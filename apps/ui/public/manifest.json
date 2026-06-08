@@ -1,0 +1,21 @@
+{
+  "name": "Home OS",
+  "short_name": "Home OS",
+  "description": "Your household operating system — manage properties, assets, maintenance, and more.",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#111827",
+  "background_color": "#ffffff",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

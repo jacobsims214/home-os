@@ -1,0 +1,59 @@
+# ============================================
+# Home OS .gitignore
+# ============================================
+
+# --- Go ---
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Vendor (dependency vendoring)
+vendor/
+
+# Go workspace
+go.work.sum
+
+# --- Node ---
+node_modules/
+.next/
+dist/
+.turbo/
+
+# Build output
+build/
+
+# --- Env ---
+.env
+.env.local
+.env.*.local
+.env.production
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# --- Docker / Compose ---
+docker-compose.override.yml
+
+# --- Misc ---
+coverage/
+tmp/
+*.log
