@@ -10,18 +10,23 @@ import (
 )
 
 // Bill represents a recurring bill from the bills table.
-// Columns match the order defined in migration 007_bills.up.sql.
 type Bill struct {
-	ID          uuid.UUID
-	HouseholdID uuid.UUID
-	PropertyID  *uuid.UUID
-	Name        string
-	Amount      pgtype.Numeric
-	DueDay      *int
-	Category    *string
-	VendorID    *uuid.UUID
-	Rrule       *string
-	Notes       *string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID            uuid.UUID
+	HouseholdID   uuid.UUID
+	PropertyID    *uuid.UUID
+	Name          string
+	Amount        pgtype.Numeric
+	DueDay        *int
+	Category      *string
+	VendorID      *uuid.UUID
+	Rrule         *string
+	Notes         *string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	EntityType    *string
+	EntityID      *uuid.UUID
+	PaidDate      *time.Time
+	IsAutopay     *bool
+	AccountNumber *string
+	PaymentURL    *string
 }

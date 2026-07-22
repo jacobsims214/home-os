@@ -3,7 +3,7 @@
  *
  * All data fetching goes through apiFetch(), which:
  * 1. Resolves the base URL from NEXT_PUBLIC_API_URL (dev) or relative path (prod).
- * 2. Injects the Bearer token from the Zustand auth store automatically.
+ * 2. Injects the Bearer token from the Zustand auth store, with cookie fallback.
  * 3. Automatically parses JSON responses and throws ApiError on non-2xx status.
  */
 
@@ -29,13 +29,31 @@ export interface ApiFetchOptions extends Omit<RequestInit, "body"> {
   params?: Record<string, string | number | boolean | undefined>;
 }
 
+/** Get the auth token from Zustand store, with cookie fallback for hydration races. */
+function getAuthToken(): string | null {
+  // Try Zustand store first
+  const storeToken = useAuthStore.getState().token;
+  if (storeToken) return storeToken;
+
+  // Fallback: read from cookie (set by the BFF /api/auth route)
+  if (typeof document !== "undefined") {
+    const cookie = document.cookie
+      .split("; ")
+      .find((c) => c.startsWith("home-os-token="));
+    if (cookie) {
+      const token = cookie.split("=")[1];
+      // Hydrate the store so subsequent calls don't need to read the cookie
+      useAuthStore.setState({ token });
+      return token;
+    }
+  }
+
+  return null;
+}
+
 /**
  * Typed fetch wrapper for the Home OS API.
- * Automatically injects the Bearer token from the Zustand auth store.
- *
- * @example
- * const properties = await apiFetch<Property[]>("/api/v1/properties");
- * const asset = await apiFetch<Asset>(`/api/v1/assets/${id}`);
+ * Automatically injects the Bearer token from the auth store or cookie.
  */
 export async function apiFetch<T = unknown>(
   path: string,
@@ -43,7 +61,7 @@ export async function apiFetch<T = unknown>(
 ): Promise<T> {
   const { body, params, headers: initHeaders, ...init } = options;
 
-  // Build URL — BASE_URL is the Go API origin in dev, empty string in prod (same origin via BFF)
+  // Build URL
   const origin =
     typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
   const url = new URL(`${BASE_URL}${path}`, origin);
@@ -59,8 +77,8 @@ export async function apiFetch<T = unknown>(
   // Build headers
   const headers = new Headers(initHeaders);
 
-  // Inject Bearer token from auth store (skip if caller already set Authorization)
-  const token = useAuthStore.getState().token;
+  // Inject Bearer token (skip if caller already set Authorization)
+  const token = getAuthToken();
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }

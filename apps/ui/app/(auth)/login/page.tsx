@@ -18,9 +18,13 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  // Redirect to /dashboard if already authenticated
+  // Redirect to /dashboard if the auth cookie is present
+  // (cookie is the source of truth for middleware, not Zustand)
   useEffect(() => {
-    if (useAuthStore.getState().token) {
+    const cookie = document.cookie
+      .split("; ")
+      .find((c) => c.startsWith("home-os-token="));
+    if (cookie) {
       router.push("/dashboard");
     }
   }, [router]);
@@ -29,24 +33,26 @@ export default function LoginPage() {
     mutationFn: (body: { email: string; password: string }) =>
       apiFetch<LoginResponse>("/api/v1/auth/login", {
         method: "POST",
-        body: JSON.stringify(body),
+        body,
       }),
     onSuccess: async (data) => {
-      // Store token and fetch user profile
+      // Store token in Zustand immediately so apiFetch has it
+      useAuthStore.getState().setAuth(
+        { id: "", email, name: "", avatar_url: null },
+        data.token,
+      );
+
+      // Fetch user profile (response is NOT wrapped in { data: ... })
       try {
         const user = await apiFetch<User>("/api/v1/auth/me", {
           headers: { Authorization: `Bearer ${data.token}` },
         });
         useAuthStore.getState().setAuth(user, data.token);
       } catch {
-        // If /me fails, still set auth with minimal user from login data
-        useAuthStore.getState().setAuth(
-          { id: "", email, name: "", avatar_url: null },
-          data.token,
-        );
+        // Keep the minimal user info from above
       }
 
-      // Set httpOnly cookie for middleware auth checks
+      // Set cookie for middleware auth checks
       await fetch("/api/auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

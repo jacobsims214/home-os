@@ -1,6 +1,6 @@
 # Home OS
 
-A family-first household operating system — a unified application that becomes the primary interface for managing a household. Home OS integrates with existing best-of-breed tools (Home Assistant, Paperless-ngx, Vaultwarden, MinIO) to provide a simple, searchable interface for family calendar, multi-property management, asset inventory, maintenance tracking, bill tracking, vendor management, vehicle management, pet management, and smart-home context. Any family member should be able to find needed household information within 10 seconds.
+A family-first household operating system — a unified application that becomes the primary interface for managing a household. Home OS provides a simple, searchable interface for family calendar, multi-property management, asset inventory, maintenance tracking, bill tracking, vendor management, vehicle management, pet management, file/document management with OCR, native secrets management with client-side encryption, and smart-home context via Home Assistant. Any family member should be able to find needed household information within 10 seconds.
 
 ## Quick Start
 
@@ -44,8 +44,8 @@ home-os/
 | Search | Typesense 27 |
 | Async | Proto.Actor |
 | Storage | MinIO |
-| Docs | Paperless-ngx (external) |
-| Secrets | Vaultwarden (external) |
+| Docs | PostgreSQL (bytea) + Tika OCR |
+| Secrets | Native (AES-256-GCM, client-side encryption) |
 
 ## Services & Ports
 
@@ -94,7 +94,7 @@ The seed is idempotent — safe to restart without duplicating data.
 
 ## External Integrations (Optional)
 
-Paperless-ngx, Vaultwarden, and Home Assistant are NOT included in the compose stack. Configure them via environment variables in `deploy/docker-compose.yml` if you have existing instances.
+Home Assistant is NOT included in the compose stack. Configure it via environment variables in `deploy/docker-compose.yml` if you have an existing instance.
 
 ## Architecture
 

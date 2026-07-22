@@ -1,25 +1,41 @@
 package maintenance
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/calendar"
 	"home-os/api/internal/middleware"
 	"home-os/api/pkg/apierr"
 )
 
+// calendarSyncer is the subset of calendar.Repo needed for maintenance sync.
+type calendarSyncer interface {
+	UpsertMaintenanceEvent(ctx context.Context, householdID uuid.UUID, taskID uuid.UUID, propertyID *uuid.UUID, title, description string, dueDate time.Time) error
+	DeleteMaintenanceEvent(ctx context.Context, taskID uuid.UUID) error
+}
+
 // Handler holds the dependencies needed by maintenance HTTP handlers.
 type Handler struct {
-	repo *Repo
+	repo    *Repo
+	calSync calendarSyncer
 }
 
 // NewHandler creates a new maintenance handler.
 func NewHandler(repo *Repo) *Handler {
 	return &Handler{repo: repo}
+}
+
+// WithCalendarRepo sets the calendar repo for bidirectional sync.
+func (h *Handler) WithCalendarRepo(cr *calendar.Repo) *Handler {
+	h.calSync = cr
+	return h
 }
 
 // --- task request / response types ---
@@ -31,6 +47,7 @@ type createTaskRequest struct {
 	ScheduleID  *string `json:"schedule_id,omitempty"`
 	PropertyID  *string `json:"property_id,omitempty"`
 	AssetID     *string `json:"asset_id,omitempty"`
+	VehicleID    *string `json:"vehicle_id,omitempty"`
 	Cost        *string `json:"cost,omitempty"`
 	VendorID    *string `json:"vendor_id,omitempty"`
 	Notes       *string `json:"notes,omitempty"`
@@ -45,6 +62,7 @@ type updateTaskRequest struct {
 	ScheduleID  *string `json:"schedule_id,omitempty"`
 	PropertyID  *string `json:"property_id,omitempty"`
 	AssetID     *string `json:"asset_id,omitempty"`
+	VehicleID    *string `json:"vehicle_id,omitempty"`
 	Cost        *string `json:"cost,omitempty"`
 	VendorID    *string `json:"vendor_id,omitempty"`
 	Notes       *string `json:"notes,omitempty"`
@@ -56,6 +74,7 @@ type taskResponse struct {
 	ScheduleID  *string `json:"schedule_id,omitempty"`
 	PropertyID  *string `json:"property_id,omitempty"`
 	AssetID     *string `json:"asset_id,omitempty"`
+	VehicleID    *string `json:"vehicle_id,omitempty"`
 	Name        string  `json:"name"`
 	Description *string `json:"description,omitempty"`
 	Status      string  `json:"status"`
@@ -77,6 +96,7 @@ type createScheduleRequest struct {
 	EstimatedCost *string `json:"estimated_cost,omitempty"`
 	PropertyID    *string `json:"property_id,omitempty"`
 	AssetID       *string `json:"asset_id,omitempty"`
+		VehicleID      *string `json:"vehicle_id,omitempty"`
 	VendorID      *string `json:"vendor_id,omitempty"`
 }
 
@@ -85,6 +105,7 @@ type scheduleResponse struct {
 	HouseholdID   string  `json:"household_id"`
 	PropertyID    *string `json:"property_id,omitempty"`
 	AssetID       *string `json:"asset_id,omitempty"`
+		VehicleID      *string `json:"vehicle_id,omitempty"`
 	Name          string  `json:"name"`
 	Description   *string `json:"description,omitempty"`
 	RRule         string  `json:"rrule"`
@@ -154,6 +175,10 @@ func toTaskResponse(t *Task) taskResponse {
 	if t.AssetID != nil {
 		s := t.AssetID.String()
 		resp.AssetID = &s
+	}
+	if t.VehicleID != nil {
+		s := t.VehicleID.String()
+		resp.VehicleID = &s
 	}
 	if t.DueDate != nil {
 		s := timePtr(*t.DueDate)
@@ -293,6 +318,11 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "invalid asset_id")
 		return
 	}
+	vehicleID, err := parseUUID(req.VehicleID)
+	if err != nil {
+		apierr.BadRequest(w, "invalid vehicle_id")
+		return
+	}
 	vendorID, err := parseUUID(req.VendorID)
 	if err != nil {
 		apierr.BadRequest(w, "invalid vendor_id")
@@ -308,6 +338,7 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		ScheduleID:  scheduleID,
 		PropertyID:  propertyID,
 		AssetID:     assetID,
+		VehicleID:   vehicleID,
 		Cost:        req.Cost,
 		VendorID:    vendorID,
 		Notes:       req.Notes,
@@ -319,7 +350,10 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apierr.JSON(w, http.StatusCreated, toTaskResponse(created))
+	// Sync to calendar if the task has a due date.
+	h.syncToCalendar(r.Context(), householdID, created)
+
+	apierr.JSON(w, http.StatusCreated, map[string]any{"data": toTaskResponse(created)})
 }
 
 // UpdateTask updates an existing maintenance task.
@@ -329,6 +363,12 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())
 	if claims == nil {
 		apierr.Forbidden(w, "authentication required")
+		return
+	}
+
+	householdID, err := uuid.Parse(claims.HouseholdID)
+	if err != nil {
+		apierr.InternalError(w, err)
 		return
 	}
 
@@ -435,6 +475,14 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		}
 		updates.AssetID = id
 	}
+	if req.VehicleID != nil {
+		id, err := parseUUID(req.VehicleID)
+		if err != nil {
+			apierr.BadRequest(w, "invalid vehicle_id")
+			return
+		}
+		updates.VehicleID = id
+	}
 
 	updated, err := h.repo.UpdateTask(r.Context(), taskID, updates)
 	if err != nil {
@@ -446,7 +494,70 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apierr.JSON(w, http.StatusOK, toTaskResponse(updated))
+	// Sync to calendar if the task has a due date.
+	h.syncToCalendar(r.Context(), householdID, updated)
+
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": toTaskResponse(updated)})
+}
+
+// DeleteTask removes a maintenance task.
+// DELETE /api/v1/maintenance/tasks/:id
+func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.ClaimsFromContext(r.Context())
+	if claims == nil {
+		apierr.Forbidden(w, "authentication required")
+		return
+	}
+
+	householdID, err := uuid.Parse(claims.HouseholdID)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	taskID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		apierr.BadRequest(w, "invalid task id")
+		return
+	}
+
+	if err := h.repo.DeleteTask(r.Context(), taskID, householdID); err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	// Delete the linked calendar event (if any).
+	if h.calSync != nil {
+		if err := h.calSync.DeleteMaintenanceEvent(r.Context(), taskID); err != nil {
+			slog.Warn("maintenance: failed to delete calendar event", "task_id", taskID, "error", err)
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// syncToCalendar creates or updates a calendar event for a maintenance task
+// that has a due date. If the task has no due date, any existing calendar
+// event is deleted. Errors are logged but never fail the request — calendar
+// sync is best-effort.
+func (h *Handler) syncToCalendar(ctx context.Context, householdID uuid.UUID, task *Task) {
+	if h.calSync == nil {
+		return
+	}
+	if task.DueDate == nil {
+		// Task has no due date — remove any existing calendar event.
+		if err := h.calSync.DeleteMaintenanceEvent(ctx, task.ID); err != nil {
+			slog.Warn("maintenance: failed to delete calendar event for task without due date", "task_id", task.ID, "error", err)
+		}
+		return
+	}
+	desc := ""
+	if task.Description != nil {
+		desc = *task.Description
+	}
+	if err := h.calSync.UpsertMaintenanceEvent(ctx, householdID, task.ID, task.PropertyID, task.Name, desc, *task.DueDate); err != nil {
+		slog.Warn("maintenance: failed to sync calendar event", "task_id", task.ID, "error", err)
+	}
 }
 
 // ListSchedules returns all maintenance schedules for the authenticated household.
@@ -541,5 +652,5 @@ func (h *Handler) CreateSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apierr.JSON(w, http.StatusCreated, toScheduleResponse(created))
+	apierr.JSON(w, http.StatusCreated, map[string]any{"data": toScheduleResponse(created)})
 }

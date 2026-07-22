@@ -37,6 +37,7 @@ type Schedule struct {
 	HouseholdID   uuid.UUID
 	PropertyID    *uuid.UUID
 	AssetID       *uuid.UUID
+	VehicleID     *uuid.UUID
 	Name          string
 	Description   *string
 	RRule         string
@@ -53,6 +54,7 @@ type Task struct {
 	ScheduleID   *uuid.UUID
 	PropertyID   *uuid.UUID
 	AssetID      *uuid.UUID
+	VehicleID    *uuid.UUID
 	Name         string
 	Description  *string
 	Status       TaskStatus

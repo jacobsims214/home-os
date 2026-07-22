@@ -15,7 +15,7 @@ interface AuthState {
 
 interface AuthActions {
   setAuth: (user: User, token: string) => void;
-  logout: () => void;
+  logout: () => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState & AuthActions>()(
@@ -24,11 +24,19 @@ export const useAuthStore = create<AuthState & AuthActions>()(
       user: null,
       token: null,
       setAuth: (user: User, token: string) => set({ user, token }),
-      logout: () => set({ user: null, token: null }),
+      logout: async () => {
+        // Clear the auth cookie by calling the API route with a DELETE
+        try {
+          await fetch("/api/auth", { method: "DELETE" });
+        } catch {
+          // Ignore errors — cookie may already be gone
+        }
+        // Clear the Zustand store (and persisted localStorage)
+        set({ user: null, token: null });
+      },
     }),
     {
       name: "home-os-auth",
-      // Only persist user and token — not actions
       partialize: (state) => ({ user: state.user, token: state.token }),
     },
   ),

@@ -20,12 +20,17 @@ export default function PropertiesPage() {
   const properties = data?.data ?? [];
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 lg:px-8">
+    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
       {/* Page header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-gray-900">
             Properties
+            {!isLoading && !isError && properties.length > 0 && (
+              <span className="ml-2 inline-flex items-center rounded-full bg-indigo-100 px-2.5 py-0.5 text-sm font-medium text-indigo-700">
+                {properties.length}
+              </span>
+            )}
           </h1>
           <p className="mt-1 text-sm text-gray-500">
             Manage your homes and properties.
@@ -34,30 +39,22 @@ export default function PropertiesPage() {
         <Button onClick={() => setShowAddModal(true)}>Add Property</Button>
       </div>
 
-      {/* Loading state */}
+      {/* Loading state — 3 skeleton cards matching PropertyCard shape */}
       {isLoading && (
-        <div className="mt-8 flex items-center justify-center py-12">
-          <svg
-            className="h-6 w-6 animate-spin text-indigo-600"
-            fill="none"
-            viewBox="0 0 24 24"
-            aria-hidden="true"
-          >
-            <circle
-              className="opacity-25"
-              cx="12"
-              cy="12"
-              r="10"
-              stroke="currentColor"
-              strokeWidth="4"
-            />
-            <path
-              className="opacity-75"
-              fill="currentColor"
-              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-            />
-          </svg>
-          <span className="ml-3 text-sm text-gray-500">Loading properties...</span>
+        <div className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="animate-pulse rounded-lg border border-gray-200 bg-white p-5 shadow-sm"
+              aria-hidden="true"
+            >
+              <div className="h-4 w-2/3 rounded bg-gray-200" />
+              <div className="mt-2 h-3 w-1/2 rounded bg-gray-200" />
+              <div className="mt-3 flex items-center gap-3">
+                <div className="h-5 w-16 rounded-full bg-gray-200" />
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -100,7 +97,7 @@ export default function PropertiesPage() {
 
       {/* Property cards grid */}
       {!isLoading && !isError && properties.length > 0 && (
-        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {properties.map((property) => (
             <PropertyCard key={property.id} property={property} />
           ))}

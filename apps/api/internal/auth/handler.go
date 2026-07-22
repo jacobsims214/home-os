@@ -1,25 +1,32 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
 	"home-os/api/internal/config"
-	"home-os/api/internal/household"
 	"home-os/api/pkg/apierr"
 )
+
+// HouseholdCreator is the subset of household.Repo that auth needs.
+// Defined as an interface to avoid an import cycle (auth → household → auth).
+type HouseholdCreator interface {
+	CreateHousehold(ctx context.Context, name string) (id string, err error)
+	CreateMembership(ctx context.Context, householdID, userID, role string) error
+}
 
 // Handler holds the dependencies needed by auth HTTP handlers.
 type Handler struct {
 	repo          *Repo
-	householdRepo *household.Repo
+	householdRepo HouseholdCreator
 	cfg           *config.Config
 }
 
 // NewHandler creates a new auth handler.
-func NewHandler(repo *Repo, householdRepo *household.Repo, cfg *config.Config) *Handler {
+func NewHandler(repo *Repo, householdRepo HouseholdCreator, cfg *config.Config) *Handler {
 	return &Handler{repo: repo, householdRepo: householdRepo, cfg: cfg}
 }
 
@@ -97,14 +104,14 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create default household.
-	hh, err := h.householdRepo.CreateHousehold(r.Context(), req.Name+"'s Home")
+	hhID, err := h.householdRepo.CreateHousehold(r.Context(), req.Name+"'s Home")
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
 
 	// Create membership as owner.
-	if err := h.householdRepo.CreateMembership(r.Context(), hh.ID, user.ID, RoleOwner); err != nil {
+	if err := h.householdRepo.CreateMembership(r.Context(), hhID, user.ID.String(), RoleOwner); err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
@@ -112,7 +119,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	// Sign JWT.
 	claims := Claims{
 		UserID:      user.ID.String(),
-		HouseholdID: hh.ID.String(),
+		HouseholdID: hhID,
 		Role:        RoleOwner,
 	}
 	token, err := SignToken(h.cfg, claims)

@@ -1,252 +1,119 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
+import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
+import { propertyKeys } from "@/lib/query-keys";
 import Button from "@/components/ui/Button";
-import Input from "@/components/ui/Input";
-import Modal from "@/components/ui/Modal";
+import Select from "@/components/ui/Select";
+import type { Property } from "@/lib/types/api";
 
 interface Bill {
   id: string;
   name: string;
-  amount: string;
+  amount: string | null;
   due_day: number | null;
   category: string | null;
   property_id: string | null;
-  vendor_id: string | null;
-  rrule: string | null;
-  notes: string | null;
-  created_at: string;
-  updated_at: string;
+  is_autopay: boolean | null;
 }
 
-interface BillsResponse {
-  data: Bill[];
+function fmtCurrency(v: string | null): string {
+  if (!v) return "—";
+  const n = Number(v);
+  if (Number.isNaN(n)) return "—";
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 }
 
 export default function BillsPage() {
-  const queryClient = useQueryClient();
-  const [showAdd, setShowAdd] = useState(false);
+  const [propertyFilter, setPropertyFilter] = useState("");
 
-  // ── Form state ─────────────────────────────────────────────
-  const [name, setName] = useState("");
-  const [amount, setAmount] = useState("");
-  const [dueDay, setDueDay] = useState("");
-  const [category, setCategory] = useState("");
-  const [rrule, setRrule] = useState("");
-  const [notes, setNotes] = useState("");
-  const [formError, setFormError] = useState("");
+  const { data: propsData } = useQuery({
+    queryKey: propertyKeys.all,
+    queryFn: () => apiFetch<{ data: Property[] }>("/api/v1/properties"),
+  });
+  const properties = propsData?.data ?? [];
 
-  // ── Query ──────────────────────────────────────────────────
-  const { data, isLoading, isError, error } = useQuery({
+  const { data: billsData, isLoading } = useQuery({
     queryKey: ["bills"],
-    queryFn: () => apiFetch<BillsResponse>("/api/v1/bills"),
-    staleTime: 30_000,
+    queryFn: () => apiFetch<{ data: Bill[] }>("/api/v1/bills"),
   });
+  const allBills = billsData?.data ?? [];
+  const bills = propertyFilter ? allBills.filter((b) => b.property_id === propertyFilter) : allBills;
+  const monthlyTotal = bills.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+  const propertyMap = new Map(properties.map((p) => [p.id, p.name]));
 
-  const bills = data?.data ?? [];
-
-  // ── Add mutation ───────────────────────────────────────────
-  const addMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<{ data: Bill }>("/api/v1/bills", {
-        method: "POST",
-        body: {
-          name: name || null,
-          amount: amount || null,
-          due_day: dueDay ? parseInt(dueDay, 10) : null,
-          category: category || null,
-          rrule: rrule || null,
-          notes: notes || null,
-        },
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["bills"] });
-      setShowAdd(false);
-      resetForm();
-    },
-    onError: (e: unknown) => {
-      setFormError(e instanceof Error ? e.message : "Failed to add bill");
-    },
-  });
-
-  function resetForm() {
-    setName("");
-    setAmount("");
-    setDueDay("");
-    setCategory("");
-    setRrule("");
-    setNotes("");
-    setFormError("");
-  }
-
-  function handleAdd(e: React.FormEvent) {
-    e.preventDefault();
-    setFormError("");
-    if (!name.trim()) {
-      setFormError("Name is required");
-      return;
-    }
-    addMutation.mutate();
-  }
-
-  // ── Render ─────────────────────────────────────────────────
   return (
-    <div className="px-4 py-6 sm:px-6 lg:px-8">
-      <div className="sm:flex sm:items-center sm:justify-between">
-        <h1 className="text-2xl font-semibold text-gray-900">Bills</h1>
-        <div className="mt-3 sm:ml-4 sm:mt-0">
-          <Button onClick={() => setShowAdd(true)}>Add Bill</Button>
+    <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Bills</h1>
+          <p className="mt-1 text-sm text-gray-500">Track recurring expenses and build your monthly budget</p>
+        </div>
+        <Link href="/dashboard/bills/new"><Button>+ Add Bill</Button></Link>
+      </div>
+
+      <div className="mb-6 flex items-center gap-4 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div>
+          <p className="text-xs text-gray-400">Monthly Total</p>
+          <p className="text-2xl font-bold text-gray-900">{fmtCurrency(monthlyTotal.toString())}<span className="text-sm font-normal text-gray-400">/mo</span></p>
+        </div>
+        <div className="h-10 w-px bg-gray-200" />
+        <div>
+          <p className="text-xs text-gray-400">Bills</p>
+          <p className="text-lg font-semibold text-gray-700">{bills.length}</p>
+        </div>
+        <div className="ml-auto">
+          <Select label="" value={propertyFilter} onChange={(e) => setPropertyFilter(e.target.value)}
+            options={[{ value: "", label: "All properties" }, ...properties.map((p) => ({ value: p.id, label: p.name }))]}
+            placeholder="Filter" className="max-w-xs" />
         </div>
       </div>
 
-      {/* Loading state */}
-      {isLoading && (
-        <div className="mt-6 animate-pulse space-y-3">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="h-16 rounded-lg bg-gray-200" />
-          ))}
+      {isLoading && <div className="space-y-2">{[1,2,3].map((i) => <div key={i} className="h-14 animate-pulse rounded-lg bg-gray-100" />)}</div>}
+
+      {!isLoading && bills.length === 0 && (
+        <div className="rounded-lg border-2 border-dashed border-gray-300 py-12 text-center">
+          <p className="text-sm text-gray-500">No bills yet.</p>
         </div>
       )}
 
-      {/* Error state */}
-      {isError && (
-        <div className="mt-6 rounded-lg border border-red-200 bg-red-50 p-4">
-          <p className="text-sm text-red-700">
-            {error instanceof Error ? error.message : "Failed to load bills"}
-          </p>
-        </div>
-      )}
-
-      {/* Empty state */}
-      {!isLoading && !isError && bills.length === 0 && (
-        <div className="mt-12 text-center">
-          <svg
-            className="mx-auto h-12 w-12 text-gray-400"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={1.5}
-              d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-            />
-          </svg>
-          <h3 className="mt-2 text-sm font-semibold text-gray-900">No bills</h3>
-          <p className="mt-1 text-sm text-gray-500">
-            Add your first recurring bill to get started.
-          </p>
-          <div className="mt-6">
-            <Button onClick={() => setShowAdd(true)}>Add Bill</Button>
-          </div>
-        </div>
-      )}
-
-      {/* Bill list */}
-      {!isLoading && !isError && bills.length > 0 && (
-        <div className="mt-6 overflow-hidden rounded-lg border border-gray-200">
-          <table className="min-w-full divide-y divide-gray-300">
+      {!isLoading && bills.length > 0 && (
+        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+          <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">
-                  Name
-                </th>
-                <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">
-                  Amount
-                </th>
-                <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">
-                  Due Day
-                </th>
-                <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">
-                  Category
-                </th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Name</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Category</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Property</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Due</th>
+                <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase">Amount</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200 bg-white">
-              {bills.map((b) => (
-                <tr key={b.id} className="hover:bg-gray-50">
-                  <td className="whitespace-nowrap px-4 py-3 text-sm font-medium text-gray-900">
-                    {b.name}
+            <tbody className="divide-y divide-gray-100">
+              {bills.map((bill) => (
+                <tr key={bill.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => window.location.href = `/dashboard/bills/${bill.id}`}>
+                  <td className="px-4 py-3">
+                    <p className="text-sm font-medium text-gray-900">{bill.name}</p>
+                    {bill.is_autopay && <span className="text-xs text-green-600">Auto-pay</span>}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-700">
-                    {b.amount ? `$${b.amount}` : "—"}
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-700">
-                    {b.due_day ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-700">
-                    {b.category ?? "—"}
-                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-500">{bill.category ?? "—"}</td>
+                  <td className="px-4 py-3 text-sm text-gray-500">{bill.property_id ? propertyMap.get(bill.property_id) ?? "—" : "—"}</td>
+                  <td className="px-4 py-3 text-sm text-gray-500">{bill.due_day ? `Day ${bill.due_day}` : "—"}</td>
+                  <td className="px-4 py-3 text-right text-sm font-medium text-gray-900">{fmtCurrency(bill.amount)}</td>
                 </tr>
               ))}
             </tbody>
+            <tfoot className="bg-gray-50">
+              <tr>
+                <td colSpan={4} className="px-4 py-3 text-right text-sm font-medium text-gray-500">Monthly Total</td>
+                <td className="px-4 py-3 text-right text-sm font-bold text-gray-900">{fmtCurrency(monthlyTotal.toString())}</td>
+              </tr>
+            </tfoot>
           </table>
         </div>
       )}
-
-      {/* Add Modal */}
-      <Modal open={showAdd} onClose={() => { setShowAdd(false); resetForm(); }} title="Add Bill">
-        <form onSubmit={handleAdd} className="space-y-4">
-          <Input
-            label="Name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Mortgage"
-            required
-          />
-          <Input
-            label="Amount"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            placeholder="e.g. 2500.00"
-          />
-          <Input
-            label="Due Day"
-            type="number"
-            min="1"
-            max="31"
-            value={dueDay}
-            onChange={(e) => setDueDay(e.target.value)}
-            placeholder="e.g. 1"
-          />
-          <Input
-            label="Category"
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
-            placeholder="e.g. housing"
-          />
-          <Input
-            label="Recurrence (RRULE)"
-            value={rrule}
-            onChange={(e) => setRrule(e.target.value)}
-            placeholder="e.g. FREQ=MONTHLY;BYMONTHDAY=1"
-          />
-          <Input
-            label="Notes"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Any notes about this bill"
-          />
-          {formError && (
-            <p className="text-sm text-red-600">{formError}</p>
-          )}
-          <div className="flex justify-end space-x-3 pt-2">
-            <button
-              type="button"
-              onClick={() => { setShowAdd(false); resetForm(); }}
-              className="inline-flex items-center justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <Button type="submit" loading={addMutation.isPending}>
-              Add Bill
-            </Button>
-          </div>
-        </form>
-      </Modal>
     </div>
   );
 }

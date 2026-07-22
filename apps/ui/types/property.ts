@@ -12,6 +12,22 @@ export interface PropertyResponse {
   address: string | null;
   property_type: string | null;
   notes: string | null;
+  // Financial fields — all optional nullable strings matching Go *string serialization.
+  purchase_price: string | null;
+  purchase_date: string | null;
+  current_value: string | null;
+  down_payment: string | null;
+  mortgage_amount: string | null;
+  mortgage_rate: string | null;
+  mortgage_term_months: string | null;
+  mortgage_start_date: string | null;
+  mortgage_lender: string | null;
+  mortgage_account_number: string | null;
+  property_tax_annual: string | null;
+  property_tax_due_months: string | null;
+  insurance_annual: string | null;
+  insurance_provider: string | null;
+  hoa_fee_monthly: string | null;
   created_at: string;
   updated_at: string;
 }

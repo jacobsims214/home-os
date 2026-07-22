@@ -23,11 +23,62 @@ func NewHandler(repo *Repo) *Handler {
 
 // --- request / response types ---
 
+// propertyRequest is the JSON body for create and update property requests.
+// All fields are optional except name. Nullable numeric/date fields use *string
+// to match the Property model (numeric values serialize as strings to avoid
+// float precision loss; null in JSON = NULL in DB).
 type propertyRequest struct {
-	Name         *string `json:"name"`
-	Address      *string `json:"address"`
-	PropertyType *string `json:"property_type"`
-	Notes        *string `json:"notes"`
+	Name                  *string `json:"name"`
+	Address               *string `json:"address"`
+	PropertyType          *string `json:"property_type"`
+	Notes                 *string `json:"notes"`
+	PurchasePrice         *string `json:"purchase_price"`
+	PurchaseDate          *string `json:"purchase_date"`
+	CurrentValue          *string `json:"current_value"`
+	DownPayment           *string `json:"down_payment"`
+	MortgageAmount        *string `json:"mortgage_amount"`
+	MortgageRate          *string `json:"mortgage_rate"`
+	MortgageTermMonths    *string `json:"mortgage_term_months"`
+	MortgageStartDate     *string `json:"mortgage_start_date"`
+	MortgageLender        *string `json:"mortgage_lender"`
+	MortgageAccountNumber *string `json:"mortgage_account_number"`
+	PropertyTaxAnnual     *string `json:"property_tax_annual"`
+	PropertyTaxDueMonths  *string `json:"property_tax_due_months"`
+	InsuranceAnnual       *string `json:"insurance_annual"`
+	InsuranceProvider     *string `json:"insurance_provider"`
+	HoaFeeMonthly         *string `json:"hoa_fee_monthly"`
+}
+
+// toProperty builds a *Property from a propertyRequest, copying every field.
+// Name is optional on update, so a nil req.Name yields "" which the repo's
+// UpdateProperty treats as "leave unchanged" via COALESCE(NULLIF(...), name).
+// CreateProperty handlers validate name is non-empty before calling this.
+func (req *propertyRequest) toProperty() *Property {
+	name := ""
+	if req.Name != nil {
+		name = *req.Name
+	}
+	return &Property{
+		Name:                  name,
+		Address:               req.Address,
+		PropertyType:          req.PropertyType,
+		Notes:                 req.Notes,
+		PurchasePrice:         req.PurchasePrice,
+		PurchaseDate:          req.PurchaseDate,
+		CurrentValue:          req.CurrentValue,
+		DownPayment:           req.DownPayment,
+		MortgageAmount:        req.MortgageAmount,
+		MortgageRate:          req.MortgageRate,
+		MortgageTermMonths:    req.MortgageTermMonths,
+		MortgageStartDate:     req.MortgageStartDate,
+		MortgageLender:        req.MortgageLender,
+		MortgageAccountNumber: req.MortgageAccountNumber,
+		PropertyTaxAnnual:     req.PropertyTaxAnnual,
+		PropertyTaxDueMonths:  req.PropertyTaxDueMonths,
+		InsuranceAnnual:       req.InsuranceAnnual,
+		InsuranceProvider:     req.InsuranceProvider,
+		HOAFeeMonthly:         req.HoaFeeMonthly,
+	}
 }
 
 type propertyResponse struct {
@@ -39,6 +90,24 @@ type propertyResponse struct {
 	Notes        *string `json:"notes,omitempty"`
 	CreatedAt    string  `json:"created_at"`
 	UpdatedAt    string  `json:"updated_at"`
+
+	// Financial fields. Carried as *string (no omitempty) so NULL in the DB
+	// serializes as JSON null, matching the TS `string | null` type exactly.
+	PurchasePrice         *string `json:"purchase_price"`
+	PurchaseDate          *string `json:"purchase_date"`
+	CurrentValue          *string `json:"current_value"`
+	DownPayment           *string `json:"down_payment"`
+	MortgageAmount        *string `json:"mortgage_amount"`
+	MortgageRate          *string `json:"mortgage_rate"`
+	MortgageTermMonths    *string `json:"mortgage_term_months"`
+	MortgageStartDate     *string `json:"mortgage_start_date"`
+	MortgageLender        *string `json:"mortgage_lender"`
+	MortgageAccountNumber *string `json:"mortgage_account_number"`
+	PropertyTaxAnnual     *string `json:"property_tax_annual"`
+	PropertyTaxDueMonths  *string `json:"property_tax_due_months"`
+	InsuranceAnnual       *string `json:"insurance_annual"`
+	InsuranceProvider     *string `json:"insurance_provider"`
+	HOAFeeMonthly         *string `json:"hoa_fee_monthly"`
 }
 
 type roomRequest struct {
@@ -95,6 +164,22 @@ func toPropertyResponse(p *Property) propertyResponse {
 		Notes:        p.Notes,
 		CreatedAt:    p.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:    p.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+
+		PurchasePrice:         p.PurchasePrice,
+		PurchaseDate:          p.PurchaseDate,
+		CurrentValue:          p.CurrentValue,
+		DownPayment:           p.DownPayment,
+		MortgageAmount:        p.MortgageAmount,
+		MortgageRate:          p.MortgageRate,
+		MortgageTermMonths:    p.MortgageTermMonths,
+		MortgageStartDate:     p.MortgageStartDate,
+		MortgageLender:        p.MortgageLender,
+		MortgageAccountNumber: p.MortgageAccountNumber,
+		PropertyTaxAnnual:     p.PropertyTaxAnnual,
+		PropertyTaxDueMonths:  p.PropertyTaxDueMonths,
+		InsuranceAnnual:       p.InsuranceAnnual,
+		InsuranceProvider:     p.InsuranceProvider,
+		HOAFeeMonthly:         p.HOAFeeMonthly,
 	}
 }
 
@@ -152,7 +237,7 @@ func (h *Handler) CreateProperty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	property, err := h.repo.CreateProperty(r.Context(), hhID, *req.Name, req.Address, req.PropertyType, req.Notes)
+	property, err := h.repo.CreateProperty(r.Context(), hhID, req.toProperty())
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -210,7 +295,7 @@ func (h *Handler) UpdateProperty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	property, err := h.repo.UpdateProperty(r.Context(), propertyID, hhID, req.Name, req.Address, req.PropertyType, req.Notes)
+	property, err := h.repo.UpdateProperty(r.Context(), propertyID, hhID, req.toProperty())
 	if err != nil {
 		apierr.InternalError(w, err)
 		return

@@ -25,7 +25,11 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 // ListProperties returns all properties for a household.
 func (r *Repo) ListProperties(ctx context.Context, householdID uuid.UUID) ([]*Property, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, name, address, property_type, notes, created_at, updated_at
+		`SELECT id, household_id, name, address, property_type, notes, created_at, updated_at,
+		        purchase_price, purchase_date::text, current_value, down_payment,
+		        mortgage_amount, mortgage_rate, mortgage_term_months, mortgage_start_date::text,
+		        mortgage_lender, mortgage_account_number, property_tax_annual,
+		        property_tax_due_months, insurance_annual, insurance_provider, hoa_fee_monthly
 		 FROM properties WHERE household_id = $1 ORDER BY name`,
 		householdID,
 	)
@@ -44,7 +48,11 @@ func (r *Repo) ListProperties(ctx context.Context, householdID uuid.UUID) ([]*Pr
 // GetProperty returns a single property by ID, scoped to the household.
 func (r *Repo) GetProperty(ctx context.Context, propertyID, householdID uuid.UUID) (*Property, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, name, address, property_type, notes, created_at, updated_at
+		`SELECT id, household_id, name, address, property_type, notes, created_at, updated_at,
+		        purchase_price, purchase_date::text, current_value, down_payment,
+		        mortgage_amount, mortgage_rate, mortgage_term_months, mortgage_start_date::text,
+		        mortgage_lender, mortgage_account_number, property_tax_annual,
+		        property_tax_due_months, insurance_annual, insurance_provider, hoa_fee_monthly
 		 FROM properties WHERE id = $1 AND household_id = $2`,
 		propertyID, householdID,
 	)
@@ -64,12 +72,33 @@ func (r *Repo) GetProperty(ctx context.Context, propertyID, householdID uuid.UUI
 }
 
 // CreateProperty inserts a new property and returns the created record.
-func (r *Repo) CreateProperty(ctx context.Context, householdID uuid.UUID, name string, address, propertyType, notes *string) (*Property, error) {
+// All financial fields are taken from the supplied *Property. Nullable columns
+// are passed through as-is (nil => NULL).
+func (r *Repo) CreateProperty(ctx context.Context, householdID uuid.UUID, p *Property) (*Property, error) {
 	rows, err := r.pool.Query(ctx,
-		`INSERT INTO properties (household_id, name, address, property_type, notes)
-		 VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, household_id, name, address, property_type, notes, created_at, updated_at`,
-		householdID, name, address, propertyType, notes,
+		`INSERT INTO properties (
+			household_id, name, address, property_type, notes,
+			purchase_price, purchase_date, current_value, down_payment,
+			mortgage_amount, mortgage_rate, mortgage_term_months, mortgage_start_date,
+			mortgage_lender, mortgage_account_number, property_tax_annual,
+			property_tax_due_months, insurance_annual, insurance_provider, hoa_fee_monthly
+		) VALUES (
+			$1, $2, $3, $4, $5,
+			$6, $7, $8, $9,
+			$10, $11, $12, $13,
+			$14, $15, $16,
+			$17, $18, $19, $20
+		)
+		RETURNING id, household_id, name, address, property_type, notes, created_at, updated_at,
+			purchase_price, purchase_date::text, current_value, down_payment,
+			mortgage_amount, mortgage_rate, mortgage_term_months, mortgage_start_date::text,
+			mortgage_lender, mortgage_account_number, property_tax_annual,
+			property_tax_due_months, insurance_annual, insurance_provider, hoa_fee_monthly`,
+		householdID, p.Name, p.Address, p.PropertyType, p.Notes,
+		p.PurchasePrice, p.PurchaseDate, p.CurrentValue, p.DownPayment,
+		p.MortgageAmount, p.MortgageRate, p.MortgageTermMonths, p.MortgageStartDate,
+		p.MortgageLender, p.MortgageAccountNumber, p.PropertyTaxAnnual,
+		p.PropertyTaxDueMonths, p.InsuranceAnnual, p.InsuranceProvider, p.HOAFeeMonthly,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create property: %w", err)
@@ -84,18 +113,46 @@ func (r *Repo) CreateProperty(ctx context.Context, householdID uuid.UUID, name s
 }
 
 // UpdateProperty updates an existing property and returns the updated record.
-// Only updates fields that are non-nil to allow partial updates.
-func (r *Repo) UpdateProperty(ctx context.Context, propertyID, householdID uuid.UUID, name, address, propertyType, notes *string) (*Property, error) {
+// name uses COALESCE(NULLIF($3, ”), name) so an empty/omitted name leaves the
+// column unchanged (partial update); every nullable financial field uses
+// COALESCE so nil leaves the column unchanged and a provided value overwrites
+// it. address, property_type, and notes keep their original direct-assignment
+// semantics (nil clears the column). Returns nil if the property was not found.
+func (r *Repo) UpdateProperty(ctx context.Context, propertyID, householdID uuid.UUID, p *Property) (*Property, error) {
 	rows, err := r.pool.Query(ctx,
 		`UPDATE properties
-		 SET name = COALESCE($3, name),
+		 SET name = COALESCE(NULLIF($3, ''), name),
 		     address = $4,
 		     property_type = $5,
 		     notes = $6,
+		     purchase_price = COALESCE($7, purchase_price),
+		     purchase_date = COALESCE($8, purchase_date),
+		     current_value = COALESCE($9, current_value),
+		     down_payment = COALESCE($10, down_payment),
+		     mortgage_amount = COALESCE($11, mortgage_amount),
+		     mortgage_rate = COALESCE($12, mortgage_rate),
+		     mortgage_term_months = COALESCE($13, mortgage_term_months),
+		     mortgage_start_date = COALESCE($14, mortgage_start_date),
+		     mortgage_lender = COALESCE($15, mortgage_lender),
+		     mortgage_account_number = COALESCE($16, mortgage_account_number),
+		     property_tax_annual = COALESCE($17, property_tax_annual),
+		     property_tax_due_months = COALESCE($18, property_tax_due_months),
+		     insurance_annual = COALESCE($19, insurance_annual),
+		     insurance_provider = COALESCE($20, insurance_provider),
+		     hoa_fee_monthly = COALESCE($21, hoa_fee_monthly),
 		     updated_at = NOW()
 		 WHERE id = $1 AND household_id = $2
-		 RETURNING id, household_id, name, address, property_type, notes, created_at, updated_at`,
-		propertyID, householdID, name, address, propertyType, notes,
+		 RETURNING id, household_id, name, address, property_type, notes, created_at, updated_at,
+			purchase_price, purchase_date::text, current_value, down_payment,
+			mortgage_amount, mortgage_rate, mortgage_term_months, mortgage_start_date::text,
+			mortgage_lender, mortgage_account_number, property_tax_annual,
+			property_tax_due_months, insurance_annual, insurance_provider, hoa_fee_monthly`,
+		propertyID, householdID,
+		p.Name, p.Address, p.PropertyType, p.Notes,
+		p.PurchasePrice, p.PurchaseDate, p.CurrentValue, p.DownPayment,
+		p.MortgageAmount, p.MortgageRate, p.MortgageTermMonths, p.MortgageStartDate,
+		p.MortgageLender, p.MortgageAccountNumber, p.PropertyTaxAnnual,
+		p.PropertyTaxDueMonths, p.InsuranceAnnual, p.InsuranceProvider, p.HOAFeeMonthly,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update property: %w", err)

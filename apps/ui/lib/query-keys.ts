@@ -75,6 +75,8 @@ export const billKeys = {
   all: ["bills"] as const,
   lists: () => [...billKeys.all, "list"] as const,
   list: (householdId: string) => [...billKeys.lists(), householdId] as const,
+  byProperty: (propertyId: string) =>
+    [...billKeys.all, "byProperty", propertyId] as const,
   details: () => [...billKeys.all, "detail"] as const,
   detail: (id: string) => [...billKeys.details(), id] as const,
 };
@@ -83,4 +85,30 @@ export const searchKeys = {
   all: ["search"] as const,
   results: (q: string, type?: string, propertyId?: string) =>
     [...searchKeys.all, q, type ?? "", propertyId ?? ""] as const,
+};
+
+export const calendarKeys = {
+  all: ["calendars"] as const,
+  lists: () => [...calendarKeys.all, "list"] as const,
+  events: () => [...calendarKeys.all, "events"] as const,
+  eventsByProperty: (propertyId: string) =>
+    [...calendarKeys.events(), "byProperty", propertyId] as const,
+};
+
+export const fileKeys = {
+  all: ["files"] as const,
+  lists: () => [...fileKeys.all, "list"] as const,
+  listByEntity: (entityType: string, entityId: string) =>
+    [...fileKeys.lists(), entityType, entityId] as const,
+  details: () => [...fileKeys.all, "detail"] as const,
+  detail: (id: string) => [...fileKeys.details(), id] as const,
+};
+
+export const secretKeys = {
+  all: ["secrets"] as const,
+  lists: () => [...secretKeys.all, "list"] as const,
+  listByEntity: (entityType: string, entityId: string) =>
+    [...secretKeys.lists(), entityType, entityId] as const,
+  details: () => [...secretKeys.all, "detail"] as const,
+  detail: (id: string) => [...secretKeys.details(), id] as const,
 };

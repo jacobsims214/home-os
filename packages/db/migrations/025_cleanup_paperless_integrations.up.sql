@@ -1,0 +1,38 @@
+-- Migration 025: Clean up orphaned Paperless integration rows.
+--
+-- Paperless was removed as a first-class integration in Story 1
+-- (migration 024 dropped the `documents` table that acted as a
+-- Paperless-ngx document cache). The Go integration layer
+-- (`isValidType` in apps/api/internal/integration/handler.go) no
+-- longer accepts `'paperless'` — only `'vaultwarden'` and
+-- `'homeassistant'` are valid — and the Settings UI only renders
+-- `integrationTypes = ["vaultwarden", "homeassistant"]`.
+--
+-- However, migration 024 did not touch the `integrations` table.
+-- Any household that had previously configured Paperless still has a
+-- row there with `type = 'paperless'`, `status = 'connected'`, and
+-- an encrypted `config` blob. Because:
+--   1. `Repo.GetAll` (apps/api/internal/integration/repo.go:25)
+--      returns ALL integrations for a household with no type filter,
+--      so the orphaned row is surfaced by the List endpoint.
+--   2. The Settings UI only renders `vaultwarden` and `homeassistant`,
+--      so the row is invisible and unmanageable in the UI.
+--   3. `Handler.Disconnect` (apps/api/internal/integration/handler.go:210)
+--      calls `isValidType`, which rejects `'paperless'` with HTTP 400,
+--      so the row cannot be disconnected through the API.
+-- the row is permanently stuck — present in the database, returned
+-- by the API, invisible in the UI, and impossible to delete.
+--
+-- The `'paperless'` value cannot be dropped from the
+-- `integration_type` Postgres enum in-place without a table rewrite
+-- (and rows referencing it must be removed first anyway), so the
+-- enum value is left in place. This migration only cleans up the
+-- orphaned row data so existing installations don't carry
+-- unmanageable Paperless integrations forward.
+--
+-- Roll back with 025_cleanup_paperless_integrations.down.sql, which
+-- is a no-op: the encrypted Paperless config blob cannot be
+-- reconstructed after deletion, so the data delete is not
+-- reversible.
+
+DELETE FROM integrations WHERE type = 'paperless';

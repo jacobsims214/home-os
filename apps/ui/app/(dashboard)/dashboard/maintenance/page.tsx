@@ -2,179 +2,231 @@
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
+import {
+  useDroppable,
+  useDraggable,
+} from "@dnd-kit/core";
+import { CSS } from "@dnd-kit/utilities";
+import { Card, Text, Group, Badge, Button, Loader, Stack } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import { apiFetch } from "@/lib/api";
-import { maintenanceKeys } from "@/lib/query-keys";
-import Button from "@/components/ui/Button";
-import TaskCard from "@/components/maintenance/TaskCard";
-import AddTaskModal from "@/components/maintenance/AddTaskModal";
-import type { MaintenanceTask } from "@/components/maintenance/types";
+import { propertyKeys } from "@/lib/query-keys";
+import { IconPlus } from "@tabler/icons-react";
+import type { Property } from "@/lib/types/api";
+import AddMaintenanceTaskModal from "@/components/maintenance/AddMaintenanceTaskModal";
 
-/** All status groups we display, in display order. */
-const STATUS_GROUPS = [
-  { status: "pending" as const, label: "Pending", emptyMsg: "No pending tasks. 🎉" },
-  { status: "in_progress" as const, label: "In Progress", emptyMsg: "Nothing in progress." },
-  { status: "done" as const, label: "Done", emptyMsg: "No completed tasks yet." },
+interface Task {
+  id: string;
+  name: string;
+  description: string | null;
+  status: string;
+  due_date: string | null;
+  property_id: string | null;
+  asset_id: string | null;
+  cost: string | null;
+  notes: string | null;
+}
+
+const COLUMNS = [
+  { id: "pending", title: "Pending", color: "yellow" },
+  { id: "in_progress", title: "In Progress", color: "blue" },
+  { id: "done", title: "Done", color: "green" },
+  { id: "skipped", title: "Skipped", color: "gray" },
 ] as const;
 
-export default function MaintenancePage() {
-  const queryClient = useQueryClient();
-  const [showAddModal, setShowAddModal] = useState(false);
+function fmtDate(d: string | null): string {
+  if (!d) return "No due date";
+  try {
+    return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  } catch { return d; }
+}
 
-  // Fetch all maintenance tasks for the household
-  const {
-    data: tasks,
-    isLoading,
-    isError,
-    error,
-  } = useQuery({
-    queryKey: maintenanceKeys.all,
-    queryFn: () => apiFetch<{data: MaintenanceTask[]}>("/api/v1/maintenance/tasks").then(r => r.data),
-  });
+function isOverdue(d: string | null, status: string): boolean {
+  if (!d || status === "done" || status === "skipped") return false;
+  return new Date(d) < new Date();
+}
 
-  // Mutation to update a task's status (optimistic)
-  const statusMutation = useMutation({
-    mutationFn: ({
-      taskId,
-      status,
-    }: {
-      taskId: string;
-      status: MaintenanceTask["status"];
-    }) =>
-      apiFetch<MaintenanceTask>(`/api/v1/maintenance/tasks/${taskId}`, {
-        method: "PATCH",
-        body: { status },
-      }),
-    onMutate: async ({ taskId, status }) => {
-      // Cancel any outgoing refetches so they don't overwrite the optimistic update
-      await queryClient.cancelQueries({ queryKey: maintenanceKeys.all });
-
-      // Snapshot previous tasks for rollback
-      const previous = queryClient.getQueryData<MaintenanceTask[]>(
-        maintenanceKeys.all,
-      );
-
-      // Optimistically update the cache
-      queryClient.setQueryData<MaintenanceTask[]>(
-        maintenanceKeys.all,
-        (old) =>
-          old?.map((t) =>
-            t.id === taskId ? { ...t, status, updated_at: new Date().toISOString() } : t,
-          ) ?? [],
-      );
-
-      return { previous };
-    },
-    onError: (_err, _vars, context) => {
-      // Rollback to previous state on error
-      if (context?.previous) {
-        queryClient.setQueryData(maintenanceKeys.all, context.previous);
-      }
-    },
-    onSettled: () => {
-      // Always refetch to ensure consistency with server state
-      queryClient.invalidateQueries({ queryKey: maintenanceKeys.all });
-    },
-  });
-
-  const handleStatusChange = (taskId: string, newStatus: MaintenanceTask["status"]) => {
-    statusMutation.mutate({ taskId, status: newStatus });
+// Draggable task card
+function TaskCard({ task }: { task: Task }) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id });
+  const style = {
+    transform: CSS.Translate.toString(transform),
+    opacity: isDragging ? 0.5 : 1,
   };
 
-  // Group tasks by status
-  const tasksByStatus = (status: MaintenanceTask["status"]) =>
-    tasks?.filter((t) => t.status === status) ?? [];
+  return (
+    <Card
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      padding="sm"
+      radius="md"
+      withBorder
+      shadow="xs"
+      mb="xs"
+    >
+      <Text size="sm" fw={600} mb={4}>{task.name}</Text>
+      {task.description && (
+        <Text size="xs" c="dimmed" lineClamp={2} mb={6}>{task.description}</Text>
+      )}
+      <Group gap="xs">
+        <Badge size="xs" color={isOverdue(task.due_date, task.status) ? "red" : "gray"} variant="light">
+          {fmtDate(task.due_date)}
+        </Badge>
+        {task.cost && (
+          <Badge size="xs" variant="light">${task.cost}</Badge>
+        )}
+      </Group>
+    </Card>
+  );
+}
+
+// Droppable column
+function Column({ column, tasks }: { column: typeof COLUMNS[number]; tasks: Task[] }) {
+  const { setNodeRef, isOver } = useDroppable({ id: column.id });
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 lg:px-8">
-      {/* Page header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Maintenance</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Track and manage home maintenance tasks.
-          </p>
-        </div>
-        <Button onClick={() => setShowAddModal(true)}>
-          <svg
-            className="-ml-1 mr-1.5 h-4 w-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            strokeWidth={2}
-            stroke="currentColor"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M12 4.5v15m7.5-7.5h-15"
-            />
-          </svg>
+    <div
+      ref={setNodeRef}
+      style={{
+        flex: "1 1 0",
+        minWidth: 250,
+        maxWidth: 350,
+        backgroundColor: isOver ? "var(--mantine-color-gray-1)" : "var(--mantine-color-gray-0)",
+        borderRadius: "var(--mantine-radius-md)",
+        padding: "12px",
+        transition: "background-color 150ms ease",
+      }}
+    >
+      <Group justify="space-between" mb="sm">
+        <Text size="sm" fw={700} c={`${column.color}.6`}>{column.title}</Text>
+        <Badge size="xs" variant="light" color={column.color}>{tasks.length}</Badge>
+      </Group>
+      <Stack gap={6}>
+        {tasks.map((task) => (
+          <TaskCard key={task.id} task={task} />
+        ))}
+        {tasks.length === 0 && (
+          <Text size="xs" c="dimmed" ta="center" py="lg">Drop tasks here</Text>
+        )}
+      </Stack>
+    </div>
+  );
+}
+
+export default function MaintenancePage() {
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const [activeTask, setActiveTask] = useState<Task | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+
+  const { data: propsData } = useQuery({
+    queryKey: propertyKeys.all,
+    queryFn: () => apiFetch<{ data: Property[] }>("/api/v1/properties"),
+  });
+  const properties = propsData?.data ?? [];
+  const propertyMap = new Map(properties.map((p) => [p.id, p.name]));
+
+  const { data: tasksData, isLoading } = useQuery({
+    queryKey: ["maintenance", "tasks"],
+    queryFn: () => apiFetch<{ data: Task[] }>("/api/v1/maintenance/tasks"),
+  });
+  const tasks = tasksData?.data ?? [];
+
+  const updateStatus = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: string }) =>
+      apiFetch(`/api/v1/maintenance/tasks/${id}`, { method: "PATCH", body: { status } }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["maintenance", "tasks"] });
+      notifications.show({ message: "Task moved", color: "green" });
+    },
+    onError: () => {
+      notifications.show({ message: "Failed to update task", color: "red" });
+    },
+  });
+
+  function handleDragStart(e: DragStartEvent) {
+    const task = tasks.find((t) => t.id === e.active.id);
+    setActiveTask(task ?? null);
+  }
+
+  function handleDragEnd(e: DragEndEvent) {
+    setActiveTask(null);
+    if (!e.over) return;
+    const taskId = e.active.id as string;
+    const newStatus = e.over.id as string;
+    const task = tasks.find((t) => t.id === taskId);
+    if (!task || task.status === newStatus) return;
+    updateStatus.mutate({ id: taskId, status: newStatus });
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex justify-center py-20">
+        <Loader />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-7xl px-4 py-6">
+      {/* Header */}
+      <Group justify="space-between" mb="lg">
+        <Stack gap={0}>
+          <Text size="xl" fw={700}>Maintenance</Text>
+          <Text size="sm" c="dimmed">Drag tasks between columns to update status</Text>
+        </Stack>
+        <Button leftSection={<IconPlus size={16} />} onClick={() => setShowAdd(true)}>
           Add Task
         </Button>
-      </div>
+      </Group>
 
-      {/* Loading state */}
-      {isLoading && (
-        <div className="space-y-4">
-          {[...Array(3)].map((_, i) => (
-            <div
-              key={i}
-              className="rounded-lg border border-gray-200 bg-white p-4 animate-pulse"
-            >
-              <div className="h-4 w-3/4 rounded bg-gray-200 mb-2" />
-              <div className="h-3 w-1/2 rounded bg-gray-100" />
-            </div>
+      {/* Kanban board */}
+      <DndContext
+        sensors={sensors}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+      >
+        <div style={{ display: "flex", gap: 16, overflowX: "auto", paddingBottom: 16 }}>
+          {COLUMNS.map((col) => (
+            <Column
+              key={col.id}
+              column={col}
+              tasks={tasks.filter((t) => t.status === col.id)}
+            />
           ))}
         </div>
-      )}
+        <DragOverlay>
+          {activeTask ? (
+            <Card padding="sm" radius="md" withBorder shadow="md" style={{ maxWidth: 300, cursor: "grabbing" }}>
+              <Text size="sm" fw={600}>{activeTask.name}</Text>
+              <Badge size="xs" color="gray" variant="light" mt={4}>
+                {fmtDate(activeTask.due_date)}
+              </Badge>
+            </Card>
+          ) : null}
+        </DragOverlay>
+      </DndContext>
 
-      {/* Error state */}
-      {isError && (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-4">
-          <p className="text-sm text-red-700">
-            Failed to load tasks.{" "}
-            {error instanceof Error ? error.message : "Please try again."}
-          </p>
-        </div>
-      )}
-
-      {/* Task lists grouped by status */}
-      {tasks && (
-        <div className="space-y-8">
-          {STATUS_GROUPS.map(({ status, label, emptyMsg }) => {
-            const groupTasks = tasksByStatus(status);
-            return (
-              <section key={status}>
-                <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-gray-500">
-                  {label} ({groupTasks.length})
-                </h2>
-                {groupTasks.length === 0 ? (
-                  <p className="rounded-lg border border-dashed border-gray-300 bg-gray-50 px-4 py-6 text-center text-sm text-gray-500">
-                    {emptyMsg}
-                  </p>
-                ) : (
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {groupTasks.map((task) => (
-                      <TaskCard
-                        key={task.id}
-                        task={task}
-                        onStatusChange={handleStatusChange}
-                      />
-                    ))}
-                  </div>
-                )}
-              </section>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Add task modal */}
-      <AddTaskModal
-        open={showAddModal}
-        onClose={() => setShowAddModal(false)}
-        onCreated={() => {
-          queryClient.invalidateQueries({ queryKey: maintenanceKeys.all });
-        }}
+      {/* Add Task Modal */}
+      <AddMaintenanceTaskModal
+        open={showAdd}
+        onClose={() => setShowAdd(false)}
       />
     </div>
   );

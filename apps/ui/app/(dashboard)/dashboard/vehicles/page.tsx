@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 import Button from "@/components/ui/Button";
@@ -25,6 +26,7 @@ interface VehiclesResponse {
 }
 
 export default function VehiclesPage() {
+  const router = useRouter();
   const queryClient = useQueryClient();
   const [showAdd, setShowAdd] = useState(false);
 
@@ -164,7 +166,11 @@ export default function VehiclesPage() {
             </thead>
             <tbody className="divide-y divide-gray-200 bg-white">
               {vehicles.map((v) => (
-                <tr key={v.id} className="hover:bg-gray-50">
+                <tr
+                  key={v.id}
+                  className="cursor-pointer hover:bg-gray-50"
+                  onClick={() => router.push(`/dashboard/vehicles/${v.id}`)}
+                >
                   <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-700">
                     {v.year ?? "—"}
                   </td>

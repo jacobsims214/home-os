@@ -42,7 +42,7 @@ func (r *Repo) ListTasks(ctx context.Context, householdID uuid.UUID, status *Tas
 	}
 
 	query := fmt.Sprintf(
-		`SELECT id, household_id, schedule_id, property_id, asset_id,
+		`SELECT id, household_id, schedule_id, property_id, asset_id, vehicle_id,
 		        name, description, status, due_date, completed_at, cost,
 		        vendor_id, notes, created_at, updated_at
 		 FROM maintenance_tasks
@@ -67,7 +67,7 @@ func (r *Repo) ListTasks(ctx context.Context, householdID uuid.UUID, status *Tas
 // GetTask returns a single maintenance task by ID. Returns nil if not found.
 func (r *Repo) GetTask(ctx context.Context, id uuid.UUID) (*Task, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, schedule_id, property_id, asset_id,
+		`SELECT id, household_id, schedule_id, property_id, asset_id, vehicle_id,
 		        name, description, status, due_date, completed_at, cost,
 		        vendor_id, notes, created_at, updated_at
 		 FROM maintenance_tasks WHERE id = $1`,
@@ -91,13 +91,13 @@ func (r *Repo) GetTask(ctx context.Context, id uuid.UUID) (*Task, error) {
 // CreateTask inserts a new maintenance task and returns the created record.
 func (r *Repo) CreateTask(ctx context.Context, t *Task) (*Task, error) {
 	rows, err := r.pool.Query(ctx,
-		`INSERT INTO maintenance_tasks (household_id, schedule_id, property_id, asset_id,
+		`INSERT INTO maintenance_tasks (household_id, schedule_id, property_id, asset_id, vehicle_id,
 		        name, description, status, due_date, cost, vendor_id, notes)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		 RETURNING id, household_id, schedule_id, property_id, asset_id,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		 RETURNING id, household_id, schedule_id, property_id, asset_id, vehicle_id,
 		           name, description, status, due_date, completed_at, cost,
 		           vendor_id, notes, created_at, updated_at`,
-		t.HouseholdID, t.ScheduleID, t.PropertyID, t.AssetID,
+		t.HouseholdID, t.ScheduleID, t.PropertyID, t.AssetID, t.VehicleID,
 		t.Name, t.Description, t.Status, t.DueDate, t.Cost, t.VendorID, t.Notes,
 	)
 	if err != nil {
@@ -174,6 +174,11 @@ func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, updates *Task) (*Ta
 		args = append(args, *updates.AssetID)
 		argIdx++
 	}
+	if updates.VehicleID != nil {
+		sets = append(sets, fmt.Sprintf("vehicle_id = $%d", argIdx))
+		args = append(args, *updates.VehicleID)
+		argIdx++
+	}
 
 	if len(sets) == 0 {
 		return nil, fmt.Errorf("update task: no fields to update")
@@ -183,7 +188,7 @@ func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, updates *Task) (*Ta
 
 	query := fmt.Sprintf(
 		`UPDATE maintenance_tasks SET %s WHERE id = $1
-		 RETURNING id, household_id, schedule_id, property_id, asset_id,
+		 RETURNING id, household_id, schedule_id, property_id, asset_id, vehicle_id,
 		           name, description, status, due_date, completed_at, cost,
 		           vendor_id, notes, created_at, updated_at`,
 		strings.Join(sets, ", "),
@@ -205,10 +210,22 @@ func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, updates *Task) (*Ta
 	return task, nil
 }
 
+// DeleteTask removes a maintenance task by id, scoped to the household.
+func (r *Repo) DeleteTask(ctx context.Context, id, householdID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx,
+		`DELETE FROM maintenance_tasks WHERE id = $1 AND household_id = $2`,
+		id, householdID,
+	)
+	if err != nil {
+		return fmt.Errorf("delete task: %w", err)
+	}
+	return nil
+}
+
 // ListSchedules returns all maintenance schedules for a household.
 func (r *Repo) ListSchedules(ctx context.Context, householdID uuid.UUID) ([]*Schedule, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, property_id, asset_id,
+		`SELECT id, household_id, property_id, asset_id, vehicle_id,
 		        name, description, rrule, estimated_cost, vendor_id,
 		        created_at, updated_at
 		 FROM maintenance_schedules
@@ -231,13 +248,13 @@ func (r *Repo) ListSchedules(ctx context.Context, householdID uuid.UUID) ([]*Sch
 // CreateSchedule inserts a new maintenance schedule and returns the created record.
 func (r *Repo) CreateSchedule(ctx context.Context, s *Schedule) (*Schedule, error) {
 	rows, err := r.pool.Query(ctx,
-		`INSERT INTO maintenance_schedules (household_id, property_id, asset_id,
+		`INSERT INTO maintenance_schedules (household_id, property_id, asset_id, vehicle_id,
 		        name, description, rrule, estimated_cost, vendor_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id, household_id, property_id, asset_id,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 RETURNING id, household_id, property_id, asset_id, vehicle_id,
 		           name, description, rrule, estimated_cost, vendor_id,
 		           created_at, updated_at`,
-		s.HouseholdID, s.PropertyID, s.AssetID,
+		s.HouseholdID, s.PropertyID, s.AssetID, s.VehicleID,
 		s.Name, s.Description, s.RRule, s.EstimatedCost, s.VendorID,
 	)
 	if err != nil {

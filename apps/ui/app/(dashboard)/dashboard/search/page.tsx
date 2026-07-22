@@ -52,6 +52,26 @@ const ENTITY_TYPES: Record<string, EntityTypeConfig> = {
     icon: "💰",
     route: () => `/dashboard/bills`,
   },
+  note: {
+    label: "Notes",
+    icon: "📝",
+    route: () => null, // notes don't have their own detail page
+  },
+  file: {
+    label: "Files",
+    icon: "📄",
+    route: () => null, // files don't have their own detail page
+  },
+  calendar: {
+    label: "Calendar",
+    icon: "📅",
+    route: () => `/dashboard/calendar`,
+  },
+  secret: {
+    label: "Secrets",
+    icon: "🔐",
+    route: () => null, // secrets are viewed from entity detail pages
+  },
 };
 
 const FILTER_TYPES = [
@@ -63,6 +83,10 @@ const FILTER_TYPES = [
   { value: "pet", label: "Pets" },
   { value: "vendor", label: "Vendors" },
   { value: "bill", label: "Bills" },
+  { value: "note", label: "Notes" },
+  { value: "file", label: "Files" },
+  { value: "calendar", label: "Calendar" },
+  { value: "secret", label: "Secrets" },
 ];
 
 /** Truncate body text to a reasonable snippet length */
@@ -96,13 +120,13 @@ export default function SearchPage() {
   } = useQuery({
     queryKey: searchKeys.results(q, typeFilter, propertyFilter),
     queryFn: () =>
-      apiFetch<SearchResponse>("/api/v1/search", {
+      apiFetch<{ data: SearchResponse }>("/api/v1/search", {
         params: {
           q,
           type: typeFilter || undefined,
           property_id: propertyFilter || undefined,
         },
-      }).then((r) => r.results),
+      }).then((r) => r.data.results),
     enabled: q.length > 0,
   });
 

@@ -1,251 +1,86 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
+import { propertyKeys } from "@/lib/query-keys";
 import Button from "@/components/ui/Button";
-import Input from "@/components/ui/Input";
-import Modal from "@/components/ui/Modal";
+import Select from "@/components/ui/Select";
+import type { Property } from "@/lib/types/api";
 
 interface Vendor {
   id: string;
   name: string;
-  property_id: string | null;
   specialty: string | null;
   phone: string | null;
   email: string | null;
   website: string | null;
+  property_id: string | null;
   notes: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface VendorsResponse {
-  data: Vendor[];
 }
 
 export default function VendorsPage() {
   const queryClient = useQueryClient();
-  const [showAdd, setShowAdd] = useState(false);
+  const [propertyFilter, setPropertyFilter] = useState("");
 
-  // ── Form state ─────────────────────────────────────────────
-  const [name, setName] = useState("");
-  const [specialty, setSpecialty] = useState("");
-  const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("");
-  const [website, setWebsite] = useState("");
-  const [notes, setNotes] = useState("");
-  const [formError, setFormError] = useState("");
+  const { data: propsData } = useQuery({
+    queryKey: propertyKeys.all,
+    queryFn: () => apiFetch<{ data: Property[] }>("/api/v1/properties"),
+  });
+  const properties = propsData?.data ?? [];
 
-  // ── Query ──────────────────────────────────────────────────
-  const { data, isLoading, isError, error } = useQuery({
+  const { data: vendorsData, isLoading } = useQuery({
     queryKey: ["vendors"],
-    queryFn: () => apiFetch<VendorsResponse>("/api/v1/vendors"),
-    staleTime: 30_000,
+    queryFn: () => apiFetch<{ data: Vendor[] }>("/api/v1/vendors"),
   });
+  const allVendors = vendorsData?.data ?? [];
+  const vendors = propertyFilter ? allVendors.filter((v) => v.property_id === propertyFilter) : allVendors;
 
-  const vendors = data?.data ?? [];
+  const propertyMap = new Map(properties.map((p) => [p.id, p.name]));
 
-  // ── Add mutation ───────────────────────────────────────────
-  const addMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<{ data: Vendor }>("/api/v1/vendors", {
-        method: "POST",
-        body: {
-          name: name || null,
-          specialty: specialty || null,
-          phone: phone || null,
-          email: email || null,
-          website: website || null,
-          notes: notes || null,
-        },
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["vendors"] });
-      setShowAdd(false);
-      resetForm();
-    },
-    onError: (e: unknown) => {
-      setFormError(e instanceof Error ? e.message : "Failed to add vendor");
-    },
-  });
-
-  function resetForm() {
-    setName("");
-    setSpecialty("");
-    setPhone("");
-    setEmail("");
-    setWebsite("");
-    setNotes("");
-    setFormError("");
-  }
-
-  function handleAdd(e: React.FormEvent) {
-    e.preventDefault();
-    setFormError("");
-    if (!name.trim()) {
-      setFormError("Name is required");
-      return;
-    }
-    addMutation.mutate();
-  }
-
-  // ── Render ─────────────────────────────────────────────────
   return (
-    <div className="px-4 py-6 sm:px-6 lg:px-8">
-      <div className="sm:flex sm:items-center sm:justify-between">
-        <h1 className="text-2xl font-semibold text-gray-900">Vendors</h1>
-        <div className="mt-3 sm:ml-4 sm:mt-0">
-          <Button onClick={() => setShowAdd(true)}>Add Vendor</Button>
+    <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Vendors</h1>
+          <p className="mt-1 text-sm text-gray-500">Service providers and contractors</p>
         </div>
+        <Link href="/dashboard/vendors/new">
+          <Button>+ Add Vendor</Button>
+        </Link>
       </div>
 
-      {/* Loading state */}
-      {isLoading && (
-        <div className="mt-6 animate-pulse space-y-3">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="h-16 rounded-lg bg-gray-200" />
+      <div className="mb-4">
+        <Select label="" value={propertyFilter} onChange={(e) => setPropertyFilter(e.target.value)}
+          options={[{ value: "", label: "All properties" }, ...properties.map((p) => ({ value: p.id, label: p.name }))]}
+          placeholder="Filter" className="max-w-xs" />
+      </div>
+
+      {isLoading && <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{[1,2,3].map((i) => <div key={i} className="h-32 animate-pulse rounded-xl bg-gray-100" />)}</div>}
+
+      {!isLoading && vendors.length === 0 && (
+        <div className="rounded-lg border-2 border-dashed border-gray-300 py-12 text-center">
+          <p className="text-sm text-gray-500">No vendors yet.</p>
+        </div>
+      )}
+
+      {!isLoading && vendors.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {vendors.map((vendor) => (
+            <Link key={vendor.id} href={`/dashboard/vendors/${vendor.id}`}
+              className="block cursor-pointer rounded-xl border border-gray-200 bg-white p-4 shadow-sm transition-all hover:shadow-lg hover:border-indigo-200">
+              <h3 className="text-sm font-semibold text-gray-900">{vendor.name}</h3>
+              {vendor.specialty && <span className="mt-1 inline-flex items-center rounded-full bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700">{vendor.specialty}</span>}
+              <dl className="mt-3 space-y-1 text-xs text-gray-500">
+                {vendor.phone && <div className="flex justify-between"><dt>Phone</dt><dd className="font-medium text-gray-700">{vendor.phone}</dd></div>}
+                {vendor.email && <div className="flex justify-between"><dt>Email</dt><dd className="font-medium text-gray-700 truncate ml-2">{vendor.email}</dd></div>}
+                {vendor.property_id && <div className="flex justify-between"><dt>Property</dt><dd className="font-medium text-gray-700">{propertyMap.get(vendor.property_id) ?? "—"}</dd></div>}
+              </dl>
+            </Link>
           ))}
         </div>
       )}
-
-      {/* Error state */}
-      {isError && (
-        <div className="mt-6 rounded-lg border border-red-200 bg-red-50 p-4">
-          <p className="text-sm text-red-700">
-            {error instanceof Error ? error.message : "Failed to load vendors"}
-          </p>
-        </div>
-      )}
-
-      {/* Empty state */}
-      {!isLoading && !isError && vendors.length === 0 && (
-        <div className="mt-12 text-center">
-          <svg
-            className="mx-auto h-12 w-12 text-gray-400"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={1.5}
-              d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"
-            />
-          </svg>
-          <h3 className="mt-2 text-sm font-semibold text-gray-900">No vendors</h3>
-          <p className="mt-1 text-sm text-gray-500">
-            Add your first vendor to get started.
-          </p>
-          <div className="mt-6">
-            <Button onClick={() => setShowAdd(true)}>Add Vendor</Button>
-          </div>
-        </div>
-      )}
-
-      {/* Vendor list */}
-      {!isLoading && !isError && vendors.length > 0 && (
-        <div className="mt-6 overflow-hidden rounded-lg border border-gray-200">
-          <table className="min-w-full divide-y divide-gray-300">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">
-                  Name
-                </th>
-                <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">
-                  Specialty
-                </th>
-                <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">
-                  Phone
-                </th>
-                <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">
-                  Email
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200 bg-white">
-              {vendors.map((v) => (
-                <tr key={v.id} className="hover:bg-gray-50">
-                  <td className="whitespace-nowrap px-4 py-3 text-sm font-medium text-gray-900">
-                    {v.name}
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-700">
-                    {v.specialty ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-700">
-                    {v.phone ?? "—"}
-                  </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-700">
-                    {v.email ?? "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* Add Modal */}
-      <Modal open={showAdd} onClose={() => { setShowAdd(false); resetForm(); }} title="Add Vendor">
-        <form onSubmit={handleAdd} className="space-y-4">
-          <Input
-            label="Name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. ABC Plumbing"
-            required
-          />
-          <Input
-            label="Specialty"
-            value={specialty}
-            onChange={(e) => setSpecialty(e.target.value)}
-            placeholder="e.g. Plumbing"
-          />
-          <Input
-            label="Phone"
-            type="tel"
-            value={phone}
-            onChange={(e) => setPhone(e.target.value)}
-            placeholder="e.g. (555) 123-4567"
-          />
-          <Input
-            label="Email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="e.g. info@abcplumbing.com"
-          />
-          <Input
-            label="Website"
-            type="url"
-            value={website}
-            onChange={(e) => setWebsite(e.target.value)}
-            placeholder="e.g. https://abcplumbing.com"
-          />
-          <Input
-            label="Notes"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Any notes about this vendor"
-          />
-          {formError && (
-            <p className="text-sm text-red-600">{formError}</p>
-          )}
-          <div className="flex justify-end space-x-3 pt-2">
-            <button
-              type="button"
-              onClick={() => { setShowAdd(false); resetForm(); }}
-              className="inline-flex items-center justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <Button type="submit" loading={addMutation.isPending}>
-              Add Vendor
-            </Button>
-          </div>
-        </form>
-      </Modal>
     </div>
   );
 }

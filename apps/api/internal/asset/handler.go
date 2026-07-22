@@ -161,7 +161,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apierr.JSON(w, http.StatusCreated, assetToResponse(created))
+	apierr.JSON(w, http.StatusCreated, map[string]any{"data": assetToResponse(created)})
 }
 
 // Get returns a single asset by ID, scoped to the authenticated household.
@@ -195,7 +195,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apierr.JSON(w, http.StatusOK, assetToResponse(asset))
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": assetToResponse(asset)})
 }
 
 // Update modifies an existing asset, scoped to the authenticated household.
@@ -253,7 +253,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apierr.JSON(w, http.StatusOK, assetToResponse(updated))
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": assetToResponse(updated)})
 }
 
 // Delete removes an asset by ID, scoped to the authenticated household.

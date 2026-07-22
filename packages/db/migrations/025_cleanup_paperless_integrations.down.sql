@@ -1,0 +1,20 @@
+-- Migration 025: Down — no-op.
+--
+-- The up migration deletes `integrations` rows where
+-- `type = 'paperless'`, including their encrypted `config` blobs.
+-- A data delete is not reversible: the encrypted Paperless config
+-- (URL, token, etc.) cannot be reconstructed after deletion, and we
+-- do not keep a backup copy. Rolling back would mean re-creating
+-- rows with no way to repopulate `config`, leaving them in a
+-- `disconnected` state with NULL config — strictly worse than the
+-- current state (the row is gone entirely).
+--
+-- Therefore this down migration is intentionally a no-op. To restore
+-- a Paperless integration after rolling back this migration, a user
+-- must re-configure it from scratch through the UI (which, after the
+-- Story 1 changes, is no longer possible as Paperless is no longer a
+-- supported integration type — Paperless-ngx documents are now
+-- accessed via the unified link system and native file storage; see
+-- migrations 019 and 023).
+
+-- No statements to execute.

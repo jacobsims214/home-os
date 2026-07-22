@@ -4,9 +4,13 @@
 package search
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -21,7 +25,10 @@ const collectionName = "household_search"
 
 // Client wraps the Typesense client for search operations.
 type Client struct {
-	ts *typesense.Client
+	ts         *typesense.Client
+	serverURL  string
+	apiKey     string
+	httpClient *http.Client
 }
 
 // SearchDocument represents a document to be indexed in Typesense.
@@ -63,7 +70,12 @@ func NewClient(cfg *config.Config) *Client {
 		typesense.WithAPIKey(cfg.TypesenseAPIKey),
 		typesense.WithConnectionTimeout(10*time.Second),
 	)
-	return &Client{ts: ts}
+	return &Client{
+		ts:         ts,
+		serverURL:  serverURL,
+		apiKey:     cfg.TypesenseAPIKey,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
 }
 
 // InitCollection ensures the household_search collection exists in Typesense.
@@ -111,19 +123,93 @@ func (c *Client) InitCollection(ctx context.Context) error {
 }
 
 // IndexDocument upserts a document into the household_search collection.
-// If a document with the same ID already exists, it is updated.
+// Uses direct HTTP instead of the Typesense Go client to avoid a nil-pointer
+// panic in the client's Upsert method.
 func (c *Client) IndexDocument(ctx context.Context, doc SearchDocument) error {
-	_, err := c.ts.Collection(collectionName).Documents().Upsert(ctx, doc, nil)
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("search: marshal document: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/collections/%s/documents?action=upsert", c.serverURL, collectionName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("search: build index request: %w", err)
+	}
+	req.Header.Set("X-TYPESENSE-API-KEY", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("search: index document %s: %w", doc.ID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("search: typesense returned %d: %s", resp.StatusCode, string(respBody))
 	}
 	return nil
 }
 
-// Search queries the household_search collection, scoped to a single household.
-// The query is run against the title, body, and tags fields. Results are filtered
-// by household_id and optionally by entity type and property.
+// DeleteDocument removes a document from the household_search collection by ID.
+func (c *Client) DeleteDocument(ctx context.Context, id string) error {
+	url := fmt.Sprintf("%s/collections/%s/documents/%s", c.serverURL, collectionName, id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("search: build delete request: %w", err)
+	}
+	req.Header.Set("X-TYPESENSE-API-KEY", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("search: delete document %s: %w", id, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 && resp.StatusCode != 404 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("search: typesense returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// Search queries all indexed collections (household_search + files), scoped to
+// a single household. Results from all collections are merged and returned.
 func (c *Client) Search(ctx context.Context, householdID, query string, filters SearchFilters) ([]SearchResult, error) {
+	// Search the main household_search collection
+	mainResults, err := c.searchCollection(ctx, collectionName, householdID, query, filters, "title,body,tags")
+	if err != nil {
+		slog.Warn("search: household_search query failed", "error", err)
+	}
+	if mainResults == nil {
+		mainResults = []SearchResult{}
+	}
+
+	// Search the files collection (indexed by the worker after OCR)
+	fileFilters := filters
+	// Files use entity_type for the attached entity, not the file itself.
+	// If the user filters by entity type, we want to match files attached to that type.
+	fileResults, err := c.searchCollection(ctx, "files", householdID, query, fileFilters, "name,extracted_text")
+	if err != nil {
+		slog.Warn("search: files query failed", "error", err)
+	}
+	if fileResults == nil {
+		fileResults = []SearchResult{}
+	}
+
+	// Merge results
+	results := append(mainResults, fileResults...)
+
+	if results == nil {
+		results = []SearchResult{}
+	}
+
+	return results, nil
+}
+
+// searchCollection queries a single Typesense collection with household scoping.
+func (c *Client) searchCollection(ctx context.Context, collName, householdID, query string, filters SearchFilters, queryBy string) ([]SearchResult, error) {
 	var filterParts []string
 	filterParts = append(filterParts, fmt.Sprintf("household_id:=`%s`", householdID))
 
@@ -142,13 +228,13 @@ func (c *Client) Search(ctx context.Context, householdID, query string, filters 
 
 	params := &api.SearchCollectionParams{
 		Q:        pointer.String(query),
-		QueryBy:  pointer.String("title,body,tags"),
+		QueryBy:  pointer.String(queryBy),
 		FilterBy: pointer.String(filterBy),
 	}
 
-	result, err := c.ts.Collection(collectionName).Documents().Search(ctx, params)
+	result, err := c.ts.Collection(collName).Documents().Search(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("search: %w", err)
+		return nil, fmt.Errorf("search %s: %w", collName, err)
 	}
 
 	var results []SearchResult
@@ -166,10 +252,15 @@ func (c *Client) Search(ctx context.Context, householdID, query string, filters 
 			if v, ok := (*doc)["entity_id"]; ok {
 				entityID = fmt.Sprint(v)
 			}
+			// Files collection uses "name" instead of "title", "extracted_text" instead of "body"
 			if v, ok := (*doc)["title"]; ok {
+				title = fmt.Sprint(v)
+			} else if v, ok := (*doc)["name"]; ok {
 				title = fmt.Sprint(v)
 			}
 			if v, ok := (*doc)["body"]; ok {
+				body = fmt.Sprint(v)
+			} else if v, ok := (*doc)["extracted_text"]; ok {
 				body = fmt.Sprint(v)
 			}
 

@@ -16,14 +16,15 @@ export default function AssetsPage() {
   const [showAddModal, setShowAddModal] = useState(false);
 
   // Fetch properties for the filter dropdown
-  const { data: properties = [], isLoading: propsLoading } = useQuery({
+  const { data: propertiesData, isLoading: propsLoading } = useQuery({
     queryKey: propertyKeys.all,
-    queryFn: () => apiFetch<{data: Property[]}>("/api/v1/properties").then(r => r.data),
+    queryFn: () => apiFetch<{data: Property[]}>("/api/v1/properties"),
   });
+  const properties = propertiesData?.data ?? [];
 
   // Fetch assets, optionally filtered by property
   const {
-    data: assets = [],
+    data: assetsData,
     isLoading: assetsLoading,
     isError: assetsError,
     error: assetsFetchError,
@@ -34,14 +35,15 @@ export default function AssetsPage() {
     queryFn: () => {
       const params: Record<string, string | undefined> = {};
       if (propertyFilter) params.property_id = propertyFilter;
-      return apiFetch<{data: Asset[]}>("/api/v1/assets", { params }).then(r => r.data);
+      return apiFetch<{data: Asset[]}>("/api/v1/assets", { params });
     },
   });
+  const assets = assetsData?.data ?? [];
 
   // Create asset mutation
   const createMutation = useMutation({
     mutationFn: (data: CreateAssetRequest) =>
-      apiFetch<Asset>("/api/v1/assets", { method: "POST", body: data }),
+      apiFetch<{data: Asset}>("/api/v1/assets", { method: "POST", body: data }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: assetKeys.all });
     },

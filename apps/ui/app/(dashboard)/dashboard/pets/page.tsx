@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 import Button from "@/components/ui/Button";
@@ -25,6 +26,7 @@ interface PetsResponse {
 }
 
 export default function PetsPage() {
+  const router = useRouter();
   const queryClient = useQueryClient();
   const [showAdd, setShowAdd] = useState(false);
 
@@ -169,7 +171,11 @@ export default function PetsPage() {
             </thead>
             <tbody className="divide-y divide-gray-200 bg-white">
               {pets.map((p) => (
-                <tr key={p.id} className="hover:bg-gray-50">
+                <tr
+                  key={p.id}
+                  className="cursor-pointer hover:bg-gray-50"
+                  onClick={() => router.push(`/dashboard/pets/${p.id}`)}
+                >
                   <td className="whitespace-nowrap px-4 py-3 text-sm font-medium text-gray-900">
                     {p.name}
                   </td>

@@ -1,58 +1,42 @@
 "use client";
 
-import { cn } from "@/lib/cn";
+import { Select as MantineSelect } from "@mantine/core";
 
-interface SelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
+interface SelectOption {
+  value: string;
   label: string;
-  error?: string;
-  options: { value: string; label: string }[];
+}
+
+interface SelectProps {
+  label?: string;
+  value: string;
+  onChange: (e: { target: { value: string } }) => void;
+  options?: SelectOption[];
   placeholder?: string;
+  className?: string;
+  disabled?: boolean;
 }
 
 export default function Select({
   label,
-  error,
-  id,
-  options,
+  value,
+  onChange,
+  options = [],
   placeholder,
-  className = "",
-  ...props
+  className,
+  disabled,
 }: SelectProps) {
-  const selectId = id ?? label.toLowerCase().replace(/\s+/g, "-");
-
   return (
-    <div className={className}>
-      <label
-        htmlFor={selectId}
-        className="block text-sm font-medium text-gray-900"
-      >
-        {label}
-      </label>
-      <select
-        id={selectId}
-        className={cn(
-          "mt-1 block w-full rounded-md border px-3 py-2 text-sm text-gray-900 shadow-sm",
-          "focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-600",
-          error ? "border-red-500" : "border-gray-300",
-        )}
-        aria-invalid={!!error}
-        aria-describedby={error ? `${selectId}-error` : undefined}
-        {...props}
-      >
-        {placeholder && (
-          <option value="">{placeholder}</option>
-        )}
-        {options.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-      {error && (
-        <p id={`${selectId}-error`} className="mt-1 text-sm text-red-600">
-          {error}
-        </p>
-      )}
-    </div>
+    <MantineSelect
+      label={label || undefined}
+      value={value || null}
+      onChange={(val) => onChange({ target: { value: val || "" } })}
+      data={options}
+      placeholder={placeholder}
+      className={className}
+      disabled={disabled}
+      clearable
+      searchable
+    />
   );
 }

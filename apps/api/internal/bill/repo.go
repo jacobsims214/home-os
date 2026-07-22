@@ -38,6 +38,12 @@ func scanBill(row pgx.Row) (*Bill, error) {
 		&b.Notes,
 		&b.CreatedAt,
 		&b.UpdatedAt,
+		&b.EntityType,
+		&b.EntityID,
+		&b.PaidDate,
+		&b.IsAutopay,
+		&b.AccountNumber,
+		&b.PaymentURL,
 	)
 	if err != nil {
 		return nil, err
@@ -49,7 +55,8 @@ func scanBill(row pgx.Row) (*Bill, error) {
 func (r *Repo) List(ctx context.Context, householdID uuid.UUID) ([]*Bill, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT id, household_id, property_id, name, amount, due_day,
-		        category, vendor_id, rrule, notes, created_at, updated_at
+		        category, vendor_id, rrule, notes, created_at, updated_at,
+		        entity_type, entity_id, paid_date, is_autopay, account_number, payment_url
 		 FROM bills
 		 WHERE household_id = $1
 		 ORDER BY name`,
@@ -78,7 +85,8 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID) ([]*Bill, error)
 func (r *Repo) Get(ctx context.Context, id, householdID uuid.UUID) (*Bill, error) {
 	row := r.pool.QueryRow(ctx,
 		`SELECT id, household_id, property_id, name, amount, due_day,
-		        category, vendor_id, rrule, notes, created_at, updated_at
+		        category, vendor_id, rrule, notes, created_at, updated_at,
+		        entity_type, entity_id, paid_date, is_autopay, account_number, payment_url
 		 FROM bills
 		 WHERE id = $1 AND household_id = $2`,
 		id, householdID,
@@ -104,12 +112,15 @@ func (r *Repo) Create(ctx context.Context, b *Bill) (*Bill, error) {
 
 	row := tx.QueryRow(ctx,
 		`INSERT INTO bills (household_id, property_id, name, amount, due_day,
-		                    category, vendor_id, rrule, notes)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		                    category, vendor_id, rrule, notes,
+		                    entity_type, entity_id, is_autopay, account_number, payment_url)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		 RETURNING id, household_id, property_id, name, amount, due_day,
-		           category, vendor_id, rrule, notes, created_at, updated_at`,
+		           category, vendor_id, rrule, notes, created_at, updated_at,
+		           entity_type, entity_id, paid_date, is_autopay, account_number, payment_url`,
 		b.HouseholdID, b.PropertyID, b.Name, b.Amount, b.DueDay,
 		b.Category, b.VendorID, b.Rrule, b.Notes,
+		b.EntityType, b.EntityID, b.IsAutopay, b.AccountNumber, b.PaymentURL,
 	)
 	created, err := scanBill(row)
 	if err != nil {
@@ -149,12 +160,17 @@ func (r *Repo) Update(ctx context.Context, b *Bill) (*Bill, error) {
 		`UPDATE bills
 		 SET property_id = $2, name = $3, amount = $4, due_day = $5,
 		     category = $6, vendor_id = $7, rrule = $8, notes = $9,
+		     entity_type = $10, entity_id = $11, is_autopay = $12,
+		     account_number = $13, payment_url = $14,
 		     updated_at = NOW()
-		 WHERE id = $1 AND household_id = $10
+		 WHERE id = $1 AND household_id = $15
 		 RETURNING id, household_id, property_id, name, amount, due_day,
-		           category, vendor_id, rrule, notes, created_at, updated_at`,
+		           category, vendor_id, rrule, notes, created_at, updated_at,
+		           entity_type, entity_id, paid_date, is_autopay, account_number, payment_url`,
 		b.ID, b.PropertyID, b.Name, b.Amount, b.DueDay,
-		b.Category, b.VendorID, b.Rrule, b.Notes, b.HouseholdID,
+		b.Category, b.VendorID, b.Rrule, b.Notes,
+		b.EntityType, b.EntityID, b.IsAutopay, b.AccountNumber, b.PaymentURL,
+		b.HouseholdID,
 	)
 	updated, err := scanBill(row)
 	if err != nil {

@@ -13,19 +13,27 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/api/internal/asset"
 	"home-os/api/internal/auth"
 	"home-os/api/internal/bill"
+	"home-os/api/internal/calendar"
 	"home-os/api/internal/config"
+	"home-os/api/internal/file"
 	"home-os/api/internal/household"
+	"home-os/api/internal/integration"
+	"home-os/api/internal/link"
 	"home-os/api/internal/maintenance"
 	"home-os/api/internal/middleware"
+	"home-os/api/internal/note"
 	"home-os/api/internal/pet"
 	"home-os/api/internal/property"
 	"home-os/api/internal/search"
+	"home-os/api/internal/secret"
 	"home-os/api/internal/seed"
 	"home-os/api/internal/vehicle"
 	"home-os/api/internal/vendor"
@@ -86,7 +94,7 @@ func main() {
 	// Auth endpoints.
 	authRepo := auth.NewRepo(pool)
 	householdRepo := household.NewRepo(pool)
-	authHandler := auth.NewHandler(authRepo, householdRepo, cfg)
+	authHandler := auth.NewHandler(authRepo, &householdAdapter{repo: householdRepo}, cfg)
 
 	r.Post("/api/v1/auth/register", authHandler.Register)
 	r.Post("/api/v1/auth/login", authHandler.Login)
@@ -95,6 +103,13 @@ func main() {
 	// Protected endpoints (require valid JWT).
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(cfg))
+
+		// Household
+		householdHandler := household.NewHandler(householdRepo)
+		r.Get("/api/v1/households/me", householdHandler.GetMe)
+		r.Get("/api/v1/households/me/members", householdHandler.ListMembers)
+		r.Patch("/api/v1/households/me/members/{userId}", householdHandler.UpdateMemberRole)
+		r.Delete("/api/v1/households/me/members/{userId}", householdHandler.RemoveMember)
 
 		// Asset CRUD
 		assetRepo := asset.NewRepo(pool)
@@ -125,19 +140,30 @@ func main() {
 
 		// Vendor CRUD
 		vendorRepo := vendor.NewRepo(pool)
-		vendorHandler := vendor.NewHandler(vendorRepo)
+		vendorHandler := vendor.NewHandler(vendorRepo).WithSearchClient(searchClient)
 		r.Get("/api/v1/vendors", vendorHandler.List)
 		r.Post("/api/v1/vendors", vendorHandler.Create)
 		r.Get("/api/v1/vendors/{id}", vendorHandler.Get)
 		r.Put("/api/v1/vendors/{id}", vendorHandler.Update)
 		r.Delete("/api/v1/vendors/{id}", vendorHandler.Delete)
 
-		// Maintenance
+		// Calendar CRUD (must be before maintenance — maintenance handler needs calendarRepo)
+		calendarRepo := calendar.NewRepo(pool)
+		calendarHandler := calendar.NewHandler(calendarRepo)
+		r.Get("/api/v1/calendars", calendarHandler.ListCalendars)
+		r.Post("/api/v1/calendars", calendarHandler.CreateCalendar)
+		r.Get("/api/v1/calendars/events", calendarHandler.ListAllEvents)
+		r.Get("/api/v1/calendars/{id}/events", calendarHandler.ListEvents)
+		r.Post("/api/v1/calendars/{id}/events", calendarHandler.CreateEvent)
+		r.Delete("/api/v1/calendars/{id}/events/{eventId}", calendarHandler.DeleteEvent)
+
+		// Maintenance CRUD (with bidirectional calendar sync)
 		maintenanceRepo := maintenance.NewRepo(pool)
-		maintenanceHandler := maintenance.NewHandler(maintenanceRepo)
+		maintenanceHandler := maintenance.NewHandler(maintenanceRepo).WithCalendarRepo(calendarRepo)
 		r.Get("/api/v1/maintenance/tasks", maintenanceHandler.ListTasks)
 		r.Post("/api/v1/maintenance/tasks", maintenanceHandler.CreateTask)
 		r.Patch("/api/v1/maintenance/tasks/{id}", maintenanceHandler.UpdateTask)
+		r.Delete("/api/v1/maintenance/tasks/{id}", maintenanceHandler.DeleteTask)
 		r.Get("/api/v1/maintenance/schedules", maintenanceHandler.ListSchedules)
 		r.Post("/api/v1/maintenance/schedules", maintenanceHandler.CreateSchedule)
 
@@ -154,7 +180,7 @@ func main() {
 
 		// Bill CRUD
 		billRepo := bill.NewRepo(pool)
-		billHandler := bill.NewHandler(billRepo)
+		billHandler := bill.NewHandler(billRepo).WithSearchClient(searchClient)
 		r.Get("/api/v1/bills", billHandler.List)
 		r.Post("/api/v1/bills", billHandler.Create)
 		r.Get("/api/v1/bills/{id}", billHandler.Get)
@@ -164,6 +190,50 @@ func main() {
 		// Search
 		searchHandler := search.NewHandler(searchClient)
 		r.Get("/api/v1/search", searchHandler.Search)
+
+		// Note CRUD (polymorphic)
+		noteRepo := note.NewRepo(pool)
+		noteHandler := note.NewHandler(noteRepo)
+		r.Get("/api/v1/notes", noteHandler.List)
+		r.Post("/api/v1/notes", noteHandler.Create)
+		r.Delete("/api/v1/notes/{id}", noteHandler.Delete)
+
+		// File storage (polymorphic, bytea in Postgres)
+		fileRepo := file.NewRepo(pool)
+		fileHandler := file.NewHandler(fileRepo)
+		r.Post("/api/v1/files/upload", fileHandler.UploadFile)
+		r.Get("/api/v1/files", fileHandler.ListFiles)
+		r.Get("/api/v1/files/{id}", fileHandler.GetFile)
+		r.Get("/api/v1/files/{id}/content", fileHandler.GetFileContent)
+		r.Patch("/api/v1/files/{id}", fileHandler.UpdateFile)
+		r.Delete("/api/v1/files/{id}", fileHandler.DeleteFile)
+
+		// Secret storage (zero-knowledge, encrypted client-side)
+		secretRepo := secret.NewRepo(pool)
+		secretHandler := secret.NewHandler(secretRepo).WithSearchClient(searchClient)
+		r.Post("/api/v1/secrets", secretHandler.CreateSecret)
+		r.Get("/api/v1/secrets", secretHandler.ListSecrets)
+		r.Get("/api/v1/secrets/{id}", secretHandler.GetSecret)
+		r.Patch("/api/v1/secrets/{id}", secretHandler.UpdateSecret)
+		r.Delete("/api/v1/secrets/{id}", secretHandler.DeleteSecret)
+		r.Post("/api/v1/secrets/setup", secretHandler.SetupKey)
+		r.Post("/api/v1/secrets/verify", secretHandler.VerifyKey)
+		r.Get("/api/v1/secrets/key", secretHandler.GetKeyInfo)
+
+		// Link CRUD (polymorphic)
+		linkRepo := link.NewRepo(pool)
+		linkHandler := link.NewHandler(linkRepo)
+		r.Post("/api/v1/links", linkHandler.Create)
+		r.Get("/api/v1/links", linkHandler.List)
+		r.Delete("/api/v1/links/{id}", linkHandler.Delete)
+
+		// Integration CRUD
+		integrationRepo := integration.NewRepo(pool)
+		integrationHandler := integration.NewHandler(integrationRepo, cfg)
+		r.Get("/api/v1/integrations", integrationHandler.List)
+		r.Post("/api/v1/integrations/{type}/connect", integrationHandler.Connect)
+		r.Post("/api/v1/integrations/{type}/test", integrationHandler.Test)
+		r.Delete("/api/v1/integrations/{type}", integrationHandler.Disconnect)
 	})
 
 	// Start the HTTP server.
@@ -192,4 +262,30 @@ func main() {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}
+}
+
+// householdAdapter wraps household.Repo to satisfy auth.HouseholdCreator
+// without creating an import cycle (auth → household → auth).
+type householdAdapter struct {
+	repo *household.Repo
+}
+
+func (a *householdAdapter) CreateHousehold(ctx context.Context, name string) (string, error) {
+	hh, err := a.repo.CreateHousehold(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	return hh.ID.String(), nil
+}
+
+func (a *householdAdapter) CreateMembership(ctx context.Context, householdID, userID, role string) error {
+	hhUUID, err := uuid.Parse(householdID)
+	if err != nil {
+		return fmt.Errorf("parse household id: %w", err)
+	}
+	userUUID, err := uuid.Parse(userID)
+	if err != nil {
+		return fmt.Errorf("parse user id: %w", err)
+	}
+	return a.repo.CreateMembership(ctx, hhUUID, userUUID, role)
 }
