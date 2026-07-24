@@ -4,10 +4,11 @@ import { useState, useEffect } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { notifications } from "@mantine/notifications";
 import { apiFetch } from "@/lib/api";
 import { useAuthStore, type User } from "@/stores/auth";
-import Button from "@/components/ui/Button";
-import Input from "@/components/ui/Input";
+import { Card, TextInput, PasswordInput, Button } from "@mantine/core";
+import { useForm } from "@mantine/form";
 
 interface LoginResponse {
   token: string;
@@ -15,8 +16,17 @@ interface LoginResponse {
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+
+  const form = useForm({
+    initialValues: {
+      email: "",
+      password: "",
+    },
+    validate: {
+      email: (value) => (/^\S+@\S+$/.test(value) ? null : "Invalid email"),
+      password: (value) => (value.length < 1 ? "Password is required" : null),
+    },
+  });
 
   // Redirect to /dashboard if the auth cookie is present
   // (cookie is the source of truth for middleware, not Zustand)
@@ -38,7 +48,7 @@ export default function LoginPage() {
     onSuccess: async (data) => {
       // Store token in Zustand immediately so apiFetch has it
       useAuthStore.getState().setAuth(
-        { id: "", email, name: "", avatar_url: null },
+        { id: "", email: form.values.email, name: "", avatar_url: null },
         data.token,
       );
 
@@ -48,6 +58,11 @@ export default function LoginPage() {
           headers: { Authorization: `Bearer ${data.token}` },
         });
         useAuthStore.getState().setAuth(user, data.token);
+        notifications.show({
+          title: "Success",
+          message: "Welcome back!",
+          color: "green",
+        });
       } catch {
         // Keep the minimal user info from above
       }
@@ -61,68 +76,68 @@ export default function LoginPage() {
 
       router.push("/dashboard");
     },
+    onError: (error: Error) => {
+      notifications.show({
+        title: "Login failed",
+        message: error.message || "Invalid credentials",
+        color: "red",
+      });
+    },
   });
 
-  const errorMessage =
-    loginMutation.error instanceof Error
-      ? loginMutation.error.message
-      : loginMutation.error
-        ? String((loginMutation.error as { message?: string }).message ?? "Login failed")
-        : null;
-
   return (
-    <>
-      <h1 className="text-xl font-semibold text-gray-900">Sign in</h1>
+    <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
+      <Card className="w-full max-w-md">
+        <div className="text-center">
+          <h1 className="text-2xl font-bold text-gray-900">Sign in</h1>
+          <p className="mt-2 text-sm text-gray-600">
+            Welcome back! Please enter your details.
+          </p>
+        </div>
 
-      <form
-        className="mt-6 space-y-4"
-        onSubmit={(e) => {
-          e.preventDefault();
-          loginMutation.mutate({ email, password });
-        }}
-      >
-        {errorMessage && (
-          <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-700">
-            {errorMessage}
-          </div>
-        )}
-
-        <Input
-          label="Email"
-          type="email"
-          autoComplete="email"
-          required
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
-
-        <Input
-          label="Password"
-          type="password"
-          autoComplete="current-password"
-          required
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-
-        <Button
-          type="submit"
-          loading={loginMutation.isPending}
-          className="w-full"
+        <form
+          className="mt-6 space-y-4"
+          onSubmit={form.onSubmit((values) => {
+            loginMutation.mutate(values);
+          })}
         >
-          Sign in
-        </Button>
-      </form>
+          <TextInput
+            label="Email"
+            type="email"
+            autoComplete="email"
+            required
+            placeholder="you@example.com"
+            {...form.getInputProps("email")}
+          />
 
-      <p className="mt-6 text-center text-sm text-gray-600">
-        Don&apos;t have an account?{" "}
-        <Link
-          href="/register"
-          className="font-semibold text-indigo-600 hover:text-indigo-500"
-        >
-          Sign up
-        </Link>
-      </p>
-    </>
+          <PasswordInput
+            label="Password"
+            autoComplete="current-password"
+            required
+            placeholder="••••••••"
+            {...form.getInputProps("password")}
+          />
+
+          <Button
+            type="submit"
+            loading={loginMutation.isPending}
+            className="w-full"
+            size="md"
+          >
+            Sign in
+          </Button>
+        </form>
+
+        <div className="mt-6 text-center text-sm text-gray-600">
+          Don&apos;t have an account?{" "}
+          <Link
+            href="/register"
+            className="font-semibold text-indigo-600 hover:text-indigo-500"
+          >
+            Sign up
+          </Link>
+        </div>
+      </Card>
+    </div>
   );
 }

@@ -82,7 +82,7 @@ export default function TaskCard({ task, onStatusChange }: TaskCardProps) {
           </div>
         </div>
         <Badge
-          status={task.status}
+          color={task.status === "pending" ? "yellow" : task.status === "in_progress" ? "blue" : task.status === "done" ? "green" : "gray"}
           onClick={handleStatusClick}
           className="flex-shrink-0"
         />

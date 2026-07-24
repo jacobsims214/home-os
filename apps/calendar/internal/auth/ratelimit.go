@@ -22,9 +22,9 @@ import (
 
 // Per-IP rate limiting constants.
 //
-// authRatePerMinute is the sustained rate we allow: 10 attempts per minute.
-// authRateBurst is the bucket size — 10 immediate attempts are allowed before
-// the sustained rate kicks in (one new token every 6 seconds).
+// authRatePerMinute is the sustained rate we allow: 120 attempts per minute.
+// authRateBurst is the bucket size — 60 immediate attempts are allowed before
+// the sustained rate kicks in (one new token every 30 seconds).
 // failureLogThreshold is the consecutive-failure count at which we start
 // logging "repeated" failures at warning level. Each failure before that is
 // still logged at info level with the running count so operators have a full
@@ -33,8 +33,8 @@ import (
 // from the map. Without eviction the map grows unboundedly as new attackers
 // (or rotating NAT pools) hit the service.
 const (
-	authRatePerMinute    = 10
-	authRateBurst        = 10
+	authRatePerMinute    = 120
+	authRateBurst        = 60
 	failureLogThreshold  = 3
 	visitorIdleTTL       = 5 * time.Minute
 	visitorCleanupPeriod = time.Minute

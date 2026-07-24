@@ -1,0 +1,85 @@
+global:
+  imageRegistry: ghcr.io/jacobsims214/home-os
+  imageTag: latest
+  imagePullPolicy: Always
+
+namespace: home-os
+
+envoy:
+  enabled: true
+  https:
+    enabled: false
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+api:
+  replicas: 2
+  image: api
+  port: 8080
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+calendar:
+  replicas: 1
+  image: calendar
+  port: 8081
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+worker:
+  replicas: 1
+  image: worker
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+ui:
+  replicas: 2
+  image: ui
+  port: 3000
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+typesense:
+  replicas: 1
+  image: typesense/typesense:27.1
+  port: 8108
+  persistence:
+    size: 10Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 1Gi }
+
+tika:
+  replicas: 1
+  image: apache/tika:latest-full
+  port: 9998
+  resources:
+    requests: { cpu: 200m, memory: 512Mi }
+    limits: { cpu: 1, memory: 2Gi }
+
+database:
+  mode: managed
+  managed:
+    instances: 2
+    storage: 10Gi
+    backup:
+      enabled: true
+      schedule: "0 2 * * *"
+  external:
+    host: ""
+    port: 5432
+    database: homeos
+    user: homeos
+    password: ""
+    existingSecret: ""
+
+secrets:
+  jwtSecret: ""
+  calendarSecret: ""
+  typesenseApiKey: ""
+  encryptionKey: ""

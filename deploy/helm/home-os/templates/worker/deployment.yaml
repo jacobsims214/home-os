@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-os-worker
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: home-os-worker
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      app: home-os-worker
+  template:
+    metadata:
+      labels:
+        app: home-os-worker
+    spec:
+      containers:
+      - name: worker
+        image: "{{ .Values.global.imageRegistry }}/worker:{{ .Values.global.imageTag }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        env:
+        - name: DATABASE_URL
+          value: {{ include "home-os.databaseUrl" . | quote }}
+        - name: TYPESENSE_HOST
+          value: home-os-typesense
+        - name: TYPESENSE_PORT
+          value: "{{ .Values.typesense.port }}"
+        - name: TYPESENSE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: home-os-secrets
+              key: typesenseApiKey
+        - name: POLL_INTERVAL
+          value: "5s"
+        - name: LOG_LEVEL
+          value: "info"
+        resources:
+          {{- toYaml .Values.worker.resources | nindent 10 }}

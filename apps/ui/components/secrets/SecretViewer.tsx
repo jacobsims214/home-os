@@ -350,7 +350,7 @@ export default function SecretViewer({
   const title = secret?.name ?? "View secret";
 
   return (
-    <Modal open={open} onClose={onClose} title={title} maxWidth="max-w-lg">
+    <Modal opened={open} onClose={onClose} title={title} size="lg">
       {error && (
         <div
           role="alert"

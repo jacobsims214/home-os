@@ -7,6 +7,21 @@ import { useQuery } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "@/lib/api";
 import { searchKeys, propertyKeys } from "@/lib/query-keys";
 import Select from "@/components/ui/Select";
+import {
+  TextInput,
+  Card,
+  Badge,
+  Text,
+  Loader,
+  Title,
+  Group,
+  Stack,
+  Button,
+  Chip,
+  Box,
+  rem,
+} from "@mantine/core";
+import { IconSearch } from "@tabler/icons-react";
 import type { SearchResult, SearchResponse, Property } from "@/lib/types/api";
 
 interface EntityTypeConfig {
@@ -150,207 +165,207 @@ export default function SearchPage() {
   // --- Empty query state (no ?q= in URL) ---
   if (!q) {
     return (
-      <div className="p-6">
-        <h1 className="text-2xl font-bold text-gray-900">Search</h1>
-        <p className="mt-1 text-sm text-gray-500">
+      <Box p="md">
+        <Title order={1} size="h2">
+          Search
+        </Title>
+        <Text size="sm" c="dimmed" mt="xs">
           Find anything across your Home OS — properties, assets, maintenance
           tasks, vehicles, and more.
-        </p>
-        <div className="mt-12 flex flex-col items-center justify-center text-center">
-          <svg
-            className="h-16 w-16 text-gray-300"
-            fill="none"
-            viewBox="0 0 24 24"
-            strokeWidth={1}
-            stroke="currentColor"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
-            />
-          </svg>
-          <h3 className="mt-4 text-sm font-semibold text-gray-900">
+        </Text>
+        <Box mt="xl" display="flex" style={{ flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center" }}>
+          <IconSearch style={{ width: rem(64), height: rem(64), color: "var(--mantine-color-gray-3)" }} />
+          <Title order={3} mt="md">
             Start typing to search
-          </h3>
-          <p className="mt-1 text-sm text-gray-500">
+          </Title>
+          <Text size="sm" c="dimmed" mt="xs">
             Use the search box in the sidebar or press{" "}
-            <kbd className="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 text-xs font-mono">
+            <Box
+              component="kbd"
+              style={{
+                borderRadius: "var(--mantine-radius-sm)",
+                border: "1px solid var(--mantine-color-gray-3)",
+                backgroundColor: "var(--mantine-color-gray-1)",
+                padding: "0.25rem 0.375rem",
+                fontSize: "var(--mantine-font-size-xs)",
+                fontFamily: "var(--mantine-font-family-monospace)",
+              }}
+            >
               Cmd+K
-            </kbd>
-          </p>
-        </div>
-      </div>
+            </Box>
+          </Text>
+        </Box>
+      </Box>
     );
   }
 
   // --- Loading state ---
   if (isLoading) {
     return (
-      <div className="p-6">
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold text-gray-900">Search</h1>
-        </div>
-        {/* Skeleton rows */}
-        <div className="space-y-4">
+      <Box p="md">
+        <Box mb="md">
+          <Title order={1} size="h2">
+            Search
+          </Title>
+        </Box>
+        <Stack>
           {[1, 2, 3, 4].map((i) => (
-            <div
-              key={i}
-              className="animate-pulse rounded-lg border border-gray-200 bg-white p-4"
-            >
-              <div className="h-4 w-3/4 rounded bg-gray-200" />
-              <div className="mt-2 h-3 w-full rounded bg-gray-100" />
-            </div>
+            <Card key={i} withBorder>
+              <Box h={16} style={{ backgroundColor: "var(--mantine-color-gray-2)", borderRadius: "var(--mantine-radius-md)", marginBottom: "var(--mantine-spacing-sm)" }} />
+              <Box h={12} style={{ backgroundColor: "var(--mantine-color-gray-1)", borderRadius: "var(--mantine-radius-md)" }} />
+            </Card>
           ))}
-        </div>
-      </div>
+        </Stack>
+      </Box>
     );
   }
 
   // --- Error state ---
   if (isError) {
     return (
-      <div className="p-6">
-        <h1 className="text-2xl font-bold text-gray-900">Search</h1>
-        <div className="mt-12 flex flex-col items-center justify-center">
-          <div className="rounded-lg bg-red-50 p-6 text-center">
-            <p className="font-medium text-red-700">Search failed</p>
-            <p className="mt-1 text-sm text-red-600">{errorMessage}</p>
-            <button
-              onClick={() => window.location.reload()}
-              className="mt-4 inline-flex items-center rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 transition-colors"
-            >
+      <Box p="md">
+        <Title order={1} size="h2">
+          Search
+        </Title>
+        <Box mt="xl" display="flex" style={{ flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+          <Card withBorder style={{ textAlign: "center" }}>
+            <Text fw={500} c="red">
+              Search failed
+            </Text>
+            <Text size="sm" c="dimmed" mt="xs">
+              {errorMessage}
+            </Text>
+            <Button mt="md" onClick={() => window.location.reload()}>
               Retry
-            </button>
-          </div>
-        </div>
-      </div>
+            </Button>
+          </Card>
+        </Box>
+      </Box>
     );
   }
 
   // --- Results ---
   return (
-    <div className="p-6">
+    <Box p="md">
       {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Search</h1>
-        <p className="mt-1 text-sm text-gray-500">
+      <Box mb="md">
+        <Title order={1} size="h2">
+          Search
+        </Title>
+        <Text size="sm" c="dimmed" mt="xs">
           {results.length > 0
             ? `${results.length} result${results.length === 1 ? "" : "s"} for "${q}"`
             : `No results for "${q}"`}
-        </p>
-      </div>
+        </Text>
+      </Box>
 
       {/* Filters row */}
-      <div className="mb-6 flex flex-wrap items-center gap-3">
-        {/* Type filter chips */}
-        <div className="flex flex-wrap gap-1.5">
+      <Box mb="md">
+        <Group wrap="wrap" gap="xs">
+          {/* Type filter chips */}
           {FILTER_TYPES.map((ft) => (
-            <button
+            <Chip
               key={ft.value}
-              onClick={() => setTypeFilter(ft.value)}
-              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                typeFilter === ft.value
-                  ? "bg-indigo-600 text-white"
-                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-              }`}
+              checked={typeFilter === ft.value}
+              onChange={() => setTypeFilter(ft.value)}
+              variant="filled"
             >
               {ft.label}
-            </button>
+            </Chip>
           ))}
-        </div>
 
-        {/* Property filter dropdown */}
-        {properties.length > 0 && (
-          <div className="ml-auto">
-            <Select
-              label=""
-              value={propertyFilter}
-              onChange={(e) => setPropertyFilter(e.target.value)}
-              options={properties.map((p) => ({
-                value: p.id,
-                label: p.name,
-              }))}
-              placeholder="All Properties"
-              className="w-48"
-            />
-          </div>
-        )}
-      </div>
+          {/* Property filter dropdown */}
+          {properties.length > 0 && (
+            <Box ml="auto" style={{ flex: 1, minWidth: 200 }}>
+              <Select
+                label=""
+                value={propertyFilter}
+                onChange={(value) => setPropertyFilter(value ?? "")}
+                data={properties.map((p) => ({
+                  value: p.id,
+                  label: p.name,
+                }))}
+                placeholder="All Properties"
+              />
+            </Box>
+          )}
+        </Group>
+      </Box>
 
       {/* Empty results state */}
       {results.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-300 bg-white p-12 text-center">
-          <svg
-            className="h-12 w-12 text-gray-400"
-            fill="none"
-            viewBox="0 0 24 24"
-            strokeWidth={1}
-            stroke="currentColor"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
-            />
-          </svg>
-          <h3 className="mt-4 text-sm font-semibold text-gray-900">
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: "var(--mantine-radius-md)",
+            border: "2px dashed var(--mantine-color-gray-3)",
+            backgroundColor: "var(--mantine-color-white)",
+            padding: "3rem",
+            textAlign: "center",
+          }}
+        >
+          <IconSearch style={{ width: rem(48), height: rem(48), color: "var(--mantine-color-gray-4)" }} />
+          <Title order={3} mt="md">
             No results found
-          </h3>
-          <p className="mt-1 text-sm text-gray-500">
+          </Title>
+          <Text size="sm" c="dimmed" mt="xs">
             Try a different search term or clear your filters.
-          </p>
+          </Text>
         </div>
       ) : (
         /* Results grouped by entity type */
-        <div className="space-y-6">
+        <Stack>
           {Array.from(grouped.entries()).map(([entityType, items]) => {
             const config = ENTITY_TYPES[entityType];
             return (
               <section key={entityType}>
-                <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-gray-500">
-                  <span>{config?.icon ?? "📄"}</span>
-                  {config?.label ?? entityType}
-                  <span className="ml-1 font-normal normal-case text-gray-400">
-                    ({items.length})
-                  </span>
-                </h2>
-                <ul className="space-y-2">
+                <Group mb="sm" gap="xs">
+                  <Text fw={500} fz="sm" tt="uppercase" c="dimmed">
+                    {config?.icon ?? "📄"} {config?.label ?? entityType}
+                  </Text>
+                  <Badge variant="light" color="gray" size="sm">
+                    {items.length}
+                  </Badge>
+                </Group>
+                <Stack gap="xs">
                   {items.map((result) => {
                     const href = config?.route(result.entity_id);
                     const content = (
-                      <div className="rounded-lg border border-gray-200 bg-white p-4 transition-colors hover:border-indigo-300 hover:shadow-sm">
-                        <h3 className="text-sm font-semibold text-gray-900">
+                      <Card withBorder key={result.entity_id}>
+                        <Text fw={600} size="sm">
                           {result.title}
-                        </h3>
+                        </Text>
                         {result.body && (
-                          <p className="mt-1 text-sm text-gray-500 line-clamp-2">
+                          <Text size="sm" c="dimmed" mt="xs">
                             {snippet(result.body)}
-                          </p>
+                          </Text>
                         )}
                         {config && (
-                          <span className="mt-2 inline-block rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500">
+                          <Badge mt="xs" variant="light" color="gray" size="sm">
                             {config.label}
-                          </span>
+                          </Badge>
                         )}
-                      </div>
+                      </Card>
                     );
 
                     if (href) {
                       return (
-                        <li key={result.entity_id}>
-                          <Link href={href}>{content}</Link>
-                        </li>
+                        <Link key={result.entity_id} href={href}>
+                          {content}
+                        </Link>
                       );
                     }
-                    return <li key={result.entity_id}>{content}</li>;
+                    return <div key={result.entity_id}>{content}</div>;
                   })}
-                </ul>
+                </Stack>
               </section>
             );
           })}
-        </div>
+        </Stack>
       )}
-    </div>
+    </Box>
   );
 }

@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-os-calendar
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: home-os-calendar
+spec:
+  replicas: {{ .Values.calendar.replicas }}
+  selector:
+    matchLabels:
+      app: home-os-calendar
+  template:
+    metadata:
+      labels:
+        app: home-os-calendar
+    spec:
+      containers:
+      - name: calendar
+        image: "{{ .Values.global.imageRegistry }}/calendar:{{ .Values.global.imageTag }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        ports:
+        - containerPort: {{ .Values.calendar.port }}
+        env:
+        - name: PORT
+          value: "{{ .Values.calendar.port }}"
+        - name: DATABASE_URL
+          value: {{ include "home-os.databaseUrl" . | quote }}
+        - name: LOG_LEVEL
+          value: "info"
+        resources:
+          {{- toYaml .Values.calendar.resources | nindent 10 }}

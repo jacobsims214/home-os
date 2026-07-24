@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-os-envoy
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: home-os-envoy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: home-os-envoy
+  template:
+    metadata:
+      labels:
+        app: home-os-envoy
+    spec:
+      containers:
+      - name: envoy
+        image: envoyproxy/envoy:v1.31-latest
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: config
+          mountPath: /etc/envoy
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: envoy-config

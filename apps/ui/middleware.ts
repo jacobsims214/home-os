@@ -11,11 +11,6 @@ export function middleware(request: NextRequest) {
 
   // Allow public paths without auth check
   if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
-    // If already authenticated, redirect to dashboard
-    const token = request.cookies.get(AUTH_COOKIE)?.value;
-    if (token) {
-      return NextResponse.redirect(new URL("/dashboard", request.url));
-    }
     return NextResponse.next();
   }
 

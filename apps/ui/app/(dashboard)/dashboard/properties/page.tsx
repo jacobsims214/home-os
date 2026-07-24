@@ -106,7 +106,7 @@ export default function PropertiesPage() {
 
       {/* Add Property Modal */}
       <AddPropertyModal
-        open={showAddModal}
+        opened={showAddModal}
         onClose={() => setShowAddModal(false)}
       />
     </div>

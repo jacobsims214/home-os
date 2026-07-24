@@ -2,10 +2,12 @@
 
 import { useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import Link from "next/link";
 import { useAuthStore } from "@/stores/auth";
-import { TextInput } from "@mantine/core";
-import { IconSearch, IconHome, IconBuilding, IconTool, IconCalendar, IconCar, IconPaw, IconBuildingStore, IconCash, IconUsers, IconSettings } from "@tabler/icons-react";
+import { AppShell, NavLink, ScrollArea, TextInput, Group, Avatar, Text, Button, ActionIcon } from "@mantine/core";
+import { IconSearch, IconHome, IconBuilding, IconTool, IconCalendar, IconCar, IconPaw, IconBuildingStore, IconCash, IconUsers, IconSettings, IconMoon, IconSun, IconBell } from "@tabler/icons-react";
+import { useLocalStorage } from "@mantine/hooks";
+import { useMantineColorScheme } from "@mantine/core";
+import NotificationBell from "@/components/notifications/NotificationBell";
 
 interface NavItem {
   name: string;
@@ -32,6 +34,11 @@ export default function Sidebar() {
   const router = useRouter();
   const user = useAuthStore((s) => s.user);
   const [searchQuery, setSearchQuery] = useState("");
+  const { colorScheme, toggleColorScheme } = useMantineColorScheme();
+  const [darkMode, setDarkMode] = useLocalStorage({
+    key: "mantine-color-scheme",
+    defaultValue: "light",
+  });
 
   const handleSearch = useCallback(
     (e?: React.FormEvent) => {
@@ -43,73 +50,111 @@ export default function Sidebar() {
     [searchQuery, router],
   );
 
+  const handleLogout = async () => {
+    await useAuthStore.getState().logout();
+    router.push("/login");
+  };
+
+  const isActive = (href: string) => {
+    if (href === "/dashboard") return pathname === "/dashboard";
+    return pathname.startsWith(href);
+  };
+
+  const getNavLinkProps = (href: string) => {
+    const active = isActive(href);
+    return {
+      active: active,
+      styles: {
+        label: { color: active ? "#0891B2" : "#333" },
+        icon: { color: active ? "#0891B2" : "#999" },
+        body: {
+          backgroundColor: active ? "#e0f7fa" : "transparent",
+        },
+      },
+    };
+  };
+
   return (
-    <aside className="flex h-full w-64 flex-col border-r border-gray-200 bg-white">
-      {/* Logo */}
-      <div className="flex h-16 items-center border-b border-gray-100 px-6">
-        <span className="text-lg font-bold text-cyan-600">Home OS</span>
-      </div>
+    <div>
+      <AppShell.Section grow component={ScrollArea}>
+        {/* Logo */}
+        <div className="flex h-16 items-center border-b border-gray-200 px-0">
+          <span className="text-lg font-bold text-cyan-600">Home OS</span>
+        </div>
 
-      {/* Search */}
-      <div className="px-4 py-3">
-        <form onSubmit={handleSearch}>
-          <TextInput
-            placeholder="Search..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            leftSection={<IconSearch size={16} />}
+        {/* Search */}
+        <div className="py-3">
+          <form onSubmit={handleSearch}>
+            <TextInput
+              placeholder="Search..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              leftSection={<IconSearch size={16} />}
+              size="xs"
+              radius="md"
+            />
+          </form>
+        </div>
+
+        {/* Notification Bell */}
+        <div className="py-2">
+          <NotificationBell />
+        </div>
+
+        {/* Nav items */}
+        <div className="space-y-1">
+          {navItems.map((item) => (
+            <NavLink
+              key={item.name}
+              href={item.href}
+              label={item.name}
+              leftSection={item.icon}
+              onClick={() => router.push(item.href)}
+              {...getNavLinkProps(item.href)}
+            />
+          ))}
+        </div>
+      </AppShell.Section>
+
+      {/* User info and dark mode toggle */}
+      <AppShell.Section>
+        <div className="flex items-center justify-between px-4 py-3">
+          <div className="flex items-center gap-3">
+            <Avatar size="sm" radius="xl">
+              {user?.name?.[0]?.toUpperCase() || "U"}
+            </Avatar>
+            <div className="min-w-0 flex-1">
+              <Text size="sm" fw={500} truncate="end">
+                {user?.name || "User"}
+              </Text>
+              <Text size="xs" c="dimmed" truncate="end">
+                {user?.email}
+              </Text>
+            </div>
+          </div>
+          <Button
+            variant="subtle"
             size="xs"
-            radius="md"
-          />
-        </form>
-      </div>
-
-      {/* Nav items */}
-      <nav className="flex-1 overflow-y-auto px-3 py-2">
-        <ul className="space-y-1">
-          {navItems.map((item) => {
-            const isActive = pathname === item.href ||
-              (item.href !== "/dashboard" && pathname.startsWith(item.href));
-            return (
-              <li key={item.name}>
-                <Link
-                  href={item.href}
-                  className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                    isActive
-                      ? "bg-cyan-50 text-cyan-700"
-                      : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
-                  }`}
-                >
-                  <span className={isActive ? "text-cyan-600" : "text-gray-400"}>{item.icon}</span>
-                  {item.name}
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
-      </nav>
-
-      {/* User info */}
-      <div className="border-t border-gray-100 px-4 py-3">
-        <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-cyan-100 text-sm font-semibold text-cyan-700">
-            {user?.name?.[0]?.toUpperCase() || "U"}
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-gray-900">{user?.name || "User"}</p>
-            <p className="truncate text-xs text-gray-400">{user?.email}</p>
-          </div>
-          <button
-            onClick={async () => {
-              await useAuthStore.getState().logout();
-              router.push("/login");
-            }}
-            className="text-xs text-gray-400 hover:text-red-500"
+            onClick={handleLogout}
+            color="red"
           >
             Logout
-          </button>
+          </Button>
         </div>
-      </div>
-    </aside>
+        <div className="flex items-center justify-center px-4 py-2 border-t border-gray-200">
+          <ActionIcon
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              const newScheme = colorScheme === "dark" ? "light" : "dark";
+              setDarkMode(newScheme);
+              toggleColorScheme();
+            }}
+          >
+            {colorScheme === "dark" ? <IconSun size={18} /> : <IconMoon size={18} />}
+          </ActionIcon>
+        </div>
+      </AppShell.Section>
+    </div>
   );
 }

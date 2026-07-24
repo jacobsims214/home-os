@@ -5,10 +5,11 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
 import { useSecretsStore } from "@/stores/secrets";
+import { Card, Switch, TextInput, Badge, Button, Group, Text, Stack, Alert, Paper, Anchor, Box } from "@mantine/core";
+import { IconCheck, IconX, IconCopy, IconInfoCircle, IconLock, IconLockOpen } from "@tabler/icons-react";
 import Modal from "@/components/ui/Modal";
-import Button from "@/components/ui/Button";
-import Input from "@/components/ui/Input";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import { showNotification, cleanNotifications } from "@mantine/notifications";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -253,27 +254,12 @@ export default function SettingsPage() {
 
   function statusBadge(integration: Integration) {
     if (integration.status === "connected") {
-      return (
-        <span className="inline-flex items-center gap-1 rounded-full bg-green-50 px-2.5 py-0.5 text-xs font-medium text-green-700">
-          <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
-          Connected
-        </span>
-      );
+      return <Badge color="green" leftSection={<span className="h-2 w-2 rounded-full bg-green-500" />}>Connected</Badge>;
     }
     if (integration.status === "error") {
-      return (
-        <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-700">
-          <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
-          Error
-        </span>
-      );
+      return <Badge color="red" leftSection={<span className="h-2 w-2 rounded-full bg-red-500" />}>Error</Badge>;
     }
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-gray-50 px-2.5 py-0.5 text-xs font-medium text-gray-600">
-        <span className="h-1.5 w-1.5 rounded-full bg-gray-400" />
-        Not configured
-      </span>
-    );
+    return <Badge color="gray" leftSection={<span className="h-2 w-2 rounded-full bg-gray-400" />}>Not configured</Badge>;
   }
 
   function formatTimestamp(ts: string | null): string {
@@ -306,163 +292,132 @@ export default function SettingsPage() {
         <p className="mt-1 text-sm text-gray-500">
           Connect and manage your self-hosted services.
         </p>
-        <div className="mt-2 rounded-md bg-purple-50 border border-purple-200 px-4 py-2">
-          <p className="text-xs text-purple-700">
+        <Card withBorder mt={8}>
+          <Text size="sm" c="dimmed">
+            <IconInfoCircle size={16} style={{ display: "inline", marginRight: 4 }} />
             Integrations are <strong>household-wide</strong> — one connection shared across all your properties.
-          </p>
-        </div>
+          </Text>
+        </Card>
       </div>
 
       {/* ── Loading state ───────────────────────────────────── */}
 
       {isLoading && (
-        <div className="space-y-4">
+        <Stack>
           {[1, 2, 3, 4].map((i) => (
-            <div
-              key={i}
-              className="animate-pulse rounded-lg border border-gray-200 bg-white p-6"
-            >
-              <div className="flex items-center gap-4">
-                <div className="h-10 w-10 rounded-lg bg-gray-200" />
-                <div className="flex-1 space-y-2">
-                  <div className="h-4 w-32 rounded bg-gray-200" />
-                  <div className="h-3 w-48 rounded bg-gray-200" />
-                </div>
-                <div className="h-6 w-24 rounded-full bg-gray-200" />
-              </div>
-            </div>
+            <Card key={i} withBorder>
+              <Group>
+                <Box w={40} h={40} style={{ backgroundColor: "var(--mantine-color-gray-2)", borderRadius: 8 }} />
+                <Stack gap={4} style={{ flex: 1 }}>
+                  <Box h={16} style={{ backgroundColor: "var(--mantine-color-gray-2)", borderRadius: 8 }} />
+                  <Box h={12} style={{ backgroundColor: "var(--mantine-color-gray-2)", borderRadius: 8 }} />
+                </Stack>
+                <Box w={96} h={24} style={{ backgroundColor: "var(--mantine-color-gray-2)", borderRadius: 24 }} />
+              </Group>
+            </Card>
           ))}
-        </div>
+        </Stack>
       )}
 
       {/* ── Error state ─────────────────────────────────────── */}
 
       {isError && (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-4">
-          <div className="flex items-start gap-3">
-            <svg className="mt-0.5 h-5 w-5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-            </svg>
-            <div className="flex-1">
-              <h3 className="text-sm font-medium text-red-800">
-                Failed to load integrations
-              </h3>
-              <p className="mt-1 text-sm text-red-700">
-                {error instanceof Error ? error.message : "An unexpected error occurred."}
-              </p>
-              <button
-                onClick={() => queryClient.invalidateQueries({ queryKey: ["integrations"] })}
-                className="mt-3 text-sm font-medium text-red-800 underline hover:text-red-900"
-              >
-                Try again
-              </button>
-            </div>
-          </div>
-        </div>
+        <Alert color="red" title="Failed to load integrations" icon={<IconX size={16} />}>
+          {error instanceof Error ? error.message : "An unexpected error occurred."}
+          <Button
+            variant="subtle"
+            size="xs"
+            mt={8}
+            onClick={() => queryClient.invalidateQueries({ queryKey: ["integrations"] })}
+          >
+            Try again
+          </Button>
+        </Alert>
       )}
 
       {/* ── Integration cards ───────────────────────────────── */}
 
       {!isLoading && !isError && (
-        <div className="space-y-4">
+        <Stack>
           {integrationTypes.map((type) => {
             const integration = getIntegration(type);
             const meta = INTEGRATIONS[type];
             const isConnected = integration.status === "connected";
 
             return (
-              <div
-                key={type}
-                className="rounded-lg border border-gray-200 bg-white shadow-sm"
-              >
-                <div className="p-6">
+              <Card key={type} withBorder shadow="sm">
+                <Stack gap="md">
                   {/* Header row */}
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-start gap-4">
-                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-indigo-50">
-                        {meta.icon}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-3">
-                          <h3 className="text-base font-semibold text-gray-900">
-                            {meta.name}
-                          </h3>
-                          {statusBadge(integration)}
-                        </div>
-                        <p className="mt-0.5 text-sm text-gray-500">
-                          {meta.description}
-                        </p>
-                        {isConnected && (
-                          <p className="mt-0.5 text-xs text-gray-400">
-                            Last tested: {formatTimestamp(integration.last_health_check)}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  </div>
+                  <Group>
+                    <Box
+                      w={48}
+                      h={48}
+                      style={{ backgroundColor: "var(--mantine-color-indigo-5)", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 8 }}
+                    >
+                      {meta.icon}
+                    </Box>
+                    <Stack gap={4} style={{ flex: 1 }}>
+                      <Group>
+                        <Text fw={600}>{meta.name}</Text>
+                        {statusBadge(integration)}
+                      </Group>
+                      <Text size="sm" c="dimmed">
+                        {meta.description}
+                      </Text>
+                      {isConnected && (
+                        <Text size="xs" c="gray.5">
+                          Last tested: {formatTimestamp(integration.last_health_check)}
+                        </Text>
+                      )}
+                    </Stack>
+                  </Group>
 
-                  {/* Action buttons */}
-                  <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-gray-100 pt-4">
+                   {/* Action buttons */}
+                   <Group wrap="wrap" pt="md" style={{ borderTop: "1px solid #f1f1f1", paddingTop: 16 }}>
                     {isConnected ? (
                       <>
                         <Button
                           onClick={() => handleTest(type)}
                           loading={testMutation.isPending && testType === type}
-                          variant="secondary"
-                          className="!border !border-gray-300 !bg-white !text-gray-700 hover:!bg-gray-50"
+                          variant="outline"
                         >
                           Test Connection
                         </Button>
-                        <button
-                          type="button"
+                        <Button
+                          color="red"
                           onClick={() => setDisconnectType(type)}
-                          className="inline-flex items-center justify-center rounded-md border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
+                          variant="light"
                         >
                           Disconnect
-                        </button>
+                        </Button>
                       </>
                     ) : (
-                      <Button onClick={() => openConnectModal(type)}>
-                        Connect
-                      </Button>
+                      <Button onClick={() => openConnectModal(type)}>Connect</Button>
                     )}
-                  </div>
+                  </Group>
 
                   {/* Test result */}
                   {testResult && testType === type && (
-                    <div
-                      className={`mt-3 rounded-md px-3 py-2 text-sm ${
-                        testResult.success
-                          ? "bg-green-50 text-green-700"
-                          : "bg-red-50 text-red-700"
-                      }`}
+                    <Alert
+                      color={testResult.success ? "green" : "red"}
+                      title={testResult.success ? "Success" : "Error"}
+                      icon={testResult.success ? <IconCheck size={16} /> : <IconX size={16} />}
                     >
-                      <div className="flex items-center gap-2">
-                        {testResult.success ? (
-                          <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                          </svg>
-                        ) : (
-                          <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        )}
-                        {testResult.message}
-                      </div>
-                    </div>
+                      {testResult.message}
+                    </Alert>
                   )}
 
                   {/* Error message */}
                   {integration.status === "error" && integration.error_message && (
-                    <div className="mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+                    <Alert color="red" title="Connection Error" icon={<IconX size={16} />}>
                       {integration.error_message}
-                    </div>
+                    </Alert>
                   )}
-                </div>
-              </div>
+                </Stack>
+              </Card>
             );
           })}
-        </div>
+        </Stack>
       )}
 
       {/* ── Calendar Sync Section ────────────────────────────── */}
@@ -473,55 +428,44 @@ export default function SettingsPage() {
           Sync your Home OS calendars with Apple Calendar, iPhone, or any CalDAV-compatible app.
         </p>
 
-        <div className="mt-4 rounded-lg border border-gray-200 bg-white shadow-sm">
-          <div className="p-6">
+        <Card withBorder mt={16}>
+          <Stack gap="md">
             {/* Server info */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between rounded-md bg-gray-50 px-4 py-3">
-                <span className="text-sm font-medium text-gray-700">Server</span>
-                <span className="text-sm text-gray-900 font-mono">http://localhost:8081</span>
-              </div>
-              <div className="flex items-center justify-between rounded-md bg-gray-50 px-4 py-3">
-                <span className="text-sm font-medium text-gray-700">Username</span>
-                <span className="text-sm text-gray-900 font-mono">{user?.email ?? "..."}</span>
-              </div>
-              <div className="flex items-center justify-between rounded-md bg-gray-50 px-4 py-3">
-                <span className="text-sm font-medium text-gray-700">Password</span>
-                <span className="text-sm text-gray-900 font-mono">
-                  {caldavPassword ? (
-                    <span className="inline-flex items-center gap-2">
-                      <span className="tracking-wider">{caldavPassword}</span>
-                      <button
-                        type="button"
-                        onClick={handleCopyPassword}
-                        className="inline-flex items-center gap-1 rounded-md bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
-                      >
-                        {copied ? (
-                          <>
-                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                            </svg>
-                            Copied
-                          </>
-                        ) : (
-                          <>
-                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" />
-                            </svg>
-                            Copy
-                          </>
-                        )}
-                      </button>
-                    </span>
-                  ) : (
-                    <span className="text-gray-400">Not generated</span>
+            <Stack gap={4}>
+              <Group justify="space-between">
+                <Text size="sm" fw={500}>Server</Text>
+                <Text size="sm" ff="monospace">http://localhost:8081</Text>
+              </Group>
+              <Group justify="space-between">
+                <Text size="sm" fw={500}>Username</Text>
+                <Text size="sm" ff="monospace">{user?.email ?? "..."}</Text>
+              </Group>
+              <Group justify="space-between">
+                <Text size="sm" fw={500}>Password</Text>
+                <Group gap={8}>
+                  <Text size="sm" ff="monospace">
+                    {caldavPassword ? (
+                      <span>{caldavPassword}</span>
+                    ) : (
+                      <span className="text-gray-400">Not generated</span>
+                    )}
+                  </Text>
+                  {caldavPassword && (
+                    <Button
+                      size="xs"
+                      variant="subtle"
+                      onClick={handleCopyPassword}
+                      leftSection={copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                    >
+                      {copied ? "Copied" : "Copy"}
+                    </Button>
                   )}
-                </span>
-              </div>
-            </div>
+                </Group>
+              </Group>
+            </Stack>
 
             {/* Generate button */}
-            <div className="mt-4 flex items-center gap-3">
+            <Group wrap="wrap">
               <Button
                 onClick={() => caldavPasswordMutation.mutate()}
                 loading={caldavPasswordMutation.isPending}
@@ -529,98 +473,93 @@ export default function SettingsPage() {
                 Generate App Password
               </Button>
               {caldavPassword && (
-                <p className="text-xs text-amber-600">
+                <Text size="xs" c="orange">
                   This password will never be shown again. Copy it now.
-                </p>
+                </Text>
               )}
-            </div>
+            </Group>
 
             {/* Setup instructions */}
-            <div className="mt-6 rounded-md bg-blue-50 border border-blue-200 px-4 py-3">
-              <h4 className="text-sm font-semibold text-blue-800">
-                Apple Calendar Setup
-              </h4>
-              <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-blue-700">
-                <li>Open <strong>Settings</strong> on your iPhone or Mac</li>
-                <li>Go to <strong>Calendar</strong> → <strong>Accounts</strong> → <strong>Add Account</strong></li>
-                <li>Select <strong>Other</strong> → <strong>Add CalDAV Account</strong></li>
-                <li>Enter the Server, Username, and Password shown above</li>
-                <li>Your Home OS calendars will sync automatically</li>
-              </ol>
-            </div>
+            <Card withBorder style={{ backgroundColor: "var(--mantine-color-blue-0)" }}>
+              <Text fw={600} mb={8}>Apple Calendar Setup</Text>
+              <Stack gap={4}>
+                <Text>1. Open <strong>Settings</strong> on your iPhone or Mac</Text>
+                <Text>2. Go to <strong>Calendar</strong> → <strong>Accounts</strong> → <strong>Add Account</strong></Text>
+                <Text>3. Select <strong>Other</strong> → <strong>Add CalDAV Account</strong></Text>
+                <Text>4. Enter the Server, Username, and Password shown above</Text>
+                <Text>5. Your Home OS calendars will sync automatically</Text>
+              </Stack>
+            </Card>
 
             {/* Error state */}
             {caldavPasswordMutation.isError && (
-              <div className="mt-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+              <Alert color="red" title="Error" icon={<IconX size={16} />}>
                 Failed to generate password. Please try again.
-              </div>
+              </Alert>
             )}
-          </div>
-        </div>
+          </Stack>
+        </Card>
       </div>
 
       {/* ── Connect modal ────────────────────────────────────── */}
 
       {connectType && (
         <Modal
-          open={!!connectType}
+          opened={!!connectType}
           onClose={() => {
             setConnectType(null);
             resetForm();
           }}
           title={`Connect ${INTEGRATIONS[connectType].name}`}
-          maxWidth="max-w-lg"
+          size="lg"
         >
-          <form onSubmit={handleConnectSubmit} className="space-y-4">
-            {getConfigFields(connectType).map((field) => {
-              if (field.type === "toggle") {
-                return (
-                  <label
-                    key={field.key}
-                    className="flex items-center gap-3 text-sm font-medium text-gray-900"
-                  >
-                    <input
-                      type="checkbox"
+          <Stack gap="md">
+            <form onSubmit={handleConnectSubmit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {getConfigFields(connectType).map((field) => {
+                if (field.type === "toggle") {
+                  return (
+                    <Switch
+                      key={field.key}
+                      label={field.label}
                       checked={formToggleValues[field.key] ?? false}
                       onChange={(e) => handleToggleChange(field.key, e.target.checked)}
-                      className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-600"
                     />
-                    {field.label}
-                  </label>
+                  );
+                }
+                return (
+                  <TextInput
+                    key={field.key}
+                    label={field.label}
+                    type={field.type}
+                    placeholder={field.placeholder}
+                    value={formValues[field.key] ?? ""}
+                    onChange={(e) => handleFieldChange(field.key, e.target.value)}
+                  />
                 );
-              }
-              return (
-                <Input
-                  key={field.key}
-                  label={field.label}
-                  type={field.type}
-                  placeholder={field.placeholder}
-                  value={formValues[field.key] ?? ""}
-                  onChange={(e) => handleFieldChange(field.key, e.target.value)}
-                />
-              );
-            })}
+              })}
 
-            {formError && (
-              <p className="text-sm text-red-600">{formError}</p>
-            )}
+              {formError && (
+                <Alert color="red" title="Error" icon={<IconX size={16} />}>
+                  {formError}
+                </Alert>
+              )}
 
-            <div className="flex justify-end gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setConnectType(null);
-                  resetForm();
-                }}
-                className="inline-flex items-center justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-              <Button type="submit" loading={connectMutation.isPending}>
-                Connect
-              </Button>
-            </div>
-          </form>
+              <Group justify="flex-end" mt="md">
+                <Button
+                  variant="subtle"
+                  onClick={() => {
+                    setConnectType(null);
+                    resetForm();
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" loading={connectMutation.isPending}>
+                  Connect
+                </Button>
+              </Group>
+            </form>
+          </Stack>
         </Modal>
       )}
 
@@ -640,14 +579,16 @@ export default function SettingsPage() {
 
       {/* ── Secrets Manager Section ──────────────────────────── */}
 
-      <div className="mt-8 rounded-lg border border-gray-200 bg-white p-6">
-        <h2 className="text-lg font-semibold text-gray-900">Secrets Manager</h2>
-        <p className="mt-1 text-sm text-gray-500">
-          Store passwords, API keys, and credit cards securely. All secrets are encrypted in your browser with AES-256-GCM before being sent to the server.
-        </p>
+      <Card withBorder mt={32}>
+        <Stack gap="md">
+          <Text fw={600}>Secrets Manager</Text>
+          <Text size="sm" c="dimmed">
+            Store passwords, API keys, and credit cards securely. All secrets are encrypted in your browser with AES-256-GCM before being sent to the server.
+          </Text>
 
-        <SecretsStatus />
-      </div>
+          <SecretsStatus />
+        </Stack>
+      </Card>
     </div>
   );
 }
@@ -719,41 +660,35 @@ function SecretsStatus() {
 
   if (isUnlocked) {
     return (
-      <div className="mt-4">
-        <div className="flex items-center gap-3">
-          <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">
-            Unlocked
-          </span>
-          <p className="text-sm text-gray-500">Your secrets are decrypted in memory. Lock to clear the key.</p>
-        </div>
-        <div className="mt-3">
-          <Button variant="secondary" onClick={() => lock()}>Lock Secrets</Button>
-        </div>
-      </div>
+      <Stack gap="md">
+        <Group>
+          <Badge color="green" leftSection={<IconLockOpen size={14} />}>Unlocked</Badge>
+          <Text size="sm" c="dimmed">Your secrets are decrypted in memory. Lock to clear the key.</Text>
+        </Group>
+        <Button variant="outline" onClick={() => lock()}>Lock Secrets</Button>
+      </Stack>
     );
   }
 
   return (
-    <div className="mt-4">
-      <div className="flex items-center gap-3">
-        <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600">
+    <Stack gap="md">
+      <Group>
+        <Badge color="gray" leftSection={<IconLock size={14} />}>
           {hasKey ? "Locked" : "Not Set Up"}
-        </span>
-        <p className="text-sm text-gray-500">
+        </Badge>
+        <Text size="sm" c="dimmed">
           {hasKey
             ? "Enter your master password to unlock and view your secrets."
             : "Set up a master password to start storing encrypted secrets."}
-        </p>
-      </div>
-      <div className="mt-3">
-        <Button onClick={handleOpen}>
-          {hasKey ? "Unlock Secrets" : "Set Up Master Password"}
-        </Button>
-      </div>
+        </Text>
+      </Group>
+      <Button onClick={handleOpen}>
+        {hasKey ? "Unlock Secrets" : "Set Up Master Password"}
+      </Button>
 
-      <Modal open={showPrompt} onClose={() => setShowPrompt(false)} title={mode === "setup" ? "Set Up Master Password" : "Unlock Secrets"}>
-        <div className="space-y-4">
-          <Input
+        <Modal opened={showPrompt} onClose={() => setShowPrompt(false)} title={mode === "setup" ? "Set Up Master Password" : "Unlock Secrets"} size="lg">
+        <Stack gap="md">
+          <TextInput
             label="Master Password"
             type="password"
             value={password}
@@ -761,7 +696,7 @@ function SecretsStatus() {
             placeholder="Enter master password"
           />
           {mode === "setup" && (
-            <Input
+            <TextInput
               label="Confirm Password"
               type="password"
               value={confirmPassword}
@@ -770,16 +705,18 @@ function SecretsStatus() {
             />
           )}
           {(localError || error) && (
-            <p className="text-sm text-red-600">{localError || error}</p>
+            <Alert color="red" title="Error" icon={<IconX size={16} />}>
+              {localError || error}
+            </Alert>
           )}
-          <div className="flex justify-end gap-3">
-            <Button variant="secondary" onClick={() => setShowPrompt(false)}>Cancel</Button>
+          <Group justify="flex-end">
+            <Button variant="subtle" onClick={() => setShowPrompt(false)}>Cancel</Button>
             <Button loading={isProcessing} onClick={handleSubmit}>
               {mode === "setup" ? "Set Up" : "Unlock"}
             </Button>
-          </div>
-        </div>
+          </Group>
+        </Stack>
       </Modal>
-    </div>
+    </Stack>
   );
 }

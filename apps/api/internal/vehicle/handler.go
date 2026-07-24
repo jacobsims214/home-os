@@ -1,7 +1,9 @@
 package vehicle
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -9,17 +11,57 @@ import (
 	"github.com/google/uuid"
 
 	"home-os/api/internal/middleware"
+	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
 )
 
+type searchIndexer interface {
+	IndexDocument(ctx context.Context, doc search.SearchDocument) error
+	DeleteDocument(ctx context.Context, id string) error
+}
+
 // Handler holds dependencies for vehicle HTTP handlers.
 type Handler struct {
-	repo *Repo
+	repo   *Repo
+	search searchIndexer
 }
 
 // NewHandler creates a new vehicle handler.
 func NewHandler(repo *Repo) *Handler {
 	return &Handler{repo: repo}
+}
+
+func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
+	h.search = sc
+	return h
+}
+
+func (h *Handler) indexVehicle(ctx context.Context, v *Vehicle) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("vehicle: panic during search indexing", "panic", r) } }()
+	body := ""
+	if v.Make != nil { body = *v.Make }
+	if v.Model != nil { body += " " + *v.Model }
+	if v.VIN != nil { body += " " + *v.VIN }
+	if v.LicensePlate != nil { body += " " + *v.LicensePlate }
+	if v.Color != nil { body += " " + *v.Color }
+	doc := search.SearchDocument{
+		ID: "vehicle-" + v.ID.String(), HouseholdID: v.HouseholdID.String(),
+		EntityType: "vehicle", EntityID: v.ID.String(),
+		Title: v.MakeString(), Body: body,
+		CreatedAt: v.CreatedAt.Unix(), UpdatedAt: v.UpdatedAt.Unix(),
+	}
+	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
+		slog.Warn("vehicle: failed to index", "id", v.ID, "error", err)
+	}
+}
+
+func (h *Handler) deleteVehicleIndex(ctx context.Context, id string) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("vehicle: panic during search deletion", "panic", r) } }()
+	if err := h.search.DeleteDocument(context.Background(), "vehicle-"+id); err != nil {
+		slog.Warn("vehicle: failed to delete from search", "id", id, "error", err)
+	}
 }
 
 // --- request / response types ---
@@ -172,6 +214,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.indexVehicle(r.Context(), created)
+
 	apierr.JSON(w, http.StatusCreated, map[string]any{
 		"data": toVehicleResponse(created),
 	})
@@ -217,6 +261,8 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		apierr.NotFound(w, "vehicle not found")
 		return
 	}
+
+	h.indexVehicle(r.Context(), updated)
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
 		"data": toVehicleResponse(updated),

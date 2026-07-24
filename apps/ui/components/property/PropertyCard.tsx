@@ -130,7 +130,7 @@ export default function PropertyCard({
   return (
     <Link
       href={`/dashboard/properties/${property.id}`}
-      className="relative block cursor-pointer overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition-all duration-200 hover:border-indigo-200 hover:shadow-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-600"
+      className="relative block cursor-pointer overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-md transition-all duration-200 hover:border-indigo-200 hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-600"
     >
       {/* Left accent bar — color varies by property_type */}
       <span
@@ -142,7 +142,7 @@ export default function PropertyCard({
       <div className="flex items-start justify-between gap-2">
         <h3 className="text-base font-semibold text-gray-900">{property.name}</h3>
         {property.property_type && (
-          <span className="inline-flex shrink-0 items-center rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium capitalize text-indigo-700">
+          <span className="inline-flex shrink-0 items-center rounded-full bg-indigo-100 px-2.5 py-0.5 text-xs font-medium capitalize text-indigo-700">
             {property.property_type.replace(/_/g, " ")}
           </span>
         )}

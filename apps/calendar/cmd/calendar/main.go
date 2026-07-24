@@ -3,13 +3,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/calendar/internal/auth"
+	"home-os/calendar/internal/caldav"
 	"home-os/calendar/internal/config"
+	"home-os/calendar/internal/db"
+	"home-os/calendar/internal/logging"
+	"home-os/calendar/internal/middleware"
+	"home-os/calendar/internal/metrics"
 )
 
 func main() {
@@ -19,19 +28,70 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Configure structured logging
+	logging.Init("info")
+
+	// Create database connection pool
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		logging.Logger.Error("calendar: failed to create database pool", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	// Verify database connection
+	if err := pool.Ping(ctx); err != nil {
+		logging.Logger.Error("calendar: failed to ping database", "error", err)
+		os.Exit(1)
+	}
+
+	// Create repository and CalDAV handler
+	repo, err := db.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		logging.Logger.Error("calendar: failed to create db repo", "error", err)
+		os.Exit(1)
+	}
+	defer repo.Close()
+	caldavHandler := caldav.NewHandler(repo)
+
+	// Create the router
 	mux := http.NewServeMux()
+
+	// Health endpoint (no auth required)
 	mux.HandleFunc("GET /health", healthHandler)
 
+	// Well-known CalDAV redirect
+	mux.HandleFunc("GET /.well-known/caldav", caldav.RedirectToWellKnown)
+
+	// CalDAV endpoints (with auth middleware)
+	caldavRouter := auth.AuthMiddleware(repo)(caldavHandler)
+	mux.Handle("/dav/", caldavRouter)
+
+	// Apply request body size limits
+	wrappedMux := middleware.BodyLimitMiddleware(1024 * 1024)(mux)
+
+	// Apply metrics middleware
+	wrappedMux = metrics.Middleware(wrappedMux)
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	log.Printf("calendar: starting on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("calendar: server error: %v", err)
+	logging.Logger.Info("calendar: starting CalDAV server", "addr", addr)
+
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           wrappedMux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	if err := server.ListenAndServe(); err != nil {
+		logging.Logger.Error("calendar: server error", "error", err)
+		os.Exit(1)
 	}
 }
 
-// healthHandler responds with a JSON status payload indicating the service is
-// healthy. CalDAV clients do not use this endpoint — it is for internal health
-// checks (Kubernetes probes, Docker healthcheck, monitoring).
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

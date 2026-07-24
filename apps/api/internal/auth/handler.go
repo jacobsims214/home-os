@@ -2,10 +2,15 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 
 	"home-os/api/internal/config"
 	"home-os/api/pkg/apierr"
@@ -225,4 +230,61 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: user.CreatedAt.Format(time.RFC3339),
 		UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
 	})
+}
+
+// GenerateCaldavPassword generates a random 32-character CalDAV app password,
+// hashes it with bcrypt, stores it in the database, and returns the plaintext
+// password to the user. POST /api/v1/auth/caldav-password.
+func (h *Handler) GenerateCaldavPassword(w http.ResponseWriter, r *http.Request) {
+	// Extract and verify JWT from Authorization header directly
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
+			Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: "Not authenticated"},
+		})
+		return
+	}
+	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+	claims, err := VerifyToken(h.cfg, tokenStr)
+	if err != nil {
+		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
+			Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: "Invalid or expired token"},
+		})
+		return
+	}
+
+	// Generate a random 32-char password
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%"
+	buf := make([]byte, 32)
+	for i := range buf {
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+		buf[i] = chars[n.Int64()]
+	}
+	plaintext := string(buf)
+
+	// Hash with bcrypt
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), 12)
+	if err != nil {
+		apierr.JSON(w, http.StatusInternalServerError, apierr.ErrorResponse{
+			Error: apierr.ErrorDetail{Code: "HASH_ERROR", Message: "Failed to hash password"},
+		})
+		return
+	}
+
+	// Store in database
+	userUUID, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		apierr.JSON(w, http.StatusBadRequest, apierr.ErrorResponse{
+			Error: apierr.ErrorDetail{Code: "INVALID_USER_ID", Message: "Invalid user ID format"},
+		})
+		return
+	}
+	if err := h.repo.UpdateCaldavPasswordHash(r.Context(), userUUID, string(hash)); err != nil {
+		apierr.JSON(w, http.StatusInternalServerError, apierr.ErrorResponse{
+			Error: apierr.ErrorDetail{Code: "DB_ERROR", Message: "Failed to store password"},
+		})
+		return
+	}
+
+	apierr.JSON(w, http.StatusOK, map[string]string{"password": plaintext})
 }

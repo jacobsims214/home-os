@@ -1,7 +1,9 @@
 package note
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -9,17 +11,53 @@ import (
 	"github.com/google/uuid"
 
 	"home-os/api/internal/middleware"
+	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
 )
 
+type searchIndexer interface {
+	IndexDocument(ctx context.Context, doc search.SearchDocument) error
+	DeleteDocument(ctx context.Context, id string) error
+}
+
 // Handler holds dependencies for note HTTP handlers.
 type Handler struct {
-	repo *Repo
+	repo   *Repo
+	search searchIndexer
 }
 
 // NewHandler creates a new note handler.
 func NewHandler(repo *Repo) *Handler {
 	return &Handler{repo: repo}
+}
+
+func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
+	h.search = sc
+	return h
+}
+
+func (h *Handler) indexNote(ctx context.Context, n *Note) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("note: panic during search indexing", "panic", r) } }()
+	title := ""
+	if n.Title != nil { title = *n.Title }
+	doc := search.SearchDocument{
+		ID: "note-" + n.ID.String(), HouseholdID: n.HouseholdID.String(),
+		EntityType: "note", EntityID: n.ID.String(),
+		Title: title, Body: n.Body,
+		CreatedAt: n.CreatedAt.Unix(), UpdatedAt: n.UpdatedAt.Unix(),
+	}
+	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
+		slog.Warn("note: failed to index", "id", n.ID, "error", err)
+	}
+}
+
+func (h *Handler) deleteNoteIndex(ctx context.Context, id string) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("note: panic during search deletion", "panic", r) } }()
+	if err := h.search.DeleteDocument(context.Background(), "note-"+id); err != nil {
+		slog.Warn("note: failed to delete from search", "id", id, "error", err)
+	}
 }
 
 // --- request / response types ---
@@ -212,6 +250,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.indexNote(r.Context(), created)
+
 	apierr.JSON(w, http.StatusCreated, map[string]any{
 		"data": toNoteResponse(created),
 	})
@@ -291,6 +331,8 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		apierr.NotFound(w, "note not found")
 		return
 	}
+
+	h.deleteNoteIndex(r.Context(), id.String())
 
 	w.WriteHeader(http.StatusNoContent)
 }

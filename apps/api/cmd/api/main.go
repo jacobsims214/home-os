@@ -30,6 +30,7 @@ import (
 	"home-os/api/internal/maintenance"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/note"
+	"home-os/api/internal/notification"
 	"home-os/api/internal/pet"
 	"home-os/api/internal/property"
 	"home-os/api/internal/search"
@@ -99,6 +100,7 @@ func main() {
 	r.Post("/api/v1/auth/register", authHandler.Register)
 	r.Post("/api/v1/auth/login", authHandler.Login)
 	r.Get("/api/v1/auth/me", authHandler.Me)
+	r.Post("/api/v1/auth/caldav-password", authHandler.GenerateCaldavPassword)
 
 	// Protected endpoints (require valid JWT).
 	r.Group(func(r chi.Router) {
@@ -113,7 +115,7 @@ func main() {
 
 		// Asset CRUD
 		assetRepo := asset.NewRepo(pool)
-		assetHandler := asset.NewHandler(assetRepo, cfg)
+		assetHandler := asset.NewHandler(assetRepo, cfg).WithSearchClient(searchClient)
 		r.Get("/api/v1/assets", assetHandler.List)
 		r.Post("/api/v1/assets", assetHandler.Create)
 		r.Get("/api/v1/assets/{id}", assetHandler.Get)
@@ -122,7 +124,7 @@ func main() {
 
 		// Vehicle CRUD
 		vehicleRepo := vehicle.NewRepo(pool)
-		vehicleHandler := vehicle.NewHandler(vehicleRepo)
+		vehicleHandler := vehicle.NewHandler(vehicleRepo).WithSearchClient(searchClient)
 		r.Get("/api/v1/vehicles", vehicleHandler.List)
 		r.Post("/api/v1/vehicles", vehicleHandler.Create)
 		r.Get("/api/v1/vehicles/{id}", vehicleHandler.Get)
@@ -131,7 +133,7 @@ func main() {
 
 		// Pet CRUD
 		petRepo := pet.NewRepo(pool)
-		petHandler := pet.NewHandler(petRepo)
+		petHandler := pet.NewHandler(petRepo).WithSearchClient(searchClient)
 		r.Get("/api/v1/pets", petHandler.List)
 		r.Post("/api/v1/pets", petHandler.Create)
 		r.Get("/api/v1/pets/{id}", petHandler.Get)
@@ -159,7 +161,7 @@ func main() {
 
 		// Maintenance CRUD (with bidirectional calendar sync)
 		maintenanceRepo := maintenance.NewRepo(pool)
-		maintenanceHandler := maintenance.NewHandler(maintenanceRepo).WithCalendarRepo(calendarRepo)
+		maintenanceHandler := maintenance.NewHandler(maintenanceRepo).WithCalendarRepo(calendarRepo).WithSearchClient(searchClient)
 		r.Get("/api/v1/maintenance/tasks", maintenanceHandler.ListTasks)
 		r.Post("/api/v1/maintenance/tasks", maintenanceHandler.CreateTask)
 		r.Patch("/api/v1/maintenance/tasks/{id}", maintenanceHandler.UpdateTask)
@@ -169,7 +171,7 @@ func main() {
 
 		// Property and Room CRUD
 		propertyRepo := property.NewRepo(pool)
-		propertyHandler := property.NewHandler(propertyRepo)
+		propertyHandler := property.NewHandler(propertyRepo).WithSearchClient(searchClient)
 		r.Get("/api/v1/properties", propertyHandler.ListProperties)
 		r.Post("/api/v1/properties", propertyHandler.CreateProperty)
 		r.Get("/api/v1/properties/{id}", propertyHandler.GetProperty)
@@ -193,10 +195,16 @@ func main() {
 
 		// Note CRUD (polymorphic)
 		noteRepo := note.NewRepo(pool)
-		noteHandler := note.NewHandler(noteRepo)
+		noteHandler := note.NewHandler(noteRepo).WithSearchClient(searchClient)
 		r.Get("/api/v1/notes", noteHandler.List)
 		r.Post("/api/v1/notes", noteHandler.Create)
 		r.Delete("/api/v1/notes/{id}", noteHandler.Delete)
+
+		// Notification CRUD
+		notificationRepo := notification.NewRepo(pool)
+		notificationHandler := notification.NewHandler(notificationRepo)
+		r.Get("/api/v1/notifications", notificationHandler.List)
+		r.Patch("/api/v1/notifications/{id}/read", notificationHandler.MarkRead)
 
 		// File storage (polymorphic, bytea in Postgres)
 		fileRepo := file.NewRepo(pool)

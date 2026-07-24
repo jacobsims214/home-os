@@ -1,0 +1,23 @@
+localhost:8443 {
+	tls internal
+
+	handle /api/* {
+		reverse_proxy api:8080
+	}
+
+	handle /dav/* {
+		reverse_proxy calendar:8081
+	}
+
+	handle /.well-known/caldav {
+		reverse_proxy calendar:8081
+	}
+
+	handle {
+		reverse_proxy ui:3000
+	}
+}
+
+:80 {
+	redir https://localhost:8443{uri} permanent
+}

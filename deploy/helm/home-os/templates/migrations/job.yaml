@@ -1,0 +1,20 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: home-os-migrations
+  namespace: {{ .Values.namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: migrations
+        image: "{{ .Values.global.imageRegistry }}/migrations:{{ .Values.global.imageTag }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        env:
+        - name: DATABASE_URL
+          value: {{ include "home-os.databaseUrl" . | quote }}

@@ -69,6 +69,41 @@ services:
       start_period: 10s
 
   # ──────────────────────────────────────────────────────────────
+  # Caddy — Reverse proxy with automatic SSL
+  # ──────────────────────────────────────────────────────────────
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - ui
+      - api
+      - calendar
+
+  # ──────────────────────────────────────────────────────────────
+  # Tika — OCR service for worker
+  # ──────────────────────────────────────────────────────────────
+
+  tika:
+    image: apache/tika:latest-full
+    restart: unless-stopped
+    ports:
+      - "9998:9998"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9998/tika"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────
   # MIGRATIONS — runs once, exits
   # ──────────────────────────────────────────────────────────────
 
@@ -118,7 +153,7 @@ services:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       MINIO_USE_SSL: "false"
-      INTEGRATION_ENCRYPTION_KEY: homeos-dev-enc-key-32-chars-xxxxx
+      ENCRYPTION_KEY: homeos-dev-enc-key-32-chars-xxxxx
       LOG_LEVEL: debug
       DEMO_MODE: "true"
 
@@ -185,12 +220,11 @@ services:
       - api
     volumes:
       - ../apps/ui:/app
-      - ui_next:/app/.next
       - ui_node_modules:/app/node_modules
     working_dir: /app
     environment:
       NODE_ENV: development
-      NEXT_PUBLIC_API_URL: http://localhost:8080
+      NEXT_PUBLIC_API_URL: https://localhost:8443
       API_URL: http://api:8080
 
 # ──────────────────────────────────────────────────────────────
@@ -201,8 +235,9 @@ volumes:
   postgres_data:
   typesense_data:
   minio_data:
+  caddy_data:
+  caddy_config:
   api_gopath:
   calendar_gopath:
   worker_gopath:
-  ui_next:
   ui_node_modules:

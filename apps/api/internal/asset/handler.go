@@ -1,7 +1,9 @@
 package asset
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,18 +14,58 @@ import (
 
 	"home-os/api/internal/config"
 	"home-os/api/internal/middleware"
+	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
 )
 
+type searchIndexer interface {
+	IndexDocument(ctx context.Context, doc search.SearchDocument) error
+	DeleteDocument(ctx context.Context, id string) error
+}
+
 // Handler holds the dependencies needed by asset HTTP handlers.
 type Handler struct {
-	repo *Repo
-	cfg  *config.Config
+	repo   *Repo
+	cfg    *config.Config
+	search searchIndexer
 }
 
 // NewHandler creates a new asset handler.
 func NewHandler(repo *Repo, cfg *config.Config) *Handler {
 	return &Handler{repo: repo, cfg: cfg}
+}
+
+func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
+	h.search = sc
+	return h
+}
+
+func (h *Handler) indexAsset(ctx context.Context, a *Asset) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("asset: panic during search indexing", "panic", r) } }()
+	body := ""
+	if a.Category != nil { body = *a.Category }
+	if a.Manufacturer != nil { body += " " + *a.Manufacturer }
+	if a.Model != nil { body += " " + *a.Model }
+	if a.SerialNumber != nil { body += " " + *a.SerialNumber }
+	doc := search.SearchDocument{
+		ID: "asset-" + a.ID.String(), HouseholdID: a.HouseholdID.String(),
+		EntityType: "asset", EntityID: a.ID.String(),
+		Title: a.Name, Body: body,
+		CreatedAt: a.CreatedAt.Unix(), UpdatedAt: a.UpdatedAt.Unix(),
+	}
+	if a.PropertyID != nil { pid := a.PropertyID.String(); doc.PropertyID = &pid }
+	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
+		slog.Warn("asset: failed to index", "id", a.ID, "error", err)
+	}
+}
+
+func (h *Handler) deleteAssetIndex(ctx context.Context, id string) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("asset: panic during search deletion", "panic", r) } }()
+	if err := h.search.DeleteDocument(context.Background(), "asset-"+id); err != nil {
+		slog.Warn("asset: failed to delete from search", "id", id, "error", err)
+	}
 }
 
 // --- request / response types ---
@@ -161,6 +203,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.indexAsset(r.Context(), created)
+
 	apierr.JSON(w, http.StatusCreated, map[string]any{"data": assetToResponse(created)})
 }
 
@@ -253,6 +297,8 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.indexAsset(r.Context(), updated)
+
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": assetToResponse(updated)})
 }
 
@@ -281,6 +327,8 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
+
+	h.deleteAssetIndex(r.Context(), assetID.String())
 
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -420,7 +420,7 @@ export default function CalendarPage() {
       </div>
 
       {/* ── Calendar ──────────────────────────────────────────── */}
-      <div className="flex-1 overflow-hidden p-4">
+      <div className="flex-1 p-4" style={{ minHeight: "600px" }}>
         {eventsLoading ? (
           <div className="flex h-full items-center justify-center">
             <svg
@@ -456,23 +456,29 @@ export default function CalendarPage() {
             eventClick={(info) => {
               setSelectedEvent(info.event.extendedProps as CalEvent);
             }}
-            height="100%"
+            height="auto"
+            contentHeight="auto"
             eventDisplay="block"
             dayMaxEvents={4}
             nowIndicator
+            eventTimeFormat={{
+              hour: "numeric",
+              minute: "2-digit",
+              meridiem: "short",
+            }}
           />
         )}
       </div>
 
       {/* ── Add Event modal ───────────────────────────────────── */}
       <Modal
-        open={showAddModal}
+        opened={showAddModal}
         onClose={() => {
           setShowAddModal(false);
           resetAddForm();
         }}
         title="Add Event"
-        maxWidth="max-w-lg"
+        size="lg"
       >
         <form onSubmit={handleAddSubmit} className="space-y-4">
           <Input
@@ -486,8 +492,10 @@ export default function CalendarPage() {
           <Select
             label="Event Type"
             value={formType}
-            onChange={(e) => setFormType(e.target.value as EventTypeKey)}
-            options={TYPE_KEYS.map((k) => ({
+            onChange={(e) => {
+              if (e) setFormType(e as EventTypeKey);
+            }}
+            data={TYPE_KEYS.map((k) => ({
               value: k,
               label: EVENT_TYPES[k].label,
             }))}
@@ -496,9 +504,9 @@ export default function CalendarPage() {
           <Select
             label="Calendar"
             value={formCalendarId}
-            onChange={(e) => setFormCalendarId(e.target.value)}
+            onChange={(e) => e && setFormCalendarId(e)}
             placeholder={calsLoading ? "Loading..." : "Select a calendar"}
-            options={calendars.map((c) => ({
+            data={calendars.map((c) => ({
               value: c.id,
               label: calendarLabel(c, properties),
             }))}
@@ -590,10 +598,10 @@ export default function CalendarPage() {
       {/* ── Detail / Delete modal ─────────────────────────────── */}
       {selectedEvent && (
         <Modal
-          open={!!selectedEvent}
+          opened={!!selectedEvent}
           onClose={() => setSelectedEvent(null)}
           title="Event Details"
-          maxWidth="max-w-md"
+          size="md"
         >
           <div className="space-y-4">
             {/* Title */}

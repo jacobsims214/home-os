@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -23,7 +24,7 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 // GetUserByEmail returns the user with the given email, or nil if no such user exists.
 func (r *Repo) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, email, name, password_hash, avatar_url, created_at, updated_at
+		`SELECT id, email, name, password_hash, caldav_password_hash, avatar_url, created_at, updated_at
 		 FROM users WHERE email = $1`,
 		email,
 	)
@@ -45,7 +46,7 @@ func (r *Repo) GetUserByEmail(ctx context.Context, email string) (*User, error) 
 // GetUserByID returns the user with the given ID, or nil if no such user exists.
 func (r *Repo) GetUserByID(ctx context.Context, userID string) (*User, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, email, name, password_hash, avatar_url, created_at, updated_at
+		`SELECT id, email, name, password_hash, caldav_password_hash, avatar_url, created_at, updated_at
 		 FROM users WHERE id = $1`,
 		userID,
 	)
@@ -70,7 +71,7 @@ func (r *Repo) CreateUser(ctx context.Context, email, name, passwordHash string)
 	rows, err := r.pool.Query(ctx,
 		`INSERT INTO users (email, name, password_hash)
 		 VALUES ($1, $2, $3)
-		 RETURNING id, email, name, password_hash, avatar_url, created_at, updated_at`,
+		 RETURNING id, email, name, password_hash, caldav_password_hash, avatar_url, created_at, updated_at`,
 		email, name, passwordHash,
 	)
 	if err != nil {
@@ -102,4 +103,13 @@ func (r *Repo) GetMemberships(ctx context.Context, userID string) ([]*Membership
 		return nil, fmt.Errorf("collect memberships: %w", err)
 	}
 	return memberships, nil
+}
+
+// UpdateCaldavPasswordHash updates the caldav_password_hash for the given user.
+func (r *Repo) UpdateCaldavPasswordHash(ctx context.Context, userID uuid.UUID, hash string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE users SET caldav_password_hash = $1 WHERE id = $2`,
+		hash, userID,
+	)
+	return err
 }

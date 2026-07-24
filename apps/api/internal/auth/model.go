@@ -11,13 +11,14 @@ import (
 
 // User represents a registered user from the users table.
 type User struct {
-	ID           uuid.UUID
-	Email        string
-	Name         string
-	PasswordHash string
-	AvatarURL    *string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID               uuid.UUID
+	Email            string
+	Name             string
+	PasswordHash     string
+	CaldavPasswordHash *string
+	AvatarURL        *string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // Membership represents a user's membership in a household from the memberships table.

@@ -6,6 +6,7 @@ import { MantineProvider, createTheme } from "@mantine/core";
 import { Notifications } from "@mantine/notifications";
 import { ModalsProvider } from "@mantine/modals";
 import { useState, type ReactNode } from "react";
+import { useLocalStorage } from "@mantine/hooks";
 
 const theme = createTheme({
   primaryColor: "cyan",
@@ -67,6 +68,11 @@ const theme = createTheme({
 });
 
 export default function Providers({ children }: { children: ReactNode }) {
+  const [colorScheme] = useLocalStorage({
+    key: "mantine-color-scheme",
+    defaultValue: "light",
+  });
+
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -80,7 +86,7 @@ export default function Providers({ children }: { children: ReactNode }) {
   );
 
   return (
-    <MantineProvider theme={theme}>
+    <MantineProvider forceColorScheme={colorScheme as "light" | "dark"} theme={theme}>
       <QueryClientProvider client={queryClient}>
         <ModalsProvider>
           <Notifications position="top-right" />

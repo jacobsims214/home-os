@@ -1,7 +1,9 @@
 package pet
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -9,17 +11,54 @@ import (
 	"github.com/google/uuid"
 
 	"home-os/api/internal/middleware"
+	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
 )
 
+type searchIndexer interface {
+	IndexDocument(ctx context.Context, doc search.SearchDocument) error
+	DeleteDocument(ctx context.Context, id string) error
+}
+
 // Handler holds dependencies for pet HTTP handlers.
 type Handler struct {
-	repo *Repo
+	repo   *Repo
+	search searchIndexer
 }
 
 // NewHandler creates a new pet handler.
 func NewHandler(repo *Repo) *Handler {
 	return &Handler{repo: repo}
+}
+
+func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
+	h.search = sc
+	return h
+}
+
+func (h *Handler) indexPet(ctx context.Context, p *Pet) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("pet: panic during search indexing", "panic", r) } }()
+	body := ""
+	if p.Species != nil { body = *p.Species }
+	if p.Breed != nil { body += " " + *p.Breed }
+	doc := search.SearchDocument{
+		ID: "pet-" + p.ID.String(), HouseholdID: p.HouseholdID.String(),
+		EntityType: "pet", EntityID: p.ID.String(),
+		Title: p.Name, Body: body,
+		CreatedAt: p.CreatedAt.Unix(), UpdatedAt: p.UpdatedAt.Unix(),
+	}
+	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
+		slog.Warn("pet: failed to index", "id", p.ID, "error", err)
+	}
+}
+
+func (h *Handler) deletePetIndex(ctx context.Context, id string) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("pet: panic during search deletion", "panic", r) } }()
+	if err := h.search.DeleteDocument(context.Background(), "pet-"+id); err != nil {
+		slog.Warn("pet: failed to delete from search", "id", id, "error", err)
+	}
 }
 
 // --- request / response types ---
@@ -177,6 +216,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.indexPet(r.Context(), created)
+
 	apierr.JSON(w, http.StatusCreated, map[string]any{
 		"data": toPetResponse(created),
 	})
@@ -228,6 +269,8 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.indexPet(r.Context(), updated)
+
 	apierr.JSON(w, http.StatusOK, map[string]any{
 		"data": toPetResponse(updated),
 	})
@@ -252,6 +295,8 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		apierr.NotFound(w, "pet not found")
 		return
 	}
+
+	h.deletePetIndex(r.Context(), id.String())
 
 	w.WriteHeader(http.StatusNoContent)
 }

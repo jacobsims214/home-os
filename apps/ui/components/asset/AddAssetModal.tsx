@@ -68,14 +68,14 @@ export default function AddAssetModal({ open, onClose, onSubmit, properties, def
   };
 
   return (
-    <Modal open={open} onClose={handleClose} title="Add Asset" maxWidth="max-w-2xl">
+    <Modal opened={open} onClose={handleClose} title="Add Asset" size="lg">
       <form onSubmit={handleSubmit} className="space-y-4">
         {error && <div className="rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</div>}
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Input label="Name *" value={form.name ?? ""} onChange={(e) => set("name", e.target.value)} placeholder="e.g. Hot Water Heater" required />
-          <Select label="Category" value={form.category ?? ""} onChange={(e) => set("category", e.target.value)} options={ASSET_CATEGORIES} placeholder="Select category" />
-          <Select label="Property" value={form.property_id ?? defaultPropertyId ?? ""} onChange={(e) => set("property_id", e.target.value)} options={properties.map((p) => ({ value: p.id, label: p.name }))} placeholder="Select property" />
+          <Select label="Category" value={(form.category ?? "") as string} onChange={(value) => set("category", value ?? "")} data={ASSET_CATEGORIES} placeholder="Select category" />
+          <Select label="Property" value={(form.property_id ?? defaultPropertyId ?? "") as string} onChange={(value) => set("property_id", value ?? "")} data={properties.map((p) => ({ value: p.id, label: p.name }))} placeholder="Select property" />
           <Input label="Room ID" value={form.room_id ?? ""} onChange={(e) => set("room_id", e.target.value)} placeholder="Optional" />
           <Input label="Manufacturer" value={form.manufacturer ?? ""} onChange={(e) => set("manufacturer", e.target.value)} placeholder="e.g. Carrier" />
           <Input label="Model" value={form.model ?? ""} onChange={(e) => set("model", e.target.value)} placeholder="e.g. 24ACC6" />

@@ -1,0 +1,17 @@
+{{- if eq .Values.database.mode "managed" }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: home-os-postgres
+  namespace: {{ .Values.namespace }}
+spec:
+  instances: {{ .Values.database.managed.instances }}
+  imageName: ghcr.io/cloudnative-pg/postgresql:16
+  storage:
+    size: {{ .Values.database.managed.storage }}
+  databases:
+  - name: homeos
+    owner: homeos
+  users:
+  - name: homeos
+{{- end }}

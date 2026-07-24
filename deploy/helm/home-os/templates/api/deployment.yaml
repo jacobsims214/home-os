@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-os-api
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: home-os-api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      app: home-os-api
+  template:
+    metadata:
+      labels:
+        app: home-os-api
+    spec:
+      containers:
+      - name: api
+        image: "{{ .Values.global.imageRegistry }}/api:{{ .Values.global.imageTag }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        ports:
+        - containerPort: {{ .Values.api.port }}
+        env:
+        - name: PORT
+          value: "{{ .Values.api.port }}"
+        - name: DATABASE_URL
+          value: {{ include "home-os.databaseUrl" . | quote }}
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: home-os-secrets
+              key: jwtSecret
+        - name: TYPESENSE_HOST
+          value: home-os-typesense
+        - name: TYPESENSE_PORT
+          value: "{{ .Values.typesense.port }}"
+        - name: TYPESENSE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: home-os-secrets
+              key: typesenseApiKey
+        - name: ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: home-os-secrets
+              key: encryptionKey
+        - name: LOG_LEVEL
+          value: "info"
+        - name: DEMO_MODE
+          value: "false"
+        resources:
+          {{- toYaml .Values.api.resources | nindent 10 }}

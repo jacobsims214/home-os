@@ -1,24 +1,64 @@
 package property
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"home-os/api/internal/middleware"
+	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
 )
 
+type searchIndexer interface {
+	IndexDocument(ctx context.Context, doc search.SearchDocument) error
+	DeleteDocument(ctx context.Context, id string) error
+}
+
 // Handler holds the dependencies needed by property HTTP handlers.
 type Handler struct {
-	repo *Repo
+	repo   *Repo
+	search searchIndexer
 }
 
 // NewHandler creates a new property handler.
 func NewHandler(repo *Repo) *Handler {
 	return &Handler{repo: repo}
+}
+
+func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
+	h.search = sc
+	return h
+}
+
+func (h *Handler) indexProperty(ctx context.Context, p *Property) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("property: panic during search indexing", "panic", r) } }()
+	body := ""
+	if p.Address != nil { body = *p.Address }
+	if p.PropertyType != nil { body += " " + *p.PropertyType }
+	if p.Notes != nil { body += " " + *p.Notes }
+	doc := search.SearchDocument{
+		ID: "property-" + p.ID.String(), HouseholdID: p.HouseholdID.String(),
+		EntityType: "property", EntityID: p.ID.String(),
+		Title: p.Name, Body: body,
+		CreatedAt: p.CreatedAt.Unix(), UpdatedAt: p.UpdatedAt.Unix(),
+	}
+	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
+		slog.Warn("property: failed to index", "id", p.ID, "error", err)
+	}
+}
+
+func (h *Handler) deletePropertyIndex(ctx context.Context, id string) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("property: panic during search deletion", "panic", r) } }()
+	if err := h.search.DeleteDocument(context.Background(), "property-"+id); err != nil {
+		slog.Warn("property: failed to delete from search", "id", id, "error", err)
+	}
 }
 
 // --- request / response types ---
@@ -243,6 +283,8 @@ func (h *Handler) CreateProperty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.indexProperty(r.Context(), property)
+
 	apierr.JSON(w, http.StatusCreated, map[string]any{
 		"data": toPropertyResponse(property),
 	})
@@ -305,6 +347,8 @@ func (h *Handler) UpdateProperty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.indexProperty(r.Context(), property)
+
 	apierr.JSON(w, http.StatusOK, map[string]any{
 		"data": toPropertyResponse(property),
 	})
@@ -332,6 +376,8 @@ func (h *Handler) DeleteProperty(w http.ResponseWriter, r *http.Request) {
 		apierr.NotFound(w, "property not found")
 		return
 	}
+
+	h.deletePropertyIndex(r.Context(), propertyID.String())
 
 	w.WriteHeader(http.StatusNoContent)
 }

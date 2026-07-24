@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-os-ui
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: home-os-ui
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  selector:
+    matchLabels:
+      app: home-os-ui
+  template:
+    metadata:
+      labels:
+        app: home-os-ui
+    spec:
+      containers:
+      - name: ui
+        image: "{{ .Values.global.imageRegistry }}/ui:{{ .Values.global.imageTag }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        ports:
+        - containerPort: {{ .Values.ui.port }}
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: API_URL
+          value: "http://home-os-api:{{ .Values.api.port }}"
+        - name: NEXT_PUBLIC_API_URL
+          value: ""
+        resources:
+          {{- toYaml .Values.ui.resources | nindent 10 }}

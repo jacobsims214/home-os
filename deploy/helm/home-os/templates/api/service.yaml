@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-os-api
+  namespace: {{ .Values.namespace }}
+spec:
+  ports:
+  - port: {{ .Values.api.port }}
+    targetPort: {{ .Values.api.port }}
+    protocol: TCP
+    name: http
+  selector:
+    app: home-os-api

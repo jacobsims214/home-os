@@ -1,36 +1,12 @@
 "use client";
 
 import { Modal as MantineModal } from "@mantine/core";
+import type { ModalProps as MantineModalProps } from "@mantine/core";
 import type { ReactNode } from "react";
 
-interface ModalProps {
-  open: boolean;
-  onClose: () => void;
-  title?: string;
-  children: ReactNode;
-  maxWidth?: string;
-  size?: string | number;
-}
-
-export default function Modal({
-  open,
-  onClose,
-  title,
-  children,
-  maxWidth,
-  size,
-}: ModalProps) {
-  const modalSize = size || (maxWidth === "max-w-2xl" ? "lg" : maxWidth === "max-w-lg" ? "md" : "md");
-
-  return (
-    <MantineModal
-      opened={open}
-      onClose={onClose}
-      title={title}
-      size={modalSize as any}
-      centered
-    >
-      {children}
-    </MantineModal>
-  );
-}
+// Re-export Mantine Modal with default size and padding
+// The MantineProvider sets defaultRadius="md" for components
+// We keep the wrapper to provide centered prop and consistent defaults
+export default MantineModal;
+export { MantineModal };
+export type { MantineModalProps as ModalProps };

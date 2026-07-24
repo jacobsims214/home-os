@@ -130,7 +130,7 @@ export default function MasterPasswordPrompt({
     : "Enter your master password";
 
   return (
-    <Modal open={open} onClose={onClose} title={title}>
+    <Modal opened={open} onClose={onClose} title={title}>
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input
           label="Master password"

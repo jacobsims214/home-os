@@ -11,7 +11,7 @@ import { propertyKeys } from "@/lib/query-keys";
 import type { PropertyDetailResponse } from "@/types/property";
 
 interface AddPropertyModalProps {
-  open: boolean;
+  opened: boolean;
   onClose: () => void;
 }
 
@@ -26,7 +26,7 @@ const PROPERTY_TYPES = [
 ];
 
 export default function AddPropertyModal({
-  open,
+  opened,
   onClose,
 }: AddPropertyModalProps) {
   const queryClient = useQueryClient();
@@ -139,7 +139,7 @@ export default function AddPropertyModal({
   };
 
   return (
-    <Modal open={open} onClose={handleClose} title="Add Property" maxWidth="max-w-2xl">
+    <Modal opened={opened} onClose={handleClose} title="Add Property" size="lg">
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* ── Section 1: Basic Info ─────────────────────────── */}
         <div className="space-y-4">
@@ -161,8 +161,8 @@ export default function AddPropertyModal({
           <Select
             label="Property Type"
             value={propertyType}
-            onChange={(e) => setPropertyType(e.target.value)}
-            options={PROPERTY_TYPES}
+            onChange={(value) => setPropertyType(value ?? "")}
+            data={PROPERTY_TYPES}
             placeholder="Select type (optional)"
           />
 

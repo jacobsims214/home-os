@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-os-tika
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: home-os-tika
+spec:
+  replicas: {{ .Values.tika.replicas }}
+  selector:
+    matchLabels:
+      app: home-os-tika
+  template:
+    metadata:
+      labels:
+        app: home-os-tika
+    spec:
+      containers:
+      - name: tika
+        image: "{{ .Values.tika.image }}"
+        ports:
+        - containerPort: {{ .Values.tika.port }}
+        resources:
+          {{- toYaml .Values.tika.resources | nindent 10 }}

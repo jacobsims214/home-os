@@ -387,7 +387,7 @@ export default function SecretEditor({
   );
 
   return (
-    <Modal open={open} onClose={onClose} title={title} maxWidth="max-w-lg">
+    <Modal opened={open} onClose={onClose} title={title} size="lg">
       {/* Locked notice — vault must be unlocked before creating/editing. */}
       {!isUnlocked ? (
         <div className="rounded-md bg-amber-50 p-4 text-sm text-amber-800">
@@ -407,10 +407,10 @@ export default function SecretEditor({
           <Select
             label="Type"
             value={secretType}
-            onChange={(e) =>
-              setSecretType(e.target.value as SecretType)
+            onChange={(value) =>
+              setSecretType(value as SecretType)
             }
-            options={SECRET_TYPE_OPTIONS}
+            data={SECRET_TYPE_OPTIONS}
           />
 
           {/* Name — plaintext, stored unencrypted for searchability. */}

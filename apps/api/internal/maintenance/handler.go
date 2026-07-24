@@ -12,8 +12,14 @@ import (
 
 	"home-os/api/internal/calendar"
 	"home-os/api/internal/middleware"
+	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
 )
+
+type searchIndexer interface {
+	IndexDocument(ctx context.Context, doc search.SearchDocument) error
+	DeleteDocument(ctx context.Context, id string) error
+}
 
 // calendarSyncer is the subset of calendar.Repo needed for maintenance sync.
 type calendarSyncer interface {
@@ -25,6 +31,7 @@ type calendarSyncer interface {
 type Handler struct {
 	repo    *Repo
 	calSync calendarSyncer
+	search  searchIndexer
 }
 
 // NewHandler creates a new maintenance handler.
@@ -32,10 +39,72 @@ func NewHandler(repo *Repo) *Handler {
 	return &Handler{repo: repo}
 }
 
-// WithCalendarRepo sets the calendar repo for bidirectional sync.
 func (h *Handler) WithCalendarRepo(cr *calendar.Repo) *Handler {
 	h.calSync = cr
 	return h
+}
+
+func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
+	h.search = sc
+	return h
+}
+
+func (h *Handler) indexTask(ctx context.Context, t *Task) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search indexing", "panic", r) } }()
+	body := ""
+	if t.Description != nil { body = *t.Description }
+	if t.Status != "" { body += " " + string(t.Status) }
+	if t.Cost != nil { body += " " + *t.Cost }
+	doc := search.SearchDocument{
+		ID: "maintenance-task-" + t.ID.String(), HouseholdID: t.HouseholdID.String(),
+		EntityType: "maintenance_task", EntityID: t.ID.String(),
+		Title: t.Name, Body: body,
+		CreatedAt: t.CreatedAt.Unix(), UpdatedAt: t.UpdatedAt.Unix(),
+	}
+	if t.PropertyID != nil { pid := t.PropertyID.String(); doc.PropertyID = &pid }
+	if t.AssetID != nil { aid := t.AssetID.String(); doc.Tags = append(doc.Tags, "asset:"+aid) }
+	if t.VehicleID != nil { vid := t.VehicleID.String(); doc.Tags = append(doc.Tags, "vehicle:"+vid) }
+	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
+		slog.Warn("maintenance: failed to index task", "id", t.ID, "error", err)
+	}
+}
+
+func (h *Handler) deleteTaskIndex(ctx context.Context, id string) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search deletion", "panic", r) } }()
+	if err := h.search.DeleteDocument(context.Background(), "maintenance-task-"+id); err != nil {
+		slog.Warn("maintenance: failed to delete task from search", "id", id, "error", err)
+	}
+}
+
+func (h *Handler) indexSchedule(ctx context.Context, s *Schedule) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search indexing", "panic", r) } }()
+	body := ""
+	if s.Description != nil { body = *s.Description }
+	if s.EstimatedCost != nil { body += " " + *s.EstimatedCost }
+	if s.RRule != "" { body += " " + s.RRule }
+	doc := search.SearchDocument{
+		ID: "maintenance-schedule-" + s.ID.String(), HouseholdID: s.HouseholdID.String(),
+		EntityType: "maintenance_schedule", EntityID: s.ID.String(),
+		Title: s.Name, Body: body,
+		CreatedAt: s.CreatedAt.Unix(), UpdatedAt: s.UpdatedAt.Unix(),
+	}
+	if s.PropertyID != nil { pid := s.PropertyID.String(); doc.PropertyID = &pid }
+	if s.AssetID != nil { aid := s.AssetID.String(); doc.Tags = append(doc.Tags, "asset:"+aid) }
+	if s.VehicleID != nil { vid := s.VehicleID.String(); doc.Tags = append(doc.Tags, "vehicle:"+vid) }
+	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
+		slog.Warn("maintenance: failed to index schedule", "id", s.ID, "error", err)
+	}
+}
+
+func (h *Handler) deleteScheduleIndex(ctx context.Context, id string) {
+	if h.search == nil { return }
+	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search deletion", "panic", r) } }()
+	if err := h.search.DeleteDocument(context.Background(), "maintenance-schedule-"+id); err != nil {
+		slog.Warn("maintenance: failed to delete schedule from search", "id", id, "error", err)
+	}
 }
 
 // --- task request / response types ---
@@ -353,6 +422,9 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	// Sync to calendar if the task has a due date.
 	h.syncToCalendar(r.Context(), householdID, created)
 
+	// Index for search
+	h.indexTask(r.Context(), created)
+
 	apierr.JSON(w, http.StatusCreated, map[string]any{"data": toTaskResponse(created)})
 }
 
@@ -497,6 +569,9 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	// Sync to calendar if the task has a due date.
 	h.syncToCalendar(r.Context(), householdID, updated)
 
+	// Index for search
+	h.indexTask(r.Context(), updated)
+
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": toTaskResponse(updated)})
 }
 
@@ -532,6 +607,9 @@ func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("maintenance: failed to delete calendar event", "task_id", taskID, "error", err)
 		}
 	}
+
+	// Delete from search index
+	h.deleteTaskIndex(r.Context(), taskID.String())
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -651,6 +729,9 @@ func (h *Handler) CreateSchedule(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
+
+	// Index for search
+	h.indexSchedule(r.Context(), created)
 
 	apierr.JSON(w, http.StatusCreated, map[string]any{"data": toScheduleResponse(created)})
 }

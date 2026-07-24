@@ -168,7 +168,7 @@ export default function FileViewer({ file, open, onClose }: FileViewerProps) {
   const title = file?.name ?? "File preview";
 
   return (
-    <Modal open={open} onClose={onClose} title={title} maxWidth="max-w-4xl">
+    <Modal opened={open} onClose={onClose} title={title} size="xl">
       {error && (
         <div className="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-700">
           {error}

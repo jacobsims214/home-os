@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: home-os-typesense
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: home-os-typesense
+spec:
+  replicas: {{ .Values.typesense.replicas }}
+  selector:
+    matchLabels:
+      app: home-os-typesense
+  serviceName: home-os-typesense
+  template:
+    metadata:
+      labels:
+        app: home-os-typesense
+    spec:
+      containers:
+      - name: typesense
+        image: "{{ .Values.typesense.image }}"
+        ports:
+        - containerPort: {{ .Values.typesense.port }}
+        env:
+        - name: TYPESENSE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: home-os-secrets
+              key: typesenseApiKey
+        - name: TYPESENSE_DATA_DIR
+          value: /data
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: {{ .Values.typesense.persistence.size }}
