@@ -64,6 +64,13 @@ type userResponse struct {
 // Register creates a new user, a default household, an owner membership,
 // and returns a signed JWT. POST /api/v1/auth/register.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
+	if !h.cfg.AllowRegistration {
+		apierr.JSON(w, http.StatusForbidden, apierr.ErrorResponse{
+			Error: apierr.ErrorDetail{Code: "REGISTRATION_DISABLED", Message: "Registration is currently disabled"},
+		})
+		return
+	}
+
 	var req registerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		apierr.BadRequest(w, "invalid request body")
@@ -287,4 +294,73 @@ func (h *Handler) GenerateCaldavPassword(w http.ResponseWriter, r *http.Request)
 	}
 
 	apierr.JSON(w, http.StatusOK, map[string]string{"password": plaintext})
+}
+
+// ForgotPassword handles password reset requests. Always returns 200 to prevent email enumeration.
+func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierr.BadRequest(w, "invalid request body")
+		return
+	}
+
+	// Always return 200 to prevent email enumeration
+	user, err := h.repo.GetUserByEmail(r.Context(), req.Email)
+	if err != nil || user == nil {
+		apierr.JSON(w, http.StatusOK, map[string]string{"message": "If the email exists, a reset link has been sent"})
+		return
+	}
+
+	// Generate token and store in DB
+	token := uuid.New().String()
+	if err := h.repo.CreatePasswordResetToken(r.Context(), user.ID, token); err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	// TODO: Send email via SMTP (will be wired up when SMTP is configured)
+	apierr.JSON(w, http.StatusOK, map[string]string{"message": "If the email exists, a reset link has been sent"})
+}
+
+// ResetPassword handles password reset completion.
+func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token    string `json:"token"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierr.BadRequest(w, "invalid request body")
+		return
+	}
+
+	if req.Password == "" || len(req.Password) < 8 {
+		apierr.BadRequest(w, "password must be at least 8 characters")
+		return
+	}
+
+	userID, err := h.repo.GetPasswordResetToken(r.Context(), req.Token)
+	if err != nil {
+		apierr.BadRequest(w, "invalid or expired reset token")
+		return
+	}
+
+	hash, err := HashPassword(req.Password)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	if err := h.repo.UpdatePassword(r.Context(), userID, hash); err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	if err := h.repo.MarkResetTokenUsed(r.Context(), req.Token); err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	apierr.JSON(w, http.StatusOK, map[string]string{"message": "Password reset successfully"})
 }

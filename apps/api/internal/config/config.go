@@ -6,24 +6,31 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
 // Config holds all environment-driven configuration for the API service.
 type Config struct {
-	Port            string
-	DatabaseURL     string
-	JWTSecret       string
-	TypesenseHost   string
-	TypesensePort   string
-	TypesenseAPIKey string
-	MinioEndpoint   string
-	MinioAccessKey  string
-	MinioSecretKey  string
-	MinioUseSSL     bool
-	EncryptionKey   string
-	LogLevel        string
-	DemoMode        bool
+	Port              string
+	DatabaseURL       string
+	JWTSecret         string
+	TypesenseHost     string
+	TypesensePort     string
+	TypesenseAPIKey   string
+	MinioEndpoint     string
+	MinioAccessKey    string
+	MinioSecretKey    string
+	MinioUseSSL       bool
+	EncryptionKey     string
+	LogLevel          string
+	DemoMode          bool
+	SMTPHost          string
+	SMTPPort          int
+	SMTPUsername      string
+	SMTPPassword      string
+	SMTPFrom          string
+	AllowRegistration bool
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -43,6 +50,12 @@ func Load() (*Config, error) {
 		EncryptionKey:   os.Getenv("ENCRYPTION_KEY"),
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
 		DemoMode:        strings.ToLower(os.Getenv("DEMO_MODE")) == "true",
+		SMTPHost:        os.Getenv("SMTP_HOST"),
+		SMTPPort:        getEnvInt("SMTP_PORT", "587"),
+		SMTPUsername:    os.Getenv("SMTP_USERNAME"),
+		SMTPPassword:    os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:        getEnv("SMTP_FROM", "noreply@homeos.local"),
+		AllowRegistration: strings.ToLower(os.Getenv("ALLOW_REGISTRATION")) == "true",
 	}
 
 	var missing []string
@@ -65,4 +78,17 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getEnvInt returns the integer value of the environment variable if set, otherwise returns fallback.
+func getEnvInt(key, fallback string) int {
+	v := os.Getenv(key)
+	if v == "" {
+		v = fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0
+	}
+	return n
 }

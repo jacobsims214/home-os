@@ -37,6 +37,11 @@ func Forbidden(w http.ResponseWriter, msg string) {
 	writeError(w, http.StatusForbidden, "FORBIDDEN", msg)
 }
 
+// Unauthorized writes a 401 JSON error response.
+func Unauthorized(w http.ResponseWriter, msg string) {
+	writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", msg)
+}
+
 // BadRequest writes a 400 JSON error response.
 func BadRequest(w http.ResponseWriter, msg string) {
 	writeError(w, http.StatusBadRequest, "BAD_REQUEST", msg)

@@ -26,6 +26,7 @@ import (
 	"home-os/api/internal/file"
 	"home-os/api/internal/household"
 	"home-os/api/internal/integration"
+	"home-os/api/internal/invite"
 	"home-os/api/internal/link"
 	"home-os/api/internal/maintenance"
 	"home-os/api/internal/middleware"
@@ -101,6 +102,8 @@ func main() {
 	r.Post("/api/v1/auth/login", authHandler.Login)
 	r.Get("/api/v1/auth/me", authHandler.Me)
 	r.Post("/api/v1/auth/caldav-password", authHandler.GenerateCaldavPassword)
+	r.Post("/api/v1/auth/forgot-password", authHandler.ForgotPassword)
+	r.Post("/api/v1/auth/reset-password", authHandler.ResetPassword)
 
 	// Protected endpoints (require valid JWT).
 	r.Group(func(r chi.Router) {
@@ -242,6 +245,13 @@ func main() {
 		r.Post("/api/v1/integrations/{type}/connect", integrationHandler.Connect)
 		r.Post("/api/v1/integrations/{type}/test", integrationHandler.Test)
 		r.Delete("/api/v1/integrations/{type}", integrationHandler.Disconnect)
+
+		// Invite routes
+		inviteRepo := invite.NewRepo(pool)
+		inviteHandler := invite.NewHandler(inviteRepo, cfg)
+		r.Post("/api/v1/invites", inviteHandler.CreateInvite)
+		r.Get("/api/v1/invites", inviteHandler.ListInvites)
+		r.Post("/api/v1/invites/accept", inviteHandler.AcceptInvite)
 	})
 
 	// Start the HTTP server.

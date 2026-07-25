@@ -113,3 +113,39 @@ func (r *Repo) UpdateCaldavPasswordHash(ctx context.Context, userID uuid.UUID, h
 	)
 	return err
 }
+
+// UpdatePassword updates the password_hash for the given user.
+func (r *Repo) UpdatePassword(ctx context.Context, userID string, hash string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE users SET password_hash = $1 WHERE id = $2`,
+		hash, userID,
+	)
+	return err
+}
+
+// CreatePasswordResetToken creates a password reset token for the given user.
+func (r *Repo) CreatePasswordResetToken(ctx context.Context, userID uuid.UUID, token string) error {
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')`,
+		userID, token,
+	)
+	return err
+}
+
+// GetPasswordResetToken retrieves the user ID for a valid (unused, unexpired) reset token.
+func (r *Repo) GetPasswordResetToken(ctx context.Context, token string) (string, error) {
+	var userID string
+	err := r.pool.QueryRow(ctx,
+		`SELECT user_id FROM password_reset_tokens WHERE token = $1 AND used_at IS NULL AND expires_at > NOW()`, token,
+	).Scan(&userID)
+	if err != nil {
+		return "", err
+	}
+	return userID, nil
+}
+
+// MarkResetTokenUsed marks a reset token as used.
+func (r *Repo) MarkResetTokenUsed(ctx context.Context, token string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE password_reset_tokens SET used_at = NOW() WHERE token = $1`, token)
+	return err
+}
