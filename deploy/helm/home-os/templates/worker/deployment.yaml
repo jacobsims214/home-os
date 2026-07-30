@@ -33,6 +33,8 @@ spec:
               key: typesenseApiKey
         - name: POLL_INTERVAL
           value: "5s"
+        - name: TIKA_URL
+          value: "http://home-os-tika:{{ .Values.tika.port }}"
         - name: LOG_LEVEL
           value: "info"
         resources:

@@ -1,7 +1,7 @@
 global:
-  imageRegistry: ghcr.io/jacobsims214/home-os
+  imageRegistry: "home-os"
   imageTag: latest
-  imagePullPolicy: Always
+  imagePullPolicy: Never
 
 namespace: home-os
 
@@ -14,10 +14,10 @@ envoy:
     limits: { cpu: 500m, memory: 256Mi }
 
 api:
-  replicas: 2
+  replicas: 1
   image: api
   port: 8080
-  allowRegistration: "false"
+  allowRegistration: "true"
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
@@ -38,7 +38,7 @@ worker:
     limits: { cpu: 500m, memory: 512Mi }
 
 ui:
-  replicas: 2
+  replicas: 1
   image: ui
   port: 3000
   resources:
@@ -50,7 +50,7 @@ typesense:
   image: typesense/typesense:27.1
   port: 8108
   persistence:
-    size: 10Gi
+    size: 5Gi
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { cpu: 500m, memory: 1Gi }
@@ -66,24 +66,16 @@ tika:
 database:
   mode: managed
   managed:
-    instances: 2
-    storage: 10Gi
+    instances: 1
+    storage: 5Gi
     backup:
-      enabled: true
-      schedule: "0 2 * * *"
-  external:
-    host: ""
-    port: 5432
-    database: homeos
-    user: homeos
-    password: ""
-    existingSecret: ""
+      enabled: false
 
 secrets:
-  jwtSecret: ""
-  calendarSecret: ""
-  typesenseApiKey: ""
-  encryptionKey: ""
+  jwtSecret: "local-dev-jwt-secret"
+  calendarSecret: "local-dev-calendar-secret"
+  typesenseApiKey: "local-dev-typesense-key"
+  encryptionKey: "local-dev-encryption-key-32-chars"
 
 smtp:
   host: ""

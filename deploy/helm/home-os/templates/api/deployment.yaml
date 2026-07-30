@@ -49,5 +49,17 @@ spec:
           value: "info"
         - name: DEMO_MODE
           value: "false"
+        - name: ALLOW_REGISTRATION
+          value: "{{ .Values.api.allowRegistration }}"
+        - name: SMTP_HOST
+          value: "{{ .Values.smtp.host }}"
+        - name: SMTP_PORT
+          value: "{{ .Values.smtp.port }}"
+        - name: SMTP_USERNAME
+          value: "{{ .Values.smtp.username }}"
+        - name: SMTP_PASSWORD
+          value: "{{ .Values.smtp.password }}"
+        - name: SMTP_FROM
+          value: "{{ .Values.smtp.from }}"
         resources:
           {{- toYaml .Values.api.resources | nindent 10 }}

@@ -23,6 +23,8 @@ data:
                 - name: backend
                   domains: ["*"]
                   routes:
+                  - match: { prefix: "/api/auth" }
+                    route: { cluster: ui_cluster }
                   - match: { prefix: "/api/" }
                     route: { cluster: api_cluster }
                   - match: { prefix: "/dav/" }
