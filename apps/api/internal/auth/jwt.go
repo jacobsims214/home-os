@@ -109,6 +109,9 @@ func (v *Verifier) Enabled() bool {
 
 // Verify validates the raw OIDC ID token and returns the core Identity.
 // In disabled mode, returns a local-dev anonymous identity.
+// After go-oidc verifies the signature, issuer, and expiry, it also validates
+// that the token's "aud" (audience) claim contains at least one of the
+// expected audiences configured on the verifier.
 func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Identity, error) {
 	if !v.enabled {
 		return &Identity{Subject: "local-dev", Email: "local-dev@homeos.local", Name: "Local Dev"}, nil
