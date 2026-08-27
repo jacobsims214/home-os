@@ -44,21 +44,6 @@ func NewHandler(repo *Repo, householdRepo HouseholdCreator, cfg *config.Config, 
 
 // --- request / response types ---
 
-type registerRequest struct {
-	Email    string `json:"email"`
-	Name     string `json:"name"`
-	Password string `json:"password"`
-}
-
-type loginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
-
-type tokenResponse struct {
-	Token string `json:"token"`
-}
-
 type userResponse struct {
 	ID        string  `json:"id"`
 	Email     string  `json:"email"`
@@ -66,99 +51,6 @@ type userResponse struct {
 	AvatarURL *string `json:"avatar_url,omitempty"`
 	CreatedAt string  `json:"created_at"`
 	UpdatedAt string  `json:"updated_at"`
-}
-
-// Register creates a new user, a default household, an owner membership,
-// and returns a signed JWT. POST /api/v1/auth/register.
-func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
-	if !h.cfg.AllowRegistration {
-		apierr.JSON(w, http.StatusForbidden, apierr.ErrorResponse{
-			Error: apierr.ErrorDetail{Code: "REGISTRATION_DISABLED", Message: "Registration is currently disabled"},
-		})
-		return
-	}
-
-	var req registerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		apierr.BadRequest(w, "invalid request body")
-		return
-	}
-
-	req.Email = strings.TrimSpace(req.Email)
-	req.Name = strings.TrimSpace(req.Name)
-
-	if req.Email == "" || req.Name == "" || req.Password == "" {
-		apierr.BadRequest(w, "email, name, and password are required")
-		return
-	}
-
-	if len(req.Password) < 8 {
-		apierr.BadRequest(w, "password must be at least 8 characters")
-		return
-	}
-
-	// Check for existing user.
-	existing, err := h.repo.GetUserByEmail(r.Context(), req.Email)
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-	if existing != nil {
-		apierr.Conflict(w, "email already registered")
-		return
-	}
-
-	// Hash password.
-	hash, err := HashPassword(req.Password)
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-
-	// Create user.
-	user, err := h.repo.CreateUser(r.Context(), req.Email, req.Name, hash)
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-
-	// Register password in Dex's local password database.
-	// This enables Dex OIDC authentication for the new user.
-	if h.dexClient != nil {
-		if err := h.dexClient.CreatePassword(r.Context(), req.Email, hash, user.ID.String()); err != nil {
-			slog.Warn("dex: failed to create password, continuing registration", "email", req.Email, "error", err)
-		}
-	} else {
-		slog.Info("dex: no client configured, skipping password creation", "email", req.Email)
-	}
-
-	// Create default household.
-	hhID, err := h.householdRepo.CreateHousehold(r.Context(), req.Name+"'s Home")
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-
-	// Create membership as owner.
-	if err := h.householdRepo.CreateMembership(r.Context(), hhID, user.ID.String(), RoleOwner); err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-
-	// Sign JWT.
-	claims := Claims{
-		UserID:      user.ID.String(),
-		HouseholdID: hhID,
-		Role:        RoleOwner,
-		Email:       req.Email,
-	}
-	token, err := SignToken(h.cfg, claims)
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-
-	apierr.JSON(w, http.StatusCreated, tokenResponse{Token: token})
 }
 
 // adminCreateUserRequest is the request body for AdminCreateUser.
@@ -277,62 +169,6 @@ func (h *Handler) AdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		UserID:      user.ID.String(),
 		HouseholdID: hhID,
 	})
-}
-
-// Login validates email/password, looks up the user's primary membership,
-// and returns a signed JWT. POST /api/v1/auth/login.
-func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
-	var req loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		apierr.BadRequest(w, "invalid request body")
-		return
-	}
-
-	req.Email = strings.TrimSpace(req.Email)
-
-	if req.Email == "" || req.Password == "" {
-		apierr.BadRequest(w, "email and password are required")
-		return
-	}
-
-	user, err := h.repo.GetUserByEmail(r.Context(), req.Email)
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-	if user == nil {
-		apierr.NotFound(w, "user not found")
-		return
-	}
-
-	if err := CheckPassword(user.PasswordHash, req.Password); err != nil {
-		apierr.Forbidden(w, "invalid password")
-		return
-	}
-
-	memberships, err := h.repo.GetMemberships(r.Context(), user.ID.String())
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-	if len(memberships) == 0 {
-		apierr.Forbidden(w, "no household memberships found")
-		return
-	}
-
-	claims := Claims{
-		UserID:      user.ID.String(),
-		HouseholdID: memberships[0].HouseholdID.String(),
-		Role:        memberships[0].Role,
-		Email:       req.Email,
-	}
-	token, err := SignToken(h.cfg, claims)
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-
-	apierr.JSON(w, http.StatusOK, tokenResponse{Token: token})
 }
 
 // Me returns the currently authenticated user based on the Bearer token.
