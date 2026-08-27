@@ -40,7 +40,7 @@ import (
 	"home-os/api/internal/secret"
 	"home-os/api/internal/seed"
 	"home-os/api/internal/vehicle"
-	"home-os/api/internal/vendor"
+	"home-os/api/internal/vendors"
 	"home-os/api/pkg/apierr"
 	"home-os/api/pkg/smtp"
 )
@@ -196,8 +196,8 @@ func main() {
 		r.Delete("/api/v1/pets/{id}", petHandler.Delete)
 
 		// Vendor CRUD
-		vendorRepo := vendor.NewRepo(pool)
-		vendorHandler := vendor.NewHandler(vendorRepo).WithSearchClient(searchClient)
+		vendorRepo := vendors.NewRepo(pool)
+		vendorHandler := vendors.NewHandler(vendorRepo).WithSearchClient(searchClient)
 		r.Get("/api/v1/vendors", vendorHandler.List)
 		r.Post("/api/v1/vendors", vendorHandler.Create)
 		r.Get("/api/v1/vendors/{id}", vendorHandler.Get)
