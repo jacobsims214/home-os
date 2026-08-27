@@ -45,7 +45,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: apps/${{ matrix.service }}
+          context: ${{ matrix.service == 'worker' && '.' || format('apps/{0}', matrix.service) }}
+          file: ${{ matrix.service == 'worker' && 'apps/worker/Dockerfile' || 'Dockerfile' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
