@@ -119,6 +119,14 @@ func (v *Verifier) VerifyToken(ctx context.Context, rawToken string) (*Claims, e
 // with the user's household_id and role from the database. This is necessary because
 // Dex tokens only carry OIDC standard claims (sub, email, name) — not Home OS-specific
 // claims like household_id or role.
+//
+// Membership lookup is keyed on the OIDC sub claim via u.dex_sub, with email
+// as a fallback for legacy users. If no membership is found, returns an error
+// (the caller converts this to 401 Unauthorized) instead of silently proceeding
+// with empty household context.
+//
+// TODO: Add a `subject` column to the users table (migration) and key the
+// membership lookup on u.subject instead of u.dex_sub.
 func (v *Verifier) VerifyTokenAndEnrich(ctx context.Context, pool *pgxpool.Pool, tokenStr string) (*Claims, error) {
 	claims, err := v.VerifyToken(ctx, tokenStr)
 	if err != nil {
@@ -133,15 +141,22 @@ func (v *Verifier) VerifyTokenAndEnrich(ctx context.Context, pool *pgxpool.Pool,
 	err = pool.QueryRow(ctx,
 		`SELECT u.id, m.household_id, m.role FROM memberships m
 		 JOIN users u ON u.id = m.user_id
-		 WHERE u.email = $1`,
-		claims.Email,
+		 WHERE u.dex_sub = $1`,
+		claims.Subject,
 	).Scan(&userID, &householdID, &role)
 	if err != nil {
-		// If no membership found, allow but with empty household.
-		// This lets the ping tool and health checks still work.
-		slog.Warn("auth: no membership found for token email, proceeding without household context",
-			"email", claims.Email, "error", err)
-		return claims, nil
+		// Fallback: try email lookup for legacy users whose dex_sub may not be populated.
+		err = pool.QueryRow(ctx,
+			`SELECT u.id, m.household_id, m.role FROM memberships m
+			 JOIN users u ON u.id = m.user_id
+			 WHERE u.email = $1`,
+			claims.Email,
+		).Scan(&userID, &householdID, &role)
+		if err != nil {
+			return nil, fmt.Errorf("no membership found for sub=%q email=%q: %w", claims.Subject, claims.Email, err)
+		}
+		slog.Warn("auth: membership found by email fallback (dex_sub not populated)",
+			"sub", claims.Subject, "email", claims.Email, "user_id", userID)
 	}
 
 	claims.UserID = userID
@@ -149,7 +164,7 @@ func (v *Verifier) VerifyTokenAndEnrich(ctx context.Context, pool *pgxpool.Pool,
 	claims.Role = role
 
 	slog.Debug("auth: enriched token claims with household context",
-		"email", claims.Email, "household_id", householdID, "role", role)
+		"sub", claims.Subject, "email", claims.Email, "household_id", householdID, "role", role)
 
 	return claims, nil
 }
