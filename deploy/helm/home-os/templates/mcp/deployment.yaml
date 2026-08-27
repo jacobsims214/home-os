@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-os-mcp
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: home-os-mcp
+spec:
+  replicas: {{ .Values.mcp.replicas }}
+  selector:
+    matchLabels:
+      app: home-os-mcp
+  template:
+    metadata:
+      labels:
+        app: home-os-mcp
+    spec:
+      containers:
+      - name: mcp
+        image: "{{ .Values.global.imageRegistry }}/mcp:{{ .Values.global.imageTag }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        ports:
+        - containerPort: {{ .Values.mcp.port }}
+        - containerPort: {{ .Values.mcp.metadataPort }}
+          name: metadata
+        env:
+        - name: PORT
+          value: "{{ .Values.mcp.port }}"
+        - name: METADATA_PORT
+          value: "{{ .Values.mcp.metadataPort }}"
+        - name: DATABASE_URL
+          value: {{ include "home-os.databaseUrl" . | quote }}
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: home-os-secrets
+              key: jwtSecret
+        - name: LOG_LEVEL
+          value: "info"
+        - name: DEX_JWKS_URL
+          value: "http://home-os-envoy.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.envoy.port }}/dex/keys"
+        - name: DEX_ISSUER
+          value: "http://localhost:8000/dex"
+        resources:
+          {{- toYaml .Values.mcp.resources | nindent 10 }}
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.mcp.port }}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.mcp.port }}
+          initialDelaySeconds: 15
+          periodSeconds: 20

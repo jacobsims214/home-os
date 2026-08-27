@@ -16,6 +16,7 @@ export default function AssetDetailPage() {
     { name: "model", label: "Model", type: "text" as const },
     { name: "serial_number", label: "Serial Number", type: "text" as const },
     { name: "purchase_price", label: "Purchase Price", type: "text" as const },
+    { name: "current_value", label: "Current Value", type: "text" as const },
     { name: "purchase_date", label: "Purchase Date", type: "date" as const },
     { name: "warranty_expiry", label: "Warranty Expiry", type: "date" as const },
     { name: "notes", label: "Notes", type: "textarea" as const },
@@ -27,8 +28,8 @@ export default function AssetDetailPage() {
       fields: ["name", "category", "manufacturer", "model", "serial_number"],
     },
     {
-      title: "Purchase & Warranty",
-      fields: ["purchase_price", "purchase_date", "warranty_expiry"],
+      title: "Value & Purchase",
+      fields: ["purchase_price", "current_value", "purchase_date", "warranty_expiry"],
     },
     {
       title: "Location",

@@ -88,11 +88,19 @@ export const searchKeys = {
 };
 
 export const calendarKeys = {
-  all: ["calendars"] as const,
-  lists: () => [...calendarKeys.all, "list"] as const,
-  events: () => [...calendarKeys.all, "events"] as const,
-  eventsByProperty: (propertyId: string) =>
-    [...calendarKeys.events(), "byProperty", propertyId] as const,
+	all: ["calendars"] as const,
+	lists: () => [...calendarKeys.all, "list"] as const,
+	events: () => [...calendarKeys.all, "events"] as const,
+	eventsByProperty: (propertyId: string) =>
+		[...calendarKeys.events(), "byProperty", propertyId] as const,
+};
+
+export const loanKeys = {
+	all: ["loans"] as const,
+	lists: () => [...loanKeys.all, "list"] as const,
+	list: (householdId: string) => [...loanKeys.lists(), householdId] as const,
+	details: () => [...loanKeys.all, "detail"] as const,
+	detail: (id: string) => [...loanKeys.details(), id] as const,
 };
 
 export const fileKeys = {

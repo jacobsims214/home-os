@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -8,19 +9,29 @@ import (
 
 	"home-os/api/internal/middleware"
 	"home-os/api/pkg/apierr"
+	"home-os/api/pkg/smtp"
 )
 
 // Handler holds the dependencies needed by notification HTTP handlers.
 type Handler struct {
-	repo *Repo
+	repo       *Repo
+	smtpClient *smtp.Client
 }
 
 // NewHandler creates a new notification handler.
-func NewHandler(repo *Repo) *Handler {
-	return &Handler{repo: repo}
+func NewHandler(repo *Repo, smtpClient *smtp.Client) *Handler {
+	return &Handler{repo: repo, smtpClient: smtpClient}
 }
 
 // --- request / response types ---
+
+type createNotificationRequest struct {
+	Type       string  `json:"type"`
+	Title      string  `json:"title"`
+	Body       string  `json:"body"`
+	EntityType *string `json:"entity_type,omitempty"`
+	EntityID   *string `json:"entity_id,omitempty"`
+}
 
 type notificationResponse struct {
 	ID           string     `json:"id"`
@@ -78,6 +89,40 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": resp})
+}
+
+// Create creates a new notification and optionally sends an email.
+// POST /api/v1/notifications
+func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.ClaimsFromContext(r.Context())
+	if claims == nil {
+		apierr.Forbidden(w, "authentication required")
+		return
+	}
+
+	var req createNotificationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierr.BadRequest(w, "invalid request body")
+		return
+	}
+
+	if req.Type == "" || req.Title == "" {
+		apierr.BadRequest(w, "type and title are required")
+		return
+	}
+
+	n, err := h.repo.Create(r.Context(), claims.HouseholdID, req.Type, req.Title, req.Body, req.EntityType, req.EntityID)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	// Send email for bill_due and maintenance_due notifications (best-effort).
+	if claims.Email != "" {
+		SendNotificationEmail(h.smtpClient, claims.Email, n.Type, n.Title, n.Body)
+	}
+
+	apierr.JSON(w, http.StatusCreated, map[string]any{"data": toNotificationResponse(n)})
 }
 
 // MarkRead marks a notification as read.

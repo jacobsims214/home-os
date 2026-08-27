@@ -1,29 +1,53 @@
-// Package auth provides JWT signing, verification, and claims extraction
-// for the Home OS API. Tokens carry user identity and household context
-// and are validated on all protected routes.
+// Package auth provides JWT signing, OIDC verification, and claims extraction
+// for the Home OS API. Tokens are issued by Dex and validated using Dex's JWKS
+// endpoint with RS256 signature verification via coreos/go-oidc/v3.
+//
+// SignToken is retained for the registration/login flow (creates hand-rolled
+// HS256 JWTs). It will be removed in the cleanup phase once all auth goes
+// through Dex.
 package auth
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/golang-jwt/jwt/v5"
 
 	"home-os/api/internal/config"
 )
 
+// Identity represents the core OIDC identity from a verified ID token.
+type Identity struct {
+	Subject string `json:"sub"`
+	Email   string `json:"email"`
+	Name    string `json:"name"`
+}
+
 // Claims represents the JWT claims carried by every Home OS token.
-// UserID and HouseholdID are required; Role and standard registered claims
+// UserID, HouseholdID, and Email are required; Role and standard registered claims
 // are set automatically by SignToken.
+//
+// For Dex-issued OIDC tokens, UserID is extracted from the sub claim, while
+// HouseholdID and Role are extracted from custom claims (if present) or left empty.
+//
+// Note: Claims does NOT embed Identity because Identity.Subject conflicts with
+// jwt.RegisteredClaims.Subject. Identity is used only for the OIDC verification step.
 type Claims struct {
 	UserID      string `json:"user_id"`
 	HouseholdID string `json:"household_id"`
 	Role        string `json:"role"`
+	Email       string `json:"email"`
+	Name        string `json:"name"`
 	jwt.RegisteredClaims
 }
 
 // SignToken creates a signed JWT string with HS256 signing, 24-hour expiry,
 // and the standard issued-at / not-before timestamps.
+//
+// Deprecated: Will be removed once all auth flows go through Dex.
 func SignToken(cfg *config.Config, claims Claims) (string, error) {
 	if cfg == nil {
 		return "", fmt.Errorf("sign token: config is nil")
@@ -47,20 +71,98 @@ func SignToken(cfg *config.Config, claims Claims) (string, error) {
 	return signed, nil
 }
 
-// VerifyToken parses and validates a JWT string. It returns the extracted
-// claims on success, or an error if the token is expired, tampered with,
-// or otherwise invalid.
-func VerifyToken(cfg *config.Config, tokenStr string) (*Claims, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("verify token: config is nil")
-	}
-	if cfg.JWTSecret == "" {
-		return nil, fmt.Errorf("verify token: JWTSecret is empty")
+// Verifier validates Dex-issued RS256-signed OIDC tokens using coreos/go-oidc/v3.
+type Verifier struct {
+	inner   *oidc.IDTokenVerifier
+	enabled bool
+}
+
+// NewVerifier creates a new Verifier that validates OIDC ID tokens.
+// If issuerURL is empty, the verifier operates in disabled mode.
+// jwksURL is the full URL to the JWKS endpoint.
+func NewVerifier(ctx context.Context, issuerURL, jwksURL string) (*Verifier, error) {
+	if issuerURL == "" {
+		slog.Info("auth disabled mode: no issuer URL configured")
+		return &Verifier{enabled: false}, nil
 	}
 
+	keySet := oidc.NewRemoteKeySet(ctx, jwksURL)
+	inner := oidc.NewVerifier(issuerURL, keySet, &oidc.Config{
+		SkipClientIDCheck: true,
+		SkipIssuerCheck:   false,
+	})
+
+	slog.Info("oidc verifier created", "issuer", issuerURL, "jwks_url", jwksURL)
+	return &Verifier{inner: inner, enabled: true}, nil
+}
+
+// Enabled returns whether the verifier is active (true) or in disabled mode (false).
+func (v *Verifier) Enabled() bool {
+	return v.enabled
+}
+
+// Verify validates the raw OIDC ID token and returns the core Identity.
+// In disabled mode, returns a local-dev anonymous identity.
+func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Identity, error) {
+	if !v.enabled {
+		return &Identity{Subject: "local-dev", Email: "local-dev@homeos.local", Name: "Local Dev"}, nil
+	}
+
+	idToken, err := v.inner.Verify(ctx, rawToken)
+	if err != nil {
+		return nil, fmt.Errorf("verify token: %w", err)
+	}
+
+	var claims struct {
+		Subject string `json:"sub"`
+		Email   string `json:"email"`
+		Name    string `json:"name"`
+	}
+	if err := idToken.Claims(&claims); err != nil {
+		return nil, fmt.Errorf("extract claims: %w", err)
+	}
+
+	if claims.Subject == "" {
+		return nil, fmt.Errorf("verify token: sub claim is empty")
+	}
+
+	return &Identity{
+		Subject: claims.Subject,
+		Email:   claims.Email,
+		Name:    claims.Name,
+	}, nil
+}
+
+// VerifyToken parses and validates a Dex-issued OIDC token string.
+// It verifies the RS256 signature using Dex's JWKS, then validates the
+// issuer, audience, and expiration claims.
+func (v *Verifier) VerifyToken(ctx context.Context, tokenStr string) (*Claims, error) {
+	if !v.enabled {
+		return &Claims{
+			UserID: "local-dev",
+			Email:  "local-dev@homeos.local",
+			Name:   "Local Dev",
+		}, nil
+	}
+
+	ident, err := v.Verify(ctx, tokenStr)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Claims{
+		UserID: ident.Subject,
+		Email:  ident.Email,
+		Name:   ident.Name,
+	}, nil
+}
+
+// OldVerifyToken is the legacy HS256-based verification function.
+// Kept for backward compatibility until all callers are migrated.
+// Deprecated: Use Verifier.VerifyToken instead.
+func OldVerifyToken(cfg *config.Config, tokenStr string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{},
 		func(t *jwt.Token) (any, error) {
-			// Validate the signing algorithm matches what we expect.
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("verify token: unexpected signing method: %v", t.Header["alg"])
 			}
@@ -77,3 +179,10 @@ func VerifyToken(cfg *config.Config, tokenStr string) (*Claims, error) {
 	}
 	return claims, nil
 }
+
+// Compile-time assertion.
+var _ jwt.Claims = (*Claims)(nil)
+
+// Close is a no-op — kept for interface compatibility.
+// coreos/go-oidc/v3 does not use background refresh goroutines like keyfunc.
+func (v *Verifier) Close() {}

@@ -14,6 +14,8 @@ import (
 type Config struct {
 	Port              string
 	DatabaseURL       string
+	DexJWKSURL        string
+	DexIssuer         string
 	JWTSecret         string
 	TypesenseHost     string
 	TypesensePort     string
@@ -30,40 +32,43 @@ type Config struct {
 	SMTPUsername      string
 	SMTPPassword      string
 	SMTPFrom          string
+	PublicURL         string
 	AllowRegistration bool
+	DexGRPCAddr       string
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
-// Returns an error if DATABASE_URL or JWT_SECRET are missing or empty.
+// Returns an error if DATABASE_URL is missing or empty.
 func Load() (*Config, error) {
 	cfg := &Config{
-		Port:            getEnv("PORT", "8080"),
-		DatabaseURL:     os.Getenv("DATABASE_URL"),
-		JWTSecret:       os.Getenv("JWT_SECRET"),
-		TypesenseHost:   getEnv("TYPESENSE_HOST", "localhost"),
-		TypesensePort:   getEnv("TYPESENSE_PORT", "8108"),
-		TypesenseAPIKey: os.Getenv("TYPESENSE_API_KEY"),
-		MinioEndpoint:   getEnv("MINIO_ENDPOINT", "localhost:9000"),
-		MinioAccessKey:  os.Getenv("MINIO_ACCESS_KEY"),
-		MinioSecretKey:  os.Getenv("MINIO_SECRET_KEY"),
-		MinioUseSSL:     strings.ToLower(os.Getenv("MINIO_USE_SSL")) == "true",
-		EncryptionKey:   os.Getenv("ENCRYPTION_KEY"),
-		LogLevel:        getEnv("LOG_LEVEL", "info"),
-		DemoMode:        strings.ToLower(os.Getenv("DEMO_MODE")) == "true",
-		SMTPHost:        os.Getenv("SMTP_HOST"),
-		SMTPPort:        getEnvInt("SMTP_PORT", "587"),
-		SMTPUsername:    os.Getenv("SMTP_USERNAME"),
-		SMTPPassword:    os.Getenv("SMTP_PASSWORD"),
-		SMTPFrom:        getEnv("SMTP_FROM", "noreply@homeos.local"),
+		Port:              getEnv("PORT", "8080"),
+		DatabaseURL:       os.Getenv("DATABASE_URL"),
+		DexJWKSURL:        getEnv("DEX_JWKS_URL", "http://home-os-envoy.home-os.svc.cluster.local:8000/dex/keys"),
+		DexIssuer:         getEnv("DEX_ISSUER", "http://localhost:8000/dex"),
+		JWTSecret:         os.Getenv("JWT_SECRET"),
+		TypesenseHost:     getEnv("TYPESENSE_HOST", "localhost"),
+		TypesensePort:     getEnv("TYPESENSE_PORT", "8108"),
+		TypesenseAPIKey:   os.Getenv("TYPESENSE_API_KEY"),
+		MinioEndpoint:     getEnv("MINIO_ENDPOINT", "localhost:9000"),
+		MinioAccessKey:    os.Getenv("MINIO_ACCESS_KEY"),
+		MinioSecretKey:    os.Getenv("MINIO_SECRET_KEY"),
+		MinioUseSSL:       strings.ToLower(os.Getenv("MINIO_USE_SSL")) == "true",
+		EncryptionKey:     os.Getenv("ENCRYPTION_KEY"),
+		LogLevel:          getEnv("LOG_LEVEL", "info"),
+		DemoMode:          strings.ToLower(os.Getenv("DEMO_MODE")) == "true",
+		SMTPHost:          os.Getenv("SMTP_HOST"),
+		SMTPPort:          getEnvInt("SMTP_PORT", "587"),
+		SMTPUsername:      os.Getenv("SMTP_USERNAME"),
+		SMTPPassword:      os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:          getEnv("SMTP_FROM", "noreply@homeos.local"),
+		PublicURL:          getEnv("PUBLIC_URL", "http://localhost:3000"),
 		AllowRegistration: strings.ToLower(os.Getenv("ALLOW_REGISTRATION")) == "true",
+		DexGRPCAddr:       getEnv("DEX_GRPC_ADDR", "home-os-dex:5557"),
 	}
 
 	var missing []string
 	if cfg.DatabaseURL == "" {
 		missing = append(missing, "DATABASE_URL")
-	}
-	if cfg.JWTSecret == "" {
-		missing = append(missing, "JWT_SECRET")
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("config: missing required environment variables: %s", strings.Join(missing, ", "))

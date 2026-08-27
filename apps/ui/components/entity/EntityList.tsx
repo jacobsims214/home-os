@@ -20,6 +20,16 @@ import {
 import { IconPlus, IconX } from "@tabler/icons-react";
 import type { Property } from "@/lib/types/api";
 
+/** Generic entity shape for the entity list — all entities have at least id, name/title, and property_id. */
+interface EntityRecord {
+  id: string;
+  name?: string;
+  title?: string;
+  property_id?: string;
+  amount?: string | number;
+  [key: string]: unknown;
+}
+
 interface EntityColumn {
   name: string;
   label: string;
@@ -75,15 +85,15 @@ export default function EntityList({
 
   const { data: entitiesData, isLoading } = useQuery({
     queryKey: [entityType],
-    queryFn: () => apiFetch<{ data: unknown[] }>(`/api/v1/${entityType}s`),
+    queryFn: () => apiFetch<{ data: EntityRecord[] }>(`/api/v1/${entityType}s`),
   });
   const allEntities = entitiesData?.data ?? [];
-  const entities = filterValue ? allEntities.filter((e: any) => e.property_id === filterValue) : allEntities;
+  const entities = filterValue ? allEntities.filter((e) => e.property_id === filterValue) : allEntities;
 
   const propertyMap = new Map(properties.map((p) => [p.id, p.name]));
 
   const monthlyTotal = showMonthlyTotal
-    ? entities.reduce((sum: number, e: any) => sum + (Number(e.amount) || 0), 0)
+    ? entities.reduce((sum: number, e: EntityRecord) => sum + (Number(e.amount) || 0), 0)
     : null;
 
   return (
@@ -156,7 +166,7 @@ export default function EntityList({
         <>
           {cardView ? (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {(entities as any[]).map((entity) => (
+              {entities.map((entity) => (
                 <Link
                   key={entity.id}
                   href={`/dashboard/${entityType}s/${entity.id}`}
@@ -167,7 +177,7 @@ export default function EntityList({
                     {columns.slice(0, 3).map((col) => (
                       <div key={col.name} className="flex justify-between">
                         <dt>{col.label}</dt>
-                        <dd className="font-medium text-gray-700">{formatValue(entity[col.name], col.format)}</dd>
+                        <dd className="font-medium text-gray-700">{formatValue(entity[col.name] as string | number | null, col.format)}</dd>
                       </div>
                     ))}
                   </div>
@@ -187,7 +197,7 @@ export default function EntityList({
                   </tr>
                 </thead>
                 <tbody>
-                  {(entities as any[]).map((entity) => (
+                  {entities.map((entity) => (
                     <tr
                       key={entity.id}
                       onClick={() => (window.location.href = `/dashboard/${entityType}s/${entity.id}`)}
@@ -197,7 +207,7 @@ export default function EntityList({
                       {columns.map((col) => (
                         <td key={col.name} className="px-4 py-3">
                           <span className={col.format === "badge" ? "text-gray-900" : "text-gray-600"}>
-                            {formatValue(entity[col.name], col.format)}
+                            {formatValue(entity[col.name] as string | number | null, col.format)}
                           </span>
                         </td>
                       ))}

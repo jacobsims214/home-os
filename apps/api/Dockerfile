@@ -9,7 +9,7 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /api ./cmd/api
 
-FROM gcr.io/distroless/static AS runtime
+FROM gcr.io/distroless/static:nonroot AS runtime
 
 COPY --from=builder /api /api
 

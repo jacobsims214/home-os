@@ -23,23 +23,7 @@ func TestLoad(t *testing.T) {
 		}
 	})
 
-	t.Run("returns error when JWT_SECRET is missing", func(t *testing.T) {
-		os.Clearenv()
-		os.Setenv("DATABASE_URL", "postgres://localhost/test")
-
-		cfg, err := Load()
-		if err == nil {
-			t.Fatal("expected error for missing JWT_SECRET, got nil")
-		}
-		if cfg != nil {
-			t.Fatal("expected nil config on error")
-		}
-		if !strings.Contains(err.Error(), "JWT_SECRET") {
-			t.Errorf("error should mention JWT_SECRET, got: %v", err)
-		}
-	})
-
-	t.Run("returns error when both required vars are missing", func(t *testing.T) {
+	t.Run("returns error when only DATABASE_URL is missing", func(t *testing.T) {
 		os.Clearenv()
 
 		cfg, err := Load()
@@ -49,15 +33,14 @@ func TestLoad(t *testing.T) {
 		if cfg != nil {
 			t.Fatal("expected nil config on error")
 		}
-		if !strings.Contains(err.Error(), "DATABASE_URL") || !strings.Contains(err.Error(), "JWT_SECRET") {
-			t.Errorf("error should mention both vars, got: %v", err)
+		if !strings.Contains(err.Error(), "DATABASE_URL") {
+			t.Errorf("error should mention DATABASE_URL, got: %v", err)
 		}
 	})
 
-	t.Run("succeeds when all required vars are set", func(t *testing.T) {
+	t.Run("succeeds when DATABASE_URL is set", func(t *testing.T) {
 		os.Clearenv()
 		os.Setenv("DATABASE_URL", "postgres://localhost/test")
-		os.Setenv("JWT_SECRET", "test-secret")
 
 		cfg, err := Load()
 		if err != nil {
@@ -68,9 +51,6 @@ func TestLoad(t *testing.T) {
 		}
 		if cfg.DatabaseURL != "postgres://localhost/test" {
 			t.Errorf("DatabaseURL = %q, want %q", cfg.DatabaseURL, "postgres://localhost/test")
-		}
-		if cfg.JWTSecret != "test-secret" {
-			t.Errorf("JWTSecret = %q, want %q", cfg.JWTSecret, "test-secret")
 		}
 	})
 

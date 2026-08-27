@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: home-os-dex-config
+  namespace: {{ .Values.namespace }}
+data:
+  config.yaml: |
+    issuer: http://localhost:{{ .Values.envoy.port }}/dex
+    
+    storage:
+      type: postgres
+      config:
+        host: home-os-postgres-rw
+        port: 5432
+        database: dex
+        user: app
+        # Password supplied at deploy time via .Values.dex.dbPassword.
+        # Set via --set dex.dbPassword=<password> or a secure values file.
+        password: {{ .Values.dex.dbPassword }}
+        ssl:
+          # SSL mode is "disable" because the CNPG cluster does not currently
+          # configure TLS for client connections. Revisit if TLS is enabled
+          # in the postgres cluster spec.
+          mode: disable
+    
+    web:
+      http: 0.0.0.0:5556
+    
+    grpc:
+      addr: 0.0.0.0:5557
+    
+    oauth2:
+      skipApprovalScreen: true
+      alwaysShowLoginScreen: false
+    
+    staticClients:
+    - id: home-os-ui
+      name: Home OS UI
+      redirectURIs:
+      - http://localhost/api/auth/callback
+      public: true
+    - id: home-os-mcp
+      name: Home OS MCP
+      public: true
+      redirectURIs:
+      - http://127.0.0.1:19876/mcp/oauth/callback
+    
+    enablePasswordDB: true

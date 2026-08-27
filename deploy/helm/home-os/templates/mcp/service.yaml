@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-os-mcp
+  namespace: {{ .Values.namespace }}
+spec:
+  ports:
+  - port: {{ .Values.mcp.port }}
+    targetPort: {{ .Values.mcp.port }}
+    protocol: TCP
+    name: mcp
+  - port: {{ .Values.mcp.metadataPort }}
+    targetPort: {{ .Values.mcp.metadataPort }}
+    protocol: TCP
+    name: metadata
+  selector:
+    app: home-os-mcp

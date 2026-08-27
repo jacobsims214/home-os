@@ -23,11 +23,13 @@ import (
 	"home-os/api/internal/bill"
 	"home-os/api/internal/calendar"
 	"home-os/api/internal/config"
+	"home-os/api/internal/dex"
 	"home-os/api/internal/file"
 	"home-os/api/internal/household"
 	"home-os/api/internal/integration"
-	"home-os/api/internal/invite"
+"home-os/api/internal/invite"
 	"home-os/api/internal/link"
+	"home-os/api/internal/loan"
 	"home-os/api/internal/maintenance"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/note"
@@ -40,6 +42,7 @@ import (
 	"home-os/api/internal/vehicle"
 	"home-os/api/internal/vendor"
 	"home-os/api/pkg/apierr"
+	"home-os/api/pkg/smtp"
 )
 
 func main() {
@@ -65,13 +68,37 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create Dex gRPC client for password management.
+	// Must be created before SeedDemo and authHandler which may use it.
+	var dexClient *dex.Client
+	if cfg.DexGRPCAddr != "" {
+		dexClient, err = dex.NewClient(cfg.DexGRPCAddr)
+		if err != nil {
+			slog.Warn("dex: failed to connect, password sync disabled", "addr", cfg.DexGRPCAddr, "error", err)
+		} else {
+			slog.Info("dex: connected", "addr", cfg.DexGRPCAddr)
+			defer dexClient.Close()
+		}
+	}
+
 	// Seed demo data when DEMO_MODE is enabled.
 	if cfg.DemoMode {
-		if err := seed.SeedDemo(ctx, pool); err != nil {
+		if err := seed.SeedDemo(ctx, pool, dexClient); err != nil {
 			slog.Error("failed to seed demo data", "error", err)
 			os.Exit(1)
 		}
 	}
+
+	// Create OIDC token verifier using Dex JWKS endpoint.
+	// This validates Dex-issued RS256-signed OIDC tokens on protected routes.
+	// The JWKS URL is the internal K8s address for key fetching, while the
+	// expected issuer matches the token's "iss" claim (the public URL).
+	oidcVerifier, err := auth.NewVerifier(ctx, cfg.DexIssuer, cfg.DexJWKSURL)
+	if err != nil {
+		slog.Error("failed to create OIDC verifier", "error", err)
+		os.Exit(1)
+	}
+	defer oidcVerifier.Close()
 
 	// Initialize the search client and create the Typesense collection if needed.
 	searchClient := search.NewClient(cfg)
@@ -96,7 +123,23 @@ func main() {
 	// Auth endpoints.
 	authRepo := auth.NewRepo(pool)
 	householdRepo := household.NewRepo(pool)
-	authHandler := auth.NewHandler(authRepo, &householdAdapter{repo: householdRepo}, cfg)
+
+	// Create SMTP client if configured.
+	var smtpClient *smtp.Client
+	if cfg.SMTPHost != "" {
+		smtpClient = smtp.New(smtp.Config{
+			Host:        cfg.SMTPHost,
+			Port:        cfg.SMTPPort,
+			Username:    cfg.SMTPUsername,
+			Password:    cfg.SMTPPassword,
+			FromAddress: cfg.SMTPFrom,
+		})
+		slog.Info("SMTP client configured", "host", cfg.SMTPHost)
+	} else {
+		slog.Info("SMTP not configured; password reset emails will be skipped")
+	}
+
+	authHandler := auth.NewHandler(authRepo, &householdAdapter{repo: householdRepo}, cfg, smtpClient, dexClient, oidcVerifier)
 
 	r.Post("/api/v1/auth/register", authHandler.Register)
 	r.Post("/api/v1/auth/login", authHandler.Login)
@@ -107,7 +150,7 @@ func main() {
 
 	// Protected endpoints (require valid JWT).
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.RequireAuth(cfg))
+		r.Use(middleware.RequireAuth(oidcVerifier, cfg))
 
 		// Household
 		householdHandler := household.NewHandler(householdRepo)
@@ -124,6 +167,15 @@ func main() {
 		r.Get("/api/v1/assets/{id}", assetHandler.Get)
 		r.Put("/api/v1/assets/{id}", assetHandler.Update)
 		r.Delete("/api/v1/assets/{id}", assetHandler.Delete)
+
+		// Loan CRUD
+		loanRepo := loan.NewRepo(pool)
+		loanHandler := loan.NewHandler(loanRepo)
+		r.Get("/api/v1/loans", loanHandler.List)
+		r.Post("/api/v1/loans", loanHandler.Create)
+		r.Get("/api/v1/loans/{id}", loanHandler.Get)
+		r.Put("/api/v1/loans/{id}", loanHandler.Update)
+		r.Delete("/api/v1/loans/{id}", loanHandler.Delete)
 
 		// Vehicle CRUD
 		vehicleRepo := vehicle.NewRepo(pool)
@@ -205,8 +257,9 @@ func main() {
 
 		// Notification CRUD
 		notificationRepo := notification.NewRepo(pool)
-		notificationHandler := notification.NewHandler(notificationRepo)
+		notificationHandler := notification.NewHandler(notificationRepo, smtpClient)
 		r.Get("/api/v1/notifications", notificationHandler.List)
+		r.Post("/api/v1/notifications", notificationHandler.Create)
 		r.Patch("/api/v1/notifications/{id}/read", notificationHandler.MarkRead)
 
 		// File storage (polymorphic, bytea in Postgres)
@@ -248,7 +301,7 @@ func main() {
 
 		// Invite routes
 		inviteRepo := invite.NewRepo(pool)
-		inviteHandler := invite.NewHandler(inviteRepo, cfg)
+		inviteHandler := invite.NewHandler(inviteRepo, cfg, smtpClient)
 		r.Post("/api/v1/invites", inviteHandler.CreateInvite)
 		r.Get("/api/v1/invites", inviteHandler.ListInvites)
 		r.Post("/api/v1/invites/accept", inviteHandler.AcceptInvite)

@@ -48,7 +48,9 @@ spec:
         - name: LOG_LEVEL
           value: "info"
         - name: DEMO_MODE
-          value: "false"
+          value: {{ .Values.api.demoMode | default "false" | quote }}
+        - name: PUBLIC_URL
+          value: "{{ .Values.api.publicUrl }}"
         - name: ALLOW_REGISTRATION
           value: "{{ .Values.api.allowRegistration }}"
         - name: SMTP_HOST
@@ -61,5 +63,11 @@ spec:
           value: "{{ .Values.smtp.password }}"
         - name: SMTP_FROM
           value: "{{ .Values.smtp.from }}"
+        - name: DEX_GRPC_ADDR
+          value: "home-os-dex:5557"
+        - name: DEX_JWKS_URL
+          value: "http://home-os-envoy.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.envoy.port }}/dex/keys"
+        - name: DEX_ISSUER
+          value: "http://localhost:8000/dex"
         resources:
           {{- toYaml .Values.api.resources | nindent 10 }}

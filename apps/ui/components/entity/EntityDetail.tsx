@@ -252,10 +252,9 @@ export default function EntityDetail({
   // Render field input in edit mode
   const renderFieldInput = (field: FieldConfig) => {
     const value = formValues[field.name] ?? "";
-    const commonProps = {
+    const baseProps = {
       label: field.label,
       value: value as string,
-      onChange: (e: any) => handleFormChange(field.name, e),
       required: field.required,
       placeholder: `Enter ${field.label.toLowerCase()}`,
     };
@@ -265,11 +264,13 @@ export default function EntityDetail({
         return (
           <Textarea
             key={field.name}
-            label={commonProps.label}
-            value={commonProps.value}
-            onChange={commonProps.onChange}
-            required={commonProps.required}
-            placeholder={commonProps.placeholder}
+            label={baseProps.label}
+            value={baseProps.value}
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) =>
+              handleFormChange(field.name, e.target.value)
+            }
+            required={baseProps.required}
+            placeholder={baseProps.placeholder}
             rows={4}
           />
         );
@@ -277,7 +278,10 @@ export default function EntityDetail({
         return (
           <Select
             key={field.name}
-            {...commonProps}
+            {...baseProps}
+            onChange={(value: string | null) =>
+              handleFormChange(field.name, value ?? "")
+            }
             data={field.options ?? []}
           />
         );
@@ -285,7 +289,10 @@ export default function EntityDetail({
         return (
           <TextInput
             key={field.name}
-            {...commonProps}
+            {...baseProps}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              handleFormChange(field.name, e.target.value)
+            }
             type="number"
           />
         );
@@ -293,7 +300,10 @@ export default function EntityDetail({
         return (
           <TextInput
             key={field.name}
-            {...commonProps}
+            {...baseProps}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              handleFormChange(field.name, e.target.value)
+            }
             type="date"
           />
         );
@@ -301,7 +311,10 @@ export default function EntityDetail({
         return (
           <Select
             key={field.name}
-            {...commonProps}
+            {...baseProps}
+            onChange={(value: string | null) =>
+              handleFormChange(field.name, value ?? "")
+            }
             data={[
               { value: "true", label: "Yes" },
               { value: "false", label: "No" },
@@ -310,7 +323,15 @@ export default function EntityDetail({
         );
       case "text":
       default:
-        return <TextInput key={field.name} {...commonProps} />;
+        return (
+          <TextInput
+            key={field.name}
+            {...baseProps}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              handleFormChange(field.name, e.target.value)
+            }
+          />
+        );
     }
   };
 

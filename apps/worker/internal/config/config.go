@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -14,6 +15,11 @@ type Config struct {
 	TypesensePort   string
 	TypesenseAPIKey string
 	PollInterval    time.Duration
+	SMTPHost        string
+	SMTPPort        int
+	SMTPUsername    string
+	SMTPPassword    string
+	SMTPFrom        string
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -24,6 +30,25 @@ func Load() (*Config, error) {
 		TypesenseHost:   os.Getenv("TYPESENSE_HOST"),
 		TypesensePort:   os.Getenv("TYPESENSE_PORT"),
 		TypesenseAPIKey: os.Getenv("TYPESENSE_API_KEY"),
+		SMTPHost:        os.Getenv("SMTP_HOST"),
+		SMTPUsername:    os.Getenv("SMTP_USERNAME"),
+		SMTPPassword:    os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:        os.Getenv("SMTP_FROM"),
+	}
+
+	if cfg.SMTPFrom == "" {
+		cfg.SMTPFrom = "noreply@homeos.local"
+	}
+
+	portRaw := os.Getenv("SMTP_PORT")
+	if portRaw == "" {
+		cfg.SMTPPort = 587
+	} else {
+		p, err := strconv.Atoi(portRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse SMTP_PORT: %w", err)
+		}
+		cfg.SMTPPort = p
 	}
 
 	pollRaw := os.Getenv("POLL_INTERVAL")

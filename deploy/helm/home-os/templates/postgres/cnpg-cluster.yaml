@@ -9,9 +9,19 @@ spec:
   imageName: ghcr.io/cloudnative-pg/postgresql:16
   storage:
     size: {{ .Values.database.managed.storage }}
-  databases:
-  - name: homeos
-    owner: homeos
-  users:
-  - name: homeos
+  bootstrap:
+    initdb:
+      database: app
+      owner: app
+      secret:
+        name: home-os-db-secret
+  managed:
+    roles:
+    - name: app
+      login: true
+      superuser: false
+      inherit: true
+      createdb: true
+      createrole: false
+      ensure: present
 {{- end }}

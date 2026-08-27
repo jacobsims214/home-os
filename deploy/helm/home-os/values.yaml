@@ -7,6 +7,7 @@ namespace: home-os
 
 envoy:
   enabled: true
+  port: 8000
   https:
     enabled: false
   resources:
@@ -17,6 +18,7 @@ api:
   replicas: 2
   image: api
   port: 8080
+  publicUrl: "http://localhost:3000"
   allowRegistration: "false"
   resources:
     requests: { cpu: 100m, memory: 128Mi }
@@ -36,6 +38,15 @@ worker:
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
+
+mcp:
+  replicas: 1
+  image: mcp
+  port: 8082
+  metadataPort: 8083
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
 
 ui:
   replicas: 2
@@ -63,6 +74,16 @@ tika:
     requests: { cpu: 200m, memory: 512Mi }
     limits: { cpu: 1, memory: 2Gi }
 
+dex:
+  replicas: 1
+  image: dex
+  port: 5556
+  grpcPort: 5557
+  # Database password for Dex's Postgres storage backend.
+  # Must be set at deploy time. For production, use --set or a secure values file.
+  # WARNING: The original password was committed to git; rotate it as part of this fix.
+  dbPassword: ""
+
 database:
   mode: managed
   managed:
@@ -84,6 +105,11 @@ secrets:
   calendarSecret: ""
   typesenseApiKey: ""
   encryptionKey: ""
+  # Password for the 'app' Postgres user. Must match what is provisioned in the
+  # database. For managed mode, the CNPG cluster is bootstrapped with this secret.
+  # WARNING: The original password was committed to git; rotate it as part of this fix.
+  dbPassword: ""
+  dbPassword: ""
 
 smtp:
   host: ""

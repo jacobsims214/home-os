@@ -210,7 +210,7 @@ export default function PropertyDetailPage() {
   // ── Edit mutation ──────────────────────────────────────────
 
   const editMutation = useMutation({
-    mutationFn: (data: any) => apiFetch(`/api/v1/properties/${propertyId}`, {
+    mutationFn: (data: Record<string, string>) => apiFetch(`/api/v1/properties/${propertyId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     }),

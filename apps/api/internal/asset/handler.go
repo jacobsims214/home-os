@@ -80,6 +80,7 @@ type createAssetRequest struct {
 	SerialNumber   *string `json:"serial_number"`
 	PurchaseDate   *string `json:"purchase_date"`
 	PurchasePrice  *string `json:"purchase_price"`
+	CurrentValue   *string `json:"current_value"`
 	WarrantyExpiry *string `json:"warranty_expiry"`
 	Notes          *string `json:"notes"`
 }
@@ -94,6 +95,7 @@ type updateAssetRequest struct {
 	SerialNumber   *string `json:"serial_number"`
 	PurchaseDate   *string `json:"purchase_date"`
 	PurchasePrice  *string `json:"purchase_price"`
+	CurrentValue   *string `json:"current_value"`
 	WarrantyExpiry *string `json:"warranty_expiry"`
 	Notes          *string `json:"notes"`
 }
@@ -110,6 +112,7 @@ type assetResponse struct {
 	SerialNumber   *string `json:"serial_number,omitempty"`
 	PurchaseDate   *string `json:"purchase_date,omitempty"`
 	PurchasePrice  *string `json:"purchase_price,omitempty"`
+	CurrentValue   *string `json:"current_value"`
 	WarrantyExpiry *string `json:"warranty_expiry,omitempty"`
 	Notes          *string `json:"notes,omitempty"`
 	CreatedAt      string  `json:"created_at"`
@@ -182,7 +185,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	asset := &Asset{
+asset := &Asset{
 		HouseholdID:   householdID,
 		Name:          req.Name,
 		PropertyID:    parseUUIDPtr(req.PropertyID),
@@ -193,6 +196,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		SerialNumber:  req.SerialNumber,
 		PurchaseDate:  parseDatePtr(req.PurchaseDate),
 		PurchasePrice: parseFloatPtr(req.PurchasePrice),
+		CurrentValue:  parseFloatPtr(req.CurrentValue),
 		WarrantyExpiry: parseDatePtr(req.WarrantyExpiry),
 		Notes:         req.Notes,
 	}
@@ -269,7 +273,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build partial update — only fields that are present in the request.
+// Build partial update — only fields that are present in the request.
 	updates := &Asset{
 		PropertyID:    parseUUIDPtr(req.PropertyID),
 		RoomID:        parseUUIDPtr(req.RoomID),
@@ -279,6 +283,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		SerialNumber:  req.SerialNumber,
 		PurchaseDate:  parseDatePtr(req.PurchaseDate),
 		PurchasePrice: parseFloatPtr(req.PurchasePrice),
+		CurrentValue:  parseFloatPtr(req.CurrentValue),
 		WarrantyExpiry: parseDatePtr(req.WarrantyExpiry),
 		Notes:         req.Notes,
 	}
@@ -348,6 +353,7 @@ func assetToResponse(a *Asset) assetResponse {
 		SerialNumber:   a.SerialNumber,
 		PurchaseDate:   datePtrToString(a.PurchaseDate),
 		PurchasePrice:  floatPtrToString(a.PurchasePrice),
+		CurrentValue:   floatPtrToString(a.CurrentValue),
 		WarrantyExpiry: datePtrToString(a.WarrantyExpiry),
 		Notes:          a.Notes,
 		CreatedAt:      a.CreatedAt.Format(time.RFC3339),

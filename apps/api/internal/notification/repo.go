@@ -39,6 +39,26 @@ func (r *Repo) ListUnread(ctx context.Context, householdID string) ([]*Notificat
 	return notifications, nil
 }
 
+// Create inserts a new notification and returns the created record.
+func (r *Repo) Create(ctx context.Context, householdID, notifType, title, body string, entityType, entityID *string) (*Notification, error) {
+	rows, err := r.pool.Query(ctx,
+		`INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, household_id, type, title, body, entity_type, entity_id, read_at, created_at`,
+		householdID, notifType, title, body, entityType, entityID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create notification: %w", err)
+	}
+	defer rows.Close()
+
+	n, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[Notification])
+	if err != nil {
+		return nil, fmt.Errorf("collect created notification: %w", err)
+	}
+	return n, nil
+}
+
 // MarkRead marks a notification as read by setting read_at to the current timestamp.
 func (r *Repo) MarkRead(ctx context.Context, id, householdID string) error {
 	_, err := r.pool.Exec(ctx,

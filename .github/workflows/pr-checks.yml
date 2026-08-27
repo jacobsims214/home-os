@@ -7,12 +7,20 @@ on:
 jobs:
   go-build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [apps/api, apps/calendar, apps/mcp, apps/worker]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
       - run: go build ./...
+        working-directory: ${{ matrix.module }}
+      - run: go vet ./...
+        working-directory: ${{ matrix.module }}
+      - run: go test ./...
+        working-directory: ${{ matrix.module }}
 
   ui-build:
     runs-on: ubuntu-latest

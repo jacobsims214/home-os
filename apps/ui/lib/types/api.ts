@@ -12,6 +12,10 @@ export interface Property {
   name: string;
   address?: string;
   property_type?: string;
+  purchase_price?: string;
+  purchase_date?: string;
+  current_value?: string;
+  mortgage_amount?: string;
   notes?: string;
   created_at: string;
   updated_at: string;
@@ -30,6 +34,7 @@ export interface Asset {
   serial_number?: string;
   purchase_date?: string;
   purchase_price?: string;
+  current_value?: string;
   warranty_expiry?: string;
   notes?: string;
   created_at: string;

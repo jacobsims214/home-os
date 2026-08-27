@@ -29,8 +29,62 @@ data:
                     route: { cluster: api_cluster }
                   - match: { prefix: "/dav/" }
                     route: { cluster: calendar_cluster }
+                  - match: { prefix: "/.well-known/oauth-authorization-server" }
+                    route:
+                      cluster: mcp_metadata_cluster
+                      timeout: 0s
+                  - match: { prefix: "/.well-known/oauth-protected-resource" }
+                    route:
+                      cluster: mcp_metadata_cluster
+                      timeout: 0s
+                  - match: { prefix: "/.well-known/openid-configuration" }
+                    route:
+                      prefix_rewrite: "/dex/.well-known/openid-configuration"
+                      cluster: dex_cluster
+                      timeout: 0s
                   - match: { prefix: "/.well-known/" }
                     route: { cluster: calendar_cluster }
+                  - match: { prefix: "/mcp/" }
+                    route:
+                      cluster: mcp_cluster
+                      timeout: 0s
+                      idle_timeout: 0s
+                  - match: { prefix: "/dex/" }
+                    route:
+                      cluster: dex_cluster
+                      timeout: 0s
+                  # OAuth2 authorize endpoint — proxied to the MCP metadata server
+                  # for openid scope injection before redirecting to Dex.
+                  # MCP clients (opencode) often omit the openid scope per RFC 8707,
+                  # but Dex requires it as an OIDC provider. The metadata server injects
+                  # it and issues a 302 redirect to /dex/auth.
+                  - match: { prefix: "/authorize" }
+                    route:
+                      cluster: mcp_metadata_cluster
+                      timeout: 0s
+                  - match: { prefix: "/token" }
+                    route:
+                      prefix_rewrite: "/dex/token"
+                      cluster: dex_cluster
+                  - match: { prefix: "/device/code" }
+                    route:
+                      prefix_rewrite: "/dex/device/code"
+                      cluster: dex_cluster
+                  - match: { prefix: "/keys" }
+                    route:
+                      prefix_rewrite: "/dex/keys"
+                      cluster: dex_cluster
+                  - match: { prefix: "/userinfo" }
+                    route:
+                      prefix_rewrite: "/dex/userinfo"
+                      cluster: dex_cluster
+                  # Dynamic Client Registration endpoint — proxied to the MCP metadata server
+                  # for RFC 7591 dynamic client registration. MCP clients (opencode) POST
+                  # their redirect URIs here to obtain a client_id for the OAuth flow.
+                  - match: { prefix: "/register" }
+                    route:
+                      cluster: mcp_metadata_cluster
+                      timeout: 0s
                   - match: { prefix: "/" }
                     route: { cluster: ui_cluster }
               http_filters:
@@ -71,3 +125,36 @@ data:
             - endpoint:
                 address:
                   socket_address: { address: home-os-ui, port_value: 3000 }
+      - name: dex_cluster
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        connect_timeout: 5s
+        load_assignment:
+          cluster_name: dex_cluster
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: home-os-dex, port_value: 5556 }
+      - name: mcp_cluster
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        connect_timeout: 5s
+        load_assignment:
+          cluster_name: mcp_cluster
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: home-os-mcp, port_value: 8082 }
+      - name: mcp_metadata_cluster
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        connect_timeout: 5s
+        load_assignment:
+          cluster_name: mcp_metadata_cluster
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: home-os-mcp, port_value: 8083 }

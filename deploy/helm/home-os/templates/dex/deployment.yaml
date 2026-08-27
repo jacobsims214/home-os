@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-os-dex
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: {{ .Values.dex.replicas }}
+  selector:
+    matchLabels:
+      app: home-os-dex
+  template:
+    metadata:
+      labels:
+        app: home-os-dex
+    spec:
+      containers:
+      - name: dex
+        image: ghcr.io/dexidp/dex:v2.42.0
+        args: ["dex", "serve", "/etc/dex/config.yaml"]
+        ports:
+        - containerPort: 5556
+          name: http
+        - containerPort: 5557
+          name: grpc
+        volumeMounts:
+        - name: config
+          mountPath: /etc/dex
+      volumes:
+      - name: config
+        configMap:
+          name: home-os-dex-config

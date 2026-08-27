@@ -10,7 +10,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
 {{- define "home-os.databaseUrl" -}}
 {{- if eq .Values.database.mode "managed" -}}
-postgres://app:wCGVeROLHi1br16yJ5QjRloXH815VrFEbkinBnw1CSygf3DJEtKsGJJjFYFlZsy4@home-os-postgres-rw.home-os:5432/app?sslmode=disable
+postgres://app:{{ .Values.secrets.dbPassword }}@home-os-postgres-rw.home-os:5432/app?sslmode=disable
 {{- else -}}
 postgres://{{ .Values.database.external.user }}:{{ .Values.database.external.password }}@{{ .Values.database.external.host }}:{{ .Values.database.external.port }}/{{ .Values.database.external.database }}?sslmode=disable
 {{- end -}}

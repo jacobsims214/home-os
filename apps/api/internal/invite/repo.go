@@ -96,3 +96,13 @@ func (r *Repo) Accept(ctx context.Context, invitationID uuid.UUID, acceptedAt ti
 	}
 	return nil
 }
+
+// GetHouseholdName returns the name of a household by its ID.
+func (r *Repo) GetHouseholdName(ctx context.Context, householdID string) (string, error) {
+	var name string
+	err := r.pool.QueryRow(ctx, `SELECT name FROM households WHERE id = $1`, householdID).Scan(&name)
+	if err != nil {
+		return "", fmt.Errorf("get household name: %w", err)
+	}
+	return name, nil
+}

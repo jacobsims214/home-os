@@ -4,6 +4,9 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import { Modal, Button, TextInput, Select, Stack, Group } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
+import { IconPlus } from "@tabler/icons-react";
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -44,6 +47,24 @@ export default function MembersPage() {
   const [changeRoleFor, setChangeRoleFor] = useState<Member | null>(null);
   const [selectedRole, setSelectedRole] = useState("");
   const [removeMember, setRemoveMember] = useState<Member | null>(null);
+  const [inviteModalOpen, setInviteModalOpen] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<string | null>(null);
+
+  const inviteMutation = useMutation({
+    mutationFn: (body: { email: string; role: string }) =>
+      apiFetch("/api/v1/invites", { method: "POST", body }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["household", "members"] });
+      notifications.show({ message: "Invite sent!", color: "green" });
+      setInviteModalOpen(false);
+      setInviteEmail("");
+      setInviteRole(null);
+    },
+    onError: (err: Error) => {
+      notifications.show({ message: err.message, color: "red" });
+    },
+  });
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["household", "members"],
@@ -91,6 +112,9 @@ export default function MembersPage() {
             Manage who has access to your household.
           </p>
         </div>
+        <Button leftSection={<IconPlus size={16} />} onClick={() => setInviteModalOpen(true)}>
+          Invite Member
+        </Button>
       </div>
 
       {/* Loading */}
@@ -230,6 +254,54 @@ export default function MembersPage() {
           </div>
         </div>
       )}
+
+      {/* Invite Member Modal */}
+      <Modal
+        opened={inviteModalOpen}
+        onClose={() => { setInviteModalOpen(false); setInviteEmail(""); setInviteRole(null); }}
+        title="Invite Member"
+        size="sm"
+        centered
+      >
+        <Stack>
+          <TextInput
+            label="Email"
+            value={inviteEmail}
+            onChange={(e) => setInviteEmail(e.target.value)}
+            placeholder="email@example.com"
+            required
+          />
+          <Select
+            label="Role"
+            value={inviteRole}
+            onChange={setInviteRole}
+            placeholder="Select a role"
+            data={[
+              { value: "family_manager", label: "Family Manager" },
+              { value: "family_member", label: "Family Member" },
+              { value: "viewer", label: "Viewer" },
+            ]}
+            required
+          />
+          <Group justify="flex-end" mt="md">
+            <Button
+              variant="default"
+              onClick={() => { setInviteModalOpen(false); setInviteEmail(""); setInviteRole(null); }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (!inviteEmail.trim() || !inviteRole) return;
+                inviteMutation.mutate({ email: inviteEmail.trim(), role: inviteRole });
+              }}
+              loading={inviteMutation.isPending}
+            >
+              Send Invite
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
 
       {/* Remove confirmation */}
       <ConfirmDialog

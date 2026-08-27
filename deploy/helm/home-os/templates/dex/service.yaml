@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-os-dex
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: home-os-dex
+  ports:
+  - port: 5556
+    targetPort: 5556
+    name: http
+  - port: 5557
+    targetPort: 5557
+    name: grpc

@@ -21,8 +21,22 @@ type Vehicle struct {
 	LicensePlate *string
 	Color        *string
 	Notes        *string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+
+	// Financial fields — all nullable, use *string to match the Property pattern.
+	PurchasePrice          *string
+	PurchaseDate           *string
+	CurrentValue           *string
+	LoanAmount             *string
+	InsuranceCost          *string
+	RegistrationCost       *string
+	Lender                 *string
+	LoanTermMonths         *int
+	MonthlyPayment         *string
+	RegistrationRenewalMonth *int
+	InsuranceProvider      *string
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // MakeString returns a formatted string combining year, make, and model for search indexing.

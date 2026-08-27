@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"strings"
@@ -13,7 +15,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"home-os/api/internal/config"
+	"home-os/api/internal/dex"
 	"home-os/api/pkg/apierr"
+	"home-os/api/pkg/smtp"
 )
 
 // HouseholdCreator is the subset of household.Repo that auth needs.
@@ -28,11 +32,14 @@ type Handler struct {
 	repo          *Repo
 	householdRepo HouseholdCreator
 	cfg           *config.Config
+	smtpClient    *smtp.Client
+	dexClient     *dex.Client
+	verifier      *Verifier
 }
 
 // NewHandler creates a new auth handler.
-func NewHandler(repo *Repo, householdRepo HouseholdCreator, cfg *config.Config) *Handler {
-	return &Handler{repo: repo, householdRepo: householdRepo, cfg: cfg}
+func NewHandler(repo *Repo, householdRepo HouseholdCreator, cfg *config.Config, smtpClient *smtp.Client, dexClient *dex.Client, verifier *Verifier) *Handler {
+	return &Handler{repo: repo, householdRepo: householdRepo, cfg: cfg, smtpClient: smtpClient, dexClient: dexClient, verifier: verifier}
 }
 
 // --- request / response types ---
@@ -115,6 +122,16 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Register password in Dex's local password database.
+	// This enables Dex OIDC authentication for the new user.
+	if h.dexClient != nil {
+		if err := h.dexClient.CreatePassword(r.Context(), req.Email, hash, user.ID.String()); err != nil {
+			slog.Warn("dex: failed to create password, continuing registration", "email", req.Email, "error", err)
+		}
+	} else {
+		slog.Info("dex: no client configured, skipping password creation", "email", req.Email)
+	}
+
 	// Create default household.
 	hhID, err := h.householdRepo.CreateHousehold(r.Context(), req.Name+"'s Home")
 	if err != nil {
@@ -133,6 +150,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		UserID:      user.ID.String(),
 		HouseholdID: hhID,
 		Role:        RoleOwner,
+		Email:       req.Email,
 	}
 	token, err := SignToken(h.cfg, claims)
 	if err != nil {
@@ -188,6 +206,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		UserID:      user.ID.String(),
 		HouseholdID: memberships[0].HouseholdID.String(),
 		Role:        memberships[0].Role,
+		Email:       req.Email,
 	}
 	token, err := SignToken(h.cfg, claims)
 	if err != nil {
@@ -213,7 +232,7 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, err := VerifyToken(h.cfg, tokenStr)
+	claims, err := h.verifier.VerifyToken(r.Context(), tokenStr)
 	if err != nil {
 		apierr.Forbidden(w, "invalid or expired token")
 		return
@@ -252,7 +271,7 @@ func (h *Handler) GenerateCaldavPassword(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-	claims, err := VerifyToken(h.cfg, tokenStr)
+	claims, err := h.verifier.VerifyToken(r.Context(), tokenStr)
 	if err != nil {
 		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
 			Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: "Invalid or expired token"},
@@ -320,7 +339,48 @@ func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Send email via SMTP (will be wired up when SMTP is configured)
+	// Send password reset email asynchronously (best-effort — log warning on failure, don't return error).
+	// The handler returns immediately; the email is sent in a timeout-bounded goroutine.
+	if h.smtpClient != nil {
+		resetLink := fmt.Sprintf("%s/reset-password?token=%s", h.cfg.PublicURL, token)
+		subject := "Reset your Home OS password"
+		htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: sans-serif; padding: 24px;">
+	<h2>Password Reset</h2>
+	<p>We received a request to reset your password. Click the link below to set a new password:</p>
+	<p><a href="%s">Reset Password</a></p>
+	<p>If you didn't request this, you can safely ignore this email.</p>
+	<hr>
+	<p style="color: #666; font-size: 12px;">Home OS</p>
+</body>
+</html>`, resetLink)
+		go func() {
+			// Detach from request context so request cancellation doesn't kill the send,
+			// but bound the total lifetime to 10 seconds.
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+			defer cancel()
+
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- h.smtpClient.SendHTMLEmail(user.Email, subject, htmlBody)
+			}()
+
+			select {
+			case err := <-errCh:
+				if err != nil {
+					slog.Warn("failed to send password reset email", "email", user.Email, "error", err)
+				}
+			case <-ctx.Done():
+				slog.Warn("password reset email timed out", "email", user.Email)
+			}
+		}()
+	} else {
+		slog.Info("SMTP not configured; skipping password reset email", "email", user.Email)
+	}
+
 	apierr.JSON(w, http.StatusOK, map[string]string{"message": "If the email exists, a reset link has been sent"})
 }
 
@@ -355,6 +415,19 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.UpdatePassword(r.Context(), userID, hash); err != nil {
 		apierr.InternalError(w, err)
 		return
+	}
+
+	// Sync the new password hash to Dex's password database.
+	// CreatePassword is an upsert — it creates or updates the entry.
+	if h.dexClient != nil {
+		user, err := h.repo.GetUserByID(r.Context(), userID)
+		if err == nil && user != nil {
+			if err := h.dexClient.CreatePassword(r.Context(), user.Email, hash, userID); err != nil {
+				slog.Warn("dex: failed to sync password after reset", "user_id", userID, "error", err)
+			}
+		}
+	} else {
+		slog.Info("dex: no client configured, skipping password sync after reset", "user_id", userID)
 	}
 
 	if err := h.repo.MarkResetTokenUsed(r.Context(), req.Token); err != nil {

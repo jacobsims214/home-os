@@ -4,7 +4,7 @@ import { useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuthStore } from "@/stores/auth";
 import { AppShell, NavLink, ScrollArea, TextInput, Group, Avatar, Text, Button, ActionIcon } from "@mantine/core";
-import { IconSearch, IconHome, IconBuilding, IconTool, IconCalendar, IconCar, IconPaw, IconBuildingStore, IconCash, IconUsers, IconSettings, IconMoon, IconSun, IconBell } from "@tabler/icons-react";
+import { IconSearch, IconHome, IconBuilding, IconTool, IconCalendar, IconCar, IconPaw, IconBuildingStore, IconCash, IconUsers, IconSettings, IconMoon, IconSun, IconBell, IconCreditCard } from "@tabler/icons-react";
 import { useLocalStorage } from "@mantine/hooks";
 import { useMantineColorScheme } from "@mantine/core";
 import NotificationBell from "@/components/notifications/NotificationBell";
@@ -25,6 +25,7 @@ const navItems: NavItem[] = [
   { name: "Pets", href: "/dashboard/pets", icon: <IconPaw size={20} /> },
   { name: "Vendors", href: "/dashboard/vendors", icon: <IconBuildingStore size={20} /> },
   { name: "Bills", href: "/dashboard/bills", icon: <IconCash size={20} /> },
+  { name: "Loans", href: "/dashboard/loans", icon: <IconCreditCard size={20} /> },
   { name: "Members", href: "/dashboard/members", icon: <IconUsers size={20} /> },
   { name: "Settings", href: "/dashboard/settings", icon: <IconSettings size={20} /> },
 ];

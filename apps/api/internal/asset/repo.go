@@ -30,7 +30,7 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID, propertyID *uuid
 		rows, err = r.pool.Query(ctx,
 			`SELECT id, household_id, property_id, room_id,
 			        name, category, manufacturer, model, serial_number,
-			        purchase_date, purchase_price, warranty_expiry, notes,
+			        purchase_date, purchase_price, current_value, warranty_expiry, notes,
 			        created_at, updated_at
 			 FROM assets
 			 WHERE household_id = $1 AND property_id = $2
@@ -41,7 +41,7 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID, propertyID *uuid
 		rows, err = r.pool.Query(ctx,
 			`SELECT id, household_id, property_id, room_id,
 			        name, category, manufacturer, model, serial_number,
-			        purchase_date, purchase_price, warranty_expiry, notes,
+			        purchase_date, purchase_price, current_value, warranty_expiry, notes,
 			        created_at, updated_at
 			 FROM assets
 			 WHERE household_id = $1
@@ -67,7 +67,7 @@ func (r *Repo) Get(ctx context.Context, assetID, householdID uuid.UUID) (*Asset,
 	rows, err := r.pool.Query(ctx,
 		`SELECT id, household_id, property_id, room_id,
 		        name, category, manufacturer, model, serial_number,
-		        purchase_date, purchase_price, warranty_expiry, notes,
+		        purchase_date, purchase_price, current_value, warranty_expiry, notes,
 		        created_at, updated_at
 		 FROM assets
 		 WHERE id = $1 AND household_id = $2`,
@@ -96,14 +96,14 @@ func (r *Repo) Create(ctx context.Context, asset *Asset) (*Asset, error) {
 	}
 	defer tx.Rollback(ctx) // no-op after commit
 
-	rows, err := tx.Query(ctx,
+rows, err := tx.Query(ctx,
 		`INSERT INTO assets (household_id, property_id, room_id,
 		                     name, category, manufacturer, model, serial_number,
-		                     purchase_date, purchase_price, warranty_expiry, notes)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		                     purchase_date, purchase_price, current_value, warranty_expiry, notes)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		 RETURNING id, household_id, property_id, room_id,
 		           name, category, manufacturer, model, serial_number,
-		           purchase_date, purchase_price, warranty_expiry, notes,
+		           purchase_date, purchase_price, current_value, warranty_expiry, notes,
 		           created_at, updated_at`,
 		asset.HouseholdID,
 		asset.PropertyID,
@@ -115,6 +115,7 @@ func (r *Repo) Create(ctx context.Context, asset *Asset) (*Asset, error) {
 		asset.SerialNumber,
 		asset.PurchaseDate,
 		asset.PurchasePrice,
+		asset.CurrentValue,
 		asset.WarrantyExpiry,
 		asset.Notes,
 	)
@@ -201,6 +202,9 @@ func (r *Repo) Update(ctx context.Context, assetID, householdID uuid.UUID, updat
 	if updates.PurchasePrice != nil {
 		existing.PurchasePrice = updates.PurchasePrice
 	}
+	if updates.CurrentValue != nil {
+		existing.CurrentValue = updates.CurrentValue
+	}
 	if updates.WarrantyExpiry != nil {
 		existing.WarrantyExpiry = updates.WarrantyExpiry
 	}
@@ -208,19 +212,19 @@ func (r *Repo) Update(ctx context.Context, assetID, householdID uuid.UUID, updat
 		existing.Notes = updates.Notes
 	}
 
-	_, err = tx.Exec(ctx,
+_, err = tx.Exec(ctx,
 		`UPDATE assets SET
 		    property_id = $3, room_id = $4,
 		    name = $5, category = $6, manufacturer = $7, model = $8,
 		    serial_number = $9, purchase_date = $10, purchase_price = $11,
-		    warranty_expiry = $12, notes = $13,
+		    current_value = $12, warranty_expiry = $13, notes = $14,
 		    updated_at = NOW()
 		 WHERE id = $1 AND household_id = $2`,
 		assetID, householdID,
 		existing.PropertyID, existing.RoomID,
 		existing.Name, existing.Category, existing.Manufacturer, existing.Model,
 		existing.SerialNumber, existing.PurchaseDate, existing.PurchasePrice,
-		existing.WarrantyExpiry, existing.Notes,
+		existing.CurrentValue, existing.WarrantyExpiry, existing.Notes,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update asset: exec: %w", err)
@@ -274,7 +278,7 @@ func (r *Repo) getInTx(ctx context.Context, tx pgx.Tx, assetID, householdID uuid
 	rows, err := tx.Query(ctx,
 		`SELECT id, household_id, property_id, room_id,
 		        name, category, manufacturer, model, serial_number,
-		        purchase_date, purchase_price, warranty_expiry, notes,
+		        purchase_date, purchase_price, current_value, warranty_expiry, notes,
 		        created_at, updated_at
 		 FROM assets
 		 WHERE id = $1 AND household_id = $2`,

@@ -1,12 +1,13 @@
 global:
-  imageRegistry: "home-os"
+  imageRegistry: "host.docker.internal:5001/home-os"
   imageTag: latest
-  imagePullPolicy: Never
+  imagePullPolicy: Always
 
 namespace: home-os
 
 envoy:
   enabled: true
+  port: 8000
   https:
     enabled: false
   resources:
@@ -17,6 +18,8 @@ api:
   replicas: 1
   image: api
   port: 8080
+  publicUrl: "http://localhost:3000"
+  demoMode: true
   allowRegistration: "true"
   resources:
     requests: { cpu: 100m, memory: 128Mi }
@@ -36,6 +39,15 @@ worker:
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
+
+mcp:
+  replicas: 1
+  image: mcp
+  port: 8082
+  metadataPort: 8083
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
 
 ui:
   replicas: 1
@@ -63,6 +75,14 @@ tika:
     requests: { cpu: 200m, memory: 512Mi }
     limits: { cpu: 1, memory: 2Gi }
 
+dex:
+  replicas: 1
+  image: dex
+  port: 5556
+  grpcPort: 5557
+  # Matches the value currently provisioned in the dev postgres.
+  dbPassword: "wCGVeROLHi1br16yJ5QjRloXH815VrFEbkinBnw1CSygf3DJEtKsGJJjFYFlZsy4"
+
 database:
   mode: managed
   managed:
@@ -76,7 +96,19 @@ secrets:
   calendarSecret: "local-dev-calendar-secret"
   typesenseApiKey: "local-dev-typesense-key"
   encryptionKey: "local-dev-encryption-key-32-chars"
+  # Matches the 'app' user password provisioned in the dev CNPG cluster.
+  dbPassword: "wCGVeROLHi1br16yJ5QjRloXH815VrFEbkinBnw1CSygf3DJEtKsGJJjFYFlZsy4"
+  dbPassword: "wCGVeROLHi1br16yJ5QjRloXH815VrFEbkinBnw1CSygf3DJEtKsGJJjFYFlZsy4"
 
+# SMTP Configuration for sending emails (invites, password reset, notifications).
+# Supported: SendGrid, Mailgun, any SMTP provider.
+# Set these via environment variables in production:
+#   SMTP_HOST:     SMTP server hostname (e.g. smtp.sendgrid.net)
+#   SMTP_PORT:     SMTP port (587 for STARTTLS, 465 for SSL)
+#   SMTP_USERNAME: SMTP username (e.g. "apikey" for SendGrid)
+#   SMTP_PASSWORD: SMTP password or API key
+#   SMTP_FROM:     From address for outgoing emails (e.g. "homeos@example.com")
+# If SMTP_HOST is empty, email sending is silently skipped.
 smtp:
   host: ""
   port: "587"

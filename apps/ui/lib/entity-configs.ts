@@ -72,6 +72,8 @@ export const billConfig = {
     { name: "notes", label: "Notes", type: "textarea" },
     { name: "entity_type", label: "Entity Type", type: "select", options: [
       { value: "property", label: "Property" },
+      { value: "vehicle", label: "Vehicle" },
+      { value: "asset", label: "Asset" },
     ] },
     { name: "entity_id", label: "Entity", type: "select", options: [] },
     { name: "paid_date", label: "Paid Date", type: "date" },
@@ -206,6 +208,71 @@ export const petConfig = {
   ] as ListColumnConfig[],
 };
 
+export const propertyConfig = {
+  fields: [
+    { name: "name", label: "Name", type: "text", required: true },
+    { name: "address", label: "Address", type: "text" },
+    { name: "property_type", label: "Property Type", type: "select", options: [
+      { value: "house", label: "House" },
+      { value: "apartment", label: "Apartment" },
+      { value: "condo", label: "Condo" },
+      { value: "townhouse", label: "Townhouse" },
+      { value: "land", label: "Land" },
+      { value: "commercial", label: "Commercial" },
+      { value: "other", label: "Other" },
+    ] },
+    { name: "purchase_price", label: "Purchase Price", type: "currency" },
+    { name: "purchase_date", label: "Purchase Date", type: "date" },
+    { name: "current_value", label: "Current Value", type: "currency" },
+    { name: "mortgage_amount", label: "Mortgage Amount", type: "currency" },
+    { name: "notes", label: "Notes", type: "textarea" },
+  ] as FieldConfig[],
+  sections: [
+    { title: "Basic Information", fields: ["name", "address", "property_type"] },
+    { title: "Financial Details", fields: ["purchase_price", "purchase_date", "current_value", "mortgage_amount"] },
+    { title: "Additional Info", fields: ["notes"] },
+  ] as SectionConfig[],
+  listColumns: [
+    { name: "name", label: "Name" },
+    { name: "property_type", label: "Type", format: "badge" },
+    { name: "address", label: "Address" },
+    { name: "current_value", label: "Current Value", format: "currency" },
+  ] as ListColumnConfig[],
+};
+
+export const loanConfig = {
+  fields: [
+    { name: "name", label: "Loan Name", type: "text", required: true },
+    { name: "lender", label: "Lender", type: "text" },
+    { name: "original_amount", label: "Original Amount", type: "currency", required: true },
+    { name: "interest_rate", label: "Interest Rate (%)", type: "number" },
+    { name: "term_months", label: "Term (months)", type: "number" },
+    { name: "monthly_payment", label: "Monthly Payment", type: "currency" },
+    { name: "remaining_balance", label: "Remaining Balance", type: "currency", required: true },
+    { name: "start_date", label: "Start Date", type: "date" },
+    { name: "entity_type", label: "Entity Type", type: "select", options: [
+      { value: "property", label: "Property" },
+      { value: "vehicle", label: "Vehicle" },
+      { value: "asset", label: "Asset" },
+    ] },
+    { name: "entity_id", label: "Entity", type: "select", options: [] },
+    { name: "notes", label: "Notes", type: "textarea" },
+  ] as FieldConfig[],
+  sections: [
+    { title: "Loan Details", fields: ["name", "lender", "original_amount", "remaining_balance"] },
+    { title: "Terms", fields: ["interest_rate", "term_months", "monthly_payment", "start_date"] },
+    { title: "Association", fields: ["entity_type", "entity_id"] },
+    { title: "Additional Info", fields: ["notes"] },
+  ] as SectionConfig[],
+  listColumns: [
+    { name: "name", label: "Name" },
+    { name: "lender", label: "Lender" },
+    { name: "original_amount", label: "Original Amount", format: "currency" },
+    { name: "remaining_balance", label: "Remaining Balance", format: "currency" },
+    { name: "monthly_payment", label: "Monthly Payment", format: "currency" },
+  ] as ListColumnConfig[],
+};
+
 // ─── Entity Config Registry ───────────────────────────────────────────────────
 
 export const entityConfigs = {
@@ -214,6 +281,8 @@ export const entityConfigs = {
   asset: assetConfig,
   vehicle: vehicleConfig,
   pet: petConfig,
+  property: propertyConfig,
+  loan: loanConfig,
 };
 
 export type EntityName = keyof typeof entityConfigs;

@@ -21,6 +21,7 @@ type Asset struct {
 	SerialNumber   *string
 	PurchaseDate   *time.Time
 	PurchasePrice  *float64
+	CurrentValue   *float64
 	WarrantyExpiry *time.Time
 	Notes          *string
 	CreatedAt      time.Time
