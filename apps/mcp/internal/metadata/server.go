@@ -132,11 +132,11 @@ func Start(addr string, cfg *config.Config) *http.Server {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"issuer":                              "http://localhost:8000/dex",
-			"authorization_endpoint":              "http://localhost:8000/authorize",
-			"token_endpoint":                      "http://localhost:8000/dex/token",
-			"jwks_uri":                            "http://localhost:8000/dex/keys",
-			"registration_endpoint":               "http://localhost:8000/register",
+			"issuer":                              cfg.PublicBaseURL + "/dex",
+			"authorization_endpoint":              cfg.PublicBaseURL + "/authorize",
+			"token_endpoint":                      cfg.PublicBaseURL + "/dex/token",
+			"jwks_uri":                            cfg.PublicBaseURL + "/dex/keys",
+			"registration_endpoint":               cfg.PublicBaseURL + "/register",
 			"scopes_supported":                    []string{"openid", "email", "profile"},
 			"response_types_supported":            []string{"code"},
 			"code_challenge_methods_supported":    []string{"S256"},
@@ -154,8 +154,8 @@ func Start(addr string, cfg *config.Config) *http.Server {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"resource":                 "http://localhost:8000/mcp",
-			"authorization_servers":    []string{"http://localhost:8000"},
+			"resource":                 cfg.PublicBaseURL + "/mcp",
+			"authorization_servers":    []string{cfg.PublicBaseURL},
 			"client_id":                "home-os-mcp",
 			"scopes_supported":         []string{"openid", "email", "profile"},
 			"bearer_methods_supported": []string{"header"},

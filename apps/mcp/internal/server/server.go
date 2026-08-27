@@ -140,8 +140,8 @@ func (s *Server) Start(ctx context.Context) error {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"resource":                 "http://localhost:8000/mcp",
-			"authorization_servers":    []string{"http://localhost:8000/dex"},
+			"resource":                 s.cfg.PublicBaseURL + "/mcp",
+			"authorization_servers":    []string{s.cfg.PublicBaseURL + "/dex"},
 			"client_id":                "home-os-mcp",
 			"scopes_supported":         []string{"openid", "email", "profile"},
 			"bearer_methods_supported": []string{"header"},
@@ -220,7 +220,7 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="http://localhost:8000/.well-known/oauth-protected-resource"`)
+				w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+s.cfg.PublicBaseURL+`/.well-known/oauth-protected-resource"`)
 				writeJSONError(w, http.StatusUnauthorized, "missing authorization header")
 				return
 			}

@@ -13,6 +13,7 @@ import (
 type Config struct {
 	Port            string
 	MetadataPort    string
+	PublicBaseURL   string
 	DatabaseURL     string
 	DexJWKSURL      string
 	DexIssuer       string
@@ -29,6 +30,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Port:            getEnv("PORT", "8082"),
 		MetadataPort:    getEnv("METADATA_PORT", "8083"),
+		PublicBaseURL:   getEnv("PUBLIC_BASE_URL", "http://localhost:8000"),
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
 		DexJWKSURL:      getEnv("DEX_JWKS_URL", "http://home-os-envoy.home-os.svc.cluster.local:8000/dex/keys"),
 		DexIssuer:       getEnv("DEX_ISSUER", "http://localhost:8000/dex"),
