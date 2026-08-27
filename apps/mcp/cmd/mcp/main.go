@@ -35,7 +35,7 @@ import (
 	"home-os/mcp/internal/search"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/vehicle"
-	"home-os/mcp/internal/vendor"
+	"home-os/mcp/internal/vendors"
 )
 
 func main() {
@@ -143,8 +143,8 @@ func main() {
 	srv.RegisterTool("get_pet", pet.NewGetTool(), pet.HandleGet(pool))
 
 	// Register vendor tools.
-	srv.RegisterTool("list_vendors", vendor.NewListTool(), vendor.HandleList(pool))
-	srv.RegisterTool("get_vendor", vendor.NewGetTool(), vendor.HandleGet(pool))
+	srv.RegisterTool("list_vendors", vendors.NewListTool(), vendors.HandleList(pool))
+	srv.RegisterTool("get_vendor", vendors.NewGetTool(), vendors.HandleGet(pool))
 
 	// Register calendar tools.
 	listCalTool, listCalHandler := calendar.NewListCalendarsTool(pool)
