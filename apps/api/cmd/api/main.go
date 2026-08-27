@@ -93,7 +93,8 @@ func main() {
 	// This validates Dex-issued RS256-signed OIDC tokens on protected routes.
 	// The JWKS URL is the internal K8s address for key fetching, while the
 	// expected issuer matches the token's "iss" claim (the public URL).
-	oidcVerifier, err := auth.NewVerifier(ctx, cfg.DexIssuer, cfg.DexJWKSURL)
+	// Tokens must have an "aud" claim matching one of the expected audiences.
+	oidcVerifier, err := auth.NewVerifier(ctx, cfg.DexIssuer, cfg.DexJWKSURL, []string{"home-os-ui", "home-os-mcp"})
 	if err != nil {
 		slog.Error("failed to create OIDC verifier", "error", err)
 		os.Exit(1)
@@ -305,6 +306,9 @@ func main() {
 		r.Post("/api/v1/invites", inviteHandler.CreateInvite)
 		r.Get("/api/v1/invites", inviteHandler.ListInvites)
 		r.Post("/api/v1/invites/accept", inviteHandler.AcceptInvite)
+
+		// Admin routes (require owner role — enforced in handler).
+		r.Post("/api/v1/admin/users", authHandler.AdminCreateUser)
 	})
 
 	// Start the HTTP server.
