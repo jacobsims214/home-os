@@ -46,7 +46,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ${{ matrix.service == 'worker' && '.' || format('apps/{0}', matrix.service) }}
-          file: ${{ matrix.service == 'worker' && 'apps/worker/Dockerfile' || 'Dockerfile' }}
+          file: ${{ matrix.service == 'worker' && 'apps/worker/Dockerfile' || format('apps/{0}/Dockerfile', matrix.service) }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
