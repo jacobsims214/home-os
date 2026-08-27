@@ -20,7 +20,7 @@ api:
   port: 8080
   publicUrl: "http://localhost:3000"
   demoMode: true
-  allowRegistration: "true"
+  allowRegistration: "false"
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }

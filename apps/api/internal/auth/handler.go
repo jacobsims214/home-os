@@ -161,6 +161,124 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	apierr.JSON(w, http.StatusCreated, tokenResponse{Token: token})
 }
 
+// adminCreateUserRequest is the request body for AdminCreateUser.
+type adminCreateUserRequest struct {
+	Email         string `json:"email"`
+	Name          string `json:"name"`
+	Password      string `json:"password"`
+	HouseholdName string `json:"household_name"`
+}
+
+// adminCreateUserResponse is the response body for AdminCreateUser.
+type adminCreateUserResponse struct {
+	UserID      string `json:"user_id"`
+	HouseholdID string `json:"household_id"`
+}
+
+// AdminCreateUser creates a new user, a household, and an owner membership.
+// Requires a valid JWT with role "owner". POST /api/v1/admin/users.
+func (h *Handler) AdminCreateUser(w http.ResponseWriter, r *http.Request) {
+	// Verify JWT from Authorization header.
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
+			Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: "Not authenticated"},
+		})
+		return
+	}
+	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+	claims, err := h.verifier.VerifyToken(r.Context(), tokenStr)
+	if err != nil {
+		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
+			Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: "Invalid or expired token"},
+		})
+		return
+	}
+
+	// Only users with the owner role can create new admin users.
+	if claims.Role != RoleOwner {
+		apierr.JSON(w, http.StatusForbidden, apierr.ErrorResponse{
+			Error: apierr.ErrorDetail{Code: "FORBIDDEN", Message: "Only owners can create users"},
+		})
+		return
+	}
+
+	var req adminCreateUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierr.BadRequest(w, "invalid request body")
+		return
+	}
+
+	req.Email = strings.TrimSpace(req.Email)
+	req.Name = strings.TrimSpace(req.Name)
+
+	if req.Email == "" || req.Name == "" || req.Password == "" {
+		apierr.BadRequest(w, "email, name, and password are required")
+		return
+	}
+
+	if len(req.Password) < 8 {
+		apierr.BadRequest(w, "password must be at least 8 characters")
+		return
+	}
+
+	// Check for existing user.
+	existing, err := h.repo.GetUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	if existing != nil {
+		apierr.Conflict(w, "email already registered")
+		return
+	}
+
+	// Hash password.
+	hash, err := HashPassword(req.Password)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	// Create user.
+	user, err := h.repo.CreateUser(r.Context(), req.Email, req.Name, hash)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	// Register password in Dex's local password database.
+	if h.dexClient != nil {
+		if err := h.dexClient.CreatePassword(r.Context(), req.Email, hash, user.ID.String()); err != nil {
+			slog.Warn("dex: failed to create password for admin-created user", "email", req.Email, "error", err)
+		}
+	} else {
+		slog.Info("dex: no client configured, skipping password creation", "email", req.Email)
+	}
+
+	// Create household.
+	householdName := req.HouseholdName
+	if householdName == "" {
+		householdName = req.Name + "'s Home"
+	}
+	hhID, err := h.householdRepo.CreateHousehold(r.Context(), householdName)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	// Create membership as owner.
+	if err := h.householdRepo.CreateMembership(r.Context(), hhID, user.ID.String(), RoleOwner); err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	apierr.JSON(w, http.StatusCreated, adminCreateUserResponse{
+		UserID:      user.ID.String(),
+		HouseholdID: hhID,
+	})
+}
+
 // Login validates email/password, looks up the user's primary membership,
 // and returns a signed JWT. POST /api/v1/auth/login.
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
