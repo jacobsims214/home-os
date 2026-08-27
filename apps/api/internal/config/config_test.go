@@ -9,7 +9,6 @@ import (
 func TestLoad(t *testing.T) {
 	t.Run("returns error when DATABASE_URL is missing", func(t *testing.T) {
 		os.Clearenv()
-		os.Setenv("JWT_SECRET", "test-secret")
 
 		cfg, err := Load()
 		if err == nil {
@@ -57,7 +56,6 @@ func TestLoad(t *testing.T) {
 	t.Run("sets defaults for optional fields", func(t *testing.T) {
 		os.Clearenv()
 		os.Setenv("DATABASE_URL", "postgres://localhost/test")
-		os.Setenv("JWT_SECRET", "test-secret")
 
 		cfg, err := Load()
 		if err != nil {
@@ -83,7 +81,6 @@ func TestLoad(t *testing.T) {
 	t.Run("reads MINIO_USE_SSL as bool", func(t *testing.T) {
 		os.Clearenv()
 		os.Setenv("DATABASE_URL", "postgres://localhost/test")
-		os.Setenv("JWT_SECRET", "test-secret")
 
 		// Test false by default
 		cfg, err := Load()
@@ -108,7 +105,6 @@ func TestLoad(t *testing.T) {
 	t.Run("reads all optional fields when set", func(t *testing.T) {
 		os.Clearenv()
 		os.Setenv("DATABASE_URL", "postgres://localhost/test")
-		os.Setenv("JWT_SECRET", "test-secret")
 		os.Setenv("PORT", "3000")
 		os.Setenv("TYPESENSE_HOST", "typesense.local")
 		os.Setenv("TYPESENSE_PORT", "9999")

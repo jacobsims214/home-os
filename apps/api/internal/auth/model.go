@@ -1,6 +1,5 @@
 // Package auth handles user authentication, authorization, and membership.
-// It provides the domain models and database repository for the users and
-// memberships tables.
+// It provides OIDC token verification, user management, and role-based access control.
 package auth
 
 import (
@@ -8,6 +7,19 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// Claims represents the enriched claims extracted from a verified OIDC token.
+// UserID, HouseholdID, and Role are populated from the database after token
+// verification via JIT provisioning. Email and Name come from the OIDC identity.
+//
+// Handlers access the injected Claims via ClaimsFromContext.
+type Claims struct {
+	UserID      string `json:"user_id"`
+	HouseholdID string `json:"household_id"`
+	Role        string `json:"role"`
+	Email       string `json:"email"`
+	Name        string `json:"name"`
+}
 
 // User represents a registered user from the users table.
 type User struct {

@@ -16,7 +16,6 @@ type Config struct {
 	DatabaseURL       string
 	DexJWKSURL        string
 	DexIssuer         string
-	JWTSecret         string
 	TypesenseHost     string
 	TypesensePort     string
 	TypesenseAPIKey   string
@@ -45,7 +44,6 @@ func Load() (*Config, error) {
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		DexJWKSURL:        getEnv("DEX_JWKS_URL", "http://home-os-envoy.home-os.svc.cluster.local:8000/dex/keys"),
 		DexIssuer:         getEnv("DEX_ISSUER", "http://localhost:8000/dex"),
-		JWTSecret:         os.Getenv("JWT_SECRET"),
 		TypesenseHost:     getEnv("TYPESENSE_HOST", "localhost"),
 		TypesensePort:     getEnv("TYPESENSE_PORT", "8108"),
 		TypesenseAPIKey:   os.Getenv("TYPESENSE_API_KEY"),

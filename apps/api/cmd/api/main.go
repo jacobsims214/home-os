@@ -142,8 +142,6 @@ func main() {
 
 	authHandler := auth.NewHandler(authRepo, &householdAdapter{repo: householdRepo}, cfg, smtpClient, dexClient, oidcVerifier)
 
-	r.Post("/api/v1/auth/register", authHandler.Register)
-	r.Post("/api/v1/auth/login", authHandler.Login)
 	r.Get("/api/v1/auth/me", authHandler.Me)
 	r.Post("/api/v1/auth/caldav-password", authHandler.GenerateCaldavPassword)
 	r.Post("/api/v1/auth/forgot-password", authHandler.ForgotPassword)
@@ -151,7 +149,7 @@ func main() {
 
 	// Protected endpoints (require valid JWT).
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.RequireAuth(oidcVerifier, cfg))
+		r.Use(middleware.RequireAuth(oidcVerifier))
 
 		// Household
 		householdHandler := household.NewHandler(householdRepo)
