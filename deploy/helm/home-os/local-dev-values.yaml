@@ -76,6 +76,7 @@ tika:
     limits: { cpu: 1, memory: 2Gi }
 
 dex:
+  uiRedirectURI: "http://localhost:8000/api/auth/callback"
   replicas: 1
   image: dex
   port: 5556
