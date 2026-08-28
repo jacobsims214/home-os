@@ -37,7 +37,7 @@ data:
     - id: home-os-ui
       name: Home OS UI
       redirectURIs:
-      - http://localhost/api/auth/callback
+      - http://localhost:8000/api/auth/callback
       public: true
     - id: home-os-mcp
       name: Home OS MCP
