@@ -12,7 +12,7 @@ export default function LoginPage() {
       redirect_uri: `${window.location.origin}/api/auth/callback`,
       scope: "openid email profile",
     });
-    window.location.href = `http://localhost:8000/dex/auth?${params.toString()}`;
+    window.location.href = `/dex/auth?${params.toString()}`;
   }, []);
 
   return (
