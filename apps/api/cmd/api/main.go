@@ -89,6 +89,12 @@ func main() {
 		}
 	}
 
+	// Bootstrap admin user if this is a fresh installation with no users.
+	if err := seed.BootstrapAdmin(ctx, pool, cfg, dexClient); err != nil {
+		slog.Error("failed to bootstrap admin", "error", err)
+		os.Exit(1)
+	}
+
 	// Create OIDC token verifier using Dex JWKS endpoint.
 	// This validates Dex-issued RS256-signed OIDC tokens on protected routes.
 	// The JWKS URL is the internal K8s address for key fetching, while the

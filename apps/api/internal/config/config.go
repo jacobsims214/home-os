@@ -35,6 +35,9 @@ type Config struct {
 	PublicURL         string
 	AllowRegistration bool
 	DexGRPCAddr       string
+	AdminEmail        string // ADMIN_EMAIL, default ""
+	AdminPassword     string // ADMIN_PASSWORD, default ""
+	AdminName         string // ADMIN_NAME, default "Admin"
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -64,6 +67,9 @@ func Load() (*Config, error) {
 		PublicURL:          getEnv("PUBLIC_URL", "http://localhost:3000"),
 		AllowRegistration: strings.ToLower(os.Getenv("ALLOW_REGISTRATION")) == "true",
 		DexGRPCAddr:       getEnv("DEX_GRPC_ADDR", "home-os-dex:5557"),
+		AdminEmail:        os.Getenv("ADMIN_EMAIL"),
+		AdminPassword:     os.Getenv("ADMIN_PASSWORD"),
+		AdminName:         getEnv("ADMIN_NAME", "Admin"),
 	}
 
 	var missing []string

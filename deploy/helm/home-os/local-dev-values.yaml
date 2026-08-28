@@ -21,6 +21,8 @@ api:
   publicUrl: "http://localhost:3000"
   demoMode: true
   allowRegistration: "false"
+  adminEmail: "admin@homeos.demo"
+  adminPassword: "demo1234"
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
