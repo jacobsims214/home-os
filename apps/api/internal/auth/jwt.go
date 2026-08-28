@@ -1,14 +1,17 @@
-// Package auth provides OIDC token verification for the Home OS API.
-// Tokens are issued by Dex and validated using Dex's JWKS endpoint
-// with RS256 signature verification via coreos/go-oidc/v3.
+// Package auth provides OIDC token verification and JWT signing for the Home OS API.
+// Tokens issued by Dex are validated using Dex's JWKS endpoint with RS256 signature
+// verification via coreos/go-oidc/v3. The SignToken function creates HS256 JWTs for
+// the login/register endpoints (a temporary bridge until UI OIDC migration is complete).
 package auth
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // Identity represents the core OIDC identity from a verified ID token.
@@ -123,6 +126,21 @@ func (v *Verifier) VerifyToken(ctx context.Context, tokenStr string) (*Claims, e
 // Close is a no-op — kept for interface compatibility.
 // coreos/go-oidc/v3 does not use background refresh goroutines like keyfunc.
 func (v *Verifier) Close() {}
+
+// SignToken creates an HS256 JWT with the given user_id, household_id, and role claims.
+// The token expires in 24 hours. This is used by the Login and Register handlers as a
+// temporary bridge until the UI is fully migrated to Dex OIDC.
+func SignToken(jwtSecret string, userID, householdID, role string) (string, error) {
+	claims := jwt.MapClaims{
+		"user_id":      userID,
+		"household_id": householdID,
+		"role":         role,
+		"exp":          time.Now().Add(24 * time.Hour).Unix(),
+		"iat":          time.Now().Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString([]byte(jwtSecret))
+}
 
 // hasValidAudience checks whether the token's audience claim contains at
 // least one of the expected audiences configured on the verifier. If no
