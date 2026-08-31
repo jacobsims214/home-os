@@ -6,13 +6,19 @@ const COOKIE_MAX_AGE = 60 * 60 * 24;
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
-  const state = searchParams.get("state");
 
   if (!code) {
     return NextResponse.redirect(new URL("/login?error=no_code", request.url));
   }
 
   try {
+    // Build the redirect_uri from the Host header (what the browser sees)
+    // This MUST match the redirect_uri sent in the initial auth request
+    const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || "localhost:8000";
+    const proto = request.headers.get("x-forwarded-proto") || "http";
+    const publicOrigin = `${proto}://${host}`;
+    const redirectUri = `${publicOrigin}/api/auth/callback`;
+
     // Exchange code for tokens via Dex
     const tokenResponse = await fetch("http://home-os-dex:5556/dex/token", {
       method: "POST",
@@ -20,7 +26,7 @@ export async function GET(request: NextRequest) {
       body: new URLSearchParams({
         grant_type: "authorization_code",
         code,
-        redirect_uri: `${request.nextUrl.origin}/api/auth/callback`,
+        redirect_uri: redirectUri,
         client_id: "home-os-ui",
       }),
     });
