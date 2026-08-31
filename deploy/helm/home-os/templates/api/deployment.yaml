@@ -69,5 +69,15 @@ spec:
           value: "http://home-os-envoy.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.envoy.port }}/dex/keys"
         - name: DEX_ISSUER
           value: "http://localhost:8000/dex"
+        - name: ADMIN_EMAIL
+          valueFrom:
+            secretKeyRef:
+              name: home-os-secrets
+              key: adminEmail
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: home-os-secrets
+              key: adminPassword
         resources:
           {{- toYaml .Values.api.resources | nindent 10 }}
