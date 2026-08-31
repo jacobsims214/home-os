@@ -113,6 +113,8 @@ secrets:
   # WARNING: The original password was committed to git; rotate it as part of this fix.
   dbPassword: ""
   dbPassword: ""
+  adminEmail: ""
+  adminPassword: ""
 
 smtp:
   host: ""

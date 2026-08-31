@@ -70,8 +70,14 @@ spec:
         - name: DEX_ISSUER
           value: "http://localhost:8000/dex"
         - name: ADMIN_EMAIL
-          value: {{ .Values.api.adminEmail | quote }}
+          valueFrom:
+            secretKeyRef:
+              name: home-os-secrets
+              key: adminEmail
         - name: ADMIN_PASSWORD
-          value: {{ .Values.api.adminPassword | quote }}
+          valueFrom:
+            secretKeyRef:
+              name: home-os-secrets
+              key: adminPassword
         resources:
           {{- toYaml .Values.api.resources | nindent 10 }}
