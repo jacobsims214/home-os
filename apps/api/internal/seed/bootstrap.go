@@ -33,7 +33,11 @@ func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config,
 			if err := pool.QueryRow(ctx, `SELECT id FROM users WHERE email = $1`, cfg.AdminEmail).Scan(&userID); err != nil {
 				return fmt.Errorf("get admin user id: %w", err)
 			}
-			if err := dexClient.CreatePassword(ctx, cfg.AdminEmail, cfg.AdminPassword, userID); err != nil {
+			hash, err := bcrypt.GenerateFromPassword([]byte(cfg.AdminPassword), 12)
+			if err != nil {
+				return fmt.Errorf("hash password for dex sync: %w", err)
+			}
+			if err := dexClient.CreatePassword(ctx, cfg.AdminEmail, string(hash), userID); err != nil {
 				slog.Warn("bootstrap: failed to sync password to Dex", "email", cfg.AdminEmail, "error", err)
 			} else {
 				slog.Info("bootstrap: synced admin password to Dex", "email", cfg.AdminEmail)
@@ -79,7 +83,7 @@ func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config,
 
 	// Sync to Dex
 	if dexClient != nil {
-		if err := dexClient.CreatePassword(ctx, cfg.AdminEmail, cfg.AdminPassword, userID); err != nil {
+		if err := dexClient.CreatePassword(ctx, cfg.AdminEmail, string(hash), userID); err != nil {
 			slog.Warn("bootstrap: failed to sync password to Dex", "email", cfg.AdminEmail, "error", err)
 		} else {
 			slog.Info("bootstrap: synced admin password to Dex", "email", cfg.AdminEmail)
