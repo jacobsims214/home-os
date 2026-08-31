@@ -8,7 +8,7 @@ export async function GET(request: NextRequest) {
   const code = searchParams.get("code");
 
   if (!code) {
-    return NextResponse.redirect(new URL("/login?error=no_code", request.url));
+    return NextResponse.redirect(new URL("/login?error=no_code", publicOrigin));
   }
 
   try {
@@ -34,18 +34,18 @@ export async function GET(request: NextRequest) {
     if (!tokenResponse.ok) {
       const errorText = await tokenResponse.text();
       console.error("Token exchange failed:", errorText);
-      return NextResponse.redirect(new URL("/login?error=token_exchange_failed", request.url));
+      return NextResponse.redirect(new URL("/login?error=token_exchange_failed", publicOrigin));
     }
 
     const tokens = await tokenResponse.json();
     const idToken = tokens.id_token;
 
     if (!idToken) {
-      return NextResponse.redirect(new URL("/login?error=no_id_token", request.url));
+      return NextResponse.redirect(new URL("/login?error=no_id_token", publicOrigin));
     }
 
     // Store the token in an httpOnly cookie
-    const response = NextResponse.redirect(new URL("/dashboard", request.url));
+    const response = NextResponse.redirect(new URL("/dashboard", publicOrigin));
     response.cookies.set(COOKIE_NAME, idToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -57,6 +57,6 @@ export async function GET(request: NextRequest) {
     return response;
   } catch (error) {
     console.error("Callback error:", error);
-    return NextResponse.redirect(new URL("/login?error=callback_error", request.url));
+    return NextResponse.redirect(new URL("/login?error=callback_error", publicOrigin));
   }
 }
