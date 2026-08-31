@@ -7,16 +7,17 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
 
+  // Build the public origin from Host headers (what the browser sees)
+  // This MUST match the redirect_uri sent in the initial auth request
+  const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || "localhost:8000";
+  const proto = request.headers.get("x-forwarded-proto") || "http";
+  const publicOrigin = `${proto}://${host}`;
+
   if (!code) {
     return NextResponse.redirect(new URL("/login?error=no_code", publicOrigin));
   }
 
   try {
-    // Build the redirect_uri from the Host header (what the browser sees)
-    // This MUST match the redirect_uri sent in the initial auth request
-    const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || "localhost:8000";
-    const proto = request.headers.get("x-forwarded-proto") || "http";
-    const publicOrigin = `${proto}://${host}`;
     const redirectUri = `${publicOrigin}/api/auth/callback`;
 
     // Exchange code for tokens via Dex
