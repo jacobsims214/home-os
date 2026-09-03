@@ -37,12 +37,22 @@ function getAuthToken(): string | null {
 
   // Fallback: read from cookie (set by the BFF /api/auth route)
   if (typeof document !== "undefined") {
+    // Try the non-httpOnly cookie first (set by OIDC callback)
+    const clientCookie = document.cookie
+      .split("; ")
+      .find((c) => c.startsWith("home-os-token-client="));
+    if (clientCookie) {
+      const token = clientCookie.split("=")[1];
+      // Hydrate the store so subsequent calls don't need to read the cookie
+      useAuthStore.setState({ token });
+      return token;
+    }
+    // Fallback to the httpOnly cookie (won't work from JS, but try anyway)
     const cookie = document.cookie
       .split("; ")
       .find((c) => c.startsWith("home-os-token="));
     if (cookie) {
       const token = cookie.split("=")[1];
-      // Hydrate the store so subsequent calls don't need to read the cookie
       useAuthStore.setState({ token });
       return token;
     }
