@@ -45,10 +45,18 @@ export async function GET(request: NextRequest) {
       return NextResponse.redirect(new URL("/login?error=no_id_token", publicOrigin));
     }
 
-    // Store the token in an httpOnly cookie
+    // Store the token in an httpOnly cookie (for server-side/BFF reads)
     const response = NextResponse.redirect(new URL("/dashboard", publicOrigin));
     response.cookies.set(COOKIE_NAME, idToken, {
       httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: COOKIE_MAX_AGE,
+    });
+    // Also set a non-httpOnly cookie so client-side JS (apiFetch) can read it
+    response.cookies.set("home-os-token-client", idToken, {
+      httpOnly: false,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/",
