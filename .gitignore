@@ -53,6 +53,29 @@ Thumbs.db
 # --- Docker / Compose ---
 docker-compose.override.yml
 
+# --- Generated: container image exports ---
+# `docker save` / OCI-layout dumps of locally built images (blobs/, index.json,
+# manifest.json, repositories). The blobs are never committed, so an exported
+# index/manifest alone is unreadable — never commit an image export here.
+/blobs/
+/index.json
+/manifest.json
+/repositories
+
+# --- Generated: compiled binaries at the repo root ---
+# `go build` output left behind when building an app module from the root.
+/mcp
+
+# --- Generated: next-pwa service worker ---
+# next.config.js writes these into public/ on every production build, keyed by
+# build hash, so committing them churns the diff and ships a stale precache.
+/apps/ui/public/sw.js
+/apps/ui/public/workbox-*.js
+
+# --- AMP ---
+# Isolated per-ticket worktrees created by the AMP harness.
+.worktrees/
+
 # --- Misc ---
 coverage/
 tmp/
