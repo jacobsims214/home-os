@@ -5,13 +5,17 @@ import (
 	"home-os/mcp/internal/server"
 )
 
-// Register adds the asset tools to srv. cmd/mcp calls it once at startup,
-// so changes to these tools stay inside this package.
+// Register adds the asset tools (catalog v2: asset_find, asset_create,
+// asset_update, asset_delete) to srv. cmd/mcp calls it once at startup, so
+// changes to these tools stay inside this package. They replace list_assets,
+// get_asset, create_asset, update_asset and delete_asset.
 func Register(srv *server.Server, deps server.Deps) {
-	assetTools := NewTools(deps.Pool, search.NewIndexer(deps.Config))
-	srv.RegisterTool("list_assets", assetTools.ListAssetsTool(), assetTools.HandleListAssets)
-	srv.RegisterTool("get_asset", assetTools.GetAssetTool(), assetTools.HandleGetAsset)
-	srv.RegisterTool("create_asset", assetTools.CreateAssetTool(), assetTools.HandleCreateAsset)
-	srv.RegisterTool("update_asset", assetTools.UpdateAssetTool(), assetTools.HandleUpdateAsset)
-	srv.RegisterTool("delete_asset", assetTools.DeleteAssetTool(), assetTools.HandleDeleteAsset)
+	var idx searchIndexer
+	if i := search.NewIndexer(deps.Config); i != nil {
+		idx = i
+	}
+	srv.RegisterTool(NewAssetFindTool(deps.Pool))
+	srv.RegisterTool(NewAssetCreateTool(deps.Pool, idx))
+	srv.RegisterTool(NewAssetUpdateTool(deps.Pool, idx))
+	srv.RegisterTool(NewAssetDeleteTool(deps.Pool))
 }
