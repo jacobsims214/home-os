@@ -23,7 +23,22 @@ func main() {
 	defer pool.Close()
 
 	sc := search.NewClient(cfg)
-	sc.InitCollection(ctx)
+
+	// Full rebuild: drop household_search and recreate it with the current
+	// schema (auto-embedding field backed by Typesense's local
+	// ts/all-MiniLM-L12-v2 model), then re-import every row below. Typesense
+	// computes each document's embedding during the upsert. The first create
+	// downloads the model into the Typesense data dir if it is not there yet.
+	if err := sc.RecreateCollection(ctx); err != nil {
+		log.Fatalf("recreate household_search: %v", err)
+	}
+
+	// The worker owns the files collection and is its only writer, so it is
+	// not re-imported here: altering it to add the auto-embedding field makes
+	// Typesense embed every existing file document in place.
+	if err := sc.EnsureFilesEmbedding(ctx); err != nil {
+		log.Fatalf("files embedding migration: %v", err)
+	}
 
 	type entityDef struct {
 		table      string
