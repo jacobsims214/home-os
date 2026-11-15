@@ -104,7 +104,14 @@ func (h *Handler) RequireInstanceAdmin(next http.Handler) http.Handler {
 			apierr.InternalError(w, err)
 			return
 		}
-		if c == nil || !c.Active || !c.IsInstanceAdmin {
+		if c != nil && !c.Active {
+			// Same 403 wording as auth.WriteVerifyError, so a deactivated
+			// admin learns why, not just that admin access is missing.
+			slog.Warn("admin: refused deactivated caller", "user_id", c.ID)
+			apierr.Forbidden(w, "this account has been deactivated")
+			return
+		}
+		if c == nil || !c.IsInstanceAdmin {
 			slog.Warn("admin: refused non-admin caller", "email", ident.Email)
 			apierr.Forbidden(w, "instance admin access required")
 			return

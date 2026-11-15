@@ -94,7 +94,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		apierr.Conflict(w, "this account already belongs to a household")
 		return
 	case errors.Is(err, ErrUserInactive):
-		apierr.Forbidden(w, "this account is deactivated")
+		apierr.Forbidden(w, "this account has been deactivated")
 		return
 	case errors.Is(err, ErrNoIdentity):
 		apierr.Unauthorized(w, "token carries no subject or email")
