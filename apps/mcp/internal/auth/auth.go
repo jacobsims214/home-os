@@ -5,11 +5,14 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/jackc/pgx/v5"
@@ -32,6 +35,35 @@ type Claims struct {
 	UserID      string `json:"user_id"`
 	HouseholdID string `json:"household_id"`
 	Role        string `json:"role"`
+	// AgentTokenID is set when the caller authenticated with a per-member
+	// agent token (hos_...) instead of a Dex JWT.
+	AgentTokenID string `json:"agent_token_id,omitempty"`
+	// Scopes are the agent token's scopes (ScopeRead, ScopeWrite). They are
+	// nil for Dex sessions, which act with the member's full rights.
+	Scopes []string `json:"scopes,omitempty"`
+}
+
+// Agent token scopes (see apps/api/internal/agenttoken).
+const (
+	ScopeRead  = "read"
+	ScopeWrite = "write"
+)
+
+// CanWrite reports whether the caller may call tools that change data. Dex
+// sessions (no AgentTokenID) always can; an agent token needs ScopeWrite.
+func (c *Claims) CanWrite() bool {
+	if c == nil {
+		return false
+	}
+	if c.AgentTokenID == "" {
+		return true
+	}
+	for _, s := range c.Scopes {
+		if s == ScopeWrite {
+			return true
+		}
+	}
+	return false
 }
 
 // Verifier validates Dex-issued RS256-signed OIDC tokens via coreos/go-oidc/v3.
@@ -219,15 +251,25 @@ func (v *Verifier) VerifyToken(ctx context.Context, rawToken string) (*Claims, e
 // tokens only carry OIDC standard claims (sub, email, name), not Home OS ones.
 //
 // It is VerifyToken followed by EnrichClaims; see ResolveMember for the lookup
-// rules. Errors:
+// rules. A bearer starting with AgentTokenPrefix is instead checked by
+// VerifyAgentToken and never parsed as a JWT. Errors:
 //   - ErrNoMembership: token is valid but the identity is not a household
 //     member. Answer 403 Forbidden.
 //   - ErrMemberLookup: database failure. Answer 500.
-//   - anything else: the token itself is invalid. Answer 401.
+//   - anything else (including ErrInvalidAgentToken): the token itself is
+//     invalid. Answer 401.
 //
 // In disabled mode (no issuer) or without a pool, the local-dev / un-enriched
 // claims from VerifyToken are returned unchanged.
 func (v *Verifier) VerifyTokenAndEnrich(ctx context.Context, pool *pgxpool.Pool, tokenStr string) (*Claims, error) {
+	if v.enabled && IsAgentToken(tokenStr) {
+		// Agent tokens are opaque secrets, never JWTs: they must not reach
+		// the OIDC parser. Without a database they cannot be checked.
+		if pool == nil {
+			return nil, ErrInvalidAgentToken
+		}
+		return VerifyAgentToken(ctx, pool, tokenStr)
+	}
 	claims, err := v.VerifyToken(ctx, tokenStr)
 	if err != nil {
 		return nil, err
@@ -357,6 +399,145 @@ func backfillSub(ctx context.Context, db DB, userID, sub string, storedSub *stri
 		return
 	}
 	slog.Info("auth: backfilled users.dex_sub from email match", "user_id", userID)
+}
+
+// AgentTokenPrefix starts every per-member agent token. Format (#4404):
+// "hos_" + base64url(32 random bytes, no padding), 47 characters in all.
+const AgentTokenPrefix = "hos_"
+
+const (
+	agentTokenLen = 47
+	// agentTokenTouchInterval throttles last_used_at writes: a token used
+	// many times a minute costs one UPDATE per interval, not one per request.
+	agentTokenTouchInterval = time.Minute
+)
+
+// ErrInvalidAgentToken is returned for any agent token that cannot be used:
+// malformed, unknown, revoked, expired, owned by a deactivated user, or whose
+// owner is no longer a member of the token's household. The cases are
+// deliberately indistinguishable to the caller: answer 401 exactly as for an
+// invalid JWT.
+var ErrInvalidAgentToken = errors.New("invalid agent token")
+
+// IsAgentToken reports whether a bearer credential is an agent token (by its
+// prefix) rather than a Dex JWT. A JWT always starts with "ey".
+func IsAgentToken(raw string) bool {
+	return strings.HasPrefix(raw, AgentTokenPrefix)
+}
+
+// HashAgentToken returns the SHA-256 digest stored in agent_tokens.token_hash.
+// It matches agenttoken.HashToken in apps/api: the hash covers the whole
+// plaintext, prefix included.
+func HashAgentToken(raw string) []byte {
+	sum := sha256.Sum256([]byte(raw))
+	return sum[:]
+}
+
+// wellFormedAgentToken checks length and the base64url alphabet so garbage
+// is refused without a database round trip.
+func wellFormedAgentToken(raw string) bool {
+	if len(raw) != agentTokenLen || !IsAgentToken(raw) {
+		return false
+	}
+	for _, c := range raw[len(AgentTokenPrefix):] {
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// VerifyAgentToken resolves a per-member agent token to Claims for its
+// owner's membership in the token's household.
+//
+// The token is looked up by its SHA-256 digest (unique index on token_hash),
+// so the plaintext is never compared or stored; the digest returned by the
+// lookup is compared again in constant time as defence in depth. A token is
+// accepted only when it is not revoked, not expired, its user is active
+// (users.active) and that user is still a member of the token's household.
+// Every refusal is ErrInvalidAgentToken; database failures wrap
+// ErrMemberLookup (answer 500).
+//
+// last_used_at is refreshed at most once per agentTokenTouchInterval, and a
+// failed refresh never fails the request. The token itself is never logged.
+func VerifyAgentToken(ctx context.Context, db DB, raw string) (*Claims, error) {
+	if !wellFormedAgentToken(raw) {
+		return nil, ErrInvalidAgentToken
+	}
+	digest := HashAgentToken(raw)
+
+	var (
+		tokenID, userID, householdID, email, name string
+		role                                      *string
+		storedHash                                []byte
+		scopes                                    []string
+		revokedAt, expiresAt, lastUsedAt          *time.Time
+		active                                    bool
+		now                                       time.Time
+	)
+	err := db.QueryRow(ctx, `
+		SELECT t.id::text, t.token_hash, t.user_id::text, t.household_id::text,
+		       t.scopes, t.revoked_at, t.expires_at, t.last_used_at,
+		       u.email, u.name, u.active, m.role::text, NOW()
+		FROM agent_tokens t
+		JOIN users u ON u.id = t.user_id
+		LEFT JOIN memberships m ON m.user_id = t.user_id AND m.household_id = t.household_id
+		WHERE t.token_hash = $1`, digest,
+	).Scan(&tokenID, &storedHash, &userID, &householdID,
+		&scopes, &revokedAt, &expiresAt, &lastUsedAt,
+		&email, &name, &active, &role, &now)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrInvalidAgentToken
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: agent token: %w", ErrMemberLookup, err)
+	}
+	if subtle.ConstantTimeCompare(storedHash, digest) != 1 {
+		return nil, ErrInvalidAgentToken
+	}
+
+	var reason string
+	switch {
+	case revokedAt != nil:
+		reason = "revoked"
+	case expiresAt != nil && !expiresAt.After(now):
+		reason = "expired"
+	case !active:
+		reason = "user deactivated"
+	case role == nil:
+		reason = "not a member of the token's household"
+	}
+	if reason != "" {
+		slog.Warn("auth: agent token refused", "token_id", tokenID, "reason", reason)
+		return nil, ErrInvalidAgentToken
+	}
+
+	if lastUsedAt == nil || now.Sub(*lastUsedAt) >= agentTokenTouchInterval {
+		touchAgentToken(ctx, db, tokenID)
+	}
+
+	return &Claims{
+		Identity:     Identity{Subject: userID, Email: email, Name: name},
+		UserID:       userID,
+		HouseholdID:  householdID,
+		Role:         *role,
+		AgentTokenID: tokenID,
+		Scopes:       scopes,
+	}, nil
+}
+
+// touchAgentToken records use of a token. The WHERE clause repeats the
+// throttle so concurrent requests do not all write.
+func touchAgentToken(ctx context.Context, db DB, tokenID string) {
+	if _, err := db.Exec(ctx,
+		`UPDATE agent_tokens SET last_used_at = NOW()
+		 WHERE id = $1 AND (last_used_at IS NULL OR last_used_at <= NOW() - make_interval(secs => $2))`,
+		tokenID, agentTokenTouchInterval.Seconds(),
+	); err != nil {
+		slog.Warn("auth: agent token last_used_at update failed", "token_id", tokenID, "error", err)
+	}
 }
 
 // Close is a no-op — kept for interface compatibility.

@@ -3,6 +3,8 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/auth"
@@ -233,5 +236,245 @@ func TestAuth_ClaimsReachTools(t *testing.T) {
 	})
 	if calls != before {
 		t.Fatalf("tool ran %d time(s) for rejected requests", calls-before)
+	}
+}
+
+// seedAgentToken stores a fresh hos_ token for the seeded owner and returns
+// the plaintext and its id.
+func seedAgentToken(t *testing.T, pool *pgxpool.Pool, h testutil.Household, scopes []string, expiresAt *time.Time) (string, string) {
+	t.Helper()
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	raw := auth.AgentTokenPrefix + base64.RawURLEncoding.EncodeToString(b)
+	var id string
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO agent_tokens (user_id, household_id, name, token_prefix, token_hash, scopes, expires_at)
+		 VALUES ($1, $2, 'agent', $3, $4, $5, $6) RETURNING id::text`,
+		h.UserID, h.HouseholdID, raw[:12], auth.HashAgentToken(raw), scopes, expiresAt,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert agent token: %v", err)
+	}
+	return raw, id
+}
+
+// rpcPost sends one JSON-RPC request (2026-07-28 stateless shape) to /mcp and
+// returns the status, headers and the JSON body (SSE framing removed).
+func rpcPost(t *testing.T, url, token string, method mcp.MCPMethod, name string, params map[string]any) (*http.Response, []byte) {
+	t.Helper()
+	if params == nil {
+		params = map[string]any{}
+	}
+	params["_meta"] = map[string]any{
+		mcp.MetaKeyProtocolVersion:    mcp.ProtocolVersion20260728,
+		mcp.MetaKeyClientInfo:         map[string]any{"name": "agent-token-test", "version": "0"},
+		mcp.MetaKeyClientCapabilities: map[string]any{},
+	}
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, url+"/mcp", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set(mcp.HeaderProtocolVersion, mcp.ProtocolVersion20260728)
+	req.Header.Set(mcp.HeaderMethod, string(method))
+	if name != "" {
+		req.Header.Set(mcp.HeaderName, name)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /mcp: %v", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		for _, line := range strings.Split(string(b), "\n") {
+			if data, ok := strings.CutPrefix(line, "data:"); ok {
+				b = []byte(strings.TrimSpace(data))
+			}
+		}
+	}
+	return resp, b
+}
+
+// TestAgentTokens_EndToEnd drives the production router with per-member
+// agent tokens: a read token lists tools and calls a read tool with the
+// member's household claims, is refused a write tool with 403, a write token
+// may call it, and revoked, expired and deactivated-user tokens get the same
+// 401 challenge as a bad JWT. The Dex path is covered by the tests above.
+func TestAgentTokens_EndToEnd(t *testing.T) {
+	pool := testutil.NewPool(t)
+	_, h := testutil.SeedHousehold(t, pool)
+	iss := testutil.NewTokenIssuer(t)
+
+	s := server.NewServer(testConfig(), pool, iss.Verifier(pool))
+	whoamiCalls, writeCalls := 0, 0
+	s.RegisterTool("whoami", mcp.NewTool("whoami",
+		mcp.WithDescription("Return the caller's claims."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		whoamiCalls++
+		b, _ := json.Marshal(server.ClaimsFromContext(ctx))
+		return mcp.NewToolResultText(string(b)), nil
+	})
+	s.RegisterTool("add_note", mcp.NewTool("add_note",
+		mcp.WithDescription("Write something."),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+	), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		writeCalls++
+		return mcp.NewToolResultText("written"), nil
+	})
+	// readOnlyHint=true but destructiveHint=true: contradictory, so treated as a write.
+	s.RegisterTool("purge", mcp.NewTool("purge",
+		mcp.WithDescription("Contradictory annotations."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(true),
+	), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		writeCalls++
+		return mcp.NewToolResultText("purged"), nil
+	})
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	readTok, readID := seedAgentToken(t, pool, h, []string{"read"}, nil)
+	rwTok, _ := seedAgentToken(t, pool, h, []string{"read", "write"}, nil)
+
+	type toolResult struct {
+		Result struct {
+			IsError bool `json:"isError"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+
+	t.Run("read token lists tools", func(t *testing.T) {
+		resp, body := rpcPost(t, ts.URL, readTok, mcp.MethodToolsList, "", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d: %s", resp.StatusCode, body)
+		}
+		var r toolResult
+		if err := json.Unmarshal(body, &r); err != nil || len(r.Result.Tools) != 3 {
+			t.Fatalf("tools/list = %s (err %v)", body, err)
+		}
+	})
+
+	t.Run("read token calls a read tool with household claims", func(t *testing.T) {
+		resp, body := rpcPost(t, ts.URL, readTok, mcp.MethodToolsCall, "whoami",
+			map[string]any{"name": "whoami", "arguments": map[string]any{}})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d: %s", resp.StatusCode, body)
+		}
+		var r toolResult
+		if err := json.Unmarshal(body, &r); err != nil || r.Result.IsError || len(r.Result.Content) != 1 {
+			t.Fatalf("tool result %s (err %v)", body, err)
+		}
+		var got auth.Claims
+		if err := json.Unmarshal([]byte(r.Result.Content[0].Text), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.HouseholdID != h.HouseholdID.String() || got.UserID != h.UserID.String() ||
+			got.Role != "owner" || got.AgentTokenID != readID {
+			t.Fatalf("tool saw claims %+v", got)
+		}
+	})
+
+	for _, tool := range []string{"add_note", "purge"} {
+		t.Run("read token refused "+tool, func(t *testing.T) {
+			before := writeCalls
+			resp, body := rpcPost(t, ts.URL, readTok, mcp.MethodToolsCall, tool,
+				map[string]any{"name": tool, "arguments": map[string]any{}})
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403: %s", resp.StatusCode, body)
+			}
+			if !strings.Contains(string(body), "read-only") || !strings.Contains(string(body), "write scope") {
+				t.Fatalf("403 body %s lacks a clear scope message", body)
+			}
+			if writeCalls != before {
+				t.Fatal("write tool ran for a read-only token")
+			}
+		})
+	}
+
+	t.Run("write token calls a write tool", func(t *testing.T) {
+		before := writeCalls
+		resp, body := rpcPost(t, ts.URL, rwTok, mcp.MethodToolsCall, "add_note",
+			map[string]any{"name": "add_note", "arguments": map[string]any{}})
+		if resp.StatusCode != http.StatusOK || writeCalls != before+1 {
+			t.Fatalf("status = %d calls %d: %s", resp.StatusCode, writeCalls-before, body)
+		}
+	})
+
+	ctx := context.Background()
+	revokedTok, revokedID := seedAgentToken(t, pool, h, []string{"read", "write"}, nil)
+	if _, err := pool.Exec(ctx, `UPDATE agent_tokens SET revoked_at = NOW() WHERE id = $1`, revokedID); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Second)
+	expiredTok, _ := seedAgentToken(t, pool, h, []string{"read"}, &past)
+
+	_, h2 := testutil.SeedHousehold(t, pool)
+	inactiveTok, _ := seedAgentToken(t, pool, h2, []string{"read"}, nil)
+	if _, err := pool.Exec(ctx, `UPDATE users SET active = false WHERE id = $1`, h2.UserID); err != nil {
+		t.Fatal(err)
+	}
+
+	before := whoamiCalls
+	for name, tok := range map[string]string{
+		"revoked":       revokedTok,
+		"expired":       expiredTok,
+		"inactive user": inactiveTok,
+		"unknown":       auth.AgentTokenPrefix + strings.Repeat("A", 43),
+		"malformed":     "hos_nope",
+	} {
+		t.Run(name+" gets 401", func(t *testing.T) {
+			resp, body := rpcPost(t, ts.URL, tok, mcp.MethodToolsCall, "whoami",
+				map[string]any{"name": "whoami", "arguments": map[string]any{}})
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401: %s", resp.StatusCode, body)
+			}
+			c := resp.Header.Get("WWW-Authenticate")
+			if !strings.Contains(c, wantResourceMetadata) || !strings.Contains(c, `error="invalid_token"`) {
+				t.Fatalf("WWW-Authenticate = %q, want the bad-JWT challenge", c)
+			}
+			if !strings.Contains(string(body), "invalid or expired token") {
+				t.Fatalf("body %s differs from the bad-JWT 401", body)
+			}
+		})
+	}
+	if whoamiCalls != before {
+		t.Fatal("tool ran for a rejected agent token")
+	}
+}
+
+// TestRequireWriteScope_Backstop: even if a call reaches the tool chain
+// without AuthMiddleware's HTTP check, a read-only agent token's call to a
+// write tool returns a tool error and the handler never runs.
+func TestRequireWriteScope_Backstop(t *testing.T) {
+	s := server.NewServer(testConfig(), nil, testutil.NewTokenIssuer(t).Verifier(nil))
+	ran := false
+	s.RegisterTool("add_note", mcp.NewTool("add_note", mcp.WithDescription("w")),
+		func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			ran = true
+			return mcp.NewToolResultText("written"), nil
+		})
+	ctx := server.ContextWithClaims(context.Background(), &auth.Claims{
+		UserID: "u", HouseholdID: "h", AgentTokenID: "t", Scopes: []string{"read"},
+	})
+	msg, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": mcp.MethodToolsCall,
+		"params": map[string]any{"name": "add_note", "arguments": map[string]any{}},
+	})
+	out, _ := json.Marshal(s.MCPServer().HandleMessage(ctx, msg))
+	if ran {
+		t.Fatal("write tool ran for a read-only token")
+	}
+	if !strings.Contains(string(out), "read-only") {
+		t.Fatalf("response %s lacks the read-only message", out)
 	}
 }

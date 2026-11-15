@@ -6,10 +6,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -72,6 +74,10 @@ func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) 
 		server.WithToolCapabilities(true),
 		server.WithCacheHints(catalogueCacheTTLMs, mcp.CacheScopePrivate),
 		server.WithMethodCacheHints(mcp.MethodResourcesRead, 0, mcp.CacheScopePrivate),
+		// Backstop for read-only agent tokens: AuthMiddleware already
+		// answers 403 before the transport, this catches anything it could
+		// not see (e.g. an unparseable or unusual request shape).
+		server.WithToolHandlerMiddleware(s.requireWriteScope),
 	)
 
 	s.httpServer = server.NewStreamableHTTPServer(s.mcpServer, s.StreamableHTTPOptions()...)
@@ -100,6 +106,75 @@ func (s *Server) StreamableHTTPOptions() []server.StreamableHTTPOption {
 			return ctx
 		}),
 	}
+}
+
+// readOnlyScopeMessage is the error a read-only agent token gets for a tool
+// that may change data.
+const readOnlyScopeMessage = "this agent token is read-only: tool %q can change data and needs an agent token with the write scope"
+
+// toolIsReadOnly reports whether a registered tool may be called with a
+// read-only agent token: it must be annotated readOnlyHint=true and not
+// destructiveHint=true. Tools without annotations count as writes.
+func (s *Server) toolIsReadOnly(name string) bool {
+	st := s.mcpServer.GetTool(name)
+	if st == nil {
+		return false
+	}
+	a := st.Tool.Annotations
+	if a.DestructiveHint != nil && *a.DestructiveHint {
+		return false
+	}
+	return a.ReadOnlyHint != nil && *a.ReadOnlyHint
+}
+
+// requireWriteScope refuses non-read-only tools to callers whose claims lack
+// write rights (read-only agent tokens).
+func (s *Server) requireWriteScope(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if c := ClaimsFromContext(ctx); c != nil && !c.CanWrite() && !s.toolIsReadOnly(req.Params.Name) {
+			return mcp.NewToolResultError(fmt.Sprintf(readOnlyScopeMessage, req.Params.Name)), nil
+		}
+		return next(ctx, req)
+	}
+}
+
+// maxScopeCheckBody bounds how much of a read-only token's request body
+// AuthMiddleware buffers to find tools/call names.
+const maxScopeCheckBody = 8 << 20
+
+// writeToolCalled returns the name of the first tools/call in a JSON-RPC
+// body (a single message or a batch) whose tool is not read-only, or "".
+// Bodies it cannot parse return "": the transport rejects them anyway and
+// requireWriteScope still guards the handlers.
+func (s *Server) writeToolCalled(body []byte) string {
+	type rpcMsg struct {
+		Method string `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	var msgs []rpcMsg
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		if json.Unmarshal(trimmed, &msgs) != nil {
+			return ""
+		}
+	} else {
+		var m rpcMsg
+		if json.Unmarshal(trimmed, &m) != nil {
+			return ""
+		}
+		msgs = []rpcMsg{m}
+	}
+	for _, m := range msgs {
+		if m.Method == string(mcp.MethodToolsCall) && !s.toolIsReadOnly(m.Params.Name) {
+			if s.mcpServer.GetTool(m.Params.Name) == nil {
+				continue // unknown tool: the transport answers "not found"
+			}
+			return m.Params.Name
+		}
+	}
+	return ""
 }
 
 // MCPServer returns the underlying mcp-go server with every registered tool,
@@ -302,6 +377,13 @@ func originAllowed(origin string, allowed map[string]bool) bool {
 //   - valid token, no household membership: 403
 //   - database failure during the lookup: 500
 //
+// A bearer starting with "hos_" is a per-member agent token (auth.
+// VerifyAgentToken): it is never parsed as a JWT, and an unknown, revoked,
+// expired or deactivated-user token gets the same 401 as a bad JWT. A token
+// without the write scope may only call tools annotated readOnlyHint=true;
+// a tools/call for any other tool is answered 403 with a clear message
+// before it reaches the transport.
+//
 // When the verifier is in disabled mode (no issuer URL configured), the middleware
 // passes through with an anonymous local-dev identity. This enables local development
 // without a running Dex instance.
@@ -353,6 +435,23 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 				challenge(w, true)
 				writeJSONError(w, http.StatusUnauthorized, "invalid or expired token")
 				return
+			}
+
+			if !claims.CanWrite() {
+				body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxScopeCheckBody))
+				if err != nil {
+					writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+					return
+				}
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				if tool := s.writeToolCalled(body); tool != "" {
+					slog.Info("auth middleware: read-only agent token refused a write tool",
+						"token_id", claims.AgentTokenID, "tool", tool)
+					// No WWW-Authenticate step-up challenge: agent tokens are
+					// static secrets, so no OAuth flow can widen their scope.
+					writeJSONError(w, http.StatusForbidden, fmt.Sprintf(readOnlyScopeMessage, tool))
+					return
+				}
 			}
 
 			ctx := context.WithValue(r.Context(), claimsKey, claims)
