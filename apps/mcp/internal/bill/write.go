@@ -187,87 +187,344 @@ func NewCreateBillTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 	return "create_bill", tool, handler
 }
 
+// updatedBill is the update_bill response: the stored row after the update
+// plus its next due date. amount and due_day are nullable because bills
+// created through the API may lack them; next_due_date and days_until_due
+// are null when the bill has no due_day.
+type updatedBill struct {
+	ID           uuid.UUID  `json:"id"`
+	Name         string     `json:"name"`
+	Amount       *float64   `json:"amount"`
+	DueDay       *int       `json:"due_day"`
+	Category     *string    `json:"category"`
+	IsAutopay    bool       `json:"is_autopay"`
+	VendorID     *uuid.UUID `json:"vendor_id"`
+	EntityType   *string    `json:"entity_type"`
+	EntityID     *uuid.UUID `json:"entity_id"`
+	PaymentURL   *string    `json:"payment_url"`
+	Notes        *string    `json:"notes"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	NextDueDate  *string    `json:"next_due_date"`
+	DaysUntilDue *int       `json:"days_until_due"`
+}
+
+// billUpdate is the validated update_bill arguments: the bill to change and
+// the columns to set, in a fixed order. Column names come only from
+// parseUpdateBillInput, never from the caller.
+type billUpdate struct {
+	billID   uuid.UUID
+	columns  []string
+	values   []any
+	vendorID *uuid.UUID // set when vendor_id is being set (not cleared)
+}
+
+func (u *billUpdate) set(column string, value any) {
+	u.columns = append(u.columns, column)
+	u.values = append(u.values, value)
+}
+
+// NewUpdateBillTool creates the update_bill MCP tool.
+// It changes only the fields given for a bill in the authenticated household
+// and returns the updated bill including its next due date. A bill in another
+// household is reported as not found. Invalid input returns a tool error and
+// changes nothing.
+func NewUpdateBillTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+	tool := mcp.NewTool("update_bill",
+		mcp.WithDescription("Update a bill in the household. Only the fields you pass are changed; "+
+			"omitted (or null) fields keep their current value. Pass an empty string to clear an optional "+
+			"text field (category, vendor_id, payment_url, notes; entity_type and entity_id together). "+
+			"Returns the updated bill with its next due date."),
+		mcp.WithString("bill_id",
+			mcp.Description("ID (UUID) of the bill to update, e.g. from list_bills"),
+			mcp.Required(),
+		),
+		mcp.WithString("name",
+			mcp.Description("New bill name"),
+		),
+		mcp.WithNumber("amount",
+			mcp.Description("New amount due each month, in dollars (e.g. 125.50)"),
+			mcp.Min(0),
+		),
+		mcp.WithNumber("due_day",
+			mcp.Description("New day of the month the bill is due, 1-31. In shorter months a day past the end falls on the last day."),
+			mcp.Min(1),
+			mcp.Max(31),
+		),
+		mcp.WithString("category",
+			mcp.Description("New category (e.g. Utilities); empty string clears it"),
+		),
+		mcp.WithBoolean("is_autopay",
+			mcp.Description("Whether the bill is paid automatically"),
+		),
+		mcp.WithString("vendor_id",
+			mcp.Description("Vendor ID (UUID) of a vendor in this household; empty string clears it"),
+		),
+		mcp.WithString("entity_type",
+			mcp.Description("Entity type the bill belongs to (e.g. property, vehicle, pet). Must be passed with entity_id; empty strings for both clear them."),
+		),
+		mcp.WithString("entity_id",
+			mcp.Description("Entity ID (UUID) the bill belongs to. Must be passed with entity_type."),
+		),
+		mcp.WithString("payment_url",
+			mcp.Description("http(s) URL where the bill is paid; empty string clears it"),
+		),
+		mcp.WithString("notes",
+			mcp.Description("Free-text notes; empty string clears them"),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		claims := server.ClaimsFromContext(ctx)
+		if claims == nil {
+			return mcp.NewToolResultError("unauthorized"), nil
+		}
+
+		in, err := parseUpdateBillInput(req.GetArguments())
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("update bill: begin tx: %w", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+		if in.vendorID != nil {
+			var exists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM vendors WHERE id = $1 AND household_id = $2)`,
+				*in.vendorID, claims.HouseholdID,
+			).Scan(&exists); err != nil {
+				return nil, fmt.Errorf("update bill: check vendor: %w", err)
+			}
+			if !exists {
+				return mcp.NewToolResultError("vendor_id not found in this household"), nil
+			}
+		}
+
+		// $1 is the bill id, $2 the household; the SET values follow.
+		args := []any{in.billID, claims.HouseholdID}
+		sets := make([]string, 0, len(in.columns)+1)
+		for i, col := range in.columns {
+			sets = append(sets, fmt.Sprintf("%s = $%d", col, i+3))
+			args = append(args, in.values[i])
+		}
+		sets = append(sets, "updated_at = NOW()")
+
+		var b updatedBill
+		var today time.Time
+		err = tx.QueryRow(ctx,
+			`UPDATE bills SET `+strings.Join(sets, ", ")+`
+			 WHERE id = $1 AND household_id = $2
+			 RETURNING id, name, amount, due_day, category, COALESCE(is_autopay, false),
+			           vendor_id, entity_type, entity_id, payment_url, notes,
+			           created_at, updated_at, CURRENT_DATE`,
+			args...,
+		).Scan(&b.ID, &b.Name, &b.Amount, &b.DueDay, &b.Category, &b.IsAutopay,
+			&b.VendorID, &b.EntityType, &b.EntityID, &b.PaymentURL, &b.Notes,
+			&b.CreatedAt, &b.UpdatedAt, &today)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return mcp.NewToolResultError("bill not found"), nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("update bill: update: %w", err)
+		}
+
+		// Same event the API writes on bill update.
+		payload, err := json.Marshal(map[string]string{"id": b.ID.String(), "name": b.Name})
+		if err != nil {
+			return nil, fmt.Errorf("update bill: marshal event: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO outbox_events (type, payload, household_id) VALUES ($1, $2, $3)`,
+			"bill.updated", payload, claims.HouseholdID,
+		); err != nil {
+			return nil, fmt.Errorf("update bill: outbox event: %w", err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("update bill: commit: %w", err)
+		}
+
+		// Bills created through the API may have no due_day.
+		if b.DueDay != nil && *b.DueDay >= 1 && *b.DueDay <= 31 {
+			next := nextDueDate(today, *b.DueDay)
+			date := next.Format("2006-01-02")
+			days := int(next.Sub(today).Hours() / 24)
+			b.NextDueDate, b.DaysUntilDue = &date, &days
+		}
+
+		result, err := json.Marshal(b)
+		if err != nil {
+			return nil, fmt.Errorf("update bill: marshal result: %w", err)
+		}
+		return mcp.NewToolResultText(string(result)), nil
+	}
+
+	return "update_bill", tool, handler
+}
+
+// parseUpdateBillInput validates update_bill arguments. A field that is
+// absent or null is left unchanged. name, amount, due_day and is_autopay
+// cannot be cleared; a blank string clears the other text fields. The
+// returned error message is shown to the caller as the tool error.
+func parseUpdateBillInput(args map[string]any) (billUpdate, error) {
+	var u billUpdate
+
+	id, err := optionalUUID(args, "bill_id")
+	if err != nil {
+		return u, err
+	}
+	if id == nil {
+		return u, errors.New("bill_id is required")
+	}
+	u.billID = *id
+
+	if given(args, "name") {
+		name, err := parseName(args)
+		if err != nil {
+			return u, err
+		}
+		if name == nil {
+			return u, errors.New("name cannot be blank")
+		}
+		u.set("name", *name)
+	}
+
+	if amount, ok, err := parseAmount(args); err != nil {
+		return u, err
+	} else if ok {
+		u.set("amount", amount)
+	}
+
+	if dueDay, ok, err := parseDueDay(args); err != nil {
+		return u, err
+	} else if ok {
+		u.set("due_day", dueDay)
+	}
+
+	if given(args, "category") {
+		category, err := parseCategory(args)
+		if err != nil {
+			return u, err
+		}
+		u.set("category", category)
+	}
+
+	if autopay, ok, err := parseIsAutopay(args); err != nil {
+		return u, err
+	} else if ok {
+		u.set("is_autopay", autopay)
+	}
+
+	if given(args, "vendor_id") {
+		vendorID, err := optionalUUID(args, "vendor_id")
+		if err != nil {
+			return u, err
+		}
+		u.vendorID = vendorID
+		u.set("vendor_id", vendorID)
+	}
+
+	if given(args, "entity_type") || given(args, "entity_id") {
+		if !given(args, "entity_type") || !given(args, "entity_id") {
+			return u, errors.New("entity_type and entity_id must be provided together")
+		}
+		entityType, entityID, err := parseEntity(args)
+		if err != nil {
+			return u, err
+		}
+		if (entityType == nil) != (entityID == nil) {
+			return u, errors.New("entity_type and entity_id must be set or cleared together")
+		}
+		u.set("entity_type", entityType)
+		u.set("entity_id", entityID)
+	}
+
+	if given(args, "payment_url") {
+		paymentURL, err := parsePaymentURL(args)
+		if err != nil {
+			return u, err
+		}
+		u.set("payment_url", paymentURL)
+	}
+
+	if given(args, "notes") {
+		notes, err := optionalString(args, "notes")
+		if err != nil {
+			return u, err
+		}
+		u.set("notes", notes)
+	}
+
+	if len(u.columns) == 0 {
+		return u, errors.New("no fields to update: pass at least one of name, amount, due_day, " +
+			"category, is_autopay, vendor_id, entity_type/entity_id, payment_url, notes")
+	}
+	return u, nil
+}
+
+// given reports whether args has a non-null value for key.
+func given(args map[string]any, key string) bool {
+	v, present := args[key]
+	return present && v != nil
+}
+
 // parseCreateBillInput validates create_bill arguments. The returned error
 // message is shown to the caller as the tool error.
 func parseCreateBillInput(args map[string]any) (createBillInput, error) {
 	var in createBillInput
 
-	name, err := optionalString(args, "name")
+	name, err := parseName(args)
 	if err != nil {
 		return in, err
 	}
 	if name == nil {
 		return in, errors.New("name is required")
 	}
-	if utf8.RuneCountInString(*name) > maxNameLen {
-		return in, fmt.Errorf("name must be at most %d characters", maxNameLen)
-	}
 	in.name = *name
 
-	amount, ok, err := number(args, "amount")
+	amount, ok, err := parseAmount(args)
 	if err != nil {
 		return in, err
 	}
 	if !ok {
 		return in, errors.New("amount is required")
 	}
-	if amount < 0 || amount > maxAmount {
-		return in, fmt.Errorf("amount must be between 0 and %.2f", maxAmount)
-	}
-	in.amount = math.Round(amount*100) / 100
+	in.amount = amount
 
-	dueDay, ok, err := number(args, "due_day")
+	dueDay, ok, err := parseDueDay(args)
 	if err != nil {
 		return in, err
 	}
 	if !ok {
 		return in, errors.New("due_day is required")
 	}
-	if dueDay != math.Trunc(dueDay) || dueDay < 1 || dueDay > 31 {
-		return in, errors.New("due_day must be a whole number from 1 to 31")
-	}
-	in.dueDay = int(dueDay)
+	in.dueDay = dueDay
 
-	if in.category, err = optionalString(args, "category"); err != nil {
+	if in.category, err = parseCategory(args); err != nil {
 		return in, err
 	}
-	if in.category != nil && utf8.RuneCountInString(*in.category) > maxCategoryLen {
-		return in, fmt.Errorf("category must be at most %d characters", maxCategoryLen)
-	}
 
-	if v, present := args["is_autopay"]; present && v != nil {
-		b, ok := v.(bool)
-		if !ok {
-			return in, errors.New("is_autopay must be a boolean")
-		}
-		in.isAutopay = b
+	if in.isAutopay, _, err = parseIsAutopay(args); err != nil {
+		return in, err
 	}
 
 	if in.vendorID, err = optionalUUID(args, "vendor_id"); err != nil {
 		return in, err
 	}
 
-	if in.entityType, err = optionalString(args, "entity_type"); err != nil {
-		return in, err
-	}
-	if in.entityID, err = optionalUUID(args, "entity_id"); err != nil {
+	if in.entityType, in.entityID, err = parseEntity(args); err != nil {
 		return in, err
 	}
 	if (in.entityType == nil) != (in.entityID == nil) {
 		return in, errors.New("entity_type and entity_id must be provided together")
 	}
-	if in.entityType != nil && utf8.RuneCountInString(*in.entityType) > maxEntityTypeLen {
-		return in, fmt.Errorf("entity_type must be at most %d characters", maxEntityTypeLen)
-	}
 
-	if in.paymentURL, err = optionalString(args, "payment_url"); err != nil {
+	if in.paymentURL, err = parsePaymentURL(args); err != nil {
 		return in, err
-	}
-	if in.paymentURL != nil {
-		u, err := url.Parse(*in.paymentURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return in, errors.New("payment_url must be an http or https URL")
-		}
 	}
 
 	if in.notes, err = optionalString(args, "notes"); err != nil {
@@ -275,6 +532,95 @@ func parseCreateBillInput(args map[string]any) (createBillInput, error) {
 	}
 
 	return in, nil
+}
+
+// Field parsers shared by create_bill and update_bill so both tools apply
+// the same rules and return the same messages. Each returns nil (or ok=false)
+// when the argument is absent, null or blank.
+
+func parseName(args map[string]any) (*string, error) {
+	name, err := optionalString(args, "name")
+	if err != nil {
+		return nil, err
+	}
+	if name != nil && utf8.RuneCountInString(*name) > maxNameLen {
+		return nil, fmt.Errorf("name must be at most %d characters", maxNameLen)
+	}
+	return name, nil
+}
+
+func parseAmount(args map[string]any) (float64, bool, error) {
+	amount, ok, err := number(args, "amount")
+	if err != nil || !ok {
+		return 0, ok, err
+	}
+	if amount < 0 || amount > maxAmount {
+		return 0, false, fmt.Errorf("amount must be between 0 and %.2f", maxAmount)
+	}
+	return math.Round(amount*100) / 100, true, nil
+}
+
+func parseDueDay(args map[string]any) (int, bool, error) {
+	dueDay, ok, err := number(args, "due_day")
+	if err != nil || !ok {
+		return 0, ok, err
+	}
+	if dueDay != math.Trunc(dueDay) || dueDay < 1 || dueDay > 31 {
+		return 0, false, errors.New("due_day must be a whole number from 1 to 31")
+	}
+	return int(dueDay), true, nil
+}
+
+func parseCategory(args map[string]any) (*string, error) {
+	category, err := optionalString(args, "category")
+	if err != nil {
+		return nil, err
+	}
+	if category != nil && utf8.RuneCountInString(*category) > maxCategoryLen {
+		return nil, fmt.Errorf("category must be at most %d characters", maxCategoryLen)
+	}
+	return category, nil
+}
+
+func parseIsAutopay(args map[string]any) (val, ok bool, err error) {
+	v, present := args["is_autopay"]
+	if !present || v == nil {
+		return false, false, nil
+	}
+	b, isBool := v.(bool)
+	if !isBool {
+		return false, false, errors.New("is_autopay must be a boolean")
+	}
+	return b, true, nil
+}
+
+// parseEntity parses entity_type and entity_id. The caller checks that they
+// are given together.
+func parseEntity(args map[string]any) (*string, *uuid.UUID, error) {
+	entityType, err := optionalString(args, "entity_type")
+	if err != nil {
+		return nil, nil, err
+	}
+	entityID, err := optionalUUID(args, "entity_id")
+	if err != nil {
+		return nil, nil, err
+	}
+	if entityType != nil && utf8.RuneCountInString(*entityType) > maxEntityTypeLen {
+		return nil, nil, fmt.Errorf("entity_type must be at most %d characters", maxEntityTypeLen)
+	}
+	return entityType, entityID, nil
+}
+
+func parsePaymentURL(args map[string]any) (*string, error) {
+	paymentURL, err := optionalString(args, "payment_url")
+	if err != nil || paymentURL == nil {
+		return nil, err
+	}
+	u, err := url.Parse(*paymentURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, errors.New("payment_url must be an http or https URL")
+	}
+	return paymentURL, nil
 }
 
 // optionalString returns the trimmed string argument, or nil when it is

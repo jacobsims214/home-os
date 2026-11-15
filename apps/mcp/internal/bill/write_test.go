@@ -301,3 +301,326 @@ func TestNextDueDate(t *testing.T) {
 		}
 	}
 }
+
+// createTestBill creates a fully populated bill through create_bill.
+func createTestBill(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vendorID uuid.UUID) createdBill {
+	t.Helper()
+	_, _, create := NewCreateBillTool(pool)
+	res, text := callTool(t, ctx, create, "create_bill", map[string]any{
+		"name":        "Electric",
+		"amount":      125.5,
+		"due_day":     10.0,
+		"category":    "Utilities",
+		"is_autopay":  true,
+		"vendor_id":   vendorID.String(),
+		"entity_type": "property",
+		"entity_id":   uuid.NewString(),
+		"payment_url": "https://power.example.com/pay",
+		"notes":       "Paperless billing",
+	})
+	if res.IsError {
+		t.Fatalf("create_bill returned tool error: %s", text)
+	}
+	var b createdBill
+	if err := json.Unmarshal([]byte(text), &b); err != nil {
+		t.Fatalf("decode %q: %v", text, err)
+	}
+	return b
+}
+
+func insertVendor(t *testing.T, pool *pgxpool.Pool, householdID uuid.UUID, name string) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO vendors (household_id, name) VALUES ($1, $2) RETURNING id`,
+		householdID, name,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert vendor: %v", err)
+	}
+	return id
+}
+
+func decodeUpdated(t *testing.T, text string) updatedBill {
+	t.Helper()
+	var b updatedBill
+	if err := json.Unmarshal([]byte(text), &b); err != nil {
+		t.Fatalf("decode %q: %v", text, err)
+	}
+	return b
+}
+
+func updatedEvents(t *testing.T, pool *pgxpool.Pool, billID, householdID uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM outbox_events
+		 WHERE type = 'bill.updated' AND payload->>'id' = $1 AND household_id = $2`,
+		billID.String(), householdID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	return n
+}
+
+// TestUpdateBill_PartialUpdate changes amount and due_day only and checks
+// every other field keeps its value, in the response and in the table.
+func TestUpdateBill_PartialUpdate(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	vendorID := insertVendor(t, pool, hh.HouseholdID, "Power Co")
+	orig := createTestBill(t, ctx, pool, vendorID)
+
+	var today time.Time
+	if err := pool.QueryRow(context.Background(), `SELECT CURRENT_DATE`).Scan(&today); err != nil {
+		t.Fatalf("current date: %v", err)
+	}
+
+	_, _, update := NewUpdateBillTool(pool)
+	res, text := callTool(t, ctx, update, "update_bill", map[string]any{
+		"bill_id": orig.ID.String(),
+		"amount":  99.999, // rounded to cents like create_bill
+		"due_day": float64(today.Day()),
+		"notes":   nil, // null means unchanged
+	})
+	if res.IsError {
+		t.Fatalf("update_bill returned tool error: %s", text)
+	}
+	got := decodeUpdated(t, text)
+
+	if got.ID != orig.ID || got.Amount == nil || *got.Amount != 100 || got.DueDay == nil || *got.DueDay != today.Day() {
+		t.Errorf("amount/due_day not updated: %s", text)
+	}
+	if got.Name != orig.Name || got.IsAutopay != orig.IsAutopay ||
+		*got.Category != *orig.Category || *got.VendorID != *orig.VendorID ||
+		*got.EntityType != *orig.EntityType || *got.EntityID != *orig.EntityID ||
+		*got.PaymentURL != *orig.PaymentURL || *got.Notes != *orig.Notes {
+		t.Errorf("untouched fields changed:\n got %s\n was %+v", text, orig)
+	}
+	if want := today.Format("2006-01-02"); got.NextDueDate == nil || *got.NextDueDate != want ||
+		got.DaysUntilDue == nil || *got.DaysUntilDue != 0 {
+		t.Errorf("next due = %v (+%v), want %s (+0)", got.NextDueDate, got.DaysUntilDue, want)
+	}
+	if !got.UpdatedAt.After(got.CreatedAt) && !got.UpdatedAt.Equal(got.CreatedAt) {
+		t.Errorf("updated_at %v before created_at %v", got.UpdatedAt, got.CreatedAt)
+	}
+
+	// The table agrees with the response.
+	var name, notes string
+	var amount float64
+	var dueDay int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT name, amount, due_day, notes FROM bills WHERE id = $1`, orig.ID,
+	).Scan(&name, &amount, &dueDay, &notes); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if name != "Electric" || amount != 100 || dueDay != today.Day() || notes != "Paperless billing" {
+		t.Errorf("stored row: name=%q amount=%v due_day=%d notes=%q", name, amount, dueDay, notes)
+	}
+	if n := updatedEvents(t, pool, orig.ID, hh.HouseholdID); n != 1 {
+		t.Errorf("bill.updated outbox events = %d, want 1", n)
+	}
+}
+
+// TestUpdateBill_SetAndClearOptionalFields sets the remaining fields, then
+// clears every optional field with empty strings.
+func TestUpdateBill_SetAndClearOptionalFields(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	orig := createTestBill(t, ctx, pool, insertVendor(t, pool, hh.HouseholdID, "Power Co"))
+	newVendor := insertVendor(t, pool, hh.HouseholdID, "Gas Co")
+	vehicleID := uuid.New()
+
+	_, _, update := NewUpdateBillTool(pool)
+	res, text := callTool(t, ctx, update, "update_bill", map[string]any{
+		"bill_id":     orig.ID.String(),
+		"name":        "  Gas  ",
+		"category":    "Fuel",
+		"is_autopay":  false,
+		"vendor_id":   newVendor.String(),
+		"entity_type": "vehicle",
+		"entity_id":   vehicleID.String(),
+		"payment_url": "http://gas.example.com",
+		"notes":       "new notes",
+	})
+	if res.IsError {
+		t.Fatalf("update_bill returned tool error: %s", text)
+	}
+	got := decodeUpdated(t, text)
+	if got.Name != "Gas" || got.IsAutopay || *got.Category != "Fuel" || *got.VendorID != newVendor ||
+		*got.EntityType != "vehicle" || *got.EntityID != vehicleID ||
+		*got.PaymentURL != "http://gas.example.com" || *got.Notes != "new notes" {
+		t.Errorf("fields not set: %s", text)
+	}
+	if *got.Amount != 125.5 || *got.DueDay != 10 {
+		t.Errorf("amount/due_day changed: %s", text)
+	}
+
+	res, text = callTool(t, ctx, update, "update_bill", map[string]any{
+		"bill_id":     orig.ID.String(),
+		"category":    "",
+		"vendor_id":   "",
+		"entity_type": " ",
+		"entity_id":   "",
+		"payment_url": "",
+		"notes":       "",
+	})
+	if res.IsError {
+		t.Fatalf("clearing update returned tool error: %s", text)
+	}
+	got = decodeUpdated(t, text)
+	if got.Category != nil || got.VendorID != nil || got.EntityType != nil || got.EntityID != nil ||
+		got.PaymentURL != nil || got.Notes != nil {
+		t.Errorf("optional fields not cleared: %s", text)
+	}
+	if got.Name != "Gas" {
+		t.Errorf("name changed by clearing update: %s", text)
+	}
+	if n := updatedEvents(t, pool, orig.ID, hh.HouseholdID); n != 2 {
+		t.Errorf("bill.updated outbox events = %d, want 2", n)
+	}
+}
+
+// TestUpdateBill_OtherHouseholdNotFound checks a bill in another household
+// is reported as not found and left unchanged.
+func TestUpdateBill_OtherHouseholdNotFound(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	otherCtx, other := testutil.SeedHousehold(t, pool)
+	orig := createTestBill(t, ctx, pool, insertVendor(t, pool, hh.HouseholdID, "Power Co"))
+
+	_, _, update := NewUpdateBillTool(pool)
+
+	tests := []struct {
+		name string
+		id   string
+	}{
+		{"bill in another household", orig.ID.String()},
+		{"bill that does not exist", uuid.NewString()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, text := callTool(t, otherCtx, update, "update_bill", map[string]any{
+				"bill_id": tc.id, "amount": 1.0,
+			})
+			if !res.IsError || !strings.Contains(text, "bill not found") {
+				t.Fatalf("want 'bill not found' tool error, got %s", text)
+			}
+		})
+	}
+
+	var amount float64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT amount FROM bills WHERE id = $1`, orig.ID).Scan(&amount); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if amount != 125.5 {
+		t.Errorf("other household changed amount to %v", amount)
+	}
+	if n := updatedEvents(t, pool, orig.ID, other.HouseholdID) + updatedEvents(t, pool, orig.ID, hh.HouseholdID); n != 0 {
+		t.Errorf("bill.updated outbox events = %d, want 0", n)
+	}
+}
+
+// TestUpdateBill_LegacyNullFields updates a bill created without amount or
+// due_day (possible through the API) without failing.
+func TestUpdateBill_LegacyNullFields(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+
+	var id uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO bills (household_id, name, is_autopay) VALUES ($1, 'Old', NULL) RETURNING id`,
+		hh.HouseholdID,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert bill: %v", err)
+	}
+
+	_, _, update := NewUpdateBillTool(pool)
+	res, text := callTool(t, ctx, update, "update_bill", map[string]any{
+		"bill_id": id.String(), "notes": "still no due day",
+	})
+	if res.IsError {
+		t.Fatalf("update_bill returned tool error: %s", text)
+	}
+	got := decodeUpdated(t, text)
+	if got.Amount != nil || got.DueDay != nil || got.NextDueDate != nil || got.DaysUntilDue != nil || got.IsAutopay {
+		t.Errorf("unexpected legacy fields: %s", text)
+	}
+	if got.Notes == nil || *got.Notes != "still no due day" {
+		t.Errorf("notes not set: %s", text)
+	}
+}
+
+// TestUpdateBill_Validation checks that bad input is a tool error and
+// changes nothing.
+func TestUpdateBill_Validation(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	_, other := testutil.SeedHousehold(t, pool)
+	orig := createTestBill(t, ctx, pool, insertVendor(t, pool, hh.HouseholdID, "Power Co"))
+	otherVendor := insertVendor(t, pool, other.HouseholdID, "Not mine")
+
+	withID := func(args map[string]any) map[string]any {
+		args["bill_id"] = orig.ID.String()
+		return args
+	}
+
+	_, _, update := NewUpdateBillTool(pool)
+
+	tests := []struct {
+		name    string
+		args    map[string]any
+		wantErr string
+	}{
+		{"missing bill_id", map[string]any{"amount": 1.0}, "bill_id is required"},
+		{"bill_id not a uuid", map[string]any{"bill_id": "abc", "amount": 1.0}, "bill_id must be a UUID"},
+		{"no fields", withID(map[string]any{}), "no fields to update"},
+		{"only null fields", withID(map[string]any{"name": nil, "notes": nil}), "no fields to update"},
+		{"blank name", withID(map[string]any{"name": "  "}), "name cannot be blank"},
+		{"name too long", withID(map[string]any{"name": strings.Repeat("x", 256)}), "name must be at most"},
+		{"negative amount", withID(map[string]any{"amount": -1.0}), "amount must be between"},
+		{"amount not a number", withID(map[string]any{"amount": "12"}), "amount must be a number"},
+		{"due_day 32", withID(map[string]any{"due_day": 32.0}), "due_day must be a whole number"},
+		{"due_day fractional", withID(map[string]any{"due_day": 1.5}), "due_day must be a whole number"},
+		{"category too long", withID(map[string]any{"category": strings.Repeat("c", 101)}), "category must be at most"},
+		{"is_autopay not a bool", withID(map[string]any{"is_autopay": "yes"}), "is_autopay must be a boolean"},
+		{"vendor_id not a uuid", withID(map[string]any{"vendor_id": "abc"}), "vendor_id must be a UUID"},
+		{"vendor from another household", withID(map[string]any{"vendor_id": otherVendor.String()}), "vendor_id not found"},
+		{"entity_type alone", withID(map[string]any{"entity_type": "pet"}), "must be provided together"},
+		{"entity_id alone", withID(map[string]any{"entity_id": uuid.NewString()}), "must be provided together"},
+		{"entity cleared on one side", withID(map[string]any{"entity_type": "", "entity_id": uuid.NewString()}), "set or cleared together"},
+		{"payment_url not http", withID(map[string]any{"payment_url": "ftp://x.example.com"}), "payment_url must be"},
+		{"valid field with invalid field", withID(map[string]any{"amount": 5.0, "due_day": 0.0}), "due_day must be a whole number"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, text := callTool(t, ctx, update, "update_bill", tc.args)
+			if !res.IsError {
+				t.Fatalf("want tool error, got %s", text)
+			}
+			if !strings.Contains(text, tc.wantErr) {
+				t.Errorf("error %q does not contain %q", text, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("no claims", func(t *testing.T) {
+		res, _ := callTool(t, context.Background(), update, "update_bill", withID(map[string]any{"amount": 1.0}))
+		if !res.IsError {
+			t.Fatal("want tool error without claims")
+		}
+	})
+
+	var amount float64
+	var vendor uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`SELECT amount, vendor_id FROM bills WHERE id = $1`, orig.ID).Scan(&amount, &vendor); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if amount != 125.5 || vendor != *orig.VendorID {
+		t.Errorf("invalid calls changed the bill: amount=%v vendor=%s", amount, vendor)
+	}
+	if n := updatedEvents(t, pool, orig.ID, hh.HouseholdID); n != 0 {
+		t.Errorf("invalid calls wrote %d bill.updated events", n)
+	}
+}
