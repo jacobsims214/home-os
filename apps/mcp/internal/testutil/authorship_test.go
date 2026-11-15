@@ -360,6 +360,7 @@ func TestAuthorship050_Reversible(t *testing.T) {
 	})
 
 	for cycle := 0; cycle < 2; cycle++ {
+		applyMigration(t, pool, "054_change_notifications.down.sql") // its trigger is on 050's activity_log
 		applyMigration(t, pool, "050_authorship.down.sql")
 		if n := countRows(t, pool, `SELECT count(*) FROM pg_tables WHERE tablename = 'activity_log'`); n != 0 {
 			t.Fatalf("cycle %d: activity_log left", cycle)

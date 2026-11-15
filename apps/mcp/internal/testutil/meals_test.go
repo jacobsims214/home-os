@@ -29,6 +29,7 @@ func TestMeals047_Reversible(t *testing.T) {
 
 	// 049 replaces entity_household() on top of 047, and 050 adds authorship
 	// on top of both; undo them first.
+	applyMigration(t, pool, "054_change_notifications.down.sql") // its trigger is on 050's activity_log
 	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "049_guides.down.sql")
 	applyMigration(t, pool, "047_meals.down.sql")

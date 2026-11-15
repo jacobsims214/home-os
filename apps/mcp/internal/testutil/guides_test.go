@@ -24,6 +24,7 @@ func TestGuides049_Reversible(t *testing.T) {
 	blob := insertID(t, pool, `INSERT INTO file_blobs (data, size) VALUES ('x', 1) RETURNING id`)
 	file := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'filter.jpg', 1, 'guide', $3) RETURNING id`, f.household, blob, guide)
 
+	applyMigration(t, pool, "054_change_notifications.down.sql") // its trigger is on 050's activity_log
 	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "049_guides.down.sql")
 	if n := countRows(t, pool, `SELECT count(*) FROM pg_tables WHERE tablename IN ('guides', 'guide_revisions')`); n != 0 {

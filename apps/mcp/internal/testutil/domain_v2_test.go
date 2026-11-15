@@ -419,6 +419,7 @@ func TestDomainV2_Backfill039(t *testing.T) {
 	// columns and triggers to tables of all of them. 051 only touches
 	// secret_keys and 052 one bills column; they are undone first to keep the
 	// chain strictly newest-first.
+	apply("054_change_notifications.down.sql")
 	apply("052_bills_paid_for_due_date.down.sql")
 	apply("051_secret_key_verifier.down.sql")
 	apply("050_authorship.down.sql")
