@@ -49,7 +49,7 @@ export HOMEOS_PASSWORD=...
 To check as the other member, change the token or user/password for that one command:
 
 ```bash
-HOMEOS_AGENT_TOKEN="$AMBER_TOKEN" ./mcpcall.py list_notes
+HOMEOS_AGENT_TOKEN="$AMBER_TOKEN" ./mcpcall.py note_find
 ```
 
 The agents themselves need the Home OS MCP attached with that member's credentials
@@ -63,10 +63,11 @@ snippet at the end of `personas.md` in their system prompt.
 
    ```bash
    ./mcpcall.py -list                                   # what tools exist right now
-   ./mcpcall.py list_calendars
-   ./mcpcall.py --text list_events '{"start_date":"2026-11-01","end_date":"2026-12-31"}' | jq length
-   ./mcpcall.py list_bills
-   ./mcpcall.py list_notes
+   ./mcpcall.py family_overview                         # people, calendars, counts, next 7 days
+   ./mcpcall.py calendar_find
+   ./mcpcall.py --text event_find '{"from":"2026-11-01","to":"2026-12-31"}' | jq '{returned, total}'
+   ./mcpcall.py bill_find
+   ./mcpcall.py note_find
    ```
 
 2. **Play a persona turn.** Pick a scenario from `personas.md`. The session name is the
@@ -80,8 +81,8 @@ snippet at the end of `personas.md` in their system prompt.
 
    ```text
    == jacob/cal (69s)
-     tool ok  mcp__home-os__list_calendars {}
-     tool ok  mcp__home-os__create_event {"calendar_id": "...", "title": "Soccer", ...}
+     tool ok  mcp__home-os__calendar_find {}
+     tool ok  mcp__home-os__event_create {"calendar_id": "...", "title": "Soccer", ...}
    REPLY: Done - 9 soccer practices on the Family calendar, Tue/Thu 5:30-6:30pm ...
    ```
 
@@ -92,13 +93,21 @@ snippet at the end of `personas.md` in their system prompt.
    anything shared, as the other member:
 
    ```bash
-   ./mcpcall.py --text list_events '{"start_date":"2026-11-17","end_date":"2026-11-17"}' | jq '.[] | {title,start,end}'
-   ./mcpcall.py check_conflicts '{"start_time":"2026-11-19T17:45:00-05:00","end_time":"2026-11-19T18:15:00-05:00"}'
-   ./mcpcall.py get_daily_briefing '{"date":"2026-11-16"}'
+   ./mcpcall.py --text event_find '{"from":"2026-11-17","to":"2026-11-17"}' | jq '.items[] | {title,start,end}'
+   # conflicts: event_find with from/to = the proposed time
+   ./mcpcall.py event_find '{"from":"2026-11-19T17:45:00-05:00","to":"2026-11-19T18:15:00-05:00"}'
+   ./mcpcall.py calendar_find_free_time '{"from":"2026-11-19","duration_minutes":60,"start_hour":14,"end_hour":20}'
+   ./mcpcall.py agenda_get '{"from":"2026-11-16"}'
+   ./mcpcall.py bill_find '{"due_within_days":14}'
+   ./mcpcall.py budget_summary '{"sections":["obligations"]}'
    ./api.py GET /api/v1/auth/me
    ```
 
-   Argument names change as the MCP grows; `./mcpcall.py -list` shows the current ones.
+   Tool names follow the v2 catalog (`<area>_<verb>`, project KB
+   `architecture/mcp-tool-catalog.md`); the exact registered set is `wantTools` in
+   `apps/mcp/cmd/mcp/protocol_test.go`. Argument names change as the MCP grows;
+   `./mcpcall.py -list` shows the current ones. Lists, recipes, meals, guides and event
+   reminders are coming in Stage 2: until then the agent should say it has no tool for them.
 
 4. **Score it.** Note PASS / PARTIAL / FAIL for each scenario, the tool calls, the
    ground-truth result, the reply, and the time taken. Write the round up in the project KB

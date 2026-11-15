@@ -45,7 +45,7 @@ Handles setup, money, the house and the cars.
 | 6 | Notes and documents | "Save Kid A's teacher, room number and pickup rules." Paste a receipt and say "file this". |
 | 7 | Daily briefing | "What do I need to know for tomorrow? And the rest of this week?" |
 | 8 | Cross-member visibility | "Thanksgiving grocery run Sat the 21st 9am, I'm taking the kids" (for Amber to see). "What has Amber added to home-os this week?" |
-| 9 | Edge cases | "Dentist moved to 4:20 same day; cancel date night on the 28th." "Start a Thanksgiving grocery list and a weekly chore chart; remind me 30 min before soccer Tuesday." "Is date night still on for the 28th?" |
+| 9 | Edge cases | "Dentist moved to 4:20 same day; cancel date night on the 28th." "Start a Thanksgiving grocery list and a weekly chore chart; remind me 30 min before soccer Tuesday." "Is date night still on for the 28th?" (Lists and reminders are coming in Stage 2: until then the agent should say it can't, not fake it.) |
 
 ## Persona: Amber
 
@@ -53,20 +53,22 @@ Handles the kids' schedules, health, Thanksgiving and lists.
 
 | # | Scenario | Sample turns |
 |---|---|---|
-| 1 | Kid logistics | "Put the kids' stuff on the family calendar: Kid C preschool M/W/F 8:30-11:30, Kid A piano Mon 4:15 (45 min), school out Wed-Fri Thanksgiving week." "Preschool is closed when school is out, and winter break is 12/21-1/1, take those off. Kid B field trip Fri Dec 4, $12 check + slip by Dec 1." "Remind me the Tuesday before to write the check." |
+| 1 | Kid logistics | "Put the kids' stuff on the family calendar: Kid C preschool M/W/F 8:30-11:30, Kid A piano Mon 4:15 (45 min), school out Wed-Fri Thanksgiving week." "Preschool is closed when school is out, and winter break is 12/21-1/1, take those off. Kid B field trip Fri Dec 4, $12 check + slip by Dec 1." "Remind me the Tuesday before to write the check." (Reminders are coming in Stage 2.) |
 | 2 | Health | "Book Kid C's well visit two weeks from Tuesday at 9:15; flu shots the first week of Dec when nobody has anything." "Pediatrician is <name, practice, address>, save that so we have it." |
 | 3 | Thanksgiving | "Parents in Wed 25th ~4, stay through Sunday; dinner Thu at 3. What does Thanksgiving week look like?" |
 | 4 | Coordination with Jacob | "Jacob picks up the kids Tue 11/17, I have a late meeting, put that on so he sees it." "What has Jacob put on the calendar? Is he free Thu 11/19 evening?" |
 | 5 | Budget | "How much do we spend on bills each month? What's due before the end of the month?" "Jacob said he put electric, internet and mortgage on there. Can we afford $600/kid for Christmas?" |
 | 6 | Notes and documents | "Put the pediatrician's info in home-os so Jacob has it; kids' clothing sizes; start a Christmas gift idea list." "Got this bill in the mail, file it: <practice>, statement 11/10, copay $35.00 due 12/10. Make sure we don't forget to pay it." |
-| 7 | Lists and reminders | "Start a Thanksgiving grocery list and a weekly chore chart; Jacob should be able to add to the grocery list too." "Add whipped cream and a bag of ice; check off the turkey, Jacob already ordered it." |
+| 7 | Lists and reminders (coming in Stage 2: until then, score whether the agent says plainly it has no tool) | "Start a Thanksgiving grocery list and a weekly chore chart; Jacob should be able to add to the grocery list too." "Add whipped cream and a bag of ice; check off the turkey, Jacob already ordered it." |
 | 8 | Daily briefing | "What do I need to know for tomorrow?" "And what's this week look like?" |
 | 9 | Edge cases | "Move Kid A's piano next Monday to 5pm." "Cancel the flu shots on the 5th, we'll walk into CVS. Also, when is Kid B's dentist appointment?" (never entered: the agent must not invent one) |
 
 ## Agent system-prompt snippet
 
-Round 1 gave both agents this guidance about the hub. Keep it (or its successor) in the
-agent's system prompt so household facts go to Home OS, not private memory.
+Round 1 gave both agents this guidance about the hub, updated here to the v2 tool names
+(project KB `architecture/mcp-tool-catalog.md`; the registered set is `wantTools` in
+`apps/mcp/cmd/mcp/protocol_test.go`). Keep it (or its successor) in the agent's system
+prompt so household facts go to Home OS, not private memory.
 
 ```markdown
 ## Household hub (home-os) — `mcp__home-os__*`
@@ -74,15 +76,29 @@ agent's system prompt so household facts go to Home OS, not private memory.
 home-os is the family's shared system of record. Everything you put there is
 visible to the other adults in the household and their agents.
 
-- **Calendar** — `list_calendars`, `list_events`, `create_event`, `update_event`,
-  `delete_event`, `check_conflicts`, `find_available_slots`. Check conflicts
-  before booking; put family events on the shared family calendar.
-- **Today / this week** — `get_daily_briefing` first when asked "what's going on".
-- **Money & bills** — `list_bills`, `get_upcoming_bills`, `get_bill_summary`,
-  `get_financial_summary`, loans.
-- **Notes** — `create_note`, `list_notes` (attach to an entity when relevant).
-- **House stuff** — properties, assets, vehicles, pets, vendors, maintenance.
-- **Documents** — `upload_file`, `list_files`, `search_files`, `search`.
+- **Start here** — `family_overview` (people, calendars, counts, the next 7
+  days, how to use these tools).
+- **Calendar** — `calendar_find`, `calendar_create`, `event_find`,
+  `event_create`, `event_update`, `event_delete`, `calendar_find_free_time`.
+  Check conflicts before booking (`event_find` with from/to = the proposed
+  time; `event_create` also returns overlaps); family events go on the shared
+  family calendar.
+- **Today / this week** — `agenda_get` first when asked "what's going on".
+- **Money & bills** — `bill_find` (`due_within_days` for "what's due soon"),
+  `bill_create`, `bill_update`, `bill_pay`, `bill_delete`, `budget_summary`,
+  `loan_find`, `loan_create`, `loan_update`, `loan_delete`.
+- **Notes** — `note_find`, `note_get`, `note_create`, `note_update`,
+  `note_delete` (attach to something with `about_type`/`about_id` when relevant).
+- **House stuff** — `property_find`, `asset_find`, `asset_create`,
+  `asset_update`, `asset_delete`, `vehicle_find`, `pet_find`, `contact_find`
+  (vendors and providers), `maintenance_find`, `maintenance_create`,
+  `maintenance_update`, `maintenance_complete`, `maintenance_delete`.
+- **People and family** — `person_find`, `family_update`.
+- **Documents** — `document_upload`, `document_find`, `document_get`;
+  `search_all` searches everything at once.
+- **Notifications** — `notification_find`, `notification_mark_read`.
+- Shared lists, recipes, meal plans, guides and event reminders are coming in
+  Stage 2. Until then there is no tool for them.
 - Always resolve relative dates ("next Tuesday") against today's date and the
   household timezone before creating anything; state the exact date back.
 - If home-os has no tool for what's needed, say so plainly — don't fake it in
