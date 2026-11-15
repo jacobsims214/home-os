@@ -359,33 +359,6 @@ func backfillSub(ctx context.Context, db DB, userID, sub string, storedSub *stri
 	slog.Info("auth: backfilled users.dex_sub from email match", "user_id", userID)
 }
 
-// UpsertUserFromClaims creates or updates a user record in the database
-// from the verified identity claims (JIT provisioning).
-// Returns the user's database ID (UUID).
-func (v *Verifier) UpsertUserFromClaims(ctx context.Context, pool *pgxpool.Pool, ident *Identity) (string, error) {
-	if pool == nil {
-		return ident.Subject, nil
-	}
-
-	var userID string
-	err := pool.QueryRow(ctx,
-		`INSERT INTO users (email, name, dex_sub)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (email) DO UPDATE SET
-		   name = EXCLUDED.name,
-		   dex_sub = EXCLUDED.dex_sub,
-		   updated_at = NOW()
-		 RETURNING id`,
-		ident.Email, ident.Name, ident.Subject,
-	).Scan(&userID)
-	if err != nil {
-		return "", fmt.Errorf("upsert user: %w", err)
-	}
-
-	slog.Debug("auth: upserted user from claims", "email", ident.Email, "user_id", userID)
-	return userID, nil
-}
-
 // Close is a no-op — kept for interface compatibility.
 // coreos/go-oidc/v3 does not use background refresh goroutines like keyfunc.
 func (v *Verifier) Close() {}
