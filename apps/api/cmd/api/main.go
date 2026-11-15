@@ -29,6 +29,7 @@ import (
 	"home-os/api/internal/integration"
 	"home-os/api/internal/invite"
 	"home-os/api/internal/link"
+	"home-os/api/internal/lists"
 	"home-os/api/internal/loan"
 	"home-os/api/internal/maintenance"
 	"home-os/api/internal/middleware"
@@ -350,6 +351,9 @@ func main() {
 		// People and preferences (Stage 2, #4463). #4489 may consolidate the
 		// Stage 2 route wiring.
 		people.NewHandler(people.NewRepo(pool)).RegisterRoutes(r)
+
+		// Shared lists (grocery, packing, chores, ...) and their items.
+		lists.NewHandler(lists.NewRepo(pool)).RegisterRoutes(r)
 	})
 
 	// Start the HTTP server.
