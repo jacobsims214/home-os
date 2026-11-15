@@ -297,12 +297,15 @@ func TestWriteSummaries(t *testing.T) {
 	}
 
 	_, text = callTool(t, ctx, pay, "bill_pay", map[string]any{"bill_id": id, "paid_date": "2026-01-12"})
-	if env := decodeEnvelope(t, text); env.Summary != "Paid Gas $31.00 for Jan 12; next due Thu Feb 12." {
-		t.Errorf("pay summary = %q", env.Summary)
+	// The next due date is the next unpaid one as of today, as bill_find
+	// reports it (#4653), so it moves with the clock.
+	nextDue := listedBill(t, ctx, pool, id).dueText()
+	if env := decodeEnvelope(t, text); env.Summary != "Paid Gas $31.00 for Jan 12; next "+nextDue+"." {
+		t.Errorf("pay summary = %q, want next %s", env.Summary, nextDue)
 	}
 	_, text = callTool(t, ctx, pay, "bill_pay", map[string]any{"bill_id": id, "paid_date": "2026-01-12"})
-	if env := decodeEnvelope(t, text); env.Summary != "Gas was already paid for Jan 12; nothing changed; next due Thu Feb 12." {
-		t.Errorf("repeat pay summary = %q", env.Summary)
+	if env := decodeEnvelope(t, text); env.Summary != "Gas was already paid for Jan 12; nothing changed; next "+nextDue+"." {
+		t.Errorf("repeat pay summary = %q, want next %s", env.Summary, nextDue)
 	}
 
 	_, text = callTool(t, ctx, del, "bill_delete", map[string]any{"bill_id": id})

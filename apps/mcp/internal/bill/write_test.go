@@ -1009,13 +1009,12 @@ func TestBillPay_SetsPaidDateAndNextDue(t *testing.T) {
 	if got.ID != id.String() || strOrNil(got.PaidDate) != "2026-01-18" || *got.AlreadyPaid {
 		t.Errorf("first payment: id=%s paid_date=%s already_paid=%v", got.ID, strOrNil(got.PaidDate), got.AlreadyPaid)
 	}
-	if strOrNil(got.PaidForDueDate) != "2026-01-20" || strOrNil(got.NextDueDate) != "2026-02-20" {
-		t.Errorf("paid_for_due_date=%s next_due_date=%s, want 2026-01-20 / 2026-02-20",
-			strOrNil(got.PaidForDueDate), strOrNil(got.NextDueDate))
+	if strOrNil(got.PaidForDueDate) != "2026-01-20" {
+		t.Errorf("paid_for_due_date=%s, want 2026-01-20", strOrNil(got.PaidForDueDate))
 	}
-	if got.DaysUntilDue == nil {
-		t.Error("days_until_due is nil")
-	}
+	// next_due_date is the next unpaid due date as of today, as bill_find
+	// reports it (#4653), not the due date after the one paid.
+	assertPayMatchesFind(t, ctx, pool, got)
 	if got.AmountPaid == nil || *got.AmountPaid != 142.5 {
 		t.Errorf("amount_paid = %v, want the bill's 142.5", got.AmountPaid)
 	}
@@ -1037,10 +1036,11 @@ func TestBillPay_SetsPaidDateAndNextDue(t *testing.T) {
 	// Same call again, and a later payment for the same due date: no change.
 	for _, paidDate := range []string{"2026-01-18", "2026-01-22", "2026-01-10"} {
 		again := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": paidDate})
-		if !*again.AlreadyPaid || strOrNil(again.PaidDate) != "2026-01-18" || strOrNil(again.NextDueDate) != "2026-02-20" {
-			t.Errorf("repeat with %s: already_paid=%v paid_date=%s next=%s, want true/2026-01-18/2026-02-20",
-				paidDate, again.AlreadyPaid, strOrNil(again.PaidDate), strOrNil(again.NextDueDate))
+		if !*again.AlreadyPaid || strOrNil(again.PaidDate) != "2026-01-18" || strOrNil(again.PaidForDueDate) != "2026-01-20" {
+			t.Errorf("repeat with %s: already_paid=%v paid_date=%s paid_for=%s, want true/2026-01-18/2026-01-20",
+				paidDate, again.AlreadyPaid, strOrNil(again.PaidDate), strOrNil(again.PaidForDueDate))
 		}
+		assertPayMatchesFind(t, ctx, pool, again)
 		if !again.UpdatedAt.Equal(firstUpdatedAt) {
 			t.Errorf("repeat with %s changed updated_at", paidDate)
 		}
@@ -1055,9 +1055,10 @@ func TestBillPay_SetsPaidDateAndNextDue(t *testing.T) {
 	// Next month's payment, with an explicit amount.
 	next := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": "2026-02-15", "amount": 150.555})
 	if *next.AlreadyPaid || strOrNil(next.PaidDate) != "2026-02-15" ||
-		strOrNil(next.PaidForDueDate) != "2026-02-20" || strOrNil(next.NextDueDate) != "2026-03-20" {
+		strOrNil(next.PaidForDueDate) != "2026-02-20" {
 		t.Errorf("second payment: %+v", next)
 	}
+	assertPayMatchesFind(t, ctx, pool, next)
 	if next.AmountPaid == nil || *next.AmountPaid != 150.56 {
 		t.Errorf("amount_paid = %v, want 150.56", next.AmountPaid)
 	}
@@ -1407,5 +1408,81 @@ func TestBillDueExported(t *testing.T) {
 	got = BillDue(today, 31, nil)
 	if got.Next.Format(time.DateOnly) != "2026-11-30" || got.DaysUntil != 15 || got.Status != statusDue || got.PaidFor != nil {
 		t.Errorf("BillDue unpaid = %+v", got)
+	}
+}
+
+// assertPayMatchesFind checks bill_pay's reply reports the same due fields as
+// bill_find does for that bill right after: one rule (BillDue), so the agent
+// never tells the family two different dates.
+func assertPayMatchesFind(t *testing.T, ctx context.Context, pool *pgxpool.Pool, got billData) {
+	t.Helper()
+	want := listedBill(t, ctx, pool, got.ID)
+	if got.NextDueDate == nil || got.DaysUntilDue == nil || got.Status == "" {
+		t.Fatalf("bill_pay reply has no due fields: next=%s days=%v status=%q",
+			strOrNil(got.NextDueDate), got.DaysUntilDue, got.Status)
+	}
+	if *got.NextDueDate != *want.NextDueDate || *got.DaysUntilDue != *want.DaysUntilDue || got.Status != want.Status {
+		t.Errorf("bill_pay next=%s days=%d status=%s, bill_find next=%s days=%d status=%s",
+			*got.NextDueDate, *got.DaysUntilDue, got.Status, *want.NextDueDate, *want.DaysUntilDue, want.Status)
+	}
+	if strOrNil(got.NextDueWeekday) != strOrNil(want.NextDueWeekday) {
+		t.Errorf("bill_pay next_due_weekday=%s, bill_find %s", strOrNil(got.NextDueWeekday), strOrNil(want.NextDueWeekday))
+	}
+	if strOrNil(got.PaidDate) != strOrNil(want.PaidDate) || strOrNil(got.PaidForDueDate) != strOrNil(want.PaidForDueDate) {
+		t.Errorf("bill_pay paid_date=%s paid_for=%s, bill_find paid_date=%s paid_for=%s",
+			strOrNil(got.PaidDate), strOrNil(got.PaidForDueDate), strOrNil(want.PaidDate), strOrNil(want.PaidForDueDate))
+	}
+	if *got.DaysUntilDue < 0 {
+		t.Errorf("bill_pay days_until_due = %d, want >= 0", *got.DaysUntilDue)
+	}
+}
+
+// TestBillPay_MatchesBillFind pays bills on time, late and back-dated and
+// checks bill_pay's next_due_date, days_until_due and status equal
+// bill_find's (#4653). Dates are relative to the household's today.
+func TestBillPay_MatchesBillFind(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	const tz = "UTC"
+	setHouseholdTZ(t, pool, hh.HouseholdID, tz)
+	today := householdTodayIn(t, tz)
+	late := today.AddDate(0, 0, -5)
+	// Two months back, kept on a day every month has so the due day is not
+	// clamped and the payment covers exactly that month's due date.
+	backY, backM, _ := today.AddDate(0, 0, -today.Day()+1).AddDate(0, -2, 0).Date()
+	backPaid := time.Date(backY, backM, 1, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name       string
+		dueDay     int
+		paidDate   time.Time
+		wantPaid   string // expected paid_for_due_date
+		wantStatus string
+	}{
+		{"on time", today.Day(), today, today.Format(time.DateOnly), statusPaid},
+		// Paid within the grace period, so it covers the due date 5 days
+		// ago; the next unpaid one (next month's) is still due.
+		{"5 days late", late.Day(), today, late.Format(time.DateOnly), statusDue},
+		// Paid on the 1st two months ago: covers that month's 20th; the next
+		// unpaid due date is the first 20th on or after today.
+		{"back-dated two months", 20, backPaid,
+			time.Date(backY, backM, 20, 0, 0, 0, 0, time.UTC).Format(time.DateOnly), statusDue},
+	}
+	_, _, pay := NewBillPayTool(pool)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := insertPayBill(t, pool, hh.HouseholdID, ptr(60.0), ptr(tc.dueDay))
+			got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": tc.paidDate.Format(time.DateOnly)})
+			if *got.AlreadyPaid || strOrNil(got.PaidDate) != tc.paidDate.Format(time.DateOnly) {
+				t.Errorf("already_paid=%v paid_date=%s, want false %s", *got.AlreadyPaid, strOrNil(got.PaidDate), tc.paidDate.Format(time.DateOnly))
+			}
+			if strOrNil(got.PaidForDueDate) != tc.wantPaid {
+				t.Errorf("paid_for_due_date = %s, want %s", strOrNil(got.PaidForDueDate), tc.wantPaid)
+			}
+			if got.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			assertPayMatchesFind(t, ctx, pool, got)
+		})
 	}
 }

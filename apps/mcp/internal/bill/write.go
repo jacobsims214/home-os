@@ -440,8 +440,8 @@ type billPayInput struct {
 // for_due_date is #4655.
 func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
-		mcp.WithDescription("Record a bill as paid and move it to its next due date. " +
-			"Calling it again for the same due date changes nothing. Returns the due date paid and the next one."),
+		mcp.WithDescription("Record a bill as paid. " +
+			"Calling it again for the same due date changes nothing. Returns the due date paid and the next unpaid due date, as bill_find reports it."),
 		mcp.WithString("bill_id", mcp.Description("The bill's id (UUID), from bill_find"), mcp.Required()),
 		mcp.WithString("paid_date", mcp.Description("Date paid, YYYY-MM-DD, e.g. 2026-11-20; default today")),
 		mcp.WithNumber("amount", mcp.Description("Amount paid, e.g. 142.50; default the bill's amount"), mcp.Min(0)),
@@ -506,10 +506,9 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 			}
 		}
 
-		effective := paid
-		if alreadyPaid {
-			effective = *r.PaidDate
-		} else {
+		// Already paid: r keeps its stored paid_date, which is the effective
+		// one. Otherwise record this payment.
+		if !alreadyPaid {
 			if err := tx.QueryRow(ctx,
 				`UPDATE bills SET paid_date = $3, updated_at = NOW()
 				 WHERE id = $1 AND household_id = $2
@@ -533,22 +532,16 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 			return respond.Failed("record the payment", err), nil
 		}
 
+		// r.PaidDate is now the effective payment date, so data
+		// applies BillDue exactly as bill_find does: next_due_date is the
+		// next unpaid due date as of today (never in the past, even for a
+		// back-dated payment), status is due/paid, and paid_for_due_date is
+		// the due date this payment covers (#4653).
 		b := r.data(today)
-		b.PaidDate = dateOnly(effective)
 		b.AlreadyPaid = &alreadyPaid
 		b.AmountPaid = in.amount
 		if b.AmountPaid == nil {
 			b.AmountPaid = r.Amount
-		}
-		// The reply's next due date follows the covered one (unchanged rule;
-		// #4653 aligns back-dated payments with bill_find).
-		b.NextDueDate, b.NextDueWeekday, b.DaysUntilDue, b.PaidForDueDate = nil, nil, nil, nil
-		b.Status = ""
-		if hasDueDay {
-			covered := paidForDueDate(effective, *r.DueDay)
-			next := dueDateInMonth(covered.Year(), covered.Month()+1, *r.DueDay)
-			days := daysBetween(today, next)
-			b.PaidForDueDate, b.NextDueDate, b.NextDueWeekday, b.DaysUntilDue = dateOnly(covered), dateOnly(next), weekday(next), &days
 		}
 
 		return respond.OK(paySummary(b, alreadyPaid), b,
