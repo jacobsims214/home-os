@@ -102,7 +102,7 @@ func TestLegacyInitializeClient(t *testing.T) {
 				t.Fatalf("tools/list returned %d tools, %d registered", len(seen), srv.ToolCount())
 			}
 			t.Logf("tools/list over protocol %s returned %d tools", version, len(seen))
-			for _, name := range []string{"ping", "note_find", "note_create", "create_event", "get_financial_summary", "bill_find", "bill_create", "bill_update", "bill_delete", "bill_pay", "note_get", "note_update", "note_delete", "family_update"} {
+			for _, name := range []string{"ping", "note_find", "note_create", "event_create", "get_financial_summary", "bill_find", "bill_create", "bill_update", "bill_delete", "bill_pay", "note_get", "note_update", "note_delete", "family_update"} {
 				if !seen[name] {
 					t.Errorf("tools/list is missing %q", name)
 				}

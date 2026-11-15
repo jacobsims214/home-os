@@ -5,29 +5,28 @@ import (
 )
 
 // Register adds the calendar tools to srv. cmd/mcp calls it once at startup,
-// so changes to these tools stay inside this package.
+// so changes to these tools stay inside this package. Names follow the v2
+// catalog (KB architecture/mcp-tool-catalog.md); check_conflicts is merged
+// into event_find (from/to = the proposed time).
 func Register(srv *server.Server, deps server.Deps) {
-	listCalTool, listCalHandler := NewListCalendarsTool(deps.Pool)
-	srv.RegisterTool("list_calendars", listCalTool, listCalHandler)
+	calTool, calHandler := NewCalendarFindTool(deps.Pool)
+	srv.RegisterTool(calTool.Name, calTool, calHandler)
 
-	listEvtTool, listEvtHandler := NewListEventsTool(deps.Pool)
-	srv.RegisterTool("list_events", listEvtTool, listEvtHandler)
+	findTool, findHandler := NewEventFindTool(deps.Pool)
+	srv.RegisterTool(findTool.Name, findTool, findHandler)
 
-	createEvtTool, createEvtHandler := NewCreateEventTool(deps.Pool)
-	srv.RegisterTool("create_event", createEvtTool, createEvtHandler)
+	createTool, createHandler := NewEventCreateTool(deps.Pool)
+	srv.RegisterTool(createTool.Name, createTool, createHandler)
 
-	updateEvtTool, updateEvtHandler := NewUpdateEventTool(deps.Pool)
-	srv.RegisterTool("update_event", updateEvtTool, updateEvtHandler)
+	updateTool, updateHandler := NewEventUpdateTool(deps.Pool)
+	srv.RegisterTool(updateTool.Name, updateTool, updateHandler)
 
-	deleteEvtTool, deleteEvtHandler := NewDeleteEventTool(deps.Pool)
-	srv.RegisterTool("delete_event", deleteEvtTool, deleteEvtHandler)
+	deleteTool, deleteHandler := NewEventDeleteTool(deps.Pool)
+	srv.RegisterTool(deleteTool.Name, deleteTool, deleteHandler)
 
-	slotsTool, slotsHandler := NewFindAvailableSlotsTool(deps.Pool)
-	srv.RegisterTool("find_available_slots", slotsTool, slotsHandler)
+	freeTool, freeHandler := NewCalendarFindFreeTimeTool(deps.Pool)
+	srv.RegisterTool(freeTool.Name, freeTool, freeHandler)
 
-	briefTool, briefHandler := NewGetDailyBriefingTool(deps.Pool)
-	srv.RegisterTool("get_daily_briefing", briefTool, briefHandler)
-
-	conflictTool, conflictHandler := NewCheckConflictsTool(deps.Pool)
-	srv.RegisterTool("check_conflicts", conflictTool, conflictHandler)
+	agendaTool, agendaHandler := NewAgendaGetTool(deps.Pool)
+	srv.RegisterTool(agendaTool.Name, agendaTool, agendaHandler)
 }
