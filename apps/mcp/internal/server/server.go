@@ -1,6 +1,8 @@
 // Package server provides the MCP server setup for Home OS.
-// It wraps the mark3labs/mcp-go SDK with SSE transport, OIDC authentication,
-// and a tool registry for domain-specific tools.
+// It wraps the mark3labs/mcp-go SDK with the stateless Streamable HTTP
+// transport (POST /mcp only), OIDC authentication, and a tool registry for
+// domain-specific tools. The legacy HTTP+SSE transport (/mcp/sse,
+// /mcp/message) was removed: it is deprecated in MCP 2026-07-28.
 package server
 
 import (
@@ -8,7 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -30,9 +34,9 @@ const claimsKey claimsCtxKey = "claims"
 // Server wraps the MCP server with configuration, database pool, token verifier, and tool registration.
 type Server struct {
 	mcpServer *server.MCPServer
-	sseServer *server.SSEServer
-	// httpServer serves the Streamable HTTP transport (MCP 2025-03-26+) at
-	// /mcp; the legacy SSE transport stays at /mcp/sse for older clients.
+	// httpServer serves the stateless Streamable HTTP transport at /mcp. It
+	// answers both 2026-07-28 clients (per-request _meta, server/discover)
+	// and 2025-era clients (initialize handshake) on every request.
 	httpServer *server.StreamableHTTPServer
 	cfg        *config.Config
 	pool       *pgxpool.Pool
@@ -40,8 +44,17 @@ type Server struct {
 	toolCount  int
 }
 
+// Cache hints (SEP-2549) advertised on list/discover/read results to
+// 2026-07-28 clients. The tool, prompt and template catalogue is identical for
+// every caller, so it may be cached for a few minutes; it is still marked
+// private because it sits behind household auth. resources/read returns live
+// household data, so clients must revalidate every time.
+const (
+	catalogueCacheTTLMs int64 = 5 * 60 * 1000
+)
+
 // NewServer creates a new MCP server with the given configuration, database pool, and token verifier.
-// It initializes the underlying MCPServer and SSE transport.
+// It initializes the underlying MCPServer and the stateless Streamable HTTP transport.
 func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) *Server {
 	s := &Server{
 		cfg:      cfg,
@@ -49,31 +62,14 @@ func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) 
 		verifier: verifier,
 	}
 
-	// Create the MCPServer with tool capabilities.
+	// Create the MCPServer with tool capabilities. mcp-go returns tools/list
+	// sorted by name, so the list is deterministic for prompt-cache hits.
 	s.mcpServer = server.NewMCPServer(
 		"Home OS MCP",
 		"1.0.0",
 		server.WithToolCapabilities(true),
-	)
-
-	// Create the SSE server with a static base path.
-	// The SSE endpoint is at /mcp/sse, and the message endpoint is at /mcp/message.
-	//
-	// WithSSEContextFunc bridges JWT claims from the message POST request context
-	// into the MCP tool handler context. This is required because mcp-go v0.48.0's
-	// SSEServer.handleMessage (sdk/server/sse.go:573-577) builds the tool-handler
-	// context from the message POST's *request* context — it does NOT propagate the
-	// SSE connection's request context. Since auth is enforced on both endpoints,
-	// the claims from the message request must be manually copied into the context
-	// that tool handlers receive.
-	s.sseServer = server.NewSSEServer(s.mcpServer,
-		server.WithStaticBasePath("/mcp"),
-		server.WithSSEContextFunc(func(ctx context.Context, r *http.Request) context.Context {
-			if claims := ClaimsFromContext(r.Context()); claims != nil {
-				return context.WithValue(ctx, claimsKey, claims)
-			}
-			return ctx
-		}),
+		server.WithCacheHints(catalogueCacheTTLMs, mcp.CacheScopePrivate),
+		server.WithMethodCacheHints(mcp.MethodResourcesRead, 0, mcp.CacheScopePrivate),
 	)
 
 	s.httpServer = server.NewStreamableHTTPServer(s.mcpServer, s.StreamableHTTPOptions()...)
@@ -90,7 +86,11 @@ func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) 
 func (s *Server) StreamableHTTPOptions() []server.StreamableHTTPOption {
 	return []server.StreamableHTTPOption{
 		server.WithEndpointPath("/mcp"),
+		// Stateless: no Mcp-Session-Id is ever minted or echoed (SEP-2567).
 		server.WithStateLess(true),
+		// Advertise every version mcp-go implements: 2026-07-28 plus the
+		// 2025-x/2024-11-05 initialize-era versions moltis and opencode use.
+		server.WithStreamableHTTPProtocolVersions(mcp.ValidProtocolVersions...),
 		server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
 			if claims := ClaimsFromContext(r.Context()); claims != nil {
 				return context.WithValue(ctx, claimsKey, claims)
@@ -136,13 +136,11 @@ func (s *Server) RegisterResourceTemplate(template mcp.ResourceTemplate, handler
 	slog.Info("registered MCP resource template", "name", template.Name, "uriTemplate", template.URITemplate.Raw())
 }
 
-// Start begins serving the MCP server on the configured port.
-// It sets up a chi router with JWT auth middleware on the SSE endpoint
-// and starts the HTTP server with graceful shutdown.
-func (s *Server) Start(ctx context.Context) error {
-	addr := fmt.Sprintf(":%s", s.cfg.Port)
-
-	// Create the chi router.
+// Handler returns the HTTP router: health, OAuth protected resource metadata,
+// and the MCP endpoint. POST /mcp is the only MCP route; requests to it pass
+// Origin validation (403), then the POST-only rule (405 for GET, DELETE and
+// anything else), then Bearer auth, before reaching the transport.
+func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 
 	// Health check endpoint (no auth required).
@@ -194,25 +192,23 @@ func (s *Server) Start(ctx context.Context) error {
 	r.Get("/mcp/.well-known/oauth-protected-resource", wellKnownHandler)
 	r.Options("/mcp/.well-known/oauth-protected-resource", wellKnownOptionsHandler)
 
-	// SSE endpoint — requires OIDC Bearer token.
-	// The SSE stream handler is mounted at /mcp/sse with Bearer token validation.
-	r.With(s.AuthMiddleware()).Handle("/mcp/sse", s.sseServer.SSEHandler())
+	// Streamable HTTP endpoint: stateless, so every POST carries its own
+	// identity and no session affinity is needed.
+	r.With(s.OriginMiddleware(), postOnly, s.AuthMiddleware()).Handle("/mcp", s.httpServer)
 
-	// Message endpoint — requires OIDC Bearer token.
-	// MCP clients send the Authorization header on both SSE and message POST requests,
-	// so the same AuthMiddleware is applied here. The WithSSEContextFunc option
-	// (configured in NewServer) bridges these claims into the tool handler context.
-	r.With(s.AuthMiddleware()).Handle("/mcp/message", s.sseServer.MessageHandler())
+	return r
+}
 
-	// Streamable HTTP endpoint — same Bearer auth; stateless, so every POST
-	// carries its own identity and no session affinity is needed.
-	r.With(s.AuthMiddleware()).Handle("/mcp", s.httpServer)
+// Start begins serving the MCP server on the configured port with graceful
+// shutdown when ctx is cancelled.
+func (s *Server) Start(ctx context.Context) error {
+	addr := fmt.Sprintf(":%s", s.cfg.Port)
 
 	slog.Info("starting MCP server", "addr", addr, "tools", s.toolCount)
 
 	httpSrv := &http.Server{
 		Addr:    addr,
-		Handler: r,
+		Handler: s.Handler(),
 	}
 
 	// Start graceful shutdown in a goroutine.
@@ -221,9 +217,6 @@ func (s *Server) Start(ctx context.Context) error {
 		slog.Info("shutting down MCP server...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := s.sseServer.Shutdown(shutdownCtx); err != nil {
-			slog.Error("SSE server shutdown error", "error", err)
-		}
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("HTTP server shutdown error", "error", err)
 		}
@@ -234,6 +227,63 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// postOnly enforces the 2026-07-28 Streamable HTTP rule that the MCP
+// endpoint accepts POST only: GET (the removed standalone SSE stream),
+// DELETE (session termination; there are no sessions) and every other method
+// get 405 with Allow: POST. mcp-go would still open a GET stream for a
+// 2025-era client, so this is enforced here rather than left to the SDK.
+func postOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			writeJSONError(w, http.StatusMethodNotAllowed, "the MCP endpoint accepts POST only")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// OriginMiddleware validates the Origin header as the MCP transport spec
+// requires (DNS-rebinding protection) and answers 403 when it is not allowed.
+// Requests without an Origin header (CLI clients, moltis, opencode, server to
+// server) pass: only browsers send Origin. A browser Origin passes when it is
+// the origin of PUBLIC_BASE_URL, or a loopback origin (local tools such as the
+// MCP inspector; a remote page cannot claim a loopback origin).
+func (s *Server) OriginMiddleware() func(http.Handler) http.Handler {
+	allowed := ""
+	if u, err := url.Parse(s.cfg.PublicBaseURL); err == nil && u.Scheme != "" && u.Host != "" {
+		allowed = strings.ToLower(u.Scheme + "://" + u.Host)
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if origin != "" && !originAllowed(origin, allowed) {
+				slog.Warn("rejected MCP request with disallowed Origin", "origin", origin)
+				writeJSONError(w, http.StatusForbidden, "origin not allowed")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// originAllowed reports whether a browser Origin header value may call /mcp.
+func originAllowed(origin, allowed string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return false // includes the opaque "null" origin
+	}
+	if allowed != "" && strings.ToLower(u.Scheme+"://"+u.Host) == allowed {
+		return true
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // AuthMiddleware returns a chi-compatible middleware that validates Dex-issued

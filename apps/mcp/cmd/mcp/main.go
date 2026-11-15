@@ -1,6 +1,6 @@
 // Package main is the entrypoint for the Home OS MCP server.
 // It loads configuration, creates the database pool, sets up the MCP server
-// with tool registration, and starts the HTTP server with SSE transport.
+// with tool registration, and starts the HTTP server with the stateless Streamable HTTP transport.
 package main
 
 import (
@@ -65,7 +65,7 @@ func main() {
 
 	// Start the metadata server on a separate port for health checks and
 	// OAuth protected resource metadata. This runs on a separate port to
-	// avoid route conflicts with the MCP SSE handler.
+	// avoid route conflicts with the MCP handler.
 	metadataAddr := fmt.Sprintf(":%s", cfg.MetadataPort)
 	metadataSrv := metadata.Start(metadataAddr, cfg)
 	slog.Info("metadata server started", "addr", metadataAddr)

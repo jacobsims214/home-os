@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mark3labs/mcp-go/server/servertest"
 
@@ -129,17 +131,138 @@ func TestLegacyInitializeClient(t *testing.T) {
 	}
 }
 
+// TestModernStatelessClient proves a 2026-07-28 client (no initialize; every
+// request carries its protocol version, client info and capabilities in
+// _meta plus the MCP-Protocol-Version/Mcp-Method/Mcp-Name headers) can
+// discover the server, list every tool in a stable order with cache hints,
+// and call DB-backed tools, on the same stateless endpoint legacy clients use.
+func TestModernStatelessClient(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	claims := server.ClaimsFromContext(ctx)
+	if claims == nil {
+		t.Fatal("SeedHousehold context carries no claims")
+	}
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'property', gen_random_uuid(), 'Modern client note', 'hello')`,
+		hh.HouseholdID,
+	); err != nil {
+		t.Fatalf("insert note: %v", err)
+	}
+
+	srv := server.NewServer(&config.Config{}, pool, nil)
+	registerAll(srv, &config.Config{}, pool)
+	opts := append(srv.StreamableHTTPOptions(),
+		mcpserver.WithHTTPContextFunc(func(ctx context.Context, _ *http.Request) context.Context {
+			return server.ContextWithClaims(ctx, claims)
+		}),
+	)
+	ts := servertest.NewTestStreamableHTTPServer(srv.MCPServer(), opts...)
+	t.Cleanup(ts.Close)
+	c := &legacyClient{t: t, url: ts.URL + "/mcp", version: mcp.ProtocolVersion20260728, modern: true}
+
+	var discover struct {
+		SupportedVersions []string `json:"supportedVersions"`
+		ResultType        string   `json:"resultType"`
+		Meta              map[string]struct {
+			Name string `json:"name"`
+		} `json:"_meta"`
+	}
+	c.call(string(mcp.MethodServerDiscover), map[string]any{}, &discover)
+	for _, v := range []string{mcp.ProtocolVersion20260728, "2025-11-25", "2025-06-18", "2025-03-26"} {
+		if !slices.Contains(discover.SupportedVersions, v) {
+			t.Errorf("server/discover supportedVersions %v lacks %s", discover.SupportedVersions, v)
+		}
+	}
+	if discover.ResultType != "complete" {
+		t.Errorf("server/discover resultType = %q", discover.ResultType)
+	}
+	if got := discover.Meta[mcp.MetaKeyServerInfo].Name; got != "Home OS MCP" {
+		t.Errorf("server/discover serverInfo.name = %q", got)
+	}
+
+	type toolList struct {
+		TTLMs      *int64 `json:"ttlMs"`
+		CacheScope string `json:"cacheScope"`
+		NextCursor string `json:"nextCursor"`
+		Tools      []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	names := func(l toolList) []string {
+		out := make([]string, 0, len(l.Tools))
+		for _, tool := range l.Tools {
+			out = append(out, tool.Name)
+		}
+		return out
+	}
+	var first, second toolList
+	c.call(string(mcp.MethodToolsList), map[string]any{}, &first)
+	c.call(string(mcp.MethodToolsList), map[string]any{}, &second)
+	if first.NextCursor != "" {
+		t.Fatalf("tools/list paginated (nextCursor %q); the test expects one page", first.NextCursor)
+	}
+	if len(first.Tools) != srv.ToolCount() {
+		t.Fatalf("tools/list returned %d tools, %d registered", len(first.Tools), srv.ToolCount())
+	}
+	if !slices.IsSorted(names(first)) {
+		t.Errorf("tools/list is not in name order: %v", names(first))
+	}
+	if !slices.Equal(names(first), names(second)) {
+		t.Errorf("tools/list order differs between calls")
+	}
+	if first.TTLMs == nil || *first.TTLMs <= 0 || first.CacheScope != string(mcp.CacheScopePrivate) {
+		t.Errorf("tools/list cache hints ttlMs=%v cacheScope=%q", first.TTLMs, first.CacheScope)
+	}
+	t.Logf("tools/list over protocol %s returned %d tools", mcp.ProtocolVersion20260728, len(first.Tools))
+
+	type callResult struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	var ping callResult
+	c.call(string(mcp.MethodToolsCall), map[string]any{"name": "ping", "arguments": map[string]any{}}, &ping)
+	if ping.IsError || len(ping.Content) != 1 || ping.Content[0].Text != `{"pong":true}` {
+		t.Fatalf("ping returned %+v", ping)
+	}
+	var notes callResult
+	c.call(string(mcp.MethodToolsCall), map[string]any{"name": "list_notes", "arguments": map[string]any{}}, &notes)
+	if notes.IsError || len(notes.Content) != 1 || !strings.Contains(notes.Content[0].Text, "Modern client note") {
+		t.Fatalf("list_notes returned %+v", notes)
+	}
+}
+
 // legacyClient sends JSON-RPC over Streamable HTTP the way a 2025-era client
 // does: no _meta protocol keys, MCP-Protocol-Version header after initialize.
+// With modern set it speaks 2026-07-28 instead: _meta protocol keys on every
+// request plus the Mcp-Method/Mcp-Name headers, and no initialize.
 type legacyClient struct {
 	t       *testing.T
 	url     string
 	version string
+	modern  bool
 	nextID  int
 }
 
 func (c *legacyClient) post(body map[string]any) *http.Response {
 	c.t.Helper()
+	method, _ := body["method"].(string)
+	var mcpName string
+	if c.modern {
+		params, _ := body["params"].(map[string]any)
+		if params == nil {
+			params = map[string]any{}
+		}
+		params["_meta"] = map[string]any{
+			mcp.MetaKeyProtocolVersion:    c.version,
+			mcp.MetaKeyClientInfo:         map[string]any{"name": "modern-test", "version": "0.0.1"},
+			mcp.MetaKeyClientCapabilities: map[string]any{},
+		}
+		body["params"] = params
+		mcpName, _ = params["name"].(string)
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		c.t.Fatalf("marshal: %v", err)
@@ -154,6 +277,12 @@ func (c *legacyClient) post(body map[string]any) *http.Response {
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	if c.version != "" {
 		req.Header.Set("MCP-Protocol-Version", c.version)
+	}
+	if c.modern {
+		req.Header.Set(mcp.HeaderMethod, method)
+		if mcpName != "" {
+			req.Header.Set(mcp.HeaderName, mcpName)
+		}
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
