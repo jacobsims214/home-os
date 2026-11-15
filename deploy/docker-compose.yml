@@ -159,8 +159,8 @@ services:
 
   calendar:
     build:
-      context: ../apps/calendar
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: apps/calendar/Dockerfile
       target: builder
     restart: unless-stopped
     command: go run ./cmd/calendar
@@ -172,9 +172,10 @@ services:
       migrations:
         condition: service_completed_successfully
     volumes:
-      - ../apps/calendar:/app
-      - calendar_gopath:/root/go/pkg/mod
-    working_dir: /app
+      - ../apps/calendar:/src/apps/calendar
+      - ../packages/icalx:/src/packages/icalx
+      - calendar_gopath:/go/pkg/mod
+    working_dir: /src/apps/calendar
     environment:
       PORT: "8081"
       DATABASE_URL: postgres://homeos:homeos@postgres:5432/homeos?sslmode=disable

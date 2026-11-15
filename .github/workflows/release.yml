@@ -47,8 +47,10 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: ${{ matrix.service == 'worker' && '.' || format('apps/{0}', matrix.service) }}
-          file: ${{ matrix.service == 'worker' && 'apps/worker/Dockerfile' || format('apps/{0}/Dockerfile', matrix.service) }}
+          # worker and calendar import repo-level modules (packages/icalx),
+          # so they build from the repository root.
+          context: ${{ contains(fromJSON('["worker","calendar"]'), matrix.service) && '.' || format('apps/{0}', matrix.service) }}
+          file: ${{ format('apps/{0}/Dockerfile', matrix.service) }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
