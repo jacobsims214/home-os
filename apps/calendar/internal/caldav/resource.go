@@ -462,6 +462,19 @@ func nextSequence(cur *db.CalendarObject, clientSequence int, eventUID string) i
 
 // HandleDELETE handles DELETE /dav/{calendar-uid}/{event-uid}.ics
 // Removes a calendar event and increments the calendar CTag.
+//
+// If-Match (RFC 7232 §3.1) is honoured: Apple Calendar sends the ETag it last
+// saw, and a device that has not synced yet must not delete an event another
+// member just edited. The check runs against the row locked inside the delete
+// transaction (db.DeleteCalendarObjectIf), so a concurrent PUT cannot slip in
+// between the check and the delete.
+//
+// Response codes:
+//   - 204 No Content           — deleted, or (without If-Match) already gone
+//   - 404 Not Found            — calendar doesn't exist / other household
+//   - 412 Precondition Failed  — If-Match does not match the current ETag, or
+//     If-Match was sent for an event that does not exist
+//   - 500 Internal Server Error — database error
 func HandleDELETE(w http.ResponseWriter, r *http.Request, repo *db.Repo, path string) {
 	if !isResourcePath(path) {
 		http.Error(w, "Not Found", http.StatusNotFound)
@@ -493,25 +506,36 @@ func HandleDELETE(w http.ResponseWriter, r *http.Request, repo *db.Repo, path st
 		return
 	}
 
-	// Delete the event AND bump the calendar CTag in a single pgx
-	// transaction. Same rationale as the PUT handler: the CTag bump is what
-	// tells Apple Calendar that an event was removed. If the delete succeeded
-	// but the CTag bump failed, the client would keep showing the deleted
-	// event forever. Wrapping both in one tx means either they both commit or
-	// neither does.
-	//
-	// DELETE is idempotent by CalDAV convention — deleting a missing event is
-	// not an error — so a successful (nil) return covers both the "deleted a
-	// row" and "row was already gone" cases. If the calendar is not owned by
-	// the caller's household, the household guard inside the delete SQL
-	// prevents any row from being touched (no CTag bump occurs either).
-	if err := repo.DeleteCalendarObjectWithCTag(ctx, householdID, cal.ID, eventUID); err != nil {
+	// The delete, its calendar_changes tombstone and the CTag bump commit
+	// together (a delete without the CTag bump would leave the event on Apple
+	// Calendar forever). An empty If-Match is treated as absent, exactly as
+	// for PUT; If-None-Match has no meaning for a CalDAV DELETE and is
+	// ignored.
+	ifMatch := r.Header.Get("If-Match")
+	check := func(cur *db.CalendarObject) error {
+		if res := evalPUTPreconditions(ifMatch, "", cur); res != preconditionPass {
+			return &preconditionError{result: res}
+		}
+		return nil
+	}
+	owned, _, err := repo.DeleteCalendarObjectIf(ctx, householdID, cal.ID, eventUID, check)
+	if err != nil {
+		var pe *preconditionError
+		if errors.As(err, &pe) {
+			writePreconditionFailed(w, pe.result)
+			return
+		}
 		logging.Logger.Error("caldav: delete object + ctag (tx)",
 			slog.String("calendar_uid", calUID),
 			slog.String("event_uid", eventUID),
 			slog.String("household_id", householdID),
 			slog.String("error", err.Error()))
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		// The calendar left the household between the lookup and the tx.
+		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
 

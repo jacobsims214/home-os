@@ -768,65 +768,75 @@ func (r *Repo) PutCalendarObject(ctx context.Context, householdID string, calend
 	return obj, created, nil
 }
 
-// DeleteCalendarObjectWithCTag deletes the calendar object, records a
-// calendar_changes row (action=delete) for the removed event_uid, and bumps
-// the calendar CTag inside a single pgx transaction. If any operation fails
-// the whole transaction is rolled back and the error is returned. This is the
-// operation CalDAV DELETE and API DeleteEvent should use: a stale CTag (event
-// deleted but CTag not bumped) would cause Apple Calendar to keep showing the
-// deleted event forever, and a missing calendar_changes row would cause
-// sync-collection to never emit the 404 tombstone that tells incremental-sync
-// clients to remove the event locally.
-//
-// The change row is only recorded when a row was actually deleted. CalDAV
-// DELETE is idempotent — a repeated DELETE for an already-removed event must
-// not produce a spurious delete change row, otherwise sync-collection would
-// tell clients to tombstone an event that is already gone (harmless per RFC
-// 6578 but wasteful and confusing in logs).
-//
-// The household ownership guard lives inside the delete SQL: if the calendar is
-// not owned by the household, no row is deleted (the call still succeeds with
-// nil — DELETE is idempotent by CalDAV convention — but no change row and no
-// CTag bump occur). Callers should have already returned 404 if the calendar
-// wasn't owned (via a prior GetCalendarByCalDAVUID check), so reaching this
-// method with an un-owned calendar_id indicates a bug upstream rather than a
-// normal 404 path.
+// DeleteCalendarObjectWithCTag deletes the calendar object unconditionally,
+// records a calendar_changes row (action=delete) and bumps the calendar CTag
+// in one transaction. It is DeleteCalendarObjectIf with no precondition; see
+// that method for the details. A calendar of another household, or an event
+// that is already gone, is a no-op that returns nil (DELETE is idempotent).
 func (r *Repo) DeleteCalendarObjectWithCTag(ctx context.Context, householdID string, calendarID string, uid string) error {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("db: begin tx (delete+ctag): %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	_, _, err := r.DeleteCalendarObjectIf(ctx, householdID, calendarID, uid, nil)
+	return err
+}
 
-	tag, err := tx.Exec(ctx, `
-		DELETE FROM calendar_objects
-		WHERE calendar_id = $1 AND uid = $2
-		AND EXISTS (
-			SELECT 1 FROM calendars
-			WHERE id = calendar_objects.calendar_id AND household_id = $3
-		)
-	`, calendarID, uid, householdID)
-	if err != nil {
-		return fmt.Errorf("db: delete calendar object: %w", err)
-	}
-
-	// Only record a delete change row if a row was actually removed. A
-	// repeated DELETE for an already-deleted event affects zero rows and must
-	// not produce a tombstone, otherwise every redundant client DELETE would
-	// pollute the change stream.
-	if tag.RowsAffected() > 0 {
+// DeleteCalendarObjectIf is the conditional delete CalDAV DELETE uses
+// (If-Match, #4662). In a single transaction it:
+//
+//  1. checks the calendar belongs to householdID (not owned: returns
+//     owned=false and the caller answers 404);
+//  2. locks the (calendar_id, uid) row FOR UPDATE, or finds none;
+//  3. calls check with that row (nil when absent), when check is non-nil.
+//     check evaluates the request's precondition against the locked row and
+//     returns an error (ErrPreconditionFailed, or one wrapping it) to abort;
+//     the error is returned unchanged and nothing is written;
+//  4. if a row exists, deletes it, records a calendar_changes row
+//     (action=delete, the sync-collection tombstone) and bumps the CTag.
+//
+// Because check sees the locked row, a stale If-Match cannot delete an event
+// another device just updated: a concurrent PUT holding the lock commits
+// first, and the delete then sees the new ETag and fails (or the delete wins
+// and the PUT, which re-reads under the lock, sees no row).
+//
+// A missing row that passes check is not an error (deleted=false): CalDAV
+// DELETE without If-Match is idempotent, and no tombstone or CTag bump is
+// written for it, so repeated DELETEs do not pollute the change stream.
+//
+// The delete is a plain DELETE on calendar_objects, so its row triggers run as
+// before (038's AFTER DELETE maintenance_calendar_sync_trigger removes the
+// maintenance task linked to the event). Lock order matches PutCalendarObject:
+// object row first, then the calendars row via the CTag UPDATE.
+func (r *Repo) DeleteCalendarObjectIf(ctx context.Context, householdID string, calendarID string, uid string, check func(existing *CalendarObject) error) (owned bool, deleted bool, err error) {
+	owned, err = r.inCalendarTx(ctx, householdID, calendarID, func(tx pgx.Tx) error {
+		existing, err := lockCalendarObjectQ(ctx, tx, calendarID, uid)
+		if err != nil {
+			return err
+		}
+		if check != nil {
+			if err := check(existing); err != nil {
+				return err
+			}
+		}
+		if existing == nil {
+			return nil
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM calendar_objects WHERE calendar_id = $1 AND uid = $2`, calendarID, uid)
+		if err != nil {
+			return fmt.Errorf("db: delete calendar object: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			// Cannot happen while we hold the row lock; refuse rather than
+			// write a tombstone for a row we did not delete.
+			return fmt.Errorf("db: delete calendar object %q: locked row vanished", uid)
+		}
+		deleted = true
 		if err := recordChangeQ(ctx, tx, calendarID, uid, ChangeDelete); err != nil {
 			return err
 		}
-		if err := incrementCalendarCTagQ(ctx, tx, calendarID); err != nil {
-			return err
-		}
+		return incrementCalendarCTagQ(ctx, tx, calendarID)
+	})
+	if err != nil {
+		return owned, false, err
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("db: commit (delete+ctag): %w", err)
-	}
-	return nil
+	return owned, deleted, nil
 }
 
 // UpdateCalendarProps updates the name and/or color of a calendar, but only

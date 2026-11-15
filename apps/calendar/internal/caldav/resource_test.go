@@ -1090,3 +1090,255 @@ func TestPutCalendarObjectPreconditionSentinel(t *testing.T) {
 		t.Errorf("failed precondition left side effects: rows=%d", n)
 	}
 }
+
+// ----- DELETE If-Match (#4662) -----
+
+// seedEvent PUTs a new event and returns its path and the ETag the server
+// sent back (quoted, as a client would echo it in If-Match).
+func seedEvent(t *testing.T, repo *db.Repo, hid, calUID, uid string) (path, etag string) {
+	t.Helper()
+	path = "/dav/" + calUID + "/" + uid + ".ics"
+	w := httptest.NewRecorder()
+	HandlePUT(w, davRequest(http.MethodPut, path, hid, simpleEvent(uid, "original"), nil), repo, path)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("seed PUT %s status = %d: %s", uid, w.Code, w.Body)
+	}
+	return path, w.Header().Get("ETag")
+}
+
+func doDELETE(repo *db.Repo, path, hid string, hdr map[string]string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	HandleDELETE(w, davRequest(http.MethodDelete, path, hid, "", hdr), repo, path)
+	return w
+}
+
+func objectExists(t *testing.T, pool *pgxpool.Pool, calID, uid string) bool {
+	t.Helper()
+	var ok bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM calendar_objects WHERE calendar_id = $1 AND uid = $2)`, calID, uid).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	return ok
+}
+
+// TestCalDAVDeleteIfMatchIntegration covers the DELETE precondition matrix
+// against a real database: what is answered, and what is left behind (row,
+// calendar_changes tombstone, CTag).
+func TestCalDAVDeleteIfMatchIntegration(t *testing.T) {
+	repo, pool := testRepo(t)
+	hid, calUID, calID := seedCalendar(t, pool)
+
+	t.Run("stale If-Match is 412 and the event stays", func(t *testing.T) {
+		uid := "del-stale"
+		path, oldETag := seedEvent(t, repo, hid, calUID, uid)
+		// Another member edits the event: its ETag changes.
+		w := httptest.NewRecorder()
+		HandlePUT(w, davRequest(http.MethodPut, path, hid, simpleEvent(uid, "edited"), map[string]string{"If-Match": oldETag}), repo, path)
+		if w.Code != http.StatusOK {
+			t.Fatalf("edit status = %d", w.Code)
+		}
+		ctagBefore := calendarCTag(t, pool, calID)
+
+		// The device that has not synced deletes with the old ETag.
+		if w := doDELETE(repo, path, hid, map[string]string{"If-Match": oldETag}); w.Code != http.StatusPreconditionFailed {
+			t.Fatalf("stale DELETE status = %d, want 412: %s", w.Code, w.Body)
+		}
+		if !objectExists(t, pool, calID, uid) {
+			t.Fatal("event deleted despite stale If-Match")
+		}
+		if _, summary, _, _ := storedEvent(t, pool, calID, uid); summary != "edited" {
+			t.Errorf("summary = %q, want the edit to survive", summary)
+		}
+		if got := changeActions(t, pool, calID, uid); strings.Join(got, ",") != "create,update" {
+			t.Errorf("calendar_changes = %v, want no delete tombstone", got)
+		}
+		if calendarCTag(t, pool, calID) != ctagBefore {
+			t.Error("ctag bumped by a refused DELETE")
+		}
+	})
+
+	t.Run("matching If-Match is 204", func(t *testing.T) {
+		for _, form := range []string{"quoted", "weak", "list"} {
+			uid := "del-match-" + form
+			path, etag := seedEvent(t, repo, hid, calUID, uid)
+			hdr := etag
+			switch form {
+			case "weak":
+				hdr = "W/" + etag
+			case "list":
+				hdr = `"deadbeef", ` + etag
+			}
+			ctagBefore := calendarCTag(t, pool, calID)
+			if w := doDELETE(repo, path, hid, map[string]string{"If-Match": hdr}); w.Code != http.StatusNoContent {
+				t.Fatalf("%s: DELETE status = %d, want 204: %s", form, w.Code, w.Body)
+			}
+			if objectExists(t, pool, calID, uid) {
+				t.Errorf("%s: event still there", form)
+			}
+			if got := changeActions(t, pool, calID, uid); strings.Join(got, ",") != "create,delete" {
+				t.Errorf("%s: calendar_changes = %v, want [create delete]", form, got)
+			}
+			if calendarCTag(t, pool, calID) == ctagBefore {
+				t.Errorf("%s: ctag not bumped", form)
+			}
+		}
+	})
+
+	t.Run("If-Match * deletes an existing event", func(t *testing.T) {
+		path, _ := seedEvent(t, repo, hid, calUID, "del-star")
+		if w := doDELETE(repo, path, hid, map[string]string{"If-Match": "*"}); w.Code != http.StatusNoContent {
+			t.Fatalf("DELETE If-Match:* status = %d, want 204", w.Code)
+		}
+	})
+
+	t.Run("no If-Match is 204 and idempotent", func(t *testing.T) {
+		uid := "del-plain"
+		path, _ := seedEvent(t, repo, hid, calUID, uid)
+		if w := doDELETE(repo, path, hid, nil); w.Code != http.StatusNoContent {
+			t.Fatalf("DELETE status = %d, want 204", w.Code)
+		}
+		if objectExists(t, pool, calID, uid) {
+			t.Fatal("event still there")
+		}
+		ctagBefore := calendarCTag(t, pool, calID)
+		if w := doDELETE(repo, path, hid, nil); w.Code != http.StatusNoContent {
+			t.Fatalf("repeat DELETE status = %d, want 204", w.Code)
+		}
+		if got := changeActions(t, pool, calID, uid); strings.Join(got, ",") != "create,delete" {
+			t.Errorf("calendar_changes = %v, want one tombstone only", got)
+		}
+		if calendarCTag(t, pool, calID) != ctagBefore {
+			t.Error("ctag bumped by a no-op DELETE")
+		}
+	})
+
+	t.Run("If-Match on a missing event is 412", func(t *testing.T) {
+		path := "/dav/" + calUID + "/del-missing.ics"
+		for _, im := range []string{`"deadbeef"`, "*"} {
+			if w := doDELETE(repo, path, hid, map[string]string{"If-Match": im}); w.Code != http.StatusPreconditionFailed {
+				t.Errorf("If-Match %s on missing: status = %d, want 412", im, w.Code)
+			}
+		}
+		if w := doDELETE(repo, path, hid, nil); w.Code != http.StatusNoContent {
+			t.Errorf("no If-Match on missing: status = %d, want 204", w.Code)
+		}
+	})
+
+	t.Run("another household gets 404 and nothing is deleted", func(t *testing.T) {
+		uid := "del-cross"
+		path, etag := seedEvent(t, repo, hid, calUID, uid)
+		otherHID, _, _ := seedCalendar(t, pool)
+		for _, hdr := range []map[string]string{nil, {"If-Match": etag}} {
+			if w := doDELETE(repo, path, otherHID, hdr); w.Code != http.StatusNotFound {
+				t.Errorf("cross-household DELETE (%v) status = %d, want 404", hdr, w.Code)
+			}
+		}
+		if !objectExists(t, pool, calID, uid) {
+			t.Error("another household deleted the event")
+		}
+	})
+
+	t.Run("deleting a maintenance event still deletes its task", func(t *testing.T) {
+		ctx := context.Background()
+		uid := "del-maint"
+		path, etag := seedEvent(t, repo, hid, calUID, uid)
+		var taskID string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO maintenance_tasks (household_id, name) VALUES ($1, 'Replace filter') RETURNING id::text`, hid).Scan(&taskID); err != nil {
+			t.Fatalf("insert task: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`UPDATE calendar_objects SET entity_type = 'maintenance', entity_id = $3 WHERE calendar_id = $1 AND uid = $2`,
+			calID, uid, taskID); err != nil {
+			t.Fatalf("link task: %v", err)
+		}
+		// The link does not change the ETag the client holds.
+		if w := doDELETE(repo, path, hid, map[string]string{"If-Match": etag}); w.Code != http.StatusNoContent {
+			t.Fatalf("DELETE status = %d, want 204: %s", w.Code, w.Body)
+		}
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM maintenance_tasks WHERE id = $1`, taskID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Error("maintenance task survived the deletion of its calendar event (027/038 trigger)")
+		}
+	})
+}
+
+// TestCalDAVConcurrentPUTDeleteIfMatchIntegration: one device edits an event
+// while another deletes it, both carrying the same (current) ETag. Exactly one
+// may succeed. If the edit wins, the delete gets 412 and the edit is kept; if
+// the delete wins, the edit gets 412 and the event stays deleted.
+func TestCalDAVConcurrentPUTDeleteIfMatchIntegration(t *testing.T) {
+	repo, pool := testRepo(t)
+	hid, calUID, calID := seedCalendar(t, pool)
+
+	putWins, delWins := 0, 0
+	for round := 0; round < 20; round++ {
+		uid := fmt.Sprintf("evt-putdel-%d", round)
+		path, etag := seedEvent(t, repo, hid, calUID, uid)
+		hdr := map[string]string{"If-Match": etag}
+
+		putReq := davRequest(http.MethodPut, path, hid, simpleEvent(uid, "edited"), hdr)
+		delReq := davRequest(http.MethodDelete, path, hid, "", hdr)
+		var putCode, delCode int
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			w := httptest.NewRecorder()
+			HandlePUT(w, putReq, repo, path)
+			putCode = w.Code
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			// The PUT parses its body before taking the row lock, so with a
+			// simultaneous start the DELETE nearly always locks first. Give
+			// the PUT a head start on odd rounds so both orders are tested.
+			if round%2 == 1 {
+				time.Sleep(time.Duration(1+round%4) * time.Millisecond)
+			}
+			w := httptest.NewRecorder()
+			HandleDELETE(w, delReq, repo, path)
+			delCode = w.Code
+		}()
+		close(start)
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("concurrent PUT + DELETE did not finish in 30s (lock wait?)")
+		}
+
+		switch {
+		case putCode == http.StatusOK && delCode == http.StatusPreconditionFailed:
+			putWins++
+			if _, summary, _, _ := storedEvent(t, pool, calID, uid); summary != "edited" {
+				t.Errorf("round %d: summary = %q, want the winning edit", round, summary)
+			}
+			if got := changeActions(t, pool, calID, uid); strings.Join(got, ",") != "create,update" {
+				t.Errorf("round %d: calendar_changes = %v, want [create update]", round, got)
+			}
+		case delCode == http.StatusNoContent && putCode == http.StatusPreconditionFailed:
+			delWins++
+			if objectExists(t, pool, calID, uid) {
+				t.Errorf("round %d: event exists after the winning DELETE", round)
+			}
+			if got := changeActions(t, pool, calID, uid); strings.Join(got, ",") != "create,delete" {
+				t.Errorf("round %d: calendar_changes = %v, want [create delete]", round, got)
+			}
+		default:
+			t.Fatalf("round %d: PUT %d, DELETE %d; want exactly one success and one 412", round, putCode, delCode)
+		}
+	}
+	t.Logf("PUT won %d rounds, DELETE won %d", putWins, delWins)
+	if putWins == 0 || delWins == 0 {
+		t.Logf("only one ordering was exercised (PUT %d, DELETE %d); the outcome checks still held", putWins, delWins)
+	}
+}
