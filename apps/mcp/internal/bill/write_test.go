@@ -649,3 +649,250 @@ func TestBillUpdate_Validation(t *testing.T) {
 		t.Errorf("invalid calls wrote %d bill.updated events", n)
 	}
 }
+
+func deletedEvents(t *testing.T, pool *pgxpool.Pool, billID uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM outbox_events WHERE type = 'bill.deleted' AND payload->>'id' = $1`,
+		billID.String(),
+	).Scan(&n); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	return n
+}
+
+func billExists(t *testing.T, pool *pgxpool.Pool, id uuid.UUID) bool {
+	t.Helper()
+	var ok bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM bills WHERE id = $1)`, id).Scan(&ok); err != nil {
+		t.Fatalf("bill exists: %v", err)
+	}
+	return ok
+}
+
+func listBillIDs(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []uuid.UUID {
+	t.Helper()
+	_, _, list := NewListBillsTool(pool)
+	_, text := callTool(t, ctx, list, "list_bills", nil)
+	var rows []struct {
+		ID uuid.UUID `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(text), &rows); err != nil {
+		t.Fatalf("list_bills: decode %q: %v", text, err)
+	}
+	ids := make([]uuid.UUID, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
+	}
+	return ids
+}
+
+// TestBillDelete_RemovesFromListBills deletes one of two bills and checks it
+// is gone from list_bills, the response is the deleted row, and a bill.deleted
+// event is written.
+func TestBillDelete_RemovesFromListBills(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	vendorID := insertVendor(t, pool, hh.HouseholdID, "Power Co")
+	doomed := createTestBill(t, ctx, pool, vendorID)
+	kept := createTestBill(t, ctx, pool, vendorID)
+
+	if got := listBillIDs(t, ctx, pool); len(got) != 2 {
+		t.Fatalf("before delete: list_bills = %v, want 2 bills", got)
+	}
+
+	_, _, del := NewBillDeleteTool(pool)
+	res, text := callTool(t, ctx, del, "bill_delete", map[string]any{"bill_id": doomed.ID.String()})
+	if res.IsError {
+		t.Fatalf("bill_delete returned tool error: %s", text)
+	}
+	var got deletedBill
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("decode %q: %v", text, err)
+	}
+	if !got.Deleted || got.ID != doomed.ID || got.Name != "Electric" ||
+		got.Amount == nil || *got.Amount != 125.5 || got.DueDay == nil || *got.DueDay != 10 ||
+		!got.IsAutopay || got.VendorID == nil || *got.VendorID != vendorID ||
+		got.Notes == nil || *got.Notes != "Paperless billing" {
+		t.Errorf("unexpected deleted bill: %s", text)
+	}
+
+	ids := listBillIDs(t, ctx, pool)
+	if len(ids) != 1 || ids[0] != kept.ID {
+		t.Errorf("after delete: list_bills = %v, want only %s", ids, kept.ID)
+	}
+	if billExists(t, pool, doomed.ID) {
+		t.Error("deleted bill still in table")
+	}
+
+	var events int
+	var name string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*), MAX(payload->>'name') FROM outbox_events
+		 WHERE type = 'bill.deleted' AND payload->>'id' = $1 AND household_id = $2`,
+		doomed.ID.String(), hh.HouseholdID,
+	).Scan(&events, &name); err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if events != 1 || name != "Electric" {
+		t.Errorf("bill.deleted events = %d (name %q), want 1 (Electric)", events, name)
+	}
+
+	// A repeat call deletes nothing more and says so.
+	res, text = callTool(t, ctx, del, "bill_delete", map[string]any{"bill_id": doomed.ID.String()})
+	if !res.IsError || !strings.Contains(text, "bill not found") {
+		t.Errorf("repeat delete: want 'bill not found' tool error, got %s", text)
+	}
+	if n := deletedEvents(t, pool, doomed.ID); n != 1 {
+		t.Errorf("repeat delete wrote events: total %d, want 1", n)
+	}
+}
+
+// TestBillDelete_OtherHouseholdNotFound checks a bill in another household
+// (or a missing bill) is reported as not found and is not deleted.
+func TestBillDelete_OtherHouseholdNotFound(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	otherCtx, _ := testutil.SeedHousehold(t, pool)
+	orig := createTestBill(t, ctx, pool, insertVendor(t, pool, hh.HouseholdID, "Power Co"))
+
+	_, _, del := NewBillDeleteTool(pool)
+	missing := uuid.New()
+
+	tests := []struct {
+		name string
+		id   uuid.UUID
+	}{
+		{"bill in another household", orig.ID},
+		{"bill that does not exist", missing},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, text := callTool(t, otherCtx, del, "bill_delete", map[string]any{"bill_id": tc.id.String()})
+			if !res.IsError || !strings.Contains(text, "bill not found") {
+				t.Fatalf("want 'bill not found' tool error, got %s", text)
+			}
+			if n := deletedEvents(t, pool, tc.id); n != 0 {
+				t.Errorf("bill.deleted events = %d, want 0", n)
+			}
+		})
+	}
+
+	if !billExists(t, pool, orig.ID) {
+		t.Fatal("other household deleted the bill")
+	}
+	if ids := listBillIDs(t, ctx, pool); len(ids) != 1 || ids[0] != orig.ID {
+		t.Errorf("owner's list_bills = %v, want [%s]", ids, orig.ID)
+	}
+}
+
+// TestBillDelete_LegacyNullFields deletes a bill created without amount,
+// due_day or is_autopay (possible through the API).
+func TestBillDelete_LegacyNullFields(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+
+	var id uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO bills (household_id, name, is_autopay) VALUES ($1, 'Old', NULL) RETURNING id`,
+		hh.HouseholdID,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert bill: %v", err)
+	}
+
+	_, _, del := NewBillDeleteTool(pool)
+	res, text := callTool(t, ctx, del, "bill_delete", map[string]any{"bill_id": id.String()})
+	if res.IsError {
+		t.Fatalf("bill_delete returned tool error: %s", text)
+	}
+	var got deletedBill
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("decode %q: %v", text, err)
+	}
+	if !got.Deleted || got.Name != "Old" || got.Amount != nil || got.DueDay != nil || got.IsAutopay {
+		t.Errorf("unexpected legacy deleted bill: %s", text)
+	}
+	if billExists(t, pool, id) {
+		t.Error("legacy bill still in table")
+	}
+}
+
+// TestBillDelete_ToolDefinition pins the catalog v2 name, required param and
+// class X annotations.
+func TestBillDelete_ToolDefinition(t *testing.T) {
+	name, tool, _ := NewBillDeleteTool(nil)
+	if name != "bill_delete" || tool.Name != "bill_delete" {
+		t.Errorf("name = %q / %q, want bill_delete", name, tool.Name)
+	}
+	if len(tool.InputSchema.Required) != 1 || tool.InputSchema.Required[0] != "bill_id" {
+		t.Errorf("required = %v, want [bill_id]", tool.InputSchema.Required)
+	}
+	if len(tool.InputSchema.Properties) != 1 {
+		t.Errorf("params = %v, want only bill_id", tool.InputSchema.Properties)
+	}
+	if n := len(tool.Description); n > 200 {
+		t.Errorf("description is %d chars, max 200", n)
+	}
+	for param, schema := range tool.InputSchema.Properties {
+		if d, _ := schema.(map[string]any)["description"].(string); len(d) > 80 {
+			t.Errorf("%s description is %d chars, max 80", param, len(d))
+		}
+	}
+	a := tool.Annotations
+	if a.ReadOnlyHint == nil || *a.ReadOnlyHint || a.DestructiveHint == nil || !*a.DestructiveHint ||
+		a.IdempotentHint == nil || !*a.IdempotentHint || a.OpenWorldHint == nil || *a.OpenWorldHint {
+		t.Errorf("annotations = %+v, want class X (false, true, true, false)", a)
+	}
+	if a.Title != "Delete a bill" {
+		t.Errorf("title = %q, want Delete a bill", a.Title)
+	}
+}
+
+// TestBillDelete_Validation checks bad input is a tool error and deletes
+// nothing.
+func TestBillDelete_Validation(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	orig := createTestBill(t, ctx, pool, insertVendor(t, pool, hh.HouseholdID, "Power Co"))
+
+	_, _, del := NewBillDeleteTool(pool)
+
+	tests := []struct {
+		name    string
+		args    map[string]any
+		wantErr string
+	}{
+		{"missing bill_id", map[string]any{}, "bill_id is required"},
+		{"null bill_id", map[string]any{"bill_id": nil}, "bill_id is required"},
+		{"blank bill_id", map[string]any{"bill_id": "  "}, "bill_id is required"},
+		{"bill_id not a uuid", map[string]any{"bill_id": "abc"}, "bill_id must be a UUID"},
+		{"bill_id not a string", map[string]any{"bill_id": 5.0}, "bill_id"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, text := callTool(t, ctx, del, "bill_delete", tc.args)
+			if !res.IsError {
+				t.Fatalf("want tool error, got %s", text)
+			}
+			if !strings.Contains(text, tc.wantErr) {
+				t.Errorf("error %q does not contain %q", text, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("no claims", func(t *testing.T) {
+		res, _ := callTool(t, context.Background(), del, "bill_delete", map[string]any{"bill_id": orig.ID.String()})
+		if !res.IsError {
+			t.Fatal("want tool error without claims")
+		}
+	})
+
+	if !billExists(t, pool, orig.ID) {
+		t.Error("invalid calls deleted the bill")
+	}
+	if n := deletedEvents(t, pool, orig.ID); n != 0 {
+		t.Errorf("invalid calls wrote %d bill.deleted events", n)
+	}
+}

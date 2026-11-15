@@ -370,6 +370,110 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 	return "bill_update", tool, handler
 }
 
+// deletedBill is the bill_delete response: the row as it was when deleted.
+// amount and due_day are nullable because bills created through the API may
+// lack them.
+type deletedBill struct {
+	ID         uuid.UUID  `json:"id"`
+	Name       string     `json:"name"`
+	Amount     *float64   `json:"amount"`
+	DueDay     *int       `json:"due_day"`
+	Category   *string    `json:"category"`
+	IsAutopay  bool       `json:"is_autopay"`
+	VendorID   *uuid.UUID `json:"vendor_id"`
+	EntityType *string    `json:"entity_type"`
+	EntityID   *uuid.UUID `json:"entity_id"`
+	PaymentURL *string    `json:"payment_url"`
+	Notes      *string    `json:"notes"`
+	CreatedAt  time.Time  `json:"created_at"`
+	Deleted    bool       `json:"deleted"`
+}
+
+// NewBillDeleteTool creates the bill_delete MCP tool (catalog v2 name; see
+// KB architecture/mcp-tool-catalog.md, class X).
+// It deletes one bill in the authenticated household and returns the deleted
+// bill. A bill in another household, or one that doesn't exist, is reported
+// as not found and nothing is deleted. Bill calendar entries are derived from
+// the bills table, so they go with the row.
+func NewBillDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+	tool := mcp.NewTool("bill_delete",
+		mcp.WithDescription("Delete a bill and its future calendar entries. "+
+			"Use when a bill is cancelled, not when it's paid. Returns the deleted bill."),
+		mcp.WithTitleAnnotation("Delete a bill"),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
+		mcp.WithString("bill_id",
+			mcp.Description("Bill ID (UUID), e.g. from list_bills"),
+			mcp.Required(),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		claims := server.ClaimsFromContext(ctx)
+		if claims == nil {
+			return mcp.NewToolResultError("unauthorized"), nil
+		}
+
+		id, err := optionalUUID(req.GetArguments(), "bill_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if id == nil {
+			return mcp.NewToolResultError("bill_id is required"), nil
+		}
+
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("delete bill: begin tx: %w", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+		var b deletedBill
+		err = tx.QueryRow(ctx,
+			`DELETE FROM bills
+			 WHERE id = $1 AND household_id = $2
+			 RETURNING id, name, amount, due_day, category, COALESCE(is_autopay, false),
+			           vendor_id, entity_type, entity_id, payment_url, notes, created_at`,
+			*id, claims.HouseholdID,
+		).Scan(&b.ID, &b.Name, &b.Amount, &b.DueDay, &b.Category, &b.IsAutopay,
+			&b.VendorID, &b.EntityType, &b.EntityID, &b.PaymentURL, &b.Notes, &b.CreatedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return mcp.NewToolResultError("bill not found"), nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("delete bill: delete: %w", err)
+		}
+		b.Deleted = true
+
+		// Same event type the API writes on bill delete; name added for
+		// consumers that want it without a lookup (the row is gone).
+		payload, err := json.Marshal(map[string]string{"id": b.ID.String(), "name": b.Name})
+		if err != nil {
+			return nil, fmt.Errorf("delete bill: marshal event: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO outbox_events (type, payload, household_id) VALUES ($1, $2, $3)`,
+			"bill.deleted", payload, claims.HouseholdID,
+		); err != nil {
+			return nil, fmt.Errorf("delete bill: outbox event: %w", err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("delete bill: commit: %w", err)
+		}
+
+		result, err := json.Marshal(b)
+		if err != nil {
+			return nil, fmt.Errorf("delete bill: marshal result: %w", err)
+		}
+		return mcp.NewToolResultText(string(result)), nil
+	}
+
+	return "bill_delete", tool, handler
+}
+
 // parseUpdateBillInput validates bill_update arguments. A field that is
 // absent or null is left unchanged. name, amount, due_day and is_autopay
 // cannot be cleared; a blank string clears the other text fields. The
