@@ -932,6 +932,18 @@ func storedPaidDate(t *testing.T, pool *pgxpool.Pool, id uuid.UUID) string {
 	return d.Format(time.DateOnly)
 }
 
+func storedPaidFor(t *testing.T, pool *pgxpool.Pool, id uuid.UUID) string {
+	t.Helper()
+	var d *time.Time
+	if err := pool.QueryRow(context.Background(), `SELECT paid_for_due_date FROM bills WHERE id = $1`, id).Scan(&d); err != nil {
+		t.Fatalf("select paid_for_due_date: %v", err)
+	}
+	if d == nil {
+		return ""
+	}
+	return d.Format(time.DateOnly)
+}
+
 func setHouseholdTZ(t *testing.T, pool *pgxpool.Pool, householdID uuid.UUID, tz string) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(), `UPDATE households SET timezone = $2 WHERE id = $1`, householdID, tz); err != nil {
@@ -1196,13 +1208,13 @@ func TestBillPay_ToolDefinition(t *testing.T) {
 	if len(tool.InputSchema.Required) != 1 || tool.InputSchema.Required[0] != "bill_id" {
 		t.Errorf("required = %v, want [bill_id]", tool.InputSchema.Required)
 	}
-	for _, p := range []string{"bill_id", "paid_date", "amount"} {
+	for _, p := range []string{"bill_id", "paid_date", "for_due_date", "amount"} {
 		if _, ok := tool.InputSchema.Properties[p]; !ok {
 			t.Errorf("missing param %s", p)
 		}
 	}
-	if len(tool.InputSchema.Properties) != 3 {
-		t.Errorf("params = %v, want bill_id, paid_date, amount", tool.InputSchema.Properties)
+	if len(tool.InputSchema.Properties) != 4 {
+		t.Errorf("params = %v, want bill_id, paid_date, for_due_date, amount", tool.InputSchema.Properties)
 	}
 	if n := len(tool.Description); n > 200 {
 		t.Errorf("description is %d chars, max 200", n)
@@ -1228,6 +1240,8 @@ func TestBillPay_Validation(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	id := insertPayBill(t, pool, hh.HouseholdID, ptr(80.0), ptr(15))
+	noDay := insertPayBill(t, pool, hh.HouseholdID, ptr(80.0), nil)
+	today := householdTodayIn(t, "UTC") // SeedHousehold's timezone
 	_, _, pay := NewBillPayTool(pool)
 
 	tests := []struct {
@@ -1243,6 +1257,17 @@ func TestBillPay_Validation(t *testing.T) {
 		{"paid_date not a string", map[string]any{"bill_id": id.String(), "paid_date": 20.0}, "paid_date must be a string"},
 		{"negative amount", map[string]any{"bill_id": id.String(), "amount": -1.0}, "amount must be between"},
 		{"amount not a number", map[string]any{"bill_id": id.String(), "amount": "ten"}, "amount must be a number"},
+		{"for_due_date not a date", map[string]any{"bill_id": id.String(), "for_due_date": "Nov 15"}, "for_due_date must be YYYY-MM-DD"},
+		{"for_due_date not a string", map[string]any{"bill_id": id.String(), "for_due_date": 15.0}, "for_due_date must be a string"},
+		// Checked against the bill: due on the 15th, so the 16th is not one
+		// of its due dates, and two months ahead is too far.
+		{"for_due_date not a due date", map[string]any{"bill_id": id.String(), "for_due_date": "2026-01-16"},
+			"is not a due date of Electric, which is due on day 15"},
+		{"for_due_date more than a month ahead", map[string]any{"bill_id": id.String(),
+			"for_due_date": dueDateInMonth(today.Year(), today.Month()+2, 15).Format(time.DateOnly)},
+			"more than a month after today"},
+		{"for_due_date on a bill with no due day", map[string]any{"bill_id": noDay.String(), "for_due_date": "2026-01-15"},
+			"has no due day"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1263,11 +1288,16 @@ func TestBillPay_Validation(t *testing.T) {
 		}
 	})
 
-	if d := storedPaidDate(t, pool, id); d != "" {
-		t.Errorf("stored paid_date = %q, want NULL", d)
-	}
-	if n := updatedEvents(t, pool, id, hh.HouseholdID); n != 0 {
-		t.Errorf("bill.updated events = %d, want 0", n)
+	for _, b := range []uuid.UUID{id, noDay} {
+		if d := storedPaidDate(t, pool, b); d != "" {
+			t.Errorf("stored paid_date = %q, want NULL", d)
+		}
+		if d := storedPaidFor(t, pool, b); d != "" {
+			t.Errorf("stored paid_for_due_date = %q, want NULL", d)
+		}
+		if n := updatedEvents(t, pool, b, hh.HouseholdID); n != 0 {
+			t.Errorf("bill.updated events = %d, want 0", n)
+		}
 	}
 }
 
@@ -1400,12 +1430,12 @@ func TestBillCreate_FarTimezoneMatchesListBills(t *testing.T) {
 func TestBillDueExported(t *testing.T) {
 	today := mustDate(t, "2026-11-15")
 	paid := mustDate(t, "2026-11-15")
-	got := BillDue(today, 15, &paid)
+	got := BillDue(today, 15, &paid, nil)
 	if got.Next.Format(time.DateOnly) != "2026-12-15" || got.DaysUntil != 30 || got.Status != statusPaid ||
 		got.PaidFor == nil || got.PaidFor.Format(time.DateOnly) != "2026-11-15" {
 		t.Errorf("BillDue paid = %+v", got)
 	}
-	got = BillDue(today, 31, nil)
+	got = BillDue(today, 31, nil, nil)
 	if got.Next.Format(time.DateOnly) != "2026-11-30" || got.DaysUntil != 15 || got.Status != statusDue || got.PaidFor != nil {
 		t.Errorf("BillDue unpaid = %+v", got)
 	}
@@ -1484,5 +1514,133 @@ func TestBillPay_MatchesBillFind(t *testing.T) {
 			}
 			assertPayMatchesFind(t, ctx, pool, got)
 		})
+	}
+}
+
+// TestBillPay_ForDueDate pays a bill 8 days late (#4655). Without
+// for_due_date the grace rule counts it for the NEXT due date, so the
+// overdue one vanished; with for_due_date it covers the overdue due date and
+// the next one is still due. Dates are relative to the household's today:
+// the 20th of last month, paid on the 28th of last month.
+func TestBillPay_ForDueDate(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	setHouseholdTZ(t, pool, hh.HouseholdID, "UTC")
+	today := householdTodayIn(t, "UTC")
+	overdue := dueDateInMonth(today.Year(), today.Month()-1, 20)
+	paid := overdue.AddDate(0, 0, 8)
+	nextDue := nextDueDate(today, 20)
+	_, _, pay := NewBillPayTool(pool)
+
+	t.Run("for_due_date covers the overdue due date", func(t *testing.T) {
+		id := insertPayBill(t, pool, hh.HouseholdID, ptr(142.5), ptr(20))
+		args := map[string]any{"bill_id": id.String(), "paid_date": paid.Format(time.DateOnly), "for_due_date": overdue.Format(time.DateOnly)}
+		got := payBill(t, ctx, pay, args)
+		if *got.AlreadyPaid || strOrNil(got.PaidForDueDate) != overdue.Format(time.DateOnly) ||
+			strOrNil(got.PaidDate) != paid.Format(time.DateOnly) {
+			t.Errorf("already_paid=%v paid_date=%s paid_for=%s, want false %s %s", *got.AlreadyPaid,
+				strOrNil(got.PaidDate), strOrNil(got.PaidForDueDate), paid.Format(time.DateOnly), overdue.Format(time.DateOnly))
+		}
+		if strOrNil(got.NextDueDate) != nextDue.Format(time.DateOnly) || got.Status != statusDue {
+			t.Errorf("next=%s status=%s, want %s due", strOrNil(got.NextDueDate), got.Status, nextDue.Format(time.DateOnly))
+		}
+		assertPayMatchesFind(t, ctx, pool, got)
+		if d := storedPaidFor(t, pool, id); d != overdue.Format(time.DateOnly) {
+			t.Errorf("stored paid_for_due_date = %q, want %s", d, overdue.Format(time.DateOnly))
+		}
+		if !strings.Contains(paySummary(got, false), "for "+overdue.Format("Jan 2")) {
+			t.Errorf("summary %q does not name the due date paid", paySummary(got, false))
+		}
+
+		// The same call again changes nothing.
+		again := payBill(t, ctx, pay, args)
+		if !*again.AlreadyPaid || !again.UpdatedAt.Equal(got.UpdatedAt) || strOrNil(again.PaidForDueDate) != overdue.Format(time.DateOnly) {
+			t.Errorf("repeat: already_paid=%v paid_for=%s updated_at changed=%v", *again.AlreadyPaid,
+				strOrNil(again.PaidForDueDate), !again.UpdatedAt.Equal(got.UpdatedAt))
+		}
+		// An earlier due date never moves coverage back.
+		earlier := dueDateInMonth(overdue.Year(), overdue.Month()-1, 20)
+		older := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": paid.Format(time.DateOnly), "for_due_date": earlier.Format(time.DateOnly)})
+		if !*older.AlreadyPaid || strOrNil(older.PaidForDueDate) != overdue.Format(time.DateOnly) {
+			t.Errorf("earlier for_due_date: already_paid=%v paid_for=%s", *older.AlreadyPaid, strOrNil(older.PaidForDueDate))
+		}
+		if n := updatedEvents(t, pool, id, hh.HouseholdID); n != 1 {
+			t.Errorf("bill.updated events = %d, want 1", n)
+		}
+
+		// Then paying the next due date moves it on.
+		on := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "for_due_date": nextDue.Format(time.DateOnly)})
+		if *on.AlreadyPaid || strOrNil(on.PaidForDueDate) != nextDue.Format(time.DateOnly) || on.Status != statusPaid {
+			t.Errorf("next payment: already_paid=%v paid_for=%s status=%s", *on.AlreadyPaid, strOrNil(on.PaidForDueDate), on.Status)
+		}
+		assertPayMatchesFind(t, ctx, pool, on)
+	})
+
+	t.Run("without for_due_date the grace rule is unchanged", func(t *testing.T) {
+		id := insertPayBill(t, pool, hh.HouseholdID, ptr(142.5), ptr(20))
+		got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": paid.Format(time.DateOnly)})
+		want := paidForDueDate(paid, 20).Format(time.DateOnly) // 8 days late: the next due date
+		if strOrNil(got.PaidForDueDate) != want {
+			t.Errorf("paid_for_due_date = %s, want %s", strOrNil(got.PaidForDueDate), want)
+		}
+		if d := storedPaidFor(t, pool, id); d != want {
+			t.Errorf("stored paid_for_due_date = %q, want the inferred %s", d, want)
+		}
+		assertPayMatchesFind(t, ctx, pool, got)
+	})
+
+	t.Run("old rows without paid_for_due_date infer it", func(t *testing.T) {
+		id := insertPayBill(t, pool, hh.HouseholdID, ptr(142.5), ptr(20))
+		if _, err := pool.Exec(context.Background(), `UPDATE bills SET paid_date = $2 WHERE id = $1`, id, paid); err != nil {
+			t.Fatal(err)
+		}
+		// Inferred coverage is the 20th after the payment, so paying the
+		// overdue one is already covered and changes nothing.
+		got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "for_due_date": overdue.Format(time.DateOnly)})
+		if !*got.AlreadyPaid || strOrNil(got.PaidForDueDate) != paidForDueDate(paid, 20).Format(time.DateOnly) {
+			t.Errorf("already_paid=%v paid_for=%s", *got.AlreadyPaid, strOrNil(got.PaidForDueDate))
+		}
+		if d := storedPaidFor(t, pool, id); d != "" {
+			t.Errorf("stored paid_for_due_date = %q, want NULL (unchanged)", d)
+		}
+	})
+}
+
+// TestBillUpdate_DueDayClearsPaidFor checks bill_update clears a stored
+// paid_for_due_date only when due_day really changes (#4655).
+func TestBillUpdate_DueDayClearsPaidFor(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	_, _, update := NewBillUpdateTool(pool)
+	id := insertPayBill(t, pool, hh.HouseholdID, ptr(50.0), ptr(20))
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE bills SET paid_date = '2026-01-28', paid_for_due_date = '2026-01-20' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range []map[string]any{
+		{"bill_id": id.String(), "amount": 55.0},
+		{"bill_id": id.String(), "due_day": 20.0},
+	} {
+		if res, text := callTool(t, ctx, update, "bill_update", args); res.IsError {
+			t.Fatalf("bill_update %v: %s", args, text)
+		}
+		if d := storedPaidFor(t, pool, id); d != "2026-01-20" {
+			t.Errorf("after %v paid_for_due_date = %q, want 2026-01-20 kept", args, d)
+		}
+	}
+
+	res, text := callTool(t, ctx, update, "bill_update", map[string]any{"bill_id": id.String(), "due_day": 25.0})
+	if res.IsError {
+		t.Fatalf("bill_update due_day: %s", text)
+	}
+	if d := storedPaidFor(t, pool, id); d != "" {
+		t.Errorf("paid_for_due_date = %q, want NULL after due_day changed", d)
+	}
+	got := decodeUpdated(t, text)
+	// Coverage is inferred from paid_date for the new day: Jan 28 is 3 days
+	// after Jan 25.
+	if strOrNil(got.PaidForDueDate) != "2026-01-25" || strOrNil(got.PaidDate) != "2026-01-28" {
+		t.Errorf("paid_for=%s paid_date=%s, want 2026-01-25 2026-01-28", strOrNil(got.PaidForDueDate), strOrNil(got.PaidDate))
 	}
 }

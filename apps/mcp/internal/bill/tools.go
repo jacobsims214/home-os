@@ -28,7 +28,7 @@ import (
 const (
 	// statusDue means the bill's current due date has not been paid yet.
 	statusDue = "due"
-	// statusPaid means bills.paid_date already covers the current due date,
+	// statusPaid means the last payment already covers the current due date,
 	// so next_due_date is the following one.
 	statusPaid = "paid"
 )
@@ -49,9 +49,9 @@ type billDueInfo struct {
 	// next is the next due date that still needs paying.
 	next time.Time
 	// status is statusPaid when the current due date (the first one on or
-	// after today) is already covered by paid_date, otherwise statusDue.
+	// after today) is already covered by the last payment, otherwise statusDue.
 	status string
-	// paidFor is the due date paid_date covers, nil when never paid.
+	// paidFor is the due date the last payment covers, nil when never paid.
 	paidFor *time.Time
 }
 
@@ -61,16 +61,17 @@ type billDueInfo struct {
 // The current due date is due_day of this month or, once it has passed, of
 // next month, with due_day clamped to the month's length (31 is Nov 30 and
 // Feb 28 or 29). This is the same rule the worker's bill_due notification job
-// uses (#4418), so agents and notifications agree. If bills.paid_date covers
-// that due date or a later one (paidForDueDate, the rule bill_pay uses), the
-// bill is paid and moves on to the due date after the one paid.
-func billDue(today time.Time, dueDay int, paidDate *time.Time) billDueInfo {
+// uses (#4418), so agents and notifications agree. If the last payment covers
+// that due date or a later one (coveredDueDate: bills.paid_for_due_date when
+// stored, else inferred from paid_date), the bill is paid and moves on to the
+// due date after the one paid.
+func billDue(today time.Time, dueDay int, paidDate, paidFor *time.Time) billDueInfo {
 	info := billDueInfo{next: nextDueDate(today, dueDay), status: statusDue}
-	if paidDate == nil {
+	covered := coveredDueDate(dueDay, paidDate, paidFor)
+	if covered == nil {
 		return info
 	}
-	covered := paidForDueDate(*paidDate, dueDay)
-	info.paidFor = &covered
+	info.paidFor = covered
 	if covered.Before(info.next) {
 		return info
 	}
@@ -79,6 +80,23 @@ func billDue(today time.Time, dueDay int, paidDate *time.Time) billDueInfo {
 		info.next = dueDateInMonth(info.next.Year(), info.next.Month()+1, dueDay)
 	}
 	return info
+}
+
+// coveredDueDate is the due date a bill's last payment covers, nil when it
+// was never paid: bills.paid_for_due_date when stored (bill_pay, #4655),
+// otherwise inferred from paid_date by paidForDueDate (rows written before
+// 052, or after due_day changed).
+func coveredDueDate(dueDay int, paidDate, paidFor *time.Time) *time.Time {
+	if paidFor != nil {
+		y, m, d := paidFor.Date()
+		c := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+		return &c
+	}
+	if paidDate == nil {
+		return nil
+	}
+	c := paidForDueDate(*paidDate, dueDay)
+	return &c
 }
 
 // daysBetween returns the whole days from a to b (both midnight UTC dates).
@@ -90,7 +108,7 @@ func daysBetween(a, b time.Time) int {
 // the order scanBill reads it.
 const billColumns = `id, name, amount, due_day, category, COALESCE(is_autopay, false),
 	vendor_id, entity_type, entity_id, payment_url, notes,
-	created_at, updated_at, paid_date`
+	created_at, updated_at, paid_date, paid_for_due_date`
 
 // billRow is a bills row as the tools load it. amount and due_day are
 // pointers because API-created rows can leave them NULL.
@@ -109,6 +127,9 @@ type billRow struct {
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 	PaidDate   *time.Time
+	// PaidFor is bills.paid_for_due_date: the due date paid_date covers,
+	// nil when not stored (coverage is then inferred from paid_date).
+	PaidFor *time.Time
 }
 
 // scanBill reads one row of billColumns.
@@ -116,7 +137,7 @@ func scanBill(row pgx.Row) (billRow, error) {
 	var r billRow
 	err := row.Scan(&r.ID, &r.Name, &r.Amount, &r.DueDay, &r.Category, &r.AutoPay,
 		&r.VendorID, &r.EntityType, &r.EntityID, &r.PaymentURL, &r.Notes,
-		&r.CreatedAt, &r.UpdatedAt, &r.PaidDate)
+		&r.CreatedAt, &r.UpdatedAt, &r.PaidDate, &r.PaidFor)
 	return r, err
 }
 
@@ -192,7 +213,7 @@ func (r billRow) data(today time.Time) billData {
 	if !r.validDueDay() {
 		return b
 	}
-	due := BillDue(today, *r.DueDay, r.PaidDate)
+	due := BillDue(today, *r.DueDay, r.PaidDate, r.PaidFor)
 	days := due.DaysUntil
 	b.NextDueDate, b.NextDueWeekday, b.DaysUntilDue, b.Status = dateOnly(due.Next), weekday(due.Next), &days, due.Status
 	if due.PaidFor != nil {

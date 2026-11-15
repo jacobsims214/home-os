@@ -220,23 +220,28 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 		}
 	})
 
-	// paid_date follows the MCP rule (paidForDueDate): a payment covers the
-	// most recent due date when at most 7 days late, otherwise the next one.
+	// paid_date follows the MCP rule (coveredDueDate): a stored
+	// paid_for_due_date (bill_pay's for_due_date, #4655) wins; otherwise a
+	// payment covers the most recent due date when at most 7 days late, and
+	// the next one after that.
 	t.Run("bills: paid_date covering the due date", func(t *testing.T) {
 		// Today Nov 18, due_day 20: due in 2 days (Nov 20).
 		tests := []struct {
 			name     string
 			paidDate string // "" = never paid
+			paidFor  string // stored paid_for_due_date; "" = NULL
 			want     bool
 		}{
-			{"paid 3 days ago covers this due date", "2026-11-15", false},
-			{"paid on the due date ahead of time", "2026-11-20", false},
-			{"never paid", "", true},
-			{"paid on last month's due date only", "2026-10-20", true},
-			{"paid early for last month only", "2026-10-18", true},
-			{"paid 5 days late for last month (grace)", "2026-10-25", true},
-			{"paid 7 days late for last month (grace edge)", "2026-10-27", true},
-			{"paid 8 days late: pays this month", "2026-10-28", false},
+			{"paid 3 days ago covers this due date", "2026-11-15", "", false},
+			{"paid on the due date ahead of time", "2026-11-20", "", false},
+			{"never paid", "", "", true},
+			{"paid on last month's due date only", "2026-10-20", "", true},
+			{"paid early for last month only", "2026-10-18", "", true},
+			{"paid 5 days late for last month (grace)", "2026-10-25", "", true},
+			{"paid 7 days late for last month (grace edge)", "2026-10-27", "", true},
+			{"paid 8 days late: pays this month", "2026-10-28", "", false},
+			{"paid 8 days late for last month (stored): still notifies", "2026-10-28", "2026-10-20", true},
+			{"paid Oct 28 for this due date (stored)", "2026-10-28", "2026-11-20", false},
 		}
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
@@ -247,7 +252,8 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 				hh := seedHousehold(t, pool)
 				billID := seedBill(t, pool, hh, "Electric", 20)
 				if tc.paidDate != "" {
-					if _, err := pool.Exec(ctx, `UPDATE bills SET paid_date = $2::date WHERE id = $1`, billID, tc.paidDate); err != nil {
+					if _, err := pool.Exec(ctx, `UPDATE bills SET paid_date = $2::date, paid_for_due_date = NULLIF($3, '')::date WHERE id = $1`,
+						billID, tc.paidDate, tc.paidFor); err != nil {
 						t.Fatal(err)
 					}
 				}

@@ -1973,13 +1973,14 @@ func agendaHints(res agendaResult) []string {
 // ordered by date then name.
 //
 // It applies bill.BillDue, the rule bill_find uses, so the agenda agrees
-// with it: due_day is clamped to the month (31 is due Nov 30) and paid_date
-// only hides the bill when it covers this due date (a payment for last
+// with it: due_day is clamped to the month (31 is due Nov 30) and the last
+// payment (paid_for_due_date, else inferred from paid_date) only hides the
+// bill when it covers this due date (a payment for last
 // month's bill does not). As of a day, the first unpaid due date on or
 // after it is that day exactly when the bill is due then and unpaid.
 func billsDueBetween(ctx context.Context, pool querier, householdID string, days []time.Time) ([]AgendaBill, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT id::text, name, COALESCE(amount, 0)::float8, COALESCE(category, ''), due_day, paid_date
+		`SELECT id::text, name, COALESCE(amount, 0)::float8, COALESCE(category, ''), due_day, paid_date, paid_for_due_date
 		 FROM bills
 		 WHERE household_id = $1 AND due_day BETWEEN 1 AND 31
 		 ORDER BY name`,
@@ -1993,11 +1994,12 @@ func billsDueBetween(ctx context.Context, pool querier, householdID string, days
 		b        AgendaBill
 		dueDay   int
 		paidDate *time.Time
+		paidFor  *time.Time
 	}
 	var all []billRow
 	for rows.Next() {
 		var r billRow
-		if err := rows.Scan(&r.b.BillID, &r.b.Name, &r.b.Amount, &r.b.Category, &r.dueDay, &r.paidDate); err != nil {
+		if err := rows.Scan(&r.b.BillID, &r.b.Name, &r.b.Amount, &r.b.Category, &r.dueDay, &r.paidDate, &r.paidFor); err != nil {
 			return nil, fmt.Errorf("scan bill: %w", err)
 		}
 		all = append(all, r)
@@ -2010,7 +2012,7 @@ func billsDueBetween(ctx context.Context, pool querier, householdID string, days
 		y, m, dd := d.Date()
 		day := time.Date(y, m, dd, 0, 0, 0, 0, time.UTC) // bill dates are midnight UTC
 		for _, r := range all {
-			if bill.BillDue(day, r.dueDay, r.paidDate).Next.Equal(day) {
+			if bill.BillDue(day, r.dueDay, r.paidDate, r.paidFor).Next.Equal(day) {
 				b := r.b
 				b.DueDate, b.Weekday = day.Format(dateLayout), day.Weekday().String()
 				out = append(out, b)

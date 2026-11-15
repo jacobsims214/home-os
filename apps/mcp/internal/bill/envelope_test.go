@@ -168,7 +168,7 @@ func TestToolDefinitions(t *testing.T) {
 		"bill_create": {"Create bill", []string{"name", "amount", "due_day"}, []string{"name", "amount", "due_day", "category", "autopay", "contact_id", "notes"}, classC},
 		"bill_update": {"Update bill", []string{"bill_id"}, []string{"bill_id", "name", "amount", "due_day", "category", "autopay", "contact_id", "notes"}, classU},
 		"bill_delete": {"Delete bill", []string{"bill_id"}, []string{"bill_id"}, classX},
-		"bill_pay":    {"Pay bill", []string{"bill_id"}, []string{"bill_id", "paid_date", "amount"}, classU},
+		"bill_pay":    {"Pay bill", []string{"bill_id"}, []string{"bill_id", "paid_date", "for_due_date", "amount"}, classU},
 	}
 	tools := toolDefs()
 	if len(tools) != len(want) {

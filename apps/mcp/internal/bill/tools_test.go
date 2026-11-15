@@ -25,29 +25,36 @@ func TestBillDue(t *testing.T) {
 		today       string
 		dueDay      int
 		paid        string // "" = never paid
+		paidFor     string // stored paid_for_due_date; "" = NULL (inferred from paid)
 		wantNext    string
 		wantStatus  string
 		wantPaidFor string // "" = nil
 	}{
-		{"31 in November is Nov 30", "2026-11-15", 31, "", "2026-11-30", statusDue, ""},
-		{"31 on Nov 30 is today", "2026-11-30", 31, "", "2026-11-30", statusDue, ""},
-		{"31 in February is Feb 28", "2027-02-10", 31, "", "2027-02-28", statusDue, ""},
-		{"31 in leap February is Feb 29", "2028-02-10", 31, "", "2028-02-29", statusDue, ""},
-		{"30 in leap February is Feb 29", "2028-02-29", 30, "", "2028-02-29", statusDue, ""},
-		{"29 in February is Feb 28", "2027-02-01", 29, "", "2027-02-28", statusDue, ""},
-		{"31 after Jan 31 is Feb 28", "2027-02-01", 31, "", "2027-02-28", statusDue, ""},
-		{"passed this month wraps to next", "2026-11-29", 1, "", "2026-12-01", statusDue, ""},
-		{"wraps the year", "2026-12-20", 5, "", "2027-01-05", statusDue, ""},
-		{"due today is today", "2026-11-15", 15, "", "2026-11-15", statusDue, ""},
+		{"31 in November is Nov 30", "2026-11-15", 31, "", "", "2026-11-30", statusDue, ""},
+		{"31 on Nov 30 is today", "2026-11-30", 31, "", "", "2026-11-30", statusDue, ""},
+		{"31 in February is Feb 28", "2027-02-10", 31, "", "", "2027-02-28", statusDue, ""},
+		{"31 in leap February is Feb 29", "2028-02-10", 31, "", "", "2028-02-29", statusDue, ""},
+		{"30 in leap February is Feb 29", "2028-02-29", 30, "", "", "2028-02-29", statusDue, ""},
+		{"29 in February is Feb 28", "2027-02-01", 29, "", "", "2027-02-28", statusDue, ""},
+		{"31 after Jan 31 is Feb 28", "2027-02-01", 31, "", "", "2027-02-28", statusDue, ""},
+		{"passed this month wraps to next", "2026-11-29", 1, "", "", "2026-12-01", statusDue, ""},
+		{"wraps the year", "2026-12-20", 5, "", "", "2027-01-05", statusDue, ""},
+		{"due today is today", "2026-11-15", 15, "", "", "2026-11-15", statusDue, ""},
 
-		{"paid early moves to next month", "2026-11-15", 20, "2026-11-14", "2026-12-20", statusPaid, "2026-11-20"},
-		{"paid on the day moves on", "2026-11-20", 20, "2026-11-20", "2026-12-20", statusPaid, "2026-11-20"},
-		{"paid Nov 30 for 31 moves to Dec 31", "2026-11-30", 31, "2026-11-30", "2026-12-31", statusPaid, "2026-11-30"},
-		{"paid for Jan 31 moves to Feb 28", "2027-01-31", 31, "2027-01-31", "2027-02-28", statusPaid, "2027-01-31"},
-		{"paid for Jan 31 moves to leap Feb 29", "2028-01-31", 31, "2028-01-31", "2028-02-29", statusPaid, "2028-01-31"},
-		{"paid last month only: still due", "2026-11-15", 20, "2026-10-20", "2026-11-20", statusDue, "2026-10-20"},
-		{"late payment in grace covers the past due date", "2026-11-25", 20, "2026-11-25", "2026-12-20", statusDue, "2026-11-20"},
-		{"payment 8 days late pays the next one", "2026-11-28", 20, "2026-11-28", "2027-01-20", statusPaid, "2026-12-20"},
+		{"paid early moves to next month", "2026-11-15", 20, "2026-11-14", "", "2026-12-20", statusPaid, "2026-11-20"},
+		{"paid on the day moves on", "2026-11-20", 20, "2026-11-20", "", "2026-12-20", statusPaid, "2026-11-20"},
+		{"paid Nov 30 for 31 moves to Dec 31", "2026-11-30", 31, "2026-11-30", "", "2026-12-31", statusPaid, "2026-11-30"},
+		{"paid for Jan 31 moves to Feb 28", "2027-01-31", 31, "2027-01-31", "", "2027-02-28", statusPaid, "2027-01-31"},
+		{"paid for Jan 31 moves to leap Feb 29", "2028-01-31", 31, "2028-01-31", "", "2028-02-29", statusPaid, "2028-01-31"},
+		{"paid last month only: still due", "2026-11-15", 20, "2026-10-20", "", "2026-11-20", statusDue, "2026-10-20"},
+		{"late payment in grace covers the past due date", "2026-11-25", 20, "2026-11-25", "", "2026-12-20", statusDue, "2026-11-20"},
+		{"payment 8 days late pays the next one", "2026-11-28", 20, "2026-11-28", "", "2027-01-20", statusPaid, "2026-12-20"},
+
+		{"stored: 8 days late for the past due date", "2026-11-28", 20, "2026-11-28", "2026-11-20", "2026-12-20", statusDue, "2026-11-20"},
+		{"stored: wins over a payment in grace", "2026-11-15", 20, "2026-11-14", "2026-10-20", "2026-11-20", statusDue, "2026-10-20"},
+		{"stored: next month paid ahead moves two on", "2026-11-15", 20, "2026-11-15", "2026-12-20", "2027-01-20", statusPaid, "2026-12-20"},
+		{"stored: clamped Feb 28 for 31", "2027-03-01", 31, "2027-03-01", "2027-02-28", "2027-03-31", statusDue, "2027-02-28"},
+		{"stored: without paid_date", "2026-11-15", 20, "", "2026-11-20", "2026-12-20", statusPaid, "2026-11-20"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,7 +63,12 @@ func TestBillDue(t *testing.T) {
 				p := mustDate(t, tc.paid)
 				paid = &p
 			}
-			got := billDue(mustDate(t, tc.today), tc.dueDay, paid)
+			var paidFor *time.Time
+			if tc.paidFor != "" {
+				p := mustDate(t, tc.paidFor)
+				paidFor = &p
+			}
+			got := billDue(mustDate(t, tc.today), tc.dueDay, paid, paidFor)
 			if g := got.next.Format(time.DateOnly); g != tc.wantNext {
 				t.Errorf("next = %s, want %s", g, tc.wantNext)
 			}

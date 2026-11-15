@@ -159,6 +159,9 @@ func (r *Repo) Update(ctx context.Context, b *Bill) (*Bill, error) {
 	row := tx.QueryRow(ctx,
 		`UPDATE bills
 		 SET property_id = $2, name = $3, amount = $4, due_day = $5,
+		     -- a stored paid_for_due_date is on the old due day: clear it
+		     -- when the day changes (migration 052, #4655)
+		     paid_for_due_date = CASE WHEN due_day IS DISTINCT FROM $5 THEN NULL ELSE paid_for_due_date END,
 		     category = $6, vendor_id = $7, rrule = $8, notes = $9,
 		     vehicle_id = $10, asset_id = $11, is_autopay = $12,
 		     account_number = $13, payment_url = $14,

@@ -303,10 +303,18 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 
 		// $1 is the bill id, $2 the household; the SET values follow.
 		args := []any{in.billID, claims.HouseholdID}
-		sets := make([]string, 0, len(in.columns)+1)
+		sets := make([]string, 0, len(in.columns)+2)
 		for i, col := range in.columns {
 			sets = append(sets, fmt.Sprintf("%s = $%d", col, i+3))
 			args = append(args, in.values[i])
+			if col == "due_day" {
+				// A stored paid_for_due_date is a date on the old due day:
+				// when the day really changes, clear it so coverage is
+				// inferred from paid_date for the new day (#4655). The
+				// right-hand due_day is the row's value before the update.
+				sets = append(sets, fmt.Sprintf(
+					"paid_for_due_date = CASE WHEN due_day IS DISTINCT FROM $%d THEN NULL ELSE paid_for_due_date END", i+3))
+			}
 		}
 		sets = append(sets, "updated_at = NOW()")
 
@@ -423,27 +431,31 @@ const lateGraceDays = 7
 // billPayInput is the validated bill_pay arguments. paidDate is nil when the
 // caller left it to default to the household's today.
 type billPayInput struct {
-	billID   uuid.UUID
-	paidDate *time.Time
-	amount   *float64
+	billID     uuid.UUID
+	paidDate   *time.Time
+	forDueDate *time.Time
+	amount     *float64
 }
 
 // NewBillPayTool creates the bill_pay MCP tool (catalog v2, class U),
 // replacing the S1 working name mark_bill_paid.
 //
 // It records a bill in the authenticated household as paid by setting
-// bills.paid_date (there is no payments table yet, so no history is kept and
-// amount is echoed back as amount_paid, not stored). paid_date defaults to
-// today in the household's timezone. The due date a payment covers is derived
-// from paid_date alone (see paidForDueDate), so paying again for a due date
-// that is already covered changes nothing and returns already_paid true.
-// for_due_date is #4655.
+// bills.paid_date and bills.paid_for_due_date (there is no payments table
+// yet, so no history is kept and amount is echoed back as amount_paid, not
+// stored). paid_date defaults to today in the household's timezone. The due
+// date the payment covers is for_due_date when given (#4655: it must be one
+// of the bill's due dates and at most a month after today), otherwise
+// inferred from paid_date (paidForDueDate), as before for_due_date existed.
+// Paying again for a due date that is already covered (or an earlier one)
+// changes nothing and returns already_paid true.
 func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Record a bill as paid. " +
 			"Calling it again for the same due date changes nothing. Returns the due date paid and the next unpaid due date, as bill_find reports it."),
 		mcp.WithString("bill_id", mcp.Description("The bill's id (UUID), from bill_find"), mcp.Required()),
 		mcp.WithString("paid_date", mcp.Description("Date paid, YYYY-MM-DD, e.g. 2026-11-20; default today")),
+		mcp.WithString("for_due_date", mcp.Description("Due date being paid, YYYY-MM-DD; pass it when paid over 7 days late")),
 		mcp.WithNumber("amount", mcp.Description("Amount paid, e.g. 142.50; default the bill's amount"), mcp.Min(0)),
 		respond.Schema[billData](),
 	}
@@ -495,29 +507,42 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 		}
 
 		hasDueDay := r.validDueDay()
-		alreadyPaid := false
-		if r.PaidDate != nil {
-			if hasDueDay {
-				// Already paid when the stored payment covers this due date
-				// or a later one; coverage never moves backwards.
-				alreadyPaid = !paidForDueDate(*r.PaidDate, *r.DueDay).Before(paidForDueDate(paid, *r.DueDay))
-			} else {
-				alreadyPaid = !r.PaidDate.Before(paid)
+		if in.forDueDate != nil {
+			if res := checkForDueDate(r, *in.forDueDate, today); res != nil {
+				return res, nil
 			}
 		}
 
-		// Already paid: r keeps its stored paid_date, which is the effective
-		// one. Otherwise record this payment.
+		// target is the due date this payment covers: for_due_date, else
+		// inferred from the payment date. nil for a bill with no due day.
+		var target *time.Time
+		if hasDueDay {
+			target = coveredDueDate(*r.DueDay, &paid, in.forDueDate)
+		}
+		alreadyPaid := false
+		if hasDueDay {
+			// Already paid when the stored coverage (paid_for_due_date, or
+			// inferred from paid_date for rows written before it existed)
+			// is this due date or a later one; coverage never moves back.
+			if stored := coveredDueDate(*r.DueDay, r.PaidDate, r.PaidFor); stored != nil {
+				alreadyPaid = !stored.Before(*target)
+			}
+		} else if r.PaidDate != nil {
+			alreadyPaid = !r.PaidDate.Before(paid)
+		}
+
+		// Already paid: r keeps its stored payment, which is the effective
+		// one. Otherwise record this payment and the due date it covers.
 		if !alreadyPaid {
 			if err := tx.QueryRow(ctx,
-				`UPDATE bills SET paid_date = $3, updated_at = NOW()
+				`UPDATE bills SET paid_date = $3, paid_for_due_date = $4, updated_at = NOW()
 				 WHERE id = $1 AND household_id = $2
 				 RETURNING updated_at`,
-				r.ID, claims.HouseholdID, paid,
+				r.ID, claims.HouseholdID, paid, target,
 			).Scan(&r.UpdatedAt); err != nil {
 				return respond.Failed("record the payment", err), nil
 			}
-			r.PaidDate = &paid
+			r.PaidDate, r.PaidFor = &paid, target
 
 			// The row changed, so write the event the API writes on any bill
 			// update; paid_date tells consumers what changed.
@@ -532,7 +557,7 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 			return respond.Failed("record the payment", err), nil
 		}
 
-		// r.PaidDate is now the effective payment date, so data
+		// r.PaidDate and r.PaidFor are now the effective payment, so data
 		// applies BillDue exactly as bill_find does: next_due_date is the
 		// next unpaid due date as of today (never in the past, even for a
 		// back-dated payment), status is due/paid, and paid_for_due_date is
@@ -549,6 +574,37 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 	}
 
 	return "bill_pay", tool, handler
+}
+
+// checkForDueDate validates bill_pay's for_due_date against the bill: it must
+// be one of the bill's due dates (due_day of its month, clamped to the
+// month's length) and no more than one month after today, so a typo can't
+// mark a year of bills paid. It returns the tool error, or nil when valid.
+func checkForDueDate(r billRow, forDue, today time.Time) *mcp.CallToolResult {
+	given := forDue.Format(time.DateOnly)
+	if !r.validDueDay() {
+		return respond.Invalid("for_due_date",
+			fmt.Sprintf("Bill %s has no due day, so for_due_date %s cannot be checked.", r.Name, given),
+			"Leave for_due_date out, or set the bill's due_day with bill_update first.",
+			map[string]any{"bill_id": r.ID.String()})
+	}
+	dueDay := *r.DueDay
+	if want := dueDateInMonth(forDue.Year(), forDue.Month(), dueDay); !want.Equal(forDue) {
+		return respond.Invalid("for_due_date",
+			fmt.Sprintf("for_due_date %s is not a due date of %s, which is due on day %d of each month (%s that month).",
+				given, r.Name, dueDay, want.Format(time.DateOnly)),
+			fmt.Sprintf("Pass the due date being paid, e.g. %s, or leave for_due_date out.", want.Format(time.DateOnly)),
+			map[string]any{"bill_id": r.ID.String(), "for_due_date": want.Format(time.DateOnly)})
+	}
+	if limit := today.AddDate(0, 1, 0); forDue.After(limit) {
+		next := nextDueDate(today, dueDay).Format(time.DateOnly)
+		return respond.Invalid("for_due_date",
+			fmt.Sprintf("for_due_date %s is more than a month after today (%s in the family's timezone).",
+				given, today.Format(time.DateOnly)),
+			fmt.Sprintf("Pay one due date at a time: pass the next one, %s, or leave for_due_date out.", next),
+			map[string]any{"bill_id": r.ID.String(), "for_due_date": next})
+	}
+	return nil
 }
 
 // paySummary is bill_pay's one-line summary.
@@ -606,6 +662,19 @@ func parseBillPayInput(args map[string]any) (billPayInput, error) {
 		in.paidDate = &d
 	}
 
+	forDue, err := optionalString(args, "for_due_date")
+	if err != nil {
+		return in, err
+	}
+	if forDue != nil {
+		d, err := time.Parse(time.DateOnly, *forDue)
+		if err != nil {
+			return in, badArg("for_due_date", fmt.Sprintf("for_due_date %q is not a date: for_due_date must be YYYY-MM-DD.", *forDue),
+				"Pass the due date being paid as YYYY-MM-DD, e.g. 2026-11-20, or leave it out.")
+		}
+		in.forDueDate = &d
+	}
+
 	amount, ok, err := parseAmount(args)
 	if err != nil {
 		return in, err
@@ -623,19 +692,21 @@ type Due struct {
 	Next time.Time
 	// DaysUntil is the whole days from today to Next.
 	DaysUntil int
-	// Status is "paid" when paid_date covers the current due date (so Next
-	// is the one after it), otherwise "due".
+	// Status is "paid" when the last payment covers the current due date (so
+	// Next is the one after it), otherwise "due".
 	Status string
-	// PaidFor is the due date paid_date covers, nil when never paid.
+	// PaidFor is the due date the last payment covers, nil when never paid.
 	PaidFor *time.Time
 }
 
 // BillDue is the single rule for when a bill is due: billDue (due_day
-// clamped to the month, paid_date moving the bill to the following due date)
-// as of today, which should come from HouseholdToday. Exported so other
-// packages (e.g. the daily briefing) give the same answer as the bill tools.
-func BillDue(today time.Time, dueDay int, paidDate *time.Time) Due {
-	info := billDue(today, dueDay, paidDate)
+// clamped to the month, the last payment moving the bill to the following
+// due date) as of today, which should come from HouseholdToday. paidDate and
+// paidFor are bills.paid_date and bills.paid_for_due_date (either may be
+// nil; paidFor wins when set). Exported so other packages (e.g. the daily
+// briefing) give the same answer as the bill tools.
+func BillDue(today time.Time, dueDay int, paidDate, paidFor *time.Time) Due {
+	info := billDue(today, dueDay, paidDate, paidFor)
 	return Due{Next: info.next, DaysUntil: daysBetween(today, info.next), Status: info.status, PaidFor: info.paidFor}
 }
 
@@ -667,9 +738,9 @@ func householdToday(ctx context.Context, q interface {
 
 // paidForDueDate returns the due date a payment made on paid pays: the most
 // recent due date (on or before paid) when the payment is at most
-// lateGraceDays late, otherwise the first due date on or after paid. It
-// depends only on paid and dueDay because bills.paid_date is the only thing
-// stored about a payment.
+// lateGraceDays late, otherwise the first due date on or after paid. It is
+// the coverage bill_pay stores when the caller gives no for_due_date, and the
+// fallback when bills.paid_for_due_date is NULL (see coveredDueDate).
 func paidForDueDate(paid time.Time, dueDay int) time.Time {
 	y, m, d := paid.Date()
 	paid = time.Date(y, m, d, 0, 0, 0, 0, time.UTC)

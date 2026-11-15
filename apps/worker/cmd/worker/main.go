@@ -155,15 +155,16 @@ const (
 
 // billCandidatesSQL lists every bill with a usable due_day and no bill_due
 // notification in the last 24 hours, with what the due-date rule needs: the
-// household's timezone (for "today"), due_day and paid_date. Which of them
+// household's timezone (for "today"), due_day, paid_date and
+// paid_for_due_date (migration 052, #4655). Which of them
 // are due within the window is decided in Go by nextUnpaidDue (billdue.go),
 // the same rule as the MCP bill tools (apps/mcp/internal/bill.BillDue and
-// paidForDueDate), so a bill marked paid with bill_pay is not notified for
+// coveredDueDate), so a bill marked paid with bill_pay is not notified for
 // the due date it paid. Doing it in SQL would mean a second copy of
 // paidForDueDate in another language, and AT TIME ZONE fails the whole
 // query on a bad households.timezone where the MCP tools fall back to UTC.
 const billCandidatesSQL = `
-	SELECT b.id::text, h.timezone, b.due_day, b.paid_date
+	SELECT b.id::text, h.timezone, b.due_day, b.paid_date, b.paid_for_due_date
 	FROM bills b
 	JOIN households h ON h.id = b.household_id
 	WHERE b.due_day BETWEEN 1 AND 31
@@ -201,6 +202,7 @@ type billCandidate struct {
 	Timezone string
 	DueDay   int
 	PaidDate *time.Time
+	PaidFor  *time.Time
 }
 
 // dueBills returns the ids and next unpaid due dates of the candidates whose
@@ -210,12 +212,12 @@ type billCandidate struct {
 // bills.due_day is a day of the month (1-31), so the next due date can be in
 // this month or the next one: on Nov 29 a bill due on the 1st is due Dec 1.
 // The day is clamped to the month's length, so due_day 31 is due Feb 28 (or
-// 29), and Apr 30. A paid_date that covers that due date moves the bill on to
+// 29), and Apr 30. A payment that covers that due date moves the bill on to
 // the following one, which is at least 28 days away and so never notifies.
 func dueBills(now time.Time, candidates []billCandidate, windowDays int) (ids []string, dueDates []time.Time) {
 	for _, c := range candidates {
 		today := householdToday(now, c.Timezone)
-		next := nextUnpaidDue(today, c.DueDay, c.PaidDate)
+		next := nextUnpaidDue(today, c.DueDay, c.PaidDate, c.PaidFor)
 		if !next.After(today.AddDate(0, 0, windowDays)) {
 			ids = append(ids, c.ID)
 			dueDates = append(dueDates, next)
