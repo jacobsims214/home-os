@@ -10,6 +10,11 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # One job, one matrix, one tag list for every image the chart deploys
+  # (api, calendar, worker, ui, mcp, migrations). Migrations used to be a
+  # separate job with its own tag list; it missed `latest`, so a
+  # workflow_dispatch on main moved the app images' `latest` ahead of the
+  # schema. Keep every image in this matrix so their tags cannot drift.
   build-images:
     runs-on: ubuntu-latest
     permissions:
@@ -18,7 +23,27 @@ jobs:
 
     strategy:
       matrix:
-        service: [api, calendar, worker, ui, mcp]
+        include:
+          - service: api
+            context: apps/api
+            file: apps/api/Dockerfile
+          # worker and calendar import repo-level modules (packages/icalx),
+          # so they build from the repository root.
+          - service: calendar
+            context: .
+            file: apps/calendar/Dockerfile
+          - service: worker
+            context: .
+            file: apps/worker/Dockerfile
+          - service: ui
+            context: apps/ui
+            file: apps/ui/Dockerfile
+          - service: mcp
+            context: apps/mcp
+            file: apps/mcp/Dockerfile
+          - service: migrations
+            context: packages/db
+            file: packages/db/Dockerfile
 
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +58,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Tags, identical for every image on every trigger:
+      #   sha-<short>           always
+      #   latest                on a published release, or a run on main
+      #   X.Y.Z and X.Y         on a release whose tag is semver (vX.Y.Z)
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -47,51 +76,10 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          # worker and calendar import repo-level modules (packages/icalx),
-          # so they build from the repository root.
-          context: ${{ contains(fromJSON('["worker","calendar"]'), matrix.service) && '.' || format('apps/{0}', matrix.service) }}
-          file: ${{ format('apps/{0}/Dockerfile', matrix.service) }}
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  build-migrations:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/migrations
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: packages/db
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
