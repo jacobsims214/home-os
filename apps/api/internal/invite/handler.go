@@ -3,6 +3,7 @@ package invite
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"html"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/config"
 	"home-os/api/internal/middleware"
 	"home-os/api/pkg/apierr"
@@ -18,13 +20,29 @@ import (
 )
 
 type Handler struct {
-	repo *Repo
-	cfg  *config.Config
-	smtp *smtp.Client
+	repo     *Repo
+	cfg      *config.Config
+	smtp     *smtp.Client
+	verifier *auth.Verifier
 }
 
 func NewHandler(repo *Repo, cfg *config.Config, smtpClient *smtp.Client) *Handler {
 	return &Handler{repo: repo, cfg: cfg, smtp: smtpClient}
+}
+
+// WithVerifier lets AcceptInvite verify the caller's Dex token itself, so the
+// accept route can be served outside RequireAuth to users who are not yet
+// members of any household.
+func (h *Handler) WithVerifier(v *auth.Verifier) *Handler {
+	h.verifier = v
+	return h
+}
+
+// validRoles mirrors the membership_role enum (migration 001). Invitations
+// store role as TEXT, so it is checked here before it is cast on accept.
+var validRoles = map[string]bool{
+	"owner": true, "family_manager": true, "family_member": true,
+	"viewer": true, "housesitter": true, "vendor": true,
 }
 
 func (h *Handler) CreateInvite(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +66,10 @@ func (h *Handler) CreateInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Role == "" {
 		req.Role = "family_member"
+	}
+	if !validRoles[req.Role] {
+		apierr.BadRequest(w, "invalid role")
+		return
 	}
 
 	token := uuid.New().String()
@@ -141,7 +163,24 @@ func (h *Handler) ListInvites(w http.ResponseWriter, r *http.Request) {
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": invs})
 }
 
+// AcceptInvite POST /api/v1/invites/accept
+//
+// The caller is usually not a household member yet, so this route is
+// registered OUTSIDE the RequireAuth group (which answers 403 for verified
+// non-members). The handler verifies the Dex bearer token itself with
+// Verifier.Verify (signature, issuer, audience, expiry; no membership needed)
+// and then, in one transaction, finds or creates the Home OS user, adds the
+// membership with the invitation's role and marks the invitation accepted.
+//
+// Responses: 200 with the membership; 400 bad body / expired; 401 missing or
+// invalid token; 403 token email differs from the invited email; 404 unknown
+// token; 409 already accepted or already a member.
 func (h *Handler) AcceptInvite(w http.ResponseWriter, r *http.Request) {
+	ident, ok := h.acceptingIdentity(w, r)
+	if !ok {
+		return
+	}
+
 	var req struct {
 		Token string `json:"token"`
 	}
@@ -149,26 +188,67 @@ func (h *Handler) AcceptInvite(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "invalid request body")
 		return
 	}
+	req.Token = strings.TrimSpace(req.Token)
+	if req.Token == "" {
+		apierr.BadRequest(w, "token is required")
+		return
+	}
 
-	inv, err := h.repo.GetByToken(r.Context(), req.Token)
-	if err != nil {
+	res, err := h.repo.Accept(r.Context(), req.Token, ident, time.Now())
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrInviteNotFound):
+		apierr.NotFound(w, "invalid or expired invitation")
+		return
+	case errors.Is(err, ErrInviteAccepted):
+		apierr.Conflict(w, "invitation already accepted")
+		return
+	case errors.Is(err, ErrAlreadyMember):
+		apierr.Conflict(w, "already a member of this household")
+		return
+	case errors.Is(err, ErrInviteExpired):
+		apierr.BadRequest(w, "invitation has expired")
+		return
+	case errors.Is(err, ErrInviteEmailMismatch):
+		apierr.Forbidden(w, "this invitation was sent to a different email address")
+		return
+	default:
 		apierr.InternalError(w, err)
 		return
 	}
-	if inv == nil {
-		apierr.NotFound(w, "invalid or expired invitation")
-		return
+
+	slog.Info("invite: accepted", "invitation_id", res.Invitation.ID,
+		"household_id", res.HouseholdID, "user_id", res.UserID, "role", res.Role, "user_created", res.UserCreated)
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+		"invitation":   res.Invitation,
+		"user_id":      res.UserID,
+		"household_id": res.HouseholdID,
+		"role":         res.Role,
+	}})
+}
+
+// acceptingIdentity returns the verified Dex identity of the caller. It writes
+// a 401 and returns false when the token is missing or invalid.
+func (h *Handler) acceptingIdentity(w http.ResponseWriter, r *http.Request) (AcceptIdentity, bool) {
+	if h.verifier == nil {
+		// Mounted behind RequireAuth (no verifier wired): fall back to claims.
+		if c := middleware.ClaimsFromContext(r.Context()); c != nil {
+			return AcceptIdentity{Email: c.Email, Name: c.Name}, true
+		}
+		apierr.Unauthorized(w, "not authenticated")
+		return AcceptIdentity{}, false
 	}
 
-	if inv.AcceptedAt != nil {
-		apierr.Conflict(w, "invitation already accepted")
-		return
+	parts := strings.SplitN(r.Header.Get("Authorization"), " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
+		apierr.Unauthorized(w, "missing or invalid authorization header")
+		return AcceptIdentity{}, false
 	}
-
-	if time.Now().After(inv.ExpiresAt) {
-		apierr.BadRequest(w, "invitation has expired")
-		return
+	id, err := h.verifier.Verify(r.Context(), strings.TrimSpace(parts[1]))
+	if err != nil {
+		slog.Warn("invite accept: token verification failed", "error", err)
+		apierr.Unauthorized(w, "invalid or expired token")
+		return AcceptIdentity{}, false
 	}
-
-	apierr.JSON(w, http.StatusOK, map[string]any{"data": inv})
+	return AcceptIdentity{Subject: id.Subject, Email: id.Email, Name: id.Name}, true
 }

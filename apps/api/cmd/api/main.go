@@ -156,6 +156,12 @@ func main() {
 	r.Post("/api/v1/auth/forgot-password", authHandler.ForgotPassword)
 	r.Post("/api/v1/auth/reset-password", authHandler.ResetPassword)
 
+	// Invites. Accept is outside RequireAuth: the invitee is usually not a
+	// household member yet (RequireAuth answers 403 for that), so the handler
+	// verifies the Dex token itself.
+	inviteHandler := invite.NewHandler(invite.NewRepo(pool), cfg, smtpClient).WithVerifier(oidcVerifier)
+	r.Post("/api/v1/invites/accept", inviteHandler.AcceptInvite)
+
 	// Protected endpoints (require valid JWT).
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(oidcVerifier))
@@ -307,12 +313,9 @@ func main() {
 		r.Post("/api/v1/integrations/{type}/test", integrationHandler.Test)
 		r.Delete("/api/v1/integrations/{type}", integrationHandler.Disconnect)
 
-		// Invite routes
-		inviteRepo := invite.NewRepo(pool)
-		inviteHandler := invite.NewHandler(inviteRepo, cfg, smtpClient)
+		// Invite routes (accept is registered above, outside this group).
 		r.Post("/api/v1/invites", inviteHandler.CreateInvite)
 		r.Get("/api/v1/invites", inviteHandler.ListInvites)
-		r.Post("/api/v1/invites/accept", inviteHandler.AcceptInvite)
 
 		// Admin routes (require owner role — enforced in handler).
 		r.Post("/api/v1/admin/users", authHandler.AdminCreateUser)
