@@ -1212,3 +1212,100 @@ func TestParseEvent_MasterWithOverrides(t *testing.T) {
 		})
 	}
 }
+
+func TestUnfoldLines_Semantics(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"CRLF space fold", "A:1\r\nB:2\r\n 3\r\nC:4\r\n", []string{"A:1", "B:23", "C:4"}},
+		{"LF tab fold", "A:1\nB:2\n\t3\n\t4\nC:5", []string{"A:1", "B:234", "C:5"}},
+		{"only the first whitespace char is dropped", "A:x\r\n  y\r\n", []string{"A:x y"}},
+		{"empty lines skipped, fold joins across them", "A:1\r\n\r\n 2\r\n\r\nB:3", []string{"A:12", "B:3"}},
+		{"leading continuation dropped", " orphan\r\nA:1\r\n", []string{"A:1"}},
+		{"fold on last line without newline", "A:1\r\n 2", []string{"A:12"}},
+		{"lone CR line is empty", "A:1\r\n\r\r\n 2", []string{"A:12"}},
+		{"empty input", "", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := UnfoldLines(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("UnfoldLines(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("UnfoldLines(%q) = %q, want %q", tc.in, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// foldedBody returns a ~size-byte VCALENDAR whose DESCRIPTION is one logical
+// line folded into "\r\n a" continuations: the input that made the old
+// unfold quadratic.
+func foldedBody(size int) string {
+	var b strings.Builder
+	b.WriteString("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:big@homeos\r\n" +
+		"DTSTART:20260101T100000Z\r\nDTEND:20260101T110000Z\r\nSUMMARY:big\r\nDESCRIPTION:x\r\n")
+	for b.Len() < size {
+		b.WriteString(" a\r\n")
+	}
+	b.WriteString("END:VEVENT\r\nEND:VCALENDAR\r\n")
+	return b.String()
+}
+
+// TestUnfoldLines_Linear guards against the O(n^2) unfold: a 1 MB body of
+// continuation lines (the BodyLimitMiddleware cap) took 6.6 s before the fix.
+func TestUnfoldLines_Linear(t *testing.T) {
+	body := foldedBody(1 << 20)
+
+	start := time.Now()
+	lines := UnfoldLines(body)
+	if d := time.Since(start); d > 200*time.Millisecond {
+		t.Errorf("UnfoldLines(1 MB folded) took %v, want < 200ms", d)
+	}
+	var desc string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "DESCRIPTION:") {
+			desc = l
+		}
+	}
+	if want := (len(body) - 140) / 4; len(desc) < want {
+		t.Errorf("DESCRIPTION unfolded to %d bytes, want >= %d", len(desc), want)
+	}
+
+	start = time.Now()
+	ev, err := ParseEvent(body)
+	if d := time.Since(start); d > 200*time.Millisecond {
+		t.Errorf("ParseEvent(1 MB folded) took %v, want < 200ms", d)
+	}
+	if err != nil {
+		t.Fatalf("ParseEvent: %v", err)
+	}
+	if ev.UID != "big@homeos" || !strings.HasPrefix(ev.Description, "xaaa") {
+		t.Errorf("ParseEvent: UID=%q Description prefix=%.8q", ev.UID, ev.Description)
+	}
+}
+
+func BenchmarkUnfoldLines1MB(b *testing.B) {
+	body := foldedBody(1 << 20)
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		UnfoldLines(body)
+	}
+}
+
+func BenchmarkParseEvent1MB(b *testing.B) {
+	body := foldedBody(1 << 20)
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := ParseEvent(body); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

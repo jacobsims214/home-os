@@ -412,6 +412,7 @@ func TestExtractRRULE(t *testing.T) {
 		{"folded", "BEGIN:VEVENT\r\nRRULE:FREQ=MONTHLY;BYMONTHDAY=1\r\n ;COUNT=12\r\nEND:VEVENT\r\n", "FREQ=MONTHLY;BYMONTHDAY=1;COUNT=12"},
 		{"outside VEVENT ignored", "BEGIN:VCALENDAR\r\nRRULE:FREQ=DAILY\r\nEND:VCALENDAR\r\n", ""},
 		{"RRULEX not matched", "BEGIN:VEVENT\r\nRRULEX:FREQ=DAILY\r\nEND:VEVENT\r\n", ""},
+		{"tab folded LF", "BEGIN:VEVENT\nRRULE:FREQ=WEEKLY\n\t;BYDAY=MO\nEND:VEVENT\n", "FREQ=WEEKLY;BYDAY=MO"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -419,6 +420,42 @@ func TestExtractRRULE(t *testing.T) {
 				t.Errorf("extractRRULE = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// foldedRRULEBody returns a ~size-byte VEVENT whose RRULE is one logical line
+// folded into "\r\n ;" continuations, the input that made the old unfold
+// quadratic.
+func foldedRRULEBody(size int) string {
+	var b strings.Builder
+	b.WriteString("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:big\r\nRRULE:FREQ=DAILY\r\n")
+	for b.Len() < size {
+		b.WriteString(" ;\r\n")
+	}
+	b.WriteString("END:VEVENT\r\nEND:VCALENDAR\r\n")
+	return b.String()
+}
+
+// TestExtractRRULE_Linear: a 1 MB body of continuation lines took seconds
+// with the old per-fold string concatenation.
+func TestExtractRRULE_Linear(t *testing.T) {
+	body := foldedRRULEBody(1 << 20)
+	start := time.Now()
+	got := extractRRULE(body)
+	if d := time.Since(start); d > 200*time.Millisecond {
+		t.Errorf("extractRRULE(1 MB folded) took %v, want < 200ms", d)
+	}
+	if !strings.HasPrefix(got, "FREQ=DAILY;;;") || len(got) < (1<<20)/5 {
+		t.Errorf("extractRRULE returned %d bytes starting %.16q", len(got), got)
+	}
+}
+
+func BenchmarkExtractRRULE1MB(b *testing.B) {
+	body := foldedRRULEBody(1 << 20)
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		extractRRULE(body)
 	}
 }
 

@@ -343,26 +343,69 @@ func generateEventBody(ev *CalEvent) string {
 	return b.String()
 }
 
-// unfoldLines joins continuation lines (RFC 5545 §3.1).
-// Lines starting with space or tab are continuations of the previous line.
-func unfoldLines(data string) []string {
-	raw := strings.Split(data, "\n")
-	var unfolded []string
-	for _, line := range raw {
+// UnfoldLines splits an iCalendar text into logical content lines, joining
+// continuation lines (RFC 5545 §3.1). Lines may end in CRLF or LF; a line
+// starting with a space or tab continues the previous line (the leading
+// whitespace character is dropped). Empty lines are skipped, and a
+// continuation line with no preceding line is dropped.
+//
+// It runs in time linear in len(data): a line with no continuations is
+// returned as a substring of data without copying, and a folded line's pieces
+// are accumulated in a strings.Builder and materialised once. (Appending each
+// piece to the previous string re-copied the whole logical line per fold,
+// which made a 1 MB body of folds take seconds.)
+func UnfoldLines(data string) []string {
+	var (
+		unfolded []string
+		head     string          // first physical line of the logical line
+		haveHead bool            // a logical line is pending
+		folded   strings.Builder // head + continuations, once a fold is seen
+		isFolded bool
+	)
+	flush := func() {
+		if !haveHead {
+			return
+		}
+		if isFolded {
+			unfolded = append(unfolded, folded.String())
+			folded = strings.Builder{}
+			isFolded = false
+		} else {
+			unfolded = append(unfolded, head)
+		}
+		haveHead = false
+	}
+	for len(data) > 0 {
+		var line string
+		if i := strings.IndexByte(data, '\n'); i >= 0 {
+			line, data = data[:i], data[i+1:]
+		} else {
+			line, data = data, ""
+		}
 		line = strings.TrimRight(line, "\r")
 		if len(line) == 0 {
 			continue
 		}
 		if line[0] == ' ' || line[0] == '\t' {
-			if len(unfolded) > 0 {
-				unfolded[len(unfolded)-1] += line[1:]
+			if !haveHead {
+				continue
 			}
-		} else {
-			unfolded = append(unfolded, line)
+			if !isFolded {
+				folded.WriteString(head)
+				isFolded = true
+			}
+			folded.WriteString(line[1:])
+			continue
 		}
+		flush()
+		head, haveHead = line, true
 	}
+	flush()
 	return unfolded
 }
+
+// unfoldLines is the package-internal name for UnfoldLines.
+func unfoldLines(data string) []string { return UnfoldLines(data) }
 
 // parsePropertyLine splits a line into property name, parameters, and value.
 // Format: PROPNAME[;PARAM1=VALUE1;PARAM2=VALUE2]:VALUE

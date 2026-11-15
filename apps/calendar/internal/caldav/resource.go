@@ -561,18 +561,11 @@ func rawForStorage(body []byte) (icalRaw *string, rrule *string) {
 }
 
 // extractRRULE returns the value of the first RRULE property inside a VEVENT
-// of an iCalendar text, after unfolding continuation lines (RFC 5545 §3.1).
+// of an iCalendar text, after unfolding continuation lines (RFC 5545 §3.1)
+// with ical.UnfoldLines, which is linear in the input size.
 // Property names are case-insensitive. Returns "" when there is none.
 func extractRRULE(icalText string) string {
-	var unfolded []string
-	for _, line := range strings.Split(strings.ReplaceAll(icalText, "\r\n", "\n"), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) && len(unfolded) > 0 {
-			unfolded[len(unfolded)-1] += line[1:]
-			continue
-		}
-		unfolded = append(unfolded, line)
-	}
+	unfolded := ical.UnfoldLines(icalText)
 
 	inEvent := false
 	for _, line := range unfolded {
