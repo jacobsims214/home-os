@@ -66,6 +66,19 @@ docker-compose.override.yml
 # `go build` output left behind when building an app module from the root.
 /mcp
 
+# --- Generated: per-module Go binaries ---
+# `go build ./cmd/<name>` run inside an app module drops its binary next to
+# go.mod. Images build their own binary in-container, so these are never used.
+/apps/api/api
+/apps/calendar/calendar
+/apps/mcp/mcp
+/apps/worker/worker
+
+# --- Generated: TypeScript incremental build cache ---
+# apps/ui/tsconfig.json sets "incremental": true, so every tsc / next build
+# rewrites this file.
+*.tsbuildinfo
+
 # --- Generated: next-pwa service worker ---
 # next.config.js writes these into public/ on every production build, keyed by
 # build hash, so committing them churns the diff and ships a stale precache.
