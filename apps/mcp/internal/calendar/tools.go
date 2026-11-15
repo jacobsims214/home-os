@@ -44,6 +44,11 @@ type Event struct {
 	Color        string `json:"color"`
 	EventType    string `json:"event_type"`
 	CalendarName string `json:"calendar_name,omitempty"`
+	// LocalDate (YYYY-MM-DD) and Weekday ("Wednesday") are the event's
+	// start day in the household timezone, computed so callers never have
+	// to derive the weekday themselves. Empty when start is unreadable.
+	LocalDate string `json:"local_date"`
+	Weekday   string `json:"weekday"`
 }
 
 // eventJSON is the JSON structure stored in ical_data column.
@@ -75,6 +80,8 @@ type ConflictEvent struct {
 	Start        string `json:"start"`
 	End          string `json:"end"`
 	CalendarName string `json:"calendar_name,omitempty"`
+	LocalDate    string `json:"local_date"`
+	Weekday      string `json:"weekday"`
 }
 
 // createEventResponse is create_event's result: the new event's id and the
@@ -191,6 +198,7 @@ func parseEventFromRow(row eventRow, loc *time.Location) (*Event, error) {
 		CalendarName: row.CalendarName,
 	}
 	localizeAllDay(ev, loc)
+	setLocalDay(ev, loc)
 	return ev, nil
 }
 
@@ -564,6 +572,8 @@ func findConflicts(ctx context.Context, pool *pgxpool.Pool, householdID string, 
 			Start:        ev.Start,
 			End:          ev.End,
 			CalendarName: ev.CalendarName,
+			LocalDate:    ev.LocalDate,
+			Weekday:      ev.Weekday,
 		})
 	}
 
@@ -695,6 +705,21 @@ func localizeAllDay(ev *Event, loc *time.Location) {
 	}
 	ev.Start = time.Date(first.Year(), first.Month(), first.Day(), 0, 0, 0, 0, loc).Format(time.RFC3339)
 	ev.End = time.Date(endExcl.Year(), endExcl.Month(), endExcl.Day(), 0, 0, 0, 0, loc).Format(time.RFC3339)
+}
+
+// setLocalDay fills ev.LocalDate and ev.Weekday from the start instant in
+// the household timezone. Call it after localizeAllDay, so an all-day event's
+// start is already the household-local midnight of its first day. A timed
+// event at 23:30 New York (04:30Z the next day) is dated by the New York day.
+func setLocalDay(ev *Event, loc *time.Location) {
+	ev.LocalDate, ev.Weekday = "", ""
+	start, err := time.Parse(time.RFC3339, ev.Start)
+	if err != nil {
+		return
+	}
+	local := start.In(loc)
+	ev.LocalDate = local.Format("2006-01-02")
+	ev.Weekday = local.Weekday().String()
 }
 
 // startsBefore orders RFC 3339 start times by instant. Stored times mix
@@ -1540,7 +1565,13 @@ func NewGetDailyBriefingTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Con
 				if ev.CalendarName != "" {
 					calInfo = fmt.Sprintf(" [%s]", ev.CalendarName)
 				}
-				briefing.WriteString(fmt.Sprintf("- **%s** — %s%s\n", timeStr, ev.Title, calInfo))
+				// Name the start day explicitly: an event that began on an
+				// earlier day (multi-day trip) would otherwise read as today.
+				dayInfo := ""
+				if ev.Weekday != "" {
+					dayInfo = fmt.Sprintf(" (%s %s)", ev.Weekday, ev.LocalDate)
+				}
+				briefing.WriteString(fmt.Sprintf("- **%s**%s — %s%s\n", timeStr, dayInfo, ev.Title, calInfo))
 				if ev.Description != "" {
 					briefing.WriteString(fmt.Sprintf("  %s\n", ev.Description))
 				}

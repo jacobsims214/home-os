@@ -783,7 +783,7 @@ func TestAllDayEvents(t *testing.T) {
 
 	t.Run("daily briefing shows the bill on its day only", func(t *testing.T) {
 		text, _ := callTool(t, briefing, ctx, map[string]any{"date": "2026-11-18"})
-		if !strings.Contains(text, "All day** — Electric bill") {
+		if !strings.Contains(text, "All day** (Wednesday 2026-11-18) — Electric bill") {
 			t.Errorf("11/18 briefing missing bill:\n%s", text)
 		}
 		text, _ = callTool(t, briefing, ctx, map[string]any{"date": "2026-11-17"})
@@ -984,4 +984,157 @@ func TestCreateEventConflicts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSetLocalDay(t *testing.T) {
+	ny := mustLoc(t, "America/New_York")
+	tokyo := mustLoc(t, "Asia/Tokyo")
+	tests := []struct {
+		name                  string
+		ev                    Event
+		loc                   *time.Location
+		wantDate, wantWeekday string
+	}{
+		// 2026-11-18 is a Wednesday.
+		{"timed event stored as UTC", Event{Start: "2026-11-18T15:00:00Z"}, ny, "2026-11-18", "Wednesday"},
+		{"late evening New York is next day in UTC", Event{Start: "2026-11-19T04:30:00Z"}, ny, "2026-11-18", "Wednesday"},
+		{"same instant in Tokyo", Event{Start: "2026-11-19T04:30:00Z"}, tokyo, "2026-11-19", "Thursday"},
+		{"offset input is read as an instant", Event{Start: "2026-11-18T23:30:00-05:00"}, ny, "2026-11-18", "Wednesday"},
+		{"DST spring-forward day", Event{Start: "2026-03-08T07:30:00Z"}, ny, "2026-03-08", "Sunday"},
+		{"localized all-day event", Event{AllDay: true, Start: "2026-11-18T00:00:00Z", End: "2026-11-19T00:00:00Z"}, tokyo, "2026-11-18", "Wednesday"},
+		{"unreadable start leaves fields empty", Event{Start: "garbage"}, ny, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := tt.ev
+			localizeAllDay(&ev, tt.loc)
+			setLocalDay(&ev, tt.loc)
+			if ev.LocalDate != tt.wantDate || ev.Weekday != tt.wantWeekday {
+				t.Errorf("got %q %q, want %q %q", ev.LocalDate, ev.Weekday, tt.wantDate, tt.wantWeekday)
+			}
+		})
+	}
+}
+
+// TestEventLocalDay checks local_date/weekday on every event payload for a
+// New York household, including events whose UTC date differs from the
+// household date.
+func TestEventLocalDay(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	setHouseholdTimezone(t, pool, hh.HouseholdID, "America/New_York")
+	calendarID := seedCalendar(t, pool, hh.HouseholdID)
+
+	// Wed 11/18 10:00 New York.
+	dentist := seedEvent(t, pool, calendarID, uuid.NewString(),
+		`{"title":"Dentist","start":"2026-11-18T15:00:00Z","end":"2026-11-18T16:00:00Z","all_day":false}`)
+	// Wed 11/18 23:00 New York = Thu 04:00Z.
+	late := seedEvent(t, pool, calendarID, uuid.NewString(),
+		`{"title":"Late call","start":"2026-11-19T04:00:00Z","end":"2026-11-19T04:30:00Z","all_day":false}`)
+	// All-day Wed 11/18, stored the CalDAV way.
+	bill := seedEvent(t, pool, calendarID, uuid.NewString(),
+		`{"title":"Electric bill","start":"2026-11-18T00:00:00Z","end":"2026-11-19T00:00:00Z","all_day":true}`)
+	// Fri 11/20 09:00 New York.
+	soccer := seedEvent(t, pool, calendarID, uuid.NewString(),
+		`{"title":"Soccer","start":"2026-11-20T14:00:00Z","end":"2026-11-20T15:00:00Z","all_day":false}`)
+
+	type day struct{ date, weekday string }
+	want := map[string]day{
+		dentist: {"2026-11-18", "Wednesday"},
+		late:    {"2026-11-18", "Wednesday"},
+		bill:    {"2026-11-18", "Wednesday"},
+		soccer:  {"2026-11-20", "Friday"},
+	}
+	checkKeys := func(t *testing.T, text string) {
+		t.Helper()
+		var raw []map[string]any
+		if err := json.Unmarshal([]byte(text), &raw); err != nil {
+			t.Fatalf("decode %q: %v", text, err)
+		}
+		for _, m := range raw {
+			for _, k := range []string{"local_date", "weekday"} {
+				if _, ok := m[k].(string); !ok {
+					t.Errorf("event %v missing string %q", m["id"], k)
+				}
+			}
+		}
+	}
+
+	t.Run("list_events", func(t *testing.T) {
+		_, list := NewListEventsTool(pool)
+		text, isErr := callTool(t, list, ctx, map[string]any{"start_date": "2026-11-18", "end_date": "2026-11-20"})
+		if isErr {
+			t.Fatalf("list_events: %s", text)
+		}
+		checkKeys(t, text)
+		var evs []Event
+		if err := json.Unmarshal([]byte(text), &evs); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(evs) != len(want) {
+			t.Fatalf("got %d events, want %d: %s", len(evs), len(want), text)
+		}
+		for _, ev := range evs {
+			if w := want[ev.ID]; ev.LocalDate != w.date || ev.Weekday != w.weekday {
+				t.Errorf("%s: got %s %s, want %s %s", ev.Title, ev.LocalDate, ev.Weekday, w.date, w.weekday)
+			}
+		}
+	})
+
+	t.Run("check_conflicts", func(t *testing.T) {
+		_, check := NewCheckConflictsTool(pool)
+		text, isErr := callTool(t, check, ctx, map[string]any{
+			"start_time": "2026-11-18T22:00:00-05:00", "end_time": "2026-11-18T23:45:00-05:00",
+		})
+		if isErr {
+			t.Fatalf("check_conflicts: %s", text)
+		}
+		checkKeys(t, text)
+		var cs []ConflictEvent
+		_ = json.Unmarshal([]byte(text), &cs)
+		if len(cs) != 2 {
+			t.Fatalf("want bill + late call, got %s", text)
+		}
+		for _, c := range cs {
+			if c.LocalDate != "2026-11-18" || c.Weekday != "Wednesday" {
+				t.Errorf("%s: got %s %s", c.Title, c.LocalDate, c.Weekday)
+			}
+		}
+	})
+
+	t.Run("update_event", func(t *testing.T) {
+		_, update := NewUpdateEventTool(pool)
+		text, isErr := callTool(t, update, ctx, map[string]any{"event_id": soccer, "title": "Soccer practice"})
+		if isErr {
+			t.Fatalf("update_event: %s", text)
+		}
+		var ev Event
+		_ = json.Unmarshal([]byte(text), &ev)
+		if ev.LocalDate != "2026-11-20" || ev.Weekday != "Friday" {
+			t.Errorf("got %s %s (%s)", ev.LocalDate, ev.Weekday, text)
+		}
+	})
+
+	t.Run("get_daily_briefing", func(t *testing.T) {
+		_, briefing := NewGetDailyBriefingTool(pool)
+		text, isErr := callTool(t, briefing, ctx, map[string]any{"date": "2026-11-18"})
+		if isErr {
+			t.Fatalf("get_daily_briefing: %s", text)
+		}
+		if !strings.Contains(text, "Wednesday, November 18, 2026") {
+			t.Errorf("header missing weekday: %s", text)
+		}
+		for _, line := range []string{
+			"- **10:00 AM** (Wednesday 2026-11-18) — Dentist",
+			"- **11:00 PM** (Wednesday 2026-11-18) — Late call",
+			"- **All day** (Wednesday 2026-11-18) — Electric bill",
+		} {
+			if !strings.Contains(text, line) {
+				t.Errorf("briefing missing %q:\n%s", line, text)
+			}
+		}
+		if strings.Contains(text, "Soccer") || strings.Contains(text, "Thursday") {
+			t.Errorf("briefing has events from other days:\n%s", text)
+		}
+	})
 }
