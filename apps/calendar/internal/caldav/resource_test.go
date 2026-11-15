@@ -683,3 +683,92 @@ func TestCalDAVNullRawFallbackIntegration(t *testing.T) {
 		t.Errorf("ETag = %q", w.Header().Get("ETag"))
 	}
 }
+
+// overrideVEvent and masterVEvent make up a weekly series plus one
+// RECURRENCE-ID override; overrideBodies puts them in both orders, since
+// clients may send either.
+const (
+	overrideVEvent = "BEGIN:VEVENT\r\n" +
+		"UID:evt-override\r\n" +
+		"RECURRENCE-ID;TZID=America/Chicago:20261116T160000\r\n" +
+		"DTSTAMP:20261101T120000Z\r\n" +
+		"SUMMARY:Piano lesson (moved)\r\n" +
+		"DESCRIPTION:Moved to Tuesday evening\r\n" +
+		"LOCATION:Teacher's house\r\n" +
+		"DTSTART;TZID=America/Chicago:20261117T180000\r\n" +
+		"DTEND;TZID=America/Chicago:20261117T190000\r\n" +
+		"END:VEVENT\r\n"
+	masterVEvent = "BEGIN:VEVENT\r\n" +
+		"UID:evt-override\r\n" +
+		"DTSTAMP:20261101T120000Z\r\n" +
+		"SUMMARY:Piano lesson\r\n" +
+		"DESCRIPTION:Bring the yellow book\r\n" +
+		"LOCATION:Music room\r\n" +
+		"DTSTART;TZID=America/Chicago:20261102T160000\r\n" +
+		"DTEND;TZID=America/Chicago:20261102T170000\r\n" +
+		"RRULE:FREQ=WEEKLY;COUNT=8\r\n" +
+		"BEGIN:VALARM\r\n" +
+		"ACTION:DISPLAY\r\n" +
+		"DESCRIPTION:Reminder\r\n" +
+		"TRIGGER:-PT15M\r\n" +
+		"END:VALARM\r\n" +
+		"END:VEVENT\r\n"
+	overrideCalHead = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Apple Inc.//macOS 15.1//EN\r\n"
+	overrideCalTail = "END:VCALENDAR\r\n"
+)
+
+// TestCalDAVOverrideStoresMasterIntegration locks in #4639: PUT of a master
+// plus RECURRENCE-ID override stores the MASTER in ical_data (what the API,
+// UI, search and MCP read), in either VEVENT order, and GET still serves the
+// PUT body byte for byte.
+func TestCalDAVOverrideStoresMasterIntegration(t *testing.T) {
+	repo, pool := testRepo(t)
+	ctx := context.Background()
+	hid, calUID, calID := seedCalendar(t, pool)
+
+	for name, body := range map[string]string{
+		"master-first":   overrideCalHead + masterVEvent + overrideVEvent + overrideCalTail,
+		"override-first": overrideCalHead + overrideVEvent + masterVEvent + overrideCalTail,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Each order is its own resource, so give each its own UID.
+			uid := "evt-override-" + name
+			body := strings.ReplaceAll(body, "UID:evt-override\r\n", "UID:"+uid+"\r\n")
+			path := "/dav/" + calUID + "/" + uid + ".ics"
+
+			w := httptest.NewRecorder()
+			HandlePUT(w, davRequest(http.MethodPut, path, hid, body, nil), repo, path)
+			if w.Code != http.StatusCreated {
+				t.Fatalf("PUT status = %d, body %s", w.Code, w.Body)
+			}
+
+			var jsonData string
+			if err := pool.QueryRow(ctx, `SELECT ical_data FROM calendar_objects WHERE calendar_id = $1 AND uid = $2`, calID, uid).Scan(&jsonData); err != nil {
+				t.Fatal(err)
+			}
+			var ev ical.CalEvent
+			if err := json.Unmarshal([]byte(jsonData), &ev); err != nil {
+				t.Fatal(err)
+			}
+			if ev.Title != "Piano lesson" {
+				t.Errorf("stored title = %q, want the master's %q (json: %s)", ev.Title, "Piano lesson", jsonData)
+			}
+			if ev.Description != "Bring the yellow book" || ev.Location != "Music room" {
+				t.Errorf("stored description/location = %q/%q, want the master's (json: %s)", ev.Description, ev.Location, jsonData)
+			}
+			// 16:00 CST on 2026-11-02 is 22:00 UTC.
+			if want := time.Date(2026, 11, 2, 22, 0, 0, 0, time.UTC); !ev.Start.Equal(want) {
+				t.Errorf("stored start = %v, want the master's %v", ev.Start, want)
+			}
+
+			w = httptest.NewRecorder()
+			HandleGET(w, davRequest(http.MethodGet, path, hid, "", nil), repo, path)
+			if w.Code != http.StatusOK {
+				t.Fatalf("GET status = %d", w.Code)
+			}
+			if got := w.Body.String(); got != body {
+				t.Fatalf("GET body differs from PUT body:\n got: %q\nwant: %q", got, body)
+			}
+		})
+	}
+}

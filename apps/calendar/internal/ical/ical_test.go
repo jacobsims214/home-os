@@ -1100,3 +1100,115 @@ func TestParseEvent_VAlarmDoesNotOverrideEventProperties(t *testing.T) {
 		})
 	}
 }
+
+// Recurring-series fixtures for TestParseEvent_MasterWithOverrides (#4639).
+// The master is a weekly piano lesson with a VALARM whose DESCRIPTION must
+// never leak; the override moves the 2026-11-16 instance to Tuesday evening.
+const (
+	recurMaster = "BEGIN:VEVENT\r\n" +
+		"UID:piano-series\r\n" +
+		"SUMMARY:Piano lesson\r\n" +
+		"DESCRIPTION:Bring the yellow book\r\n" +
+		"LOCATION:Music room\r\n" +
+		"DTSTART;TZID=America/Chicago:20261102T160000\r\n" +
+		"DTEND;TZID=America/Chicago:20261102T170000\r\n" +
+		"RRULE:FREQ=WEEKLY;COUNT=8\r\n" +
+		"BEGIN:VALARM\r\n" +
+		"ACTION:DISPLAY\r\n" +
+		"DESCRIPTION:Alarm text\r\n" +
+		"TRIGGER:-PT15M\r\n" +
+		"END:VALARM\r\n" +
+		"END:VEVENT\r\n"
+	recurOverride = "BEGIN:VEVENT\r\n" +
+		"UID:piano-series\r\n" +
+		"RECURRENCE-ID;TZID=America/Chicago:20261116T160000\r\n" +
+		"SUMMARY:Piano lesson (moved)\r\n" +
+		"DESCRIPTION:Moved to Tuesday evening\r\n" +
+		"LOCATION:Teacher's house\r\n" +
+		"DTSTART;TZID=America/Chicago:20261117T180000\r\n" +
+		"DTEND;TZID=America/Chicago:20261117T190000\r\n" +
+		"BEGIN:VALARM\r\n" +
+		"ACTION:DISPLAY\r\n" +
+		"DESCRIPTION:Override alarm text\r\n" +
+		"TRIGGER:-PT30M\r\n" +
+		"END:VALARM\r\n" +
+		"END:VEVENT\r\n"
+)
+
+func recurCalendar(vevents ...string) string {
+	return "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\n" +
+		strings.Join(vevents, "") + "END:VCALENDAR\r\n"
+}
+
+// TestParseEvent_MasterWithOverrides locks in #4639: with a recurring master
+// plus RECURRENCE-ID overrides in one resource, the parsed event (and so the
+// stored ical_data JSON) describes the master, whatever the VEVENT order.
+// An override-only resource falls back to the first VEVENT.
+func TestParseEvent_MasterWithOverrides(t *testing.T) {
+	type want struct {
+		title, desc, loc string
+		start, end       time.Time
+	}
+	// 16:00 CST (UTC-6) on 2026-11-02 is 22:00 UTC.
+	master := want{
+		title: "Piano lesson",
+		desc:  "Bring the yellow book",
+		loc:   "Music room",
+		start: time.Date(2026, 11, 2, 22, 0, 0, 0, time.UTC),
+		end:   time.Date(2026, 11, 2, 23, 0, 0, 0, time.UTC),
+	}
+	override := want{
+		title: "Piano lesson (moved)",
+		desc:  "Moved to Tuesday evening",
+		loc:   "Teacher's house",
+		start: time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC),
+		end:   time.Date(2026, 11, 18, 1, 0, 0, 0, time.UTC),
+	}
+	secondOverride := strings.NewReplacer(
+		"20261116T160000", "20261123T160000",
+		"Piano lesson (moved)", "Piano lesson (second move)",
+	).Replace(recurOverride)
+
+	tests := []struct {
+		name string
+		data string
+		want want
+	}{
+		{"master then override", recurCalendar(recurMaster, recurOverride), master},
+		{"override then master", recurCalendar(recurOverride, recurMaster), master},
+		{"master between overrides", recurCalendar(recurOverride, recurMaster, secondOverride), master},
+		{"master only", recurCalendar(recurMaster), master},
+		// Override-only: no series to describe, so the first VEVENT (the
+		// moved instance itself) is stored rather than failing the PUT.
+		{"override only falls back to first VEVENT", recurCalendar(recurOverride, secondOverride), override},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, err := ParseEvent(tc.data)
+			if err != nil {
+				t.Fatalf("ParseEvent: %v", err)
+			}
+			if ev.UID != "piano-series" {
+				t.Errorf("UID = %q, want piano-series", ev.UID)
+			}
+			if ev.Title != tc.want.title {
+				t.Errorf("Title = %q, want %q", ev.Title, tc.want.title)
+			}
+			if ev.Description != tc.want.desc {
+				t.Errorf("Description = %q, want %q (alarm text must not leak)", ev.Description, tc.want.desc)
+			}
+			if ev.Location != tc.want.loc {
+				t.Errorf("Location = %q, want %q", ev.Location, tc.want.loc)
+			}
+			if !ev.Start.Equal(tc.want.start) {
+				t.Errorf("Start = %v, want %v", ev.Start, tc.want.start)
+			}
+			if !ev.End.Equal(tc.want.end) {
+				t.Errorf("End = %v, want %v", ev.End, tc.want.end)
+			}
+			if ev.Timezone != "America/Chicago" {
+				t.Errorf("Timezone = %q, want America/Chicago", ev.Timezone)
+			}
+		})
+	}
+}
