@@ -165,6 +165,48 @@ func (h *Handler) creatorIdentity(w http.ResponseWriter, r *http.Request) (Creat
 	return CreatorIdentity{Subject: id.Subject, Email: id.Email, Name: id.Name}, true
 }
 
+// ListMine GET /api/v1/me/households — the households the caller belongs to,
+// with their role in each, oldest membership first. Registered inside
+// RequireAuth. Each entry carries:
+//   - is_default: the household used when a request has no X-Household-ID
+//     (the oldest membership).
+//   - current: the household this request resolved to (the X-Household-ID
+//     header when sent, otherwise the default).
+//
+// A client switches family by sending X-Household-ID: <id> on later requests.
+func (h *Handler) ListMine(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.ClaimsFromContext(r.Context())
+	if claims == nil {
+		apierr.Forbidden(w, "missing auth")
+		return
+	}
+	uid, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		// Local dev mode (no verifier) has no Home OS user behind it.
+		apierr.JSON(w, http.StatusOK, map[string]any{"data": []any{}})
+		return
+	}
+	list, err := h.repo.ListForUser(r.Context(), uid)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	type entry struct {
+		UserHousehold
+		IsDefault bool `json:"is_default"`
+		Current   bool `json:"current"`
+	}
+	data := make([]entry, 0, len(list))
+	for i, hh := range list {
+		data = append(data, entry{
+			UserHousehold: hh,
+			IsDefault:     i == 0,
+			Current:       hh.ID == claims.HouseholdID,
+		})
+	}
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": data})
+}
+
 // GetMe GET /api/v1/households/me — returns the current user's household.
 func (h *Handler) GetMe(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())

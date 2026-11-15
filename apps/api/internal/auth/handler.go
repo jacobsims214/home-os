@@ -42,6 +42,8 @@ func NewHandler(repo *Repo, cfg *config.Config, smtpClient *smtp.Client, dexClie
 // verify tokens themselves, so clients see the same status everywhere:
 //   - ErrNoMembership: 403 FORBIDDEN (authenticated, not a household member)
 //   - ErrUserDeactivated: 403 FORBIDDEN (authenticated, account deactivated)
+//   - ErrNotHouseholdMember: 403 FORBIDDEN (X-Household-ID names a household
+//     the caller does not belong to)
 //   - ErrMemberLookup: 500 INTERNAL_ERROR (database failure, not a bad token)
 //   - anything else (bad signature, wrong audience, expired): 401 UNAUTHORIZED
 func WriteVerifyError(w http.ResponseWriter, err error) {
@@ -50,6 +52,10 @@ func WriteVerifyError(w http.ResponseWriter, err error) {
 		slog.Warn("auth: authenticated identity has no household membership", "error", err)
 		writeAuthError(w, http.StatusForbidden, "FORBIDDEN",
 			"authenticated, but this account is not a member of any household")
+	case errors.Is(err, ErrNotHouseholdMember):
+		slog.Warn("auth: requested household is not one of the caller's", "error", err)
+		writeAuthError(w, http.StatusForbidden, "FORBIDDEN",
+			"this account is not a member of the requested household")
 	case errors.Is(err, ErrUserDeactivated):
 		slog.Warn("auth: authenticated identity is deactivated", "error", err)
 		writeAuthError(w, http.StatusForbidden, "FORBIDDEN", "this account has been deactivated")
@@ -91,14 +97,20 @@ func BearerToken(r *http.Request) (token, errMsg string) {
 
 // authenticate verifies the request's Bearer token for handlers registered
 // outside RequireAuth. On failure it has already written the response
-// (401/403/500, as RequireAuth would) and returns nil.
+// (400/401/403/500, as RequireAuth would) and returns nil. It honours the
+// X-Household-ID header like RequireAuth.
 func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) *Claims {
 	tokenStr, errMsg := BearerToken(r)
 	if errMsg != "" {
 		WriteUnauthorized(w, errMsg)
 		return nil
 	}
-	claims, err := h.verifier.VerifyToken(r.Context(), tokenStr)
+	ctx, errMsg := ContextWithHouseholdHeader(r)
+	if errMsg != "" {
+		writeAuthError(w, http.StatusBadRequest, "BAD_REQUEST", errMsg)
+		return nil
+	}
+	claims, err := h.verifier.VerifyToken(ctx, tokenStr)
 	if err != nil {
 		WriteVerifyError(w, err)
 		return nil

@@ -107,7 +107,9 @@ func main() {
 	}
 	defer oidcVerifier.Close()
 	// Resolve Dex identities to Home OS users/households: users.dex_sub first,
-	// then email (backfilling dex_sub). Oldest membership wins for multi-household users.
+	// then email (backfilling dex_sub). Multi-household users pick one per
+	// request with X-Household-ID (must be a membership, else 403); without it
+	// the oldest membership wins.
 	oidcVerifier.WithResolver(auth.NewMemberResolver(pool))
 
 	// Initialize the search client and create the Typesense collection if needed.
@@ -186,6 +188,9 @@ func main() {
 		r.Use(middleware.RequireAuth(oidcVerifier))
 
 		// Household (Create is registered above, outside this group).
+		// /me/households lists the caller's families; X-Household-ID on any
+		// request in this group picks one (see middleware.RequireAuth).
+		r.Get("/api/v1/me/households", householdHandler.ListMine)
 		r.Get("/api/v1/households/me", householdHandler.GetMe)
 		r.Get("/api/v1/households/me/members", householdHandler.ListMembers)
 		r.Patch("/api/v1/households/me/members/{userId}", householdHandler.UpdateMemberRole)

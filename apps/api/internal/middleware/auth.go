@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"home-os/api/internal/auth"
+	"home-os/api/pkg/apierr"
 )
 
 // claimsCtxKey is an unexported type used for context keys to prevent
@@ -22,11 +23,20 @@ const claimsKey claimsCtxKey = "claims"
 // users.id, household_id and role (see auth.PGMemberResolver for the lookup
 // order and how users with several households are resolved).
 //
+// Household selection: a caller with several memberships picks one per
+// request with the X-Household-ID header (a household UUID). It must be one of
+// the caller's own memberships; instance admins get no implicit access. With
+// no header the oldest membership is used. Agent tokens (hos_...) are not
+// accepted by this API at all (401), so they cannot use the header to leave
+// their bound household.
+//
 // Responses:
+//   - 400 if X-Household-ID is present but not a UUID.
 //   - 401 if the Authorization header is missing or malformed, or the token is
 //     expired, tampered, or otherwise invalid.
 //   - 403 FORBIDDEN if the token is valid but the identity is not a member of
-//     any household, or the user is deactivated (users.active = false).
+//     any household, is not a member of the household named by X-Household-ID,
+//     or the user is deactivated (users.active = false).
 //   - 500 if the membership lookup itself fails.
 func RequireAuth(verifier *auth.Verifier) func(http.Handler) http.Handler {
 	return requireToken(verifier)
@@ -57,15 +67,22 @@ func requireToken(verifier *auth.Verifier) func(http.Handler) http.Handler {
 				return
 			}
 
-			claims, err := verifier.VerifyToken(r.Context(), tokenStr)
+			ctx, errMsg := auth.ContextWithHouseholdHeader(r)
+			if errMsg != "" {
+				apierr.BadRequest(w, errMsg)
+				return
+			}
+
+			claims, err := verifier.VerifyToken(ctx, tokenStr)
 			if err != nil {
-				// One shared mapping: 401 bad token, 403 non-member or
-				// deactivated, 500 membership lookup failure.
+				// One shared mapping: 401 bad token, 403 non-member (of any
+				// or of the requested household) or deactivated, 500
+				// membership lookup failure.
 				auth.WriteVerifyError(w, err)
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), claimsKey, claims)
+			ctx = context.WithValue(r.Context(), claimsKey, claims)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

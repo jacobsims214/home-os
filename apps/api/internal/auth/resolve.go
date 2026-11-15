@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
+
+	"github.com/google/uuid"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,6 +28,48 @@ var ErrMemberLookup = errors.New("membership lookup failed")
 // Forbidden, like ErrNoMembership: the caller is authenticated but may not use
 // the API.
 var ErrUserDeactivated = errors.New("user account is deactivated")
+
+// ErrNotHouseholdMember is returned when the request names a household
+// (X-Household-ID) that the caller is not a member of. Callers should answer
+// 403 Forbidden. Instance admins get no implicit access: membership is the
+// only thing that counts.
+var ErrNotHouseholdMember = errors.New("not a member of the requested household")
+
+// HouseholdHeader lets a client that belongs to several households pick one
+// per request. When absent, the oldest membership is used.
+const HouseholdHeader = "X-Household-ID"
+
+type requestedHouseholdKey struct{}
+
+// WithRequestedHousehold returns a copy of ctx asking the resolver for the
+// membership in householdID (a UUID string) instead of the default one.
+func WithRequestedHousehold(ctx context.Context, householdID string) context.Context {
+	return context.WithValue(ctx, requestedHouseholdKey{}, householdID)
+}
+
+// RequestedHousehold returns the household requested with
+// WithRequestedHousehold, or "" when none was requested.
+func RequestedHousehold(ctx context.Context) string {
+	s, _ := ctx.Value(requestedHouseholdKey{}).(string)
+	return s
+}
+
+// ContextWithHouseholdHeader reads the X-Household-ID header of r. With no
+// header it returns r's context unchanged. A value that is not a UUID returns
+// a non-empty errMsg for a 400 response. Otherwise the returned context makes
+// VerifyToken resolve that household's membership (ErrNotHouseholdMember if
+// the caller has none).
+func ContextWithHouseholdHeader(r *http.Request) (ctx context.Context, errMsg string) {
+	raw := strings.TrimSpace(r.Header.Get(HouseholdHeader))
+	if raw == "" {
+		return r.Context(), ""
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return nil, HouseholdHeader + " must be a household UUID"
+	}
+	return WithRequestedHousehold(r.Context(), id.String()), ""
+}
 
 // ResolvedMember is the Home OS identity a Dex subject resolves to.
 type ResolvedMember struct {
@@ -50,7 +95,10 @@ type MemberResolver interface {
 // Deactivated users (users.active = false) fail with ErrUserDeactivated.
 //
 // Users with several memberships resolve deterministically to their OLDEST
-// membership (memberships.created_at, then memberships.id).
+// membership (memberships.created_at, then memberships.id), unless the context
+// carries a requested household (WithRequestedHousehold, set from the
+// X-Household-ID header): then that membership is used, or the call fails with
+// ErrNotHouseholdMember when the user has none there.
 type PGMemberResolver struct {
 	pool *pgxpool.Pool
 }
@@ -97,6 +145,19 @@ func (r *PGMemberResolver) Resolve(ctx context.Context, sub, email string) (*Res
 	}
 
 	m := ResolvedMember{UserID: userID}
+	if want := RequestedHousehold(ctx); want != "" {
+		err = r.pool.QueryRow(ctx,
+			`SELECT household_id::text, role::text FROM memberships
+			 WHERE user_id = $1 AND household_id = $2`, userID, want,
+		).Scan(&m.HouseholdID, &m.Role)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotHouseholdMember
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: requested membership: %w", ErrMemberLookup, err)
+		}
+		return &m, nil
+	}
 	err = r.pool.QueryRow(ctx,
 		`SELECT household_id::text, role::text FROM memberships
 		 WHERE user_id = $1

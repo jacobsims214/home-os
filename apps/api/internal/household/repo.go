@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -71,6 +72,44 @@ func (r *Repo) GetHousehold(ctx context.Context, id uuid.UUID) (*Household, erro
 		return nil, fmt.Errorf("get household: %w", err)
 	}
 	return hh, nil
+}
+
+// UserHousehold is one household the caller belongs to, with their role.
+type UserHousehold struct {
+	ID       string    `json:"id"`
+	Name     string    `json:"name"`
+	Timezone string    `json:"timezone"`
+	Role     string    `json:"role"`
+	JoinedAt time.Time `json:"joined_at"`
+}
+
+// ListForUser returns every household userID is a member of, oldest
+// membership first (memberships.created_at, then memberships.id). The first
+// entry is the one the API uses when a request carries no X-Household-ID.
+func (r *Repo) ListForUser(ctx context.Context, userID uuid.UUID) ([]UserHousehold, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT h.id::text, h.name, h.timezone, m.role::text, m.created_at
+		 FROM memberships m
+		 JOIN households h ON h.id = m.household_id
+		 WHERE m.user_id = $1
+		 ORDER BY m.created_at ASC, m.id ASC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list households for user: %w", err)
+	}
+	defer rows.Close()
+
+	out := []UserHousehold{}
+	for rows.Next() {
+		var h UserHousehold
+		if err := rows.Scan(&h.ID, &h.Name, &h.Timezone, &h.Role, &h.JoinedAt); err != nil {
+			return nil, fmt.Errorf("scan user household: %w", err)
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list households for user: %w", err)
+	}
+	return out, nil
 }
 
 // Member represents a household member with user info.
