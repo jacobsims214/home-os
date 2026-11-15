@@ -550,3 +550,320 @@ func TestFindAvailableSlots(t *testing.T) {
 		})
 	}
 }
+
+func TestAllDayRange(t *testing.T) {
+	tests := []struct {
+		name, start, end string
+		wantFirst        string // YYYY-MM-DD
+		wantEndExcl      string
+		wantErr          bool
+	}{
+		{"bare dates, same day", "2026-11-18", "2026-11-18", "2026-11-18", "2026-11-19", false},
+		{"bare end date names the last day", "2026-12-03", "2026-12-05", "2026-12-03", "2026-12-06", false},
+		{"clock times on one day normalise to the whole day", "2026-11-18T09:00:00-05:00", "2026-11-18T23:59:00-05:00", "2026-11-18", "2026-11-19", false},
+		{"UTC midnight is that date, not the previous evening", "2026-11-18T00:00:00Z", "2026-11-19T00:00:00Z", "2026-11-18", "2026-11-19", false},
+		{"exclusive next-midnight end (field trip)", "2026-12-03T00:00:00", "2026-12-05T00:00:00", "2026-12-03", "2026-12-05", false},
+		{"non-midnight end names the last day", "2026-12-03", "2026-12-05T08:00:00-05:00", "2026-12-03", "2026-12-06", false},
+		{"empty end is one day", "2026-11-18", "", "2026-11-18", "2026-11-19", false},
+		{"end before start", "2026-11-18", "2026-11-17", "", "", true},
+		{"garbage", "11/18", "2026-11-18", "", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			first, endExcl, err := allDayRange(tt.start, tt.end)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got %v..%v", first, endExcl)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := first.Format(dateLayout); got != tt.wantFirst {
+				t.Errorf("first = %s, want %s", got, tt.wantFirst)
+			}
+			if got := endExcl.Format(dateLayout); got != tt.wantEndExcl {
+				t.Errorf("endExcl = %s, want %s", got, tt.wantEndExcl)
+			}
+		})
+	}
+}
+
+func TestLocalizeAllDay(t *testing.T) {
+	ny := mustLoc(t, "America/New_York")
+	tokyo := mustLoc(t, "Asia/Tokyo")
+	tests := []struct {
+		name               string
+		ev                 Event
+		loc                *time.Location
+		wantStart, wantEnd string
+	}{
+		{"CalDAV-style UTC midnight in New York",
+			Event{AllDay: true, Start: "2026-11-18T00:00:00Z", End: "2026-11-19T00:00:00Z"}, ny,
+			"2026-11-18T00:00:00-05:00", "2026-11-19T00:00:00-05:00"},
+		{"CalDAV-style UTC midnight in Tokyo",
+			Event{AllDay: true, Start: "2026-11-18T00:00:00Z", End: "2026-11-19T00:00:00Z"}, tokyo,
+			"2026-11-18T00:00:00+09:00", "2026-11-19T00:00:00+09:00"},
+		{"legacy local-midnight offset keeps its written date",
+			Event{AllDay: true, Start: "2026-11-18T00:00:00+09:00", End: "2026-11-19T00:00:00+09:00"}, ny,
+			"2026-11-18T00:00:00-05:00", "2026-11-19T00:00:00-05:00"},
+		{"legacy inclusive same-day end",
+			Event{AllDay: true, Start: "2026-11-18T00:00:00Z", End: "2026-11-18T23:59:59Z"}, ny,
+			"2026-11-18T00:00:00-05:00", "2026-11-19T00:00:00-05:00"},
+		{"timed events are untouched",
+			Event{Start: "2026-11-18T14:00:00Z", End: "2026-11-18T15:00:00Z"}, ny,
+			"2026-11-18T14:00:00Z", "2026-11-18T15:00:00Z"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := tt.ev
+			localizeAllDay(&ev, tt.loc)
+			if ev.Start != tt.wantStart || ev.End != tt.wantEnd {
+				t.Errorf("got %s..%s, want %s..%s", ev.Start, ev.End, tt.wantStart, tt.wantEnd)
+			}
+		})
+	}
+}
+
+func TestResolveUpdatedAllDay(t *testing.T) {
+	ny := mustLoc(t, "America/New_York")
+	str := func(s string) *string { return &s }
+	allDay3 := eventJSON{AllDay: true, Start: "2026-12-03T00:00:00Z", End: "2026-12-06T00:00:00Z"}
+	tests := []struct {
+		name               string
+		existing           eventJSON
+		newStart, newEnd   *string
+		wantStart, wantEnd string
+	}{
+		{"start-only move keeps the number of days", allDay3, str("2026-12-10"), nil,
+			"2026-12-10T00:00:00Z", "2026-12-13T00:00:00Z"},
+		{"end-only change keeps the start", allDay3, nil, str("2026-12-04"),
+			"2026-12-03T00:00:00Z", "2026-12-05T00:00:00Z"},
+		{"timed 9pm New York event switched to all-day lands on its local date",
+			eventJSON{Start: "2026-11-19T02:00:00Z", End: "2026-11-19T03:00:00Z"}, nil, nil,
+			"2026-11-18T00:00:00Z", "2026-11-19T00:00:00Z"},
+		{"clock times on one day normalise", allDay3, str("2026-11-18T09:00:00-05:00"), str("2026-11-18T23:59:00-05:00"),
+			"2026-11-18T00:00:00Z", "2026-11-19T00:00:00Z"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, e, err := resolveUpdatedAllDay(tt.existing, ny, tt.newStart, tt.newEnd)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if s != tt.wantStart || e != tt.wantEnd {
+				t.Errorf("got %s..%s, want %s..%s", s, e, tt.wantStart, tt.wantEnd)
+			}
+		})
+	}
+}
+
+// TestAllDayEvents covers all-day events end to end in a New York household:
+// create stores the CalDAV form, and list_events, check_conflicts and the
+// daily briefing see the event on its own day only.
+func TestAllDayEvents(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	setHouseholdTimezone(t, pool, hh.HouseholdID, "America/New_York")
+	calendarID := seedCalendar(t, pool, hh.HouseholdID)
+
+	_, create := NewCreateEventTool(pool)
+	_, list := NewListEventsTool(pool)
+	_, conflicts := NewCheckConflictsTool(pool)
+	_, update := NewUpdateEventTool(pool)
+	_, briefing := NewGetDailyBriefingTool(pool)
+
+	storedTimes := func(t *testing.T, id string) (string, string, bool) {
+		t.Helper()
+		var raw string
+		if err := pool.QueryRow(context.Background(), `SELECT ical_data FROM calendar_objects WHERE id = $1`, id).Scan(&raw); err != nil {
+			t.Fatalf("load event: %v", err)
+		}
+		var ej eventJSON
+		if err := json.Unmarshal([]byte(raw), &ej); err != nil {
+			t.Fatalf("decode ical_data: %v", err)
+		}
+		return ej.Start, ej.End, ej.AllDay
+	}
+	createID := func(t *testing.T, args map[string]any) string {
+		t.Helper()
+		text, isErr := callTool(t, create, ctx, args)
+		if isErr {
+			t.Fatalf("create_event: %s", text)
+		}
+		var out struct{ ID string }
+		if err := json.Unmarshal([]byte(text), &out); err != nil {
+			t.Fatalf("decode %q: %v", text, err)
+		}
+		return out.ID
+	}
+	listTitles := func(t *testing.T, date string) []string {
+		t.Helper()
+		text, isErr := callTool(t, list, ctx, map[string]any{"start_date": date, "end_date": date})
+		if isErr {
+			t.Fatalf("list_events: %s", text)
+		}
+		var evs []Event
+		if err := json.Unmarshal([]byte(text), &evs); err != nil {
+			t.Fatalf("decode %q: %v", text, err)
+		}
+		titles := make([]string, 0, len(evs))
+		for _, ev := range evs {
+			titles = append(titles, ev.Title)
+		}
+		return titles
+	}
+
+	// A bill created with clock times 09:00-23:59 is normalised to the day,
+	// stored the way CalDAV stores DTSTART;VALUE=DATE.
+	billID := createID(t, map[string]any{
+		"calendar_id": calendarID, "title": "Electric bill", "all_day": true,
+		"start_time": "2026-11-18T09:00:00-05:00", "end_time": "2026-11-18T23:59:00-05:00",
+	})
+	if s, e, ad := storedTimes(t, billID); s != "2026-11-18T00:00:00Z" || e != "2026-11-19T00:00:00Z" || !ad {
+		t.Errorf("stored bill = %s..%s all_day=%v, want 2026-11-18T00:00:00Z..2026-11-19T00:00:00Z all_day=true", s, e, ad)
+	}
+
+	// A field trip 12/3-12/4 given with the exclusive midnight end.
+	createID(t, map[string]any{
+		"calendar_id": calendarID, "title": "Field trip", "all_day": true,
+		"start_time": "2026-12-03", "end_time": "2026-12-05T00:00:00-05:00",
+	})
+
+	for _, tt := range []struct {
+		date string
+		want []string
+	}{
+		{"2026-11-17", []string{}},
+		{"2026-11-18", []string{"Electric bill"}},
+		{"2026-11-19", []string{}},
+		{"2026-12-04", []string{"Field trip"}},
+		{"2026-12-05", []string{}},
+	} {
+		t.Run("list_events "+tt.date, func(t *testing.T) {
+			got := listTitles(t, tt.date)
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("list_events returns local midnights", func(t *testing.T) {
+		text, _ := callTool(t, list, ctx, map[string]any{"start_date": "2026-11-18", "end_date": "2026-11-18"})
+		var evs []Event
+		_ = json.Unmarshal([]byte(text), &evs)
+		if len(evs) != 1 || evs[0].Start != "2026-11-18T00:00:00-05:00" || evs[0].End != "2026-11-19T00:00:00-05:00" {
+			t.Errorf("got %+v", evs)
+		}
+	})
+
+	for _, tt := range []struct {
+		name, start, end string
+		want             int
+	}{
+		{"late evening on the day conflicts", "2026-11-18T22:00:00-05:00", "2026-11-18T23:00:00-05:00", 1},
+		{"just after the day does not", "2026-11-19T00:30:00-05:00", "2026-11-19T01:00:00-05:00", 0},
+		{"previous evening does not", "2026-11-17T20:00:00-05:00", "2026-11-17T21:00:00-05:00", 0},
+	} {
+		t.Run("check_conflicts "+tt.name, func(t *testing.T) {
+			text, isErr := callTool(t, conflicts, ctx, map[string]any{"start_time": tt.start, "end_time": tt.end})
+			if isErr {
+				t.Fatalf("check_conflicts: %s", text)
+			}
+			var got []ConflictEvent
+			if err := json.Unmarshal([]byte(text), &got); err != nil {
+				t.Fatalf("decode %q: %v", text, err)
+			}
+			if len(got) != tt.want {
+				t.Errorf("got %d conflicts %+v, want %d", len(got), got, tt.want)
+			}
+		})
+	}
+
+	t.Run("daily briefing shows the bill on its day only", func(t *testing.T) {
+		text, _ := callTool(t, briefing, ctx, map[string]any{"date": "2026-11-18"})
+		if !strings.Contains(text, "All day** — Electric bill") {
+			t.Errorf("11/18 briefing missing bill:\n%s", text)
+		}
+		text, _ = callTool(t, briefing, ctx, map[string]any{"date": "2026-11-17"})
+		if strings.Contains(text, "Electric bill") {
+			t.Errorf("11/17 briefing shows bill:\n%s", text)
+		}
+	})
+
+	t.Run("update_event keeps all-day events normalised", func(t *testing.T) {
+		text, isErr := callTool(t, update, ctx, map[string]any{"event_id": billID, "start_time": "2026-11-20T10:00:00-05:00"})
+		if isErr {
+			t.Fatalf("update_event: %s", text)
+		}
+		if s, e, _ := storedTimes(t, billID); s != "2026-11-20T00:00:00Z" || e != "2026-11-21T00:00:00Z" {
+			t.Errorf("stored after move = %s..%s", s, e)
+		}
+		var ev Event
+		_ = json.Unmarshal([]byte(text), &ev)
+		if ev.Start != "2026-11-20T00:00:00-05:00" || ev.End != "2026-11-21T00:00:00-05:00" {
+			t.Errorf("returned %s..%s", ev.Start, ev.End)
+		}
+		if text, isErr := callTool(t, update, ctx, map[string]any{"event_id": billID, "all_day": false}); !isErr || !strings.Contains(text, "start_time and end_time") {
+			t.Errorf("turning off all_day without times: isErr=%v %q", isErr, text)
+		}
+	})
+
+	t.Run("switching a timed event to all-day uses its local date", func(t *testing.T) {
+		// 21:00-22:00 New York on 11/22, stored as UTC (02:00Z on 11/23).
+		id := seedEvent(t, pool, calendarID, uuid.NewString(),
+			`{"title":"Movie","start":"2026-11-23T02:00:00Z","end":"2026-11-23T03:00:00Z","all_day":false}`)
+		if text, isErr := callTool(t, update, ctx, map[string]any{"event_id": id, "all_day": true}); isErr {
+			t.Fatalf("update_event: %s", text)
+		}
+		if s, e, ad := storedTimes(t, id); s != "2026-11-22T00:00:00Z" || e != "2026-11-23T00:00:00Z" || !ad {
+			t.Errorf("stored = %s..%s all_day=%v", s, e, ad)
+		}
+	})
+}
+
+// TestAllDayEventsEastOfUTC checks a CalDAV-created all-day event (stored as
+// UTC midnight) in a Tokyo household: it must not bleed into the next day,
+// which the plain timestamptz comparison would allow.
+func TestAllDayEventsEastOfUTC(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	setHouseholdTimezone(t, pool, hh.HouseholdID, "Asia/Tokyo")
+	calendarID := seedCalendar(t, pool, hh.HouseholdID)
+	seedEvent(t, pool, calendarID, uuid.NewString(),
+		`{"title":"Holiday","start":"2026-11-23T00:00:00Z","end":"2026-11-24T00:00:00Z","all_day":true,"sequence":0}`)
+
+	_, list := NewListEventsTool(pool)
+	for date, want := range map[string]int{"2026-11-22": 0, "2026-11-23": 1, "2026-11-24": 0} {
+		text, isErr := callTool(t, list, ctx, map[string]any{"start_date": date, "end_date": date})
+		if isErr {
+			t.Fatalf("list_events: %s", text)
+		}
+		var evs []Event
+		if err := json.Unmarshal([]byte(text), &evs); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(evs) != want {
+			t.Errorf("%s: got %d events %+v, want %d", date, len(evs), evs, want)
+		}
+	}
+
+	_, conflicts := NewCheckConflictsTool(pool)
+	// 23:00-23:30 Tokyo on 11/23 is 14:00Z, inside both readings; 08:00 on
+	// 11/24 Tokyo (23:00Z on 11/23) is inside the UTC day but not the local one.
+	for _, tt := range []struct {
+		start, end string
+		want       int
+	}{
+		{"2026-11-23T23:00:00+09:00", "2026-11-23T23:30:00+09:00", 1},
+		{"2026-11-24T08:00:00+09:00", "2026-11-24T08:30:00+09:00", 0},
+	} {
+		text, _ := callTool(t, conflicts, ctx, map[string]any{"start_time": tt.start, "end_time": tt.end})
+		var got []ConflictEvent
+		_ = json.Unmarshal([]byte(text), &got)
+		if len(got) != tt.want {
+			t.Errorf("%s: got %d conflicts, want %d", tt.start, len(got), tt.want)
+		}
+	}
+}

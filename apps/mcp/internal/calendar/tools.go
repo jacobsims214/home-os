@@ -162,7 +162,9 @@ type eventRow struct {
 	UpdatedAt    time.Time
 }
 
-func parseEventFromRow(row eventRow) (*Event, error) {
+// parseEventFromRow decodes a calendar_objects row. All-day events come back
+// as household-local midnights (see localizeAllDay).
+func parseEventFromRow(row eventRow, loc *time.Location) (*Event, error) {
 	var ej eventJSON
 	if err := json.Unmarshal([]byte(row.IcalData), &ej); err != nil {
 		return nil, fmt.Errorf("parse ical_data: %w", err)
@@ -180,6 +182,7 @@ func parseEventFromRow(row eventRow) (*Event, error) {
 		EventType:    row.EventType,
 		CalendarName: row.CalendarName,
 	}
+	localizeAllDay(ev, loc)
 	return ev, nil
 }
 
@@ -314,6 +317,56 @@ func resolveUpdatedTimes(oldStart, oldEnd string, newStart, newEnd *string) (tim
 	return start.UTC(), end.UTC(), nil
 }
 
+// resolveUpdatedAllDay works out the stored start/end of an event that is
+// all-day after update_event, from its stored times and the optional new
+// values:
+//
+//   - end given: the new (or stored) start through that end;
+//   - only start given: the event moves, keeping its number of days;
+//   - neither: the stored times snapped to whole days (used when all_day is
+//     switched on for a timed event, or to repair a non-normalised one).
+//
+// A timed event's stored UTC instants are read in the household timezone
+// first, so 9pm on 11/18 in New York (02:00Z on 11/19) becomes 11/18.
+func resolveUpdatedAllDay(existing eventJSON, loc *time.Location, newStart, newEnd *string) (string, string, error) {
+	if !existing.AllDay {
+		for _, p := range []*string{&existing.Start, &existing.End} {
+			if t, err := time.Parse(time.RFC3339, *p); err == nil {
+				*p = t.In(loc).Format(time.RFC3339)
+			}
+		}
+	}
+	start := existing.Start
+	if newStart != nil {
+		start = *newStart
+	}
+	var first, endExcl time.Time
+	var err error
+	switch {
+	case newEnd != nil:
+		first, endExcl, err = allDayRange(start, *newEnd)
+	case newStart != nil:
+		days := 1
+		if oldFirst, oldEndExcl, oerr := allDayRange(existing.Start, existing.End); oerr == nil {
+			days = int(oldEndExcl.Sub(oldFirst).Hours()/24 + 0.5)
+		}
+		if first, _, err = civilDate(start); err != nil {
+			err = fmt.Errorf("invalid start_time: %w", err)
+		} else {
+			endExcl = first.AddDate(0, 0, days)
+		}
+	default:
+		if first, endExcl, err = allDayRange(existing.Start, existing.End); err != nil {
+			err = fmt.Errorf("stored event has unreadable start/end; pass start_time and end_time")
+		}
+	}
+	if err != nil {
+		return "", "", err
+	}
+	s, e := storeAllDay(first, endExcl)
+	return s, e, nil
+}
+
 // ─────────────────────────────────────────────
 // Helper: verify a calendar belongs to the household
 // ─────────────────────────────────────────────
@@ -414,7 +467,7 @@ func loadHouseholdLocation(ctx context.Context, pool *pgxpool.Pool, householdID 
 // as a correctness backstop.
 // ─────────────────────────────────────────────
 
-func queryEvents(ctx context.Context, pool *pgxpool.Pool, householdID string, calendarIDs []string, startDate, endDate time.Time) ([]Event, error) {
+func queryEvents(ctx context.Context, pool *pgxpool.Pool, householdID string, loc *time.Location, calendarIDs []string, startDate, endDate time.Time) ([]Event, error) {
 	// Base query: join calendar_objects with calendars for household scoping
 	query := `SELECT co.id, co.calendar_id, co.ical_data, co.event_type, c.name AS calendar_name, co.created_at, co.updated_at
 		FROM calendar_objects co
@@ -436,13 +489,15 @@ func queryEvents(ctx context.Context, pool *pgxpool.Pool, householdID string, ca
 
 	// Filter by date range using JSONB extraction from ical_data.
 	// Overlap condition: event start < range end AND event end > range start.
-	// This narrows the result set in SQL; callers keep Go-side filtering as a backstop.
+	// This narrows the result set in SQL; callers keep Go-side filtering as
+	// the exact check. The window is widened by allDaySlack because all-day
+	// events are stored as UTC midnights but compared as local days.
 	if !startDate.IsZero() && !endDate.IsZero() {
 		query += fmt.Sprintf(" AND (co.ical_data::jsonb->>'start')::timestamptz < $%d", argIdx)
-		args = append(args, endDate)
+		args = append(args, endDate.Add(allDaySlack))
 		argIdx++
 		query += fmt.Sprintf(" AND (co.ical_data::jsonb->>'end')::timestamptz > $%d", argIdx)
-		args = append(args, startDate)
+		args = append(args, startDate.Add(-allDaySlack))
 		argIdx++
 	}
 
@@ -461,7 +516,7 @@ func queryEvents(ctx context.Context, pool *pgxpool.Pool, householdID string, ca
 			slog.Warn("calendar: query events: scan error", "error", err)
 			continue
 		}
-		ev, err := parseEventFromRow(row)
+		ev, err := parseEventFromRow(row, loc)
 		if err != nil {
 			slog.Warn("calendar: query events: parse error", "event_id", row.ID, "error", err)
 			continue
@@ -504,6 +559,112 @@ func parseEventTime(ev Event) (time.Time, time.Time, error) {
 	}
 	return start, end, nil
 }
+
+// ─────────────────────────────────────────────
+// Helper: all-day events
+// ─────────────────────────────────────────────
+//
+// All-day events are stored the way the CalDAV service stores
+// DTSTART;VALUE=DATE: the calendar date at 00:00 UTC, with an exclusive end
+// at 00:00 UTC of the day after the last day, e.g.
+//
+//	{"all_day":true,"start":"2026-11-18T00:00:00Z","end":"2026-11-19T00:00:00Z"}
+//
+// The CalDAV service writes VALUE=DATE from the date written in the stored
+// string, so a phone shows the event on 11/18 whatever the household's
+// timezone. Storing local midnight as an instant instead would shift the
+// date for households east of UTC.
+//
+// The tools read the date as written (ignoring clock and offset) and treat
+// it as a household-local day: [local 00:00, local 00:00 of the end date).
+
+const dateLayout = "2006-01-02"
+
+// civilDate reads the calendar date exactly as written in s, accepting
+// RFC 3339, a naive local datetime or a bare YYYY-MM-DD. The offset, when
+// present, is ignored for the date: "2026-11-18T00:00:00Z" is 11/18, not
+// 11/17 evening in New York. midnight reports whether s spells out a
+// 00:00:00 clock time (a bare date does not).
+func civilDate(s string) (date time.Time, midnight bool, err error) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05", "2006-01-02T15:04", dateLayout} {
+		t, perr := time.Parse(layout, s)
+		if perr != nil {
+			continue
+		}
+		h, m, sec := t.Clock()
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC),
+			layout != dateLayout && h == 0 && m == 0 && sec == 0 && t.Nanosecond() == 0, nil
+	}
+	return time.Time{}, false, fmt.Errorf("%q is not a date (YYYY-MM-DD) or ISO 8601 time", s)
+}
+
+// allDayRange normalises an all-day event's start and end to whole days.
+// The returned dates are UTC midnights: first is the first day and
+// endExcl the day after the last day.
+//
+// The end is exclusive when it is a 00:00 time after the start date, as in
+// iCalendar and in what is stored ("2026-11-19T00:00:00Z"). Otherwise it
+// names the last day: a bare date "2026-12-05" or any other clock time
+// includes 12/5, so 09:00–23:59 on 11/18, or 11/18–11/18, is the single
+// day 11/18. An empty end means one day.
+func allDayRange(start, end string) (first, endExcl time.Time, err error) {
+	first, _, err = civilDate(start)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid start_time: %w", err)
+	}
+	if end == "" {
+		return first, first.AddDate(0, 0, 1), nil
+	}
+	last, midnight, err := civilDate(end)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid end_time: %w", err)
+	}
+	if last.Before(first) {
+		return time.Time{}, time.Time{}, fmt.Errorf("end_time must not be before start_time")
+	}
+	if midnight && last.After(first) {
+		return first, last, nil
+	}
+	return first, last.AddDate(0, 0, 1), nil
+}
+
+// storeAllDay formats normalised all-day dates as stored in ical_data.
+func storeAllDay(first, endExcl time.Time) (string, string) {
+	return first.Format(time.RFC3339), endExcl.Format(time.RFC3339)
+}
+
+// localizeAllDay rewrites an all-day event's start/end as household-local
+// midnights (e.g. 2026-11-18T00:00:00-05:00 to 2026-11-19T00:00:00-05:00)
+// so date filtering and callers see the right day. Timed events and
+// unreadable dates are left as stored.
+func localizeAllDay(ev *Event, loc *time.Location) {
+	if !ev.AllDay {
+		return
+	}
+	first, endExcl, err := allDayRange(ev.Start, ev.End)
+	if err != nil {
+		return
+	}
+	ev.Start = time.Date(first.Year(), first.Month(), first.Day(), 0, 0, 0, 0, loc).Format(time.RFC3339)
+	ev.End = time.Date(endExcl.Year(), endExcl.Month(), endExcl.Day(), 0, 0, 0, 0, loc).Format(time.RFC3339)
+}
+
+// startsBefore orders RFC 3339 start times by instant. Stored times mix
+// offsets (timed events in UTC, all-day events as local midnights), so a
+// string comparison is wrong; unparseable values fall back to it.
+func startsBefore(a, b string) bool {
+	ta, errA := time.Parse(time.RFC3339, a)
+	tb, errB := time.Parse(time.RFC3339, b)
+	if errA != nil || errB != nil {
+		return a < b
+	}
+	return ta.Before(tb)
+}
+
+// allDaySlack widens the SQL date window so all-day events, stored as UTC
+// midnights but read as local days, are not cut off by the timestamptz
+// comparison. UTC offsets reach ±14h; eventOverlapsRange does the exact check.
+const allDaySlack = 48 * time.Hour
 
 // ─────────────────────────────────────────────
 // 1. list_calendars
@@ -604,8 +765,9 @@ func NewListEventsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, 
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("invalid end_date format (use YYYY-MM-DD): %v", err)), nil
 			}
-			// End date is inclusive, add 1 day so events on the end date are included
-			endDate = endDate.Add(24 * time.Hour)
+			// end_date is inclusive: the range ends at the next local
+			// midnight (AddDate, not +24h, so DST days are covered exactly).
+			endDate = endDate.AddDate(0, 0, 1)
 		} else {
 			// Default to start_date + 1 month
 			endDate = startDate.AddDate(0, 1, 0)
@@ -639,7 +801,7 @@ func NewListEventsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, 
 				slog.Error("list_events: scan error", "error", err)
 				continue
 			}
-			ev, err := parseEventFromRow(row)
+			ev, err := parseEventFromRow(row, loc)
 			if err != nil {
 				slog.Warn("list_events: parse error", "event_id", row.ID, "error", err)
 				continue
@@ -675,9 +837,9 @@ func NewCreateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 		mcp.WithDescription("Create a new calendar event. Records a calendar_changes entry and bumps the calendar's ctag for CalDAV sync."),
 		mcp.WithString("calendar_id", mcp.Description("Calendar ID to create the event in"), mcp.Required()),
 		mcp.WithString("title", mcp.Description("Event title"), mcp.Required()),
-		mcp.WithString("start_time", mcp.Description("Start time (ISO 8601, e.g. 2026-08-03T14:00:00Z)"), mcp.Required()),
-		mcp.WithString("end_time", mcp.Description("End time (ISO 8601, e.g. 2026-08-03T15:00:00Z)"), mcp.Required()),
-		mcp.WithBoolean("all_day", mcp.Description("Whether this is an all-day event (default false)")),
+		mcp.WithString("start_time", mcp.Description("Start time (ISO 8601, e.g. 2026-08-03T14:00:00-05:00). For all_day events a date (2026-08-03) is enough; any clock time is ignored."), mcp.Required()),
+		mcp.WithString("end_time", mcp.Description("End time (ISO 8601, e.g. 2026-08-03T15:00:00-05:00). For all_day events give the last day (2026-08-05, or any time on it), or the exclusive next-day midnight (2026-08-06T00:00:00)."), mcp.Required()),
+		mcp.WithBoolean("all_day", mcp.Description("Whether this is an all-day event (default false). All-day events cover whole days in the household timezone; clock times are dropped.")),
 		mcp.WithString("description", mcp.Description("Optional description")),
 		mcp.WithString("location", mcp.Description("Optional location")),
 		mcp.WithString("event_type", mcp.Description("Optional event type (default 'event')")),
@@ -721,17 +883,29 @@ func NewCreateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 			return mcp.NewToolResultError("calendar not found"), nil
 		}
 
-		// Validate time formats and ordering
-		startT, err := time.Parse(time.RFC3339, startTime)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid start_time format (use ISO 8601): %v", err)), nil
-		}
-		endT, err := time.Parse(time.RFC3339, endTime)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid end_time format (use ISO 8601): %v", err)), nil
-		}
-		if !endT.After(startT) {
-			return mcp.NewToolResultError("end_time must be after start_time"), nil
+		// Validate time formats and ordering. All-day events are normalised
+		// to whole days (UTC-midnight dates, exclusive end; see allDayRange).
+		// Timed events are stored as UTC RFC 3339, as the API and CalDAV do.
+		var storedStart, storedEnd string
+		if allDay {
+			first, endExcl, err := allDayRange(startTime, endTime)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			storedStart, storedEnd = storeAllDay(first, endExcl)
+		} else {
+			startT, err := time.Parse(time.RFC3339, startTime)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid start_time format (use ISO 8601): %v", err)), nil
+			}
+			endT, err := time.Parse(time.RFC3339, endTime)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid end_time format (use ISO 8601): %v", err)), nil
+			}
+			if !endT.After(startT) {
+				return mcp.NewToolResultError("end_time must be after start_time"), nil
+			}
+			storedStart, storedEnd = startT.UTC().Format(time.RFC3339), endT.UTC().Format(time.RFC3339)
 		}
 
 		// Generate IDs
@@ -740,7 +914,7 @@ func NewCreateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 		etag := uuid.New().String()
 
 		// Build ical_data JSON
-		icalData, err := marshalEventFields(title, description, startTime, endTime, location, allDay)
+		icalData, err := marshalEventFields(title, description, storedStart, storedEnd, location, allDay)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
 		}
@@ -786,9 +960,9 @@ func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 		mcp.WithDescription("Update an existing calendar event. All fields except event_id are optional — only provided fields are updated. Moving start_time without end_time keeps the event's duration. Returns the updated event."),
 		mcp.WithString("event_id", mcp.Description("Event ID to update"), mcp.Required()),
 		mcp.WithString("title", mcp.Description("New title")),
-		mcp.WithString("start_time", mcp.Description("New start time (ISO 8601)")),
-		mcp.WithString("end_time", mcp.Description("New end time (ISO 8601). Omit to keep the duration when moving start_time")),
-		mcp.WithBoolean("all_day", mcp.Description("Whether this is an all-day event")),
+		mcp.WithString("start_time", mcp.Description("New start time (ISO 8601). For all_day events a date (2026-08-03) is enough.")),
+		mcp.WithString("end_time", mcp.Description("New end time (ISO 8601). Omit to keep the duration when moving start_time. For all_day events give the last day or the exclusive next-day midnight.")),
+		mcp.WithBoolean("all_day", mcp.Description("Whether this is an all-day event. Setting it true snaps the event to whole days in the household timezone; setting it false needs start_time and end_time.")),
 		mcp.WithString("description", mcp.Description("New description")),
 		mcp.WithString("location", mcp.Description("New location")),
 		mcp.WithString("event_type", mcp.Description("New event type")),
@@ -815,6 +989,8 @@ func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 			// Return not found rather than "not your calendar" to avoid leaking info
 			return mcp.NewToolResultError("event not found"), nil
 		}
+
+		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
 
 		// Load the existing row. uid is what CalDAV clients know the event by
 		// and what calendar_changes must record; it differs from id for
@@ -861,9 +1037,23 @@ func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 		}
 
 		// Work out the new start/end: an explicit end_time is stored as
-		// given; a start-only move keeps the original duration.
+		// given; a start-only move keeps the original duration. All-day
+		// events are always re-normalised to whole days.
+		allDay := existing.AllDay
+		if allDayPtr != nil {
+			allDay = *allDayPtr
+		}
 		var newStartStr, newEndStr *string
-		if startPtr != nil || endPtr != nil {
+		switch {
+		case allDay:
+			s, e, err := resolveUpdatedAllDay(existing, loc, startPtr, endPtr)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			newStartStr, newEndStr = &s, &e
+		case existing.AllDay && startPtr == nil && endPtr == nil:
+			return mcp.NewToolResultError("pass start_time and end_time when turning off all_day"), nil
+		case startPtr != nil || endPtr != nil:
 			newStart, newEnd, err := resolveUpdatedTimes(existing.Start, existing.End, startPtr, endPtr)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
@@ -916,7 +1106,7 @@ func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 			return mcp.NewToolResultError(fmt.Sprintf("commit: %v", err)), nil
 		}
 
-		updated, err := parseEventFromRow(row)
+		updated, err := parseEventFromRow(row, loc)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("event updated but could not be read back: %v", err)), nil
 		}
@@ -1073,7 +1263,7 @@ func NewFindAvailableSlotsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.C
 		last := days[len(days)-1]
 		queryEnd := time.Date(last.Year(), last.Month(), last.Day()+1, 0, 0, 0, 0, loc)
 
-		events, err := queryEvents(ctx, pool, claims.HouseholdID, calendarIDs, queryStart, queryEnd)
+		events, err := queryEvents(ctx, pool, claims.HouseholdID, loc, calendarIDs, queryStart, queryEnd)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("query events: %v", err)), nil
 		}
@@ -1231,14 +1421,14 @@ func NewGetDailyBriefingTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Con
 		}
 
 		dayStart := date
-		dayEnd := date.Add(24 * time.Hour)
+		dayEnd := date.AddDate(0, 0, 1) // next local midnight, DST-safe
 		dateDisplay := date.Format("Monday, January 2, 2006")
 
 		var briefing strings.Builder
 		briefing.WriteString(fmt.Sprintf("# Daily Briefing — %s\n\n", dateDisplay))
 
 		// ── Events ──
-		events, eventsErr := queryEvents(ctx, pool, claims.HouseholdID, nil, dayStart, dayEnd)
+		events, eventsErr := queryEvents(ctx, pool, claims.HouseholdID, loc, nil, dayStart, dayEnd)
 		if eventsErr != nil {
 			slog.Error("get_daily_briefing: query events error", "error", eventsErr)
 		}
@@ -1254,8 +1444,8 @@ func NewGetDailyBriefingTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Con
 		}
 
 		// Sort events by start time
-		sort.Slice(todaysEvents, func(i, j int) bool {
-			return todaysEvents[i].Start < todaysEvents[j].Start
+		sort.SliceStable(todaysEvents, func(i, j int) bool {
+			return startsBefore(todaysEvents[i].Start, todaysEvents[j].Start)
 		})
 
 		briefing.WriteString(fmt.Sprintf("## 📅 Events (%d)\n\n", len(todaysEvents)))
@@ -1268,7 +1458,7 @@ func NewGetDailyBriefingTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Con
 				startT, err := time.Parse(time.RFC3339, ev.Start)
 				timeStr := ev.Start
 				if err == nil {
-					timeStr = startT.Format("3:04 PM")
+					timeStr = startT.In(loc).Format("3:04 PM")
 				}
 				if ev.AllDay {
 					timeStr = "All day"
@@ -1423,9 +1613,12 @@ func NewCheckConflictsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Conte
 		}
 
 		calendarIDs := getStringSliceArg(args, "calendar_ids")
+		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
 
-		// Query all events for the household (or filtered calendars)
-		events, err := queryEvents(ctx, pool, claims.HouseholdID, calendarIDs, proposedStart, proposedEnd)
+		// Query all events for the household (or filtered calendars).
+		// All-day events come back as local days, so one on 11/18 conflicts
+		// with any proposal on 11/18 household time and none on 11/19.
+		events, err := queryEvents(ctx, pool, claims.HouseholdID, loc, calendarIDs, proposedStart, proposedEnd)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("query events: %v", err)), nil
 		}
@@ -1446,11 +1639,11 @@ func NewCheckConflictsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Conte
 		}
 
 		// Sort by start time
-		slices.SortFunc(conflicts, func(a, b ConflictEvent) int {
-			if a.Start < b.Start {
+		slices.SortStableFunc(conflicts, func(a, b ConflictEvent) int {
+			switch {
+			case startsBefore(a.Start, b.Start):
 				return -1
-			}
-			if a.Start > b.Start {
+			case startsBefore(b.Start, a.Start):
 				return 1
 			}
 			return 0
