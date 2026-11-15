@@ -42,7 +42,8 @@ for (const width of [375, 390]) {
       await expect(header.getByRole("link", { name: /^Family:/ })).toBeVisible();
 
       // The bug from the audit: the navbar rendered open over every page.
-      await expect(page.getByRole("navigation", { name: "Main navigation" })).toBeHidden();
+      // (The phone's "Main navigation" is the bottom tab bar, tab-bar.spec.ts.)
+      await expect(page.locator(".mantine-AppShell-navbar")).toBeHidden();
       await expectHeadingUncovered(page);
       await expectNoHorizontalOverflow(page);
 

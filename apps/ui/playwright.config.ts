@@ -33,6 +33,8 @@ const uiEnv = {
   PORT: String(uiPort),
   HOSTNAME: "localhost",
   NEXT_TELEMETRY_DISABLED: "1",
+  // The React Query devtools button covers the phone tab bar's More tab.
+  NEXT_PUBLIC_QUERY_DEVTOOLS: "0",
 };
 
 // The standalone server needs the static assets copied next to it

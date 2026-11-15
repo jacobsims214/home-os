@@ -92,7 +92,9 @@ export default function Providers({ children }: { children: ReactNode }) {
           <Notifications position="top-right" />
           {children}
         </ModalsProvider>
-        <ReactQueryDevtools initialIsOpen={false} />
+        {/* Dev only (renders nothing in production builds). The E2E run turns
+            it off: its floating button sits over the phone tab bar's More tab. */}
+        {process.env.NEXT_PUBLIC_QUERY_DEVTOOLS !== "0" && <ReactQueryDevtools initialIsOpen={false} />}
       </QueryClientProvider>
     </MantineProvider>
   );

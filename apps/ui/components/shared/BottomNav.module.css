@@ -1,0 +1,277 @@
+/*
+ * Phone tab bar and More sheet (#4536), per KB design/app-shell.md
+ * (artifact #75 v1). Mantine theme values only, through the shell
+ * variables in DashboardShell.module.css.
+ */
+
+/* ---------- tab bar ---------- */
+
+.footer {
+  composes: shellVars from "./DashboardShell.module.css";
+  /* Above the More sheet's scrim (Drawer zIndex 101) and the header (100),
+     below Mantine's modals (200). */
+  z-index: 102;
+  background: var(--shell-surface);
+  border-top: 1px solid var(--shell-line);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* The bar only exists below 48em (hiddenFrom="sm" on the footer too). */
+@media (min-width: 48em) {
+  .footer {
+    display: none;
+  }
+}
+
+.bar {
+  height: 56px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.tab {
+  height: 56px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.15;
+  color: var(--shell-ink-2);
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pill {
+  width: 56px;
+  height: 30px;
+  flex: none;
+  border-radius: 15px;
+  display: grid;
+  place-items: center;
+  transition: background-color 150ms ease;
+}
+
+.tab[data-active] {
+  color: var(--shell-accent);
+  font-weight: 600;
+}
+
+.tab[data-active] .pill {
+  background: var(--shell-accent-soft);
+}
+
+.tab[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ---------- More sheet ---------- */
+
+/* The sheet floats above the tab bar: 8 px side margins, bottom = bar
+   (56 px + 1 px border) + the safe-area inset. */
+.sheetInner {
+  padding: 0 8px calc(57px + env(safe-area-inset-bottom, 0px));
+}
+
+.sheet {
+  composes: shellVars from "./DashboardShell.module.css";
+  position: relative;
+  height: auto !important;
+  max-height: 86%;
+  border-radius: 16px;
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-6));
+  box-shadow: var(--mantine-shadow-xl);
+  overflow-y: auto;
+}
+
+.sheet:focus,
+.sheet:focus-visible {
+  outline: none;
+}
+
+.sheetHeader {
+  position: relative;
+  padding: 18px 12px 4px 16px;
+  min-height: 0;
+  background: inherit;
+}
+
+.sheetTitle {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--shell-ink);
+}
+
+.sheetBody {
+  padding: 4px 12px 12px;
+}
+
+.handle {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  width: 36px;
+  height: 4px;
+  margin-left: -18px;
+  border-radius: 2px;
+  background: var(--shell-line);
+}
+
+.search {
+  margin: 4px 0 12px;
+}
+
+.searchInput {
+  height: 48px;
+  min-height: 48px;
+  /* 16 px stops iOS zooming into the field. */
+  font-size: 16px;
+  background: var(--shell-surface-2);
+  border-color: transparent;
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tile {
+  min-height: 92px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--shell-surface-2);
+  color: var(--shell-ink);
+  text-decoration: none;
+}
+
+.tile[aria-current="page"] {
+  background: var(--shell-accent-soft);
+}
+
+.tile[aria-disabled="true"] {
+  opacity: 0.6;
+}
+
+.tileIcon {
+  color: var(--shell-accent);
+  margin-bottom: 6px;
+}
+
+.tileTitle {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.tileHint {
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--shell-ink-3);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  min-height: 52px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--shell-line);
+  color: var(--shell-ink);
+  text-decoration: none;
+  font-size: 15px;
+}
+
+.row:last-child {
+  border-bottom: 0;
+}
+
+.rowIcon {
+  flex: none;
+  width: 32px;
+  color: var(--shell-ink-2);
+}
+
+.rowLabel {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row > .rowLabel {
+  flex: 1;
+  min-width: 0;
+}
+
+.rowMeta {
+  max-width: 45%;
+  font-size: 13px;
+  color: var(--shell-ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowSub {
+  font-size: 12px;
+  color: var(--shell-ink-3);
+}
+
+.accountText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.count {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 11px;
+  display: inline-grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--mantine-color-white);
+  background: var(--mantine-color-red-8);
+}
+
+.chevron {
+  flex: none;
+  color: var(--shell-ink-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pill {
+    transition: none;
+  }
+}
+
+/* The sheet renders in a portal, outside the shell's focus rule. */
+.sheet :focus-visible {
+  outline: 2px solid var(--shell-accent);
+  outline-offset: 2px;
+}

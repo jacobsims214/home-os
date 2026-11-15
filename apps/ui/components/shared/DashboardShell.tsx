@@ -6,7 +6,8 @@
  *
  * - Phone (< 768 px): header with a menu button, the family chip above the
  *   page title, the bell and the avatar. The menu button opens the drawer.
- *   The bottom tab bar is #4536 (see TAB BAR below).
+ *   The bottom tab bar and its More sheet (BottomNav, #4536) sit in the
+ *   footer.
  * - Tablet (768-991 px): 80 px icon rail. Its menu button opens the drawer.
  * - Desktop (>= 992 px): 260 px sidebar, always open; no drawer.
  *
@@ -19,7 +20,6 @@
  * Hooks for the follow-up tickets:
  * - #4543 renders <Sidebar /> from nav-config; it is mounted here in both
  *   the desktop navbar and the drawer.
- * - #4536 mounts the tab bar where "TAB BAR" is marked.
  * - #4574 replaces the family chip's target with the family switcher.
  * - #4563 replaces the header bell's popover with the notifications sheet.
  */
@@ -47,6 +47,7 @@ import { useDisclosure, useMediaQuery, useReducedMotion } from "@mantine/hooks";
 import { IconBell, IconChevronDown, IconLogout, IconMenu2, IconSettings } from "@tabler/icons-react";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
+import BottomNav from "@/components/shared/BottomNav";
 import Sidebar from "@/components/shared/Sidebar";
 import { apiFetch } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
@@ -59,6 +60,7 @@ import {
   type NavSection,
 } from "@/components/shared/nav-config";
 import classes from "./DashboardShell.module.css";
+import bottomNavClasses from "./BottomNav.module.css";
 
 dayjs.extend(relativeTime);
 
@@ -70,6 +72,10 @@ export default function DashboardShell({ children }: { children: React.ReactNode
   const [drawerOpened, drawer] = useDisclosure(false);
   const isDesktop = useMediaQuery(DESKTOP_QUERY);
   const reduceMotion = useReducedMotion();
+  // The bell's panel and the account menu are opened from the header and
+  // from the More sheet's rows, so their state lives here.
+  const [bellOpened, setBellOpened] = useState(false);
+  const [accountOpened, setAccountOpened] = useState(false);
 
   // Navigating, or widening the window to desktop, closes the drawer.
   useEffect(() => {
@@ -87,9 +93,9 @@ export default function DashboardShell({ children }: { children: React.ReactNode
       className={classes.root}
       header={{ height: { base: "calc(3.5rem + env(safe-area-inset-top, 0px))", sm: 64 } }}
       navbar={{ width: { sm: 80, md: 260 }, breakpoint: "sm", collapsed: { mobile: true } }}
-      // TAB BAR (#4536): add `footer={{ height: 56 }}` here and render
-      // <AppShell.Footer hiddenFrom="sm"> below, with its own
-      // padding-bottom: env(safe-area-inset-bottom).
+      // The phone tab bar: 56 px + 1 px border + the bottom safe-area inset.
+      // Height 0 from sm up, so main isn't padded for a bar that isn't there.
+      footer={{ height: { base: "calc(3.5625rem + env(safe-area-inset-bottom, 0px))", sm: 0 } }}
       classNames={{ header: classes.header, navbar: classes.navbar, main: classes.main }}
     >
       <AppShell.Header>
@@ -97,6 +103,10 @@ export default function DashboardShell({ children }: { children: React.ReactNode
           pathname={pathname}
           drawerOpened={drawerOpened}
           onOpenDrawer={drawer.open}
+          bellOpened={bellOpened}
+          onBellChange={setBellOpened}
+          accountOpened={accountOpened}
+          onAccountChange={setAccountOpened}
         />
       </AppShell.Header>
 
@@ -112,6 +122,15 @@ export default function DashboardShell({ children }: { children: React.ReactNode
       <AppShell.Main>
         <div className={classes.content}>{children}</div>
       </AppShell.Main>
+
+      <AppShell.Footer hiddenFrom="sm" withBorder={false} className={bottomNavClasses.footer}>
+        <nav aria-label="Main navigation">
+          <BottomNav
+            onOpenNotifications={() => setBellOpened(true)}
+            onOpenAccount={() => setAccountOpened(true)}
+          />
+        </nav>
+      </AppShell.Footer>
 
       <Drawer
         opened={drawerOpened}
@@ -140,10 +159,18 @@ function ShellHeader({
   pathname,
   drawerOpened,
   onOpenDrawer,
+  bellOpened,
+  onBellChange,
+  accountOpened,
+  onAccountChange,
 }: {
   pathname: string;
   drawerOpened: boolean;
   onOpenDrawer: () => void;
+  bellOpened: boolean;
+  onBellChange: (opened: boolean) => void;
+  accountOpened: boolean;
+  onAccountChange: (opened: boolean) => void;
 }) {
   // Rendered after mount so server and client agree (the server's timezone
   // may differ from the browser's).
@@ -175,9 +202,9 @@ function ShellHeader({
         </div>
       </div>
 
-      <HeaderBell />
+      <HeaderBell opened={bellOpened} onChange={onBellChange} />
       <Box hiddenFrom="md">
-        <UserMenu />
+        <UserMenu opened={accountOpened} onChange={onAccountChange} />
       </Box>
     </div>
   );
@@ -225,8 +252,7 @@ interface ShellNotification {
  * ["notifications"] query (and so its cache) with NotificationBell.
  * #4563 turns the popover into a bottom sheet on phones.
  */
-function HeaderBell() {
-  const [opened, setOpened] = useState(false);
+function HeaderBell({ opened, onChange: setOpened }: { opened: boolean; onChange: (opened: boolean) => void }) {
   const notificationsQ = useQuery({
     queryKey: ["notifications"],
     queryFn: () => apiFetch<{ data: ShellNotification[] }>("/api/v1/notifications"),
@@ -260,7 +286,7 @@ function HeaderBell() {
             variant="subtle"
             color="gray"
             className={classes.iconButton}
-            onClick={() => setOpened((o) => !o)}
+            onClick={() => setOpened(!opened)}
             aria-label={label}
             aria-haspopup="dialog"
             aria-expanded={opened}
@@ -302,7 +328,7 @@ function HeaderBell() {
 }
 
 /** Avatar menu (phone and tablet; desktop has the user block in the sidebar). */
-function UserMenu() {
+function UserMenu({ opened, onChange }: { opened: boolean; onChange: (opened: boolean) => void }) {
   const user = useAuthStore((s) => s.user);
   const name = user?.name || "Account";
   const initials =
@@ -314,7 +340,15 @@ function UserMenu() {
       .join("") || "U";
 
   return (
-    <Menu position="bottom-end" width={280} shadow="lg" radius="md" withinPortal>
+    <Menu
+      opened={opened}
+      onChange={onChange}
+      position="bottom-end"
+      width={280}
+      shadow="lg"
+      radius="md"
+      withinPortal
+    >
       <Menu.Target>
         <UnstyledButton
           className={classes.avatarButton}

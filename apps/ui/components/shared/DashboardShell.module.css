@@ -5,7 +5,7 @@
  * Breakpoints: sm = 48em (768 px), md = 62em (992 px).
  */
 
-.root {
+.shellVars {
   --shell-accent: light-dark(var(--mantine-color-cyan-9), var(--mantine-color-cyan-3));
   --shell-accent-soft: light-dark(var(--mantine-color-cyan-0), var(--mantine-color-cyan-light));
   --shell-bg: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8));
@@ -15,6 +15,12 @@
   --shell-ink: var(--mantine-color-text);
   --shell-ink-2: light-dark(var(--mantine-color-gray-7), var(--mantine-color-dark-1));
   --shell-ink-3: light-dark(var(--mantine-color-gray-7), var(--mantine-color-dark-2));
+}
+
+/* The tab bar's More sheet (BottomNav.module.css) renders in a portal,
+   outside .root, so it composes .shellVars itself. */
+.root {
+  composes: shellVars;
   min-height: 100dvh;
 }
 
@@ -208,9 +214,8 @@
 .main {
   background: var(--shell-bg);
   min-height: 100dvh;
-  /* No tab bar yet (#4536 adds it and its own inset); keep content clear of
-     the iPhone home indicator. */
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  /* Below 48em Mantine pads main by the footer (the tab bar, whose height
+     includes the safe-area inset), so content never sits under the bar. */
 }
 
 .content {
@@ -238,6 +243,11 @@
 /* ---------- breakpoints ---------- */
 
 @media (min-width: 48em) {
+  /* No tab bar from 48em up: keep content clear of the home indicator. */
+  .main {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
   .headerRow {
     height: 64px;
     padding: 0 16px 0 20px;
