@@ -413,6 +413,8 @@ func TestDomainV2_Backfill039(t *testing.T) {
 			t.Fatalf("apply %s: %v", name, err)
 		}
 	}
+	// Later migrations hang triggers on 038's functions; undo them first.
+	apply("041_people.down.sql")
 	apply("039_domain_model_v2_data.down.sql")
 	apply("038_domain_model_v2_add.down.sql")
 
