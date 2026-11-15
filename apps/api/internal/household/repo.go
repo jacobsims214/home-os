@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"home-os/api/internal/invite"
 	"home-os/api/internal/seed"
 )
 
@@ -131,11 +132,6 @@ func (r *Repo) RemoveMember(ctx context.Context, householdID, userID uuid.UUID) 
 	return nil
 }
 
-// dexOnlyPasswordHash marks a user created from a Dex identity. It is not a
-// bcrypt hash, so it never matches a password: these users sign in via Dex.
-// Same sentinel as invite.Accept uses.
-const dexOnlyPasswordHash = "!dex-oidc"
-
 // Errors returned by CreateFamily.
 var (
 	// ErrAlreadyMember: the caller already belongs to a household and is not
@@ -166,7 +162,8 @@ type CreateFamilyResult struct {
 // transaction:
 //
 //  1. finds the Home OS user by users.dex_sub, then lower(email) (backfilling
-//     a NULL dex_sub), or creates a Dex-only user when neither matches;
+//     a NULL dex_sub), or creates a Dex-only user when neither matches
+//     (invite.FindOrCreateUser);
 //  2. locks that user row (FOR UPDATE) so two concurrent onboarding requests
 //     from the same user cannot both create a family;
 //  3. refuses deactivated users (ErrUserInactive) and users who already have
@@ -189,9 +186,12 @@ func (r *Repo) CreateFamily(ctx context.Context, ident CreatorIdentity, name, ti
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-	userID, created, err := findOrCreateCreator(ctx, tx, sub, email, ident.Name)
+	userID, created, err := invite.FindOrCreateUser(ctx, tx, sub, email, ident.Name)
+	if errors.Is(err, invite.ErrNoEmail) {
+		return nil, ErrNoIdentity
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create family: %w", err)
 	}
 
 	var active, instanceAdmin, hasMembership bool
@@ -234,65 +234,4 @@ func (r *Repo) CreateFamily(ctx context.Context, ident CreatorIdentity, name, ti
 		return nil, fmt.Errorf("create family: commit: %w", err)
 	}
 	return &CreateFamilyResult{Household: hh, UserID: userID, Role: "owner", UserCreated: created}, nil
-}
-
-// findOrCreateCreator resolves the identity to users.id in the same order as
-// auth.PGMemberResolver (dex_sub, then case-insensitive email with a dex_sub
-// backfill when NULL) and creates a Dex-only user when nothing matches.
-func findOrCreateCreator(ctx context.Context, tx pgx.Tx, sub, email, name string) (uuid.UUID, bool, error) {
-	var userID uuid.UUID
-	if sub != "" {
-		err := tx.QueryRow(ctx, `SELECT id FROM users WHERE dex_sub = $1`, sub).Scan(&userID)
-		if err == nil {
-			return userID, false, nil
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return uuid.Nil, false, fmt.Errorf("create family: user by dex_sub: %w", err)
-		}
-	}
-
-	if email != "" {
-		err := tx.QueryRow(ctx,
-			`SELECT id FROM users WHERE lower(email) = lower($1)`, email,
-		).Scan(&userID)
-		if err == nil {
-			if sub != "" {
-				if _, err := tx.Exec(ctx,
-					`UPDATE users SET dex_sub = $1, updated_at = NOW()
-					 WHERE id = $2 AND dex_sub IS NULL`, sub, userID,
-				); err != nil {
-					return uuid.Nil, false, fmt.Errorf("create family: backfill dex_sub: %w", err)
-				}
-			}
-			return userID, false, nil
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return uuid.Nil, false, fmt.Errorf("create family: user by email: %w", err)
-		}
-	}
-
-	// users.email is NOT NULL UNIQUE; a Dex identity without an email cannot
-	// get a user row.
-	if email == "" {
-		return uuid.Nil, false, ErrNoIdentity
-	}
-	if strings.TrimSpace(name) == "" {
-		name = email
-		if at := strings.IndexByte(email, '@'); at > 0 {
-			name = email[:at]
-		}
-	}
-	var dexSub *string
-	if sub != "" {
-		dexSub = &sub
-	}
-	if err := tx.QueryRow(ctx,
-		`INSERT INTO users (email, name, password_hash, dex_sub)
-		 VALUES ($1, $2, $3, $4)
-		 RETURNING id`,
-		email, strings.TrimSpace(name), dexOnlyPasswordHash, dexSub,
-	).Scan(&userID); err != nil {
-		return uuid.Nil, false, fmt.Errorf("create family: create user: %w", err)
-	}
-	return userID, true, nil
 }

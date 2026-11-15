@@ -161,6 +161,9 @@ func main() {
 	// household member yet (RequireAuth answers 403 for that), so the handler
 	// verifies the Dex token itself.
 	inviteHandler := invite.NewHandler(invite.NewRepo(pool), cfg, smtpClient).WithVerifier(oidcVerifier)
+	if dexClient != nil { // a nil *dex.Client must not become a non-nil interface
+		inviteHandler.WithDex(dexClient)
+	}
 	r.Post("/api/v1/invites/accept", inviteHandler.AcceptInvite)
 
 	// Household handler. Create (onboarding) is outside RequireAuth for the
