@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Modal from "@/components/ui/Modal";
-import { useAuthStore } from "@/stores/auth";
+import { bffPath } from "@/lib/api";
 import type { FileRecord } from "@/lib/types/api";
 
 interface FileViewerProps {
@@ -12,40 +12,32 @@ interface FileViewerProps {
   onClose: () => void;
 }
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
-
 /**
  * Build the absolute content URL for a file.
  *
- * The API serves raw bytes at GET /api/v1/files/:id/content. Bearer-token auth
- * means a plain `<img src>` / `<iframe src>` would 401 (there is no cookie
- * auth), so callers must fetch with the Authorization header and turn the
- * response into a blob URL — see FileViewer.
+ * The API serves raw bytes at GET /api/v1/files/:id/content; the browser
+ * reaches it same-origin through the BFF (/bff/files/:id/content), which adds
+ * the bearer token from the session cookie. Callers still fetch the bytes and
+ * turn them into a blob URL (XSS hardening) — see FileViewer.
  */
 export function fileContentUrl(fileId: string): string {
   const origin =
     typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
-  return new URL(`${BASE_URL}/api/v1/files/${fileId}/content`, origin).toString();
+  return new URL(bffPath(`/api/v1/files/${fileId}/content`), origin).toString();
 }
 
-/** Fetch a file's content as a blob, attaching the bearer auth token. */
+/** Fetch a file's content as a blob via the BFF (cookie-authenticated). */
 async function fetchContentBlob(fileId: string): Promise<Blob> {
-  const token = useAuthStore.getState().token;
-  const res = await fetch(fileContentUrl(fileId), {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
+  const res = await fetch(fileContentUrl(fileId), { credentials: "same-origin" });
   if (!res.ok) {
     throw new Error(`Failed to load file content: ${res.status} ${res.statusText}`);
   }
   return res.blob();
 }
 
-/** Fetch a file's content as text, attaching the bearer auth token. */
+/** Fetch a file's content as text via the BFF (cookie-authenticated). */
 async function fetchContentText(fileId: string): Promise<string> {
-  const token = useAuthStore.getState().token;
-  const res = await fetch(fileContentUrl(fileId), {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
+  const res = await fetch(fileContentUrl(fileId), { credentials: "same-origin" });
   if (!res.ok) {
     throw new Error(`Failed to load file content: ${res.status} ${res.statusText}`);
   }
@@ -76,16 +68,15 @@ function classifyContentType(contentType: string): PreviewKind {
  * FileViewer — modal overlay that shows an inline preview of a single file.
  *
  * Preview strategy by content type:
- * - PDF: iframe rendered from a blob object URL (fetched with bearer auth).
+ * - PDF: iframe rendered from a blob object URL (fetched through the BFF).
  * - Image: img rendered from a blob object URL.
  * - Text: fetched as text and shown in a <pre>.
  * - Other: a "Download" button that fetches the blob and triggers a download.
  *
  * Why blob URLs instead of pointing `<img>`/`<iframe>` directly at
- * `/api/v1/files/:id/content`: the API uses bearer-token auth (no cookies), so
- * a browser-initiated navigation or media fetch would not include the
- * Authorization header and would 401. Fetching the bytes with the token and
- * creating an object URL is the documented pattern (see
+ * the content URL: fetching the bytes and rendering them from an object URL
+ * keeps untrusted content off the app origin's navigation path, which is the
+ * documented pattern (see
  * architecture/file-module.md — "GetFileContent XSS hardening").
  */
 export default function FileViewer({ file, open, onClose }: FileViewerProps) {

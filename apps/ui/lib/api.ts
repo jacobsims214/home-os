@@ -2,14 +2,15 @@
  * Typed API client for Home OS.
  *
  * All data fetching goes through apiFetch(), which:
- * 1. Resolves the base URL from NEXT_PUBLIC_API_URL (dev) or relative path (prod).
- * 2. Injects the Bearer token from the Zustand auth store, with cookie fallback.
- * 3. Automatically parses JSON responses and throws ApiError on non-2xx status.
+ * 1. Sends requests same-origin to the Next.js BFF (`/bff/...`). The BFF reads
+ *    the httpOnly `home-os-token` cookie and attaches the bearer token
+ *    server-side, so client JS never sees or stores a token.
+ * 2. Automatically parses JSON responses and throws ApiError on non-2xx status.
+ *
+ * Callers may pass either `/api/v1/<path>` (rewritten to `/bff/<path>`) or
+ * `/bff/<path>` directly. Login and token exchange live on `/api/auth`, never
+ * on /bff (see KB architecture/bff-proxy.md).
  */
-
-import { useAuthStore } from "@/stores/auth";
-
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 export class ApiError extends Error {
   constructor(
@@ -29,41 +30,36 @@ export interface ApiFetchOptions extends Omit<RequestInit, "body"> {
   params?: Record<string, string | number | boolean | undefined>;
 }
 
-/** Get the auth token from Zustand store, with cookie fallback for hydration races. */
-function getAuthToken(): string | null {
-  // Try Zustand store first
-  const storeToken = useAuthStore.getState().token;
-  if (storeToken) return storeToken;
+const API_PREFIX = "/api/v1";
+const BFF_PREFIX = "/bff";
 
-  // Fallback: read from cookie (set by the BFF /api/auth route)
-  if (typeof document !== "undefined") {
-    // Try the non-httpOnly cookie first (set by OIDC callback)
-    const clientCookie = document.cookie
-      .split("; ")
-      .find((c) => c.startsWith("home-os-token-client="));
-    if (clientCookie) {
-      const token = clientCookie.split("=")[1];
-      // Hydrate the store so subsequent calls don't need to read the cookie
-      useAuthStore.setState({ token });
-      return token;
-    }
-    // Fallback to the httpOnly cookie (won't work from JS, but try anyway)
-    const cookie = document.cookie
-      .split("; ")
-      .find((c) => c.startsWith("home-os-token="));
-    if (cookie) {
-      const token = cookie.split("=")[1];
-      useAuthStore.setState({ token });
-      return token;
-    }
+/**
+ * Unauthenticated API endpoints used before a session exists. The BFF answers
+ * 401 when there is no session cookie, so these go straight to the API's
+ * same-origin /api/v1 route. None of them return a token.
+ */
+const PUBLIC_API_PATHS = new Set([
+  "/api/v1/auth/forgot-password",
+  "/api/v1/auth/reset-password",
+]);
+
+/**
+ * Map an API path to the same-origin path the browser should call:
+ * `/api/v1/x` becomes `/bff/x`; `/bff/x` and public pre-login paths are
+ * returned unchanged.
+ */
+export function bffPath(path: string): string {
+  const pathname = path.split("?")[0];
+  if (PUBLIC_API_PATHS.has(pathname)) return path;
+  if (path === API_PREFIX || path.startsWith(`${API_PREFIX}/`) || path.startsWith(`${API_PREFIX}?`)) {
+    return `${BFF_PREFIX}${path.slice(API_PREFIX.length)}`;
   }
-
-  return null;
+  return path;
 }
 
 /**
- * Typed fetch wrapper for the Home OS API.
- * Automatically injects the Bearer token from the auth store or cookie.
+ * Typed fetch wrapper for the Home OS API, routed through the BFF.
+ * No Authorization header is sent: the BFF adds it from the session cookie.
  */
 export async function apiFetch<T = unknown>(
   path: string,
@@ -74,7 +70,7 @@ export async function apiFetch<T = unknown>(
   // Build URL
   const origin =
     typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
-  const url = new URL(`${BASE_URL}${path}`, origin);
+  const url = new URL(bffPath(path), origin);
 
   if (params) {
     for (const [key, value] of Object.entries(params)) {
@@ -86,12 +82,6 @@ export async function apiFetch<T = unknown>(
 
   // Build headers
   const headers = new Headers(initHeaders);
-
-  // Inject Bearer token (skip if caller already set Authorization)
-  const token = getAuthToken();
-  if (token && !headers.has("Authorization")) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
 
   if (body !== undefined) {
     headers.set("Content-Type", "application/json");
@@ -107,7 +97,7 @@ export async function apiFetch<T = unknown>(
   const response = await fetch(url.toString(), {
     ...init,
     headers,
-    credentials: "include",
+    credentials: "same-origin",
     body: serializedBody,
   });
 

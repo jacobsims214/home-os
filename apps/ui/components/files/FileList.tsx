@@ -2,8 +2,7 @@
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, ApiError } from "@/lib/api";
-import { useAuthStore } from "@/stores/auth";
+import { apiFetch, ApiError, bffPath } from "@/lib/api";
 import type { FileRecord, FileOCRStatus } from "@/lib/types/api";
 import { fileKeys } from "@/lib/query-keys";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
@@ -247,13 +246,11 @@ export default function FileList({ entityType, entityId }: FileListProps) {
   const [deleteTarget, setDeleteTarget] = useState<FileRecord | null>(null);
   const [viewTarget, setViewTarget] = useState<FileRecord | null>(null);
 
-  // Download a file by fetching with Bearer auth and triggering a blob download.
+  // Download a file through the BFF (cookie-authenticated) as a blob download.
   const handleDownload = async (file: FileRecord) => {
-    const token = useAuthStore.getState().token;
-    const resp = await fetch(
-      `${process.env.NEXT_PUBLIC_API_URL ?? ""}/api/v1/files/${file.id}/content`,
-      { headers: { Authorization: `Bearer ${token}` } },
-    );
+    const resp = await fetch(bffPath(`/api/v1/files/${file.id}/content`), {
+      credentials: "same-origin",
+    });
     if (!resp.ok) throw new Error("Download failed");
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);

@@ -10,9 +10,8 @@
  *
  * Why XMLHttpRequest instead of fetch: the fetch API has no upload-progress
  * event. XHR's `upload.onprogress` is the only standard way to surface byte
- * progress to the user during a multipart upload. The auth bearer token is
- * read directly from the auth store (same source as `apiFetch`) so this
- * stays consistent with the rest of the app's auth flow.
+ * progress to the user during a multipart upload. Like `apiFetch`, it posts
+ * same-origin to the BFF, which authenticates from the session cookie.
  *
  * Why a polling useQuery per uploaded file: the API returns the created File
  * record synchronously from POST /upload with `ocr_status: "pending"`. The
@@ -24,14 +23,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useAuthStore } from "@/stores/auth";
-import { apiFetch, ApiError } from "@/lib/api";
+import { apiFetch, ApiError, bffPath } from "@/lib/api";
 import { fileKeys } from "@/lib/query-keys";
 import type { FileRecord, FileOCRStatus } from "@/lib/types/api";
 
 // ─── Constants ────────────────────────────────────────────────
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 const UPLOAD_PATH = "/api/v1/files/upload";
 /** OCR statuses that the worker will not transition away from. */
 const TERMINAL_OCR_STATUSES: FileOCRStatus[] = ["done", "failed", "skipped"];
@@ -72,8 +69,8 @@ interface UploadSlot {
  * Resolves with the created File record on 2xx, rejects with an ApiError
  * on non-2xx or a network failure. `onProgress` receives 0–100.
  *
- * The token is read at call time (not capture time) so a freshly refreshed
- * token from the auth store is always used.
+ * Goes through the BFF (/bff/files/upload); the session cookie authenticates
+ * it, so no Authorization header is set here.
  */
 function uploadFile(
   file: File,
@@ -83,19 +80,15 @@ function uploadFile(
   signal?: AbortSignal,
 ): Promise<FileRecord> {
   return new Promise((resolve, reject) => {
-    const token = useAuthStore.getState().token;
     const form = new FormData();
     form.append("file", file, file.name);
     form.append("entity_type", entityType);
     form.append("entity_id", entityId);
 
     const xhr = new XMLHttpRequest();
-    const url = `${BASE_URL}${UPLOAD_PATH}`;
+    const url = bffPath(UPLOAD_PATH);
 
     xhr.open("POST", url, true);
-    if (token) {
-      xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-    }
     // Do NOT set Content-Type — the browser sets multipart/form-data with
     // the correct boundary when given a FormData body. Setting it manually
     // would strip the boundary and break parsing on the server.
