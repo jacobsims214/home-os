@@ -415,7 +415,9 @@ func TestDomainV2_Backfill039(t *testing.T) {
 	}
 	// Undo later migrations first, newest first: 041, 044, 046, 047 and 049
 	// hang triggers on 038's functions, which 038 down drops without CASCADE,
-	// and 048's files.person_id references 041's people.
+	// and 048's files.person_id references 041's people. 050 adds authorship
+	// columns and triggers to tables of all of them.
+	apply("050_authorship.down.sql")
 	apply("049_guides.down.sql")
 	apply("048_document_metadata.down.sql")
 	apply("047_meals.down.sql")

@@ -27,7 +27,9 @@ func TestMeals047_Reversible(t *testing.T) {
 	file := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'card.jpg', 1, 'recipe', $3) RETURNING id`, f.household, blob, recipe)
 	list := insertID(t, pool, `INSERT INTO lists (household_id, name, entity_type, entity_id) VALUES ($1, 'Taco night', 'meal_plan', $2) RETURNING id`, f.household, meal)
 
-	// 049 replaces entity_household() on top of 047; undo it first.
+	// 049 replaces entity_household() on top of 047, and 050 adds authorship
+	// on top of both; undo them first.
+	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "049_guides.down.sql")
 	applyMigration(t, pool, "047_meals.down.sql")
 	if n := countRows(t, pool, `SELECT count(*) FROM pg_tables WHERE tablename IN ('recipes', 'meal_plans', 'meal_feedback')`); n != 0 {
@@ -57,6 +59,7 @@ func TestMeals047_Reversible(t *testing.T) {
 	applyMigration(t, pool, "047_meals.down.sql")
 	applyMigration(t, pool, "047_meals.up.sql")
 	applyMigration(t, pool, "049_guides.up.sql")
+	applyMigration(t, pool, "050_authorship.up.sql")
 }
 
 // Checks, same-family rules, title copy, delete behaviour and the indexes.

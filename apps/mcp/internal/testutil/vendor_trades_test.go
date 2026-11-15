@@ -16,6 +16,7 @@ import (
 func TestVendorTrades043_BackfillAndReversible(t *testing.T) {
 	pool := NewPool(t)
 	ctx := context.Background()
+	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "043_vendor_trades.down.sql")
 
 	f := seedV2Family(t, pool)

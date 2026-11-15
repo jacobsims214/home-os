@@ -25,7 +25,9 @@ func TestLists046_Reversible(t *testing.T) {
 	blob := insertID(t, pool, `INSERT INTO file_blobs (data, size) VALUES ('x', 1) RETURNING id`)
 	file := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'coupon.pdf', 1, 'list', $3) RETURNING id`, f.household, blob, list)
 
-	// 047 and 049 replace entity_household() on top of 046; undo them first.
+	// 047 and 049 replace entity_household() on top of 046, and 050 adds
+	// authorship on top of all of them; undo them first.
+	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "049_guides.down.sql")
 	applyMigration(t, pool, "047_meals.down.sql")
 	applyMigration(t, pool, "046_lists.down.sql")
@@ -50,6 +52,7 @@ func TestLists046_Reversible(t *testing.T) {
 	applyMigration(t, pool, "046_lists.up.sql")
 	applyMigration(t, pool, "047_meals.up.sql")
 	applyMigration(t, pool, "049_guides.up.sql")
+	applyMigration(t, pool, "050_authorship.up.sql")
 }
 
 // Defaults, same-family rules, rehome on delete and the item triggers.

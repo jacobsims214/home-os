@@ -48,8 +48,9 @@ func countRows(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) int {
 func TestPeople041_BackfillAndReversible(t *testing.T) {
 	pool := NewPool(t)
 	// 046 list_items, 047 meal_feedback and 048 files.person_id reference
-	// people, and 049 replaces entity_household() on top of 047; undo them
-	// first (newest first).
+	// people, 049 replaces entity_household() on top of 047, and 050 adds
+	// authorship to all of them; undo them first (newest first).
+	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "049_guides.down.sql")
 	applyMigration(t, pool, "048_document_metadata.down.sql")
 	applyMigration(t, pool, "047_meals.down.sql")
@@ -187,6 +188,7 @@ func TestPeople041_EntityKindPerson(t *testing.T) {
 	// Down re-homes refs to remaining people and narrows entity_kind again.
 	kid2 := insertID(t, pool, `INSERT INTO people (household_id, display_name) VALUES ($1, 'Jo') RETURNING id`, f.household)
 	file2 := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'y.pdf', 1, 'person', $3) RETURNING id`, f.household, blob, kid2)
+	applyMigration(t, pool, "050_authorship.down.sql")        // authorship columns on people and the tables below
 	applyMigration(t, pool, "049_guides.down.sql")            // entity_household() is replaced on top of 047
 	applyMigration(t, pool, "048_document_metadata.down.sql") // files.person_id references people
 	applyMigration(t, pool, "047_meals.down.sql")             // meal_feedback references people

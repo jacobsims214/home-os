@@ -24,6 +24,7 @@ func TestGuides049_Reversible(t *testing.T) {
 	blob := insertID(t, pool, `INSERT INTO file_blobs (data, size) VALUES ('x', 1) RETURNING id`)
 	file := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'filter.jpg', 1, 'guide', $3) RETURNING id`, f.household, blob, guide)
 
+	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "049_guides.down.sql")
 	if n := countRows(t, pool, `SELECT count(*) FROM pg_tables WHERE tablename IN ('guides', 'guide_revisions')`); n != 0 {
 		t.Fatalf("down: %d guide tables left", n)
@@ -50,6 +51,7 @@ func TestGuides049_Reversible(t *testing.T) {
 	mustExec(t, pool, `INSERT INTO notes (household_id, entity_type, entity_id, body) VALUES ($1, 'guide', $2, 'ok')`, f.household, guide)
 	applyMigration(t, pool, "049_guides.down.sql")
 	applyMigration(t, pool, "049_guides.up.sql")
+	applyMigration(t, pool, "050_authorship.up.sql")
 }
 
 // Checks, subject rules, same-family rules, delete behaviour, revisions and

@@ -17,6 +17,7 @@ import (
 func TestBudgeting044_CopyAndReversible(t *testing.T) {
 	pool := NewPool(t)
 	ctx := context.Background()
+	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "044_budgeting.down.sql")
 
 	f := seedV2Family(t, pool)

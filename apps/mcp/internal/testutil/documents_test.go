@@ -19,6 +19,7 @@ func TestDocuments048_Reversible(t *testing.T) {
 	f := seedV2Family(t, pool)
 	blob := insertID(t, pool, `INSERT INTO file_blobs (data, size) VALUES ('x', 1) RETURNING id`)
 
+	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "048_document_metadata.down.sql")
 	if n := countRows(t, pool, `SELECT count(*) FROM information_schema.columns
 		WHERE table_name = 'files' AND column_name IN ('title','category','document_date','expires_on','description','person_id')`); n != 0 {
@@ -43,6 +44,7 @@ func TestDocuments048_Reversible(t *testing.T) {
 		}
 	}
 	applyMigration(t, pool, "048_document_metadata.up.sql")
+	applyMigration(t, pool, "050_authorship.up.sql")
 }
 
 // Category check, same-family person, person delete, date order, blank title
