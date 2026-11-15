@@ -15,7 +15,11 @@
  *                          the seeded user is accepted.
  *   POST /dex/token        grant_type=refresh_token. Rotates the refresh token
  *                          the way Dex does (old one is single-use).
- *   GET  /e2e/stats        {dexRefreshes, apiRequests, apiUnauthorized}
+ *                          grant_type=authorization_code with code=e2e-code
+ *                          and a code_verifier: the OIDC callback's exchange
+ *                          (#4617). The redirect_uri it sent is recorded.
+ *   GET  /e2e/stats        {dexRefreshes, apiRequests, apiUnauthorized,
+ *                          codeExchanges, lastRedirectUri}
  *   *    /api/v1/*         401 unless the Bearer is a JWT minted here; fixed
  *                          seed data for the dashboard lists, [] otherwise.
  *   GET  /healthz          200 (Playwright webServer readiness probe)
@@ -39,7 +43,9 @@ const SEED_USER = {
 
 const key = randomBytes(32);
 const refreshTokens = new Set();
-const stats = { dexRefreshes: 0, apiRequests: 0, apiUnauthorized: 0 };
+const stats = { dexRefreshes: 0, apiRequests: 0, apiUnauthorized: 0, codeExchanges: 0, lastRedirectUri: null };
+// The only authorization code the stub redeems (tests hand it to the callback).
+const E2E_CODE = "e2e-code";
 
 const b64url = (v) => Buffer.from(v).toString("base64url");
 
@@ -127,6 +133,14 @@ const server = createServer(async (req, res) => {
 
   if (path === "/dex/token" && req.method === "POST") {
     const form = new URLSearchParams(await readBody(req));
+    if (form.get("grant_type") === "authorization_code") {
+      if (form.get("code") !== E2E_CODE || !form.get("code_verifier") || form.get("client_id") !== "home-os-ui") {
+        return send(res, 400, { error: "invalid_grant" });
+      }
+      stats.codeExchanges += 1;
+      stats.lastRedirectUri = form.get("redirect_uri");
+      return send(res, 200, issueTokens());
+    }
     const old = form.get("refresh_token") ?? "";
     if (form.get("grant_type") !== "refresh_token" || !refreshTokens.has(old)) {
       return send(res, 400, { error: "invalid_request" });

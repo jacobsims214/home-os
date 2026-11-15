@@ -30,8 +30,12 @@ async function watchNavigations(page: Page): Promise<{ events: string[]; logins:
     }
   });
   // /login hands off to /api/auth/login -> Dex. Nothing serves Dex here, so
-  // end the chain once the login start is reached.
-  await page.route("**/api/auth/login", (route) => route.fulfill({ status: 204 }));
+  // end the chain once the login start is reached. Match on the path: since
+  // #4617 the login start carries ?redirect=.
+  await page.route(
+    (u) => u.pathname === "/api/auth/login",
+    (route) => route.fulfill({ status: 204 }),
+  );
   return { events, logins };
 }
 

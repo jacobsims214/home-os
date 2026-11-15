@@ -24,12 +24,19 @@ test("signed out: home sends the browser to Dex with a PKCE challenge", async ({
   // /dex/auth would fall through to the UI middleware and loop back here, so
   // only the first login start goes to the server.
   if (!process.env.E2E_BASE_URL) {
-    let starts = 0;
-    await page.route("**/api/auth/login", (route) =>
-      starts++ === 0 ? route.continue() : route.fulfill({ status: 204 }),
+    // Under next dev, StrictMode runs the login page's effect twice, so two
+    // starts can be in flight at once (the second may abort the first). Both
+    // reach the server until one has answered; later loops get a 204.
+    let answered = false;
+    page.on("response", (r) => {
+      if (new URL(r.url()).pathname === "/api/auth/login" && r.status() === 307) answered = true;
+    });
+    await page.route(
+      (u) => u.pathname === "/api/auth/login",
+      (route) => (answered ? route.fulfill({ status: 204 }) : route.continue()),
     );
   }
-  const loginStart = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/auth/login");
+  const loginStart = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/auth/login" && r.status() !== 204);
   // "commit": the page navigates on its own from here; loginStart is the wait.
   await page.goto(HOME, { waitUntil: "commit" });
   const res = await loginStart;
