@@ -168,6 +168,23 @@ dex:
   image: ghcr.io/dexidp/dex:v2.42.0
   port: 5556
   grpcPort: 5557
+  # Ingress NetworkPolicy on the Dex pods (#4682). The gRPC admin API on grpcPort
+  # has no authentication (mTLS is #697) and can mint passwords and OAuth
+  # clients, so without this any pod in the cluster (e.g. the Moltis agents)
+  # could call it. Enforced by any CNI that implements NetworkPolicy (Cilium on
+  # Talos); a no-op on a CNI that does not.
+  #   grpcPort: only pods whose `app` label is in grpcClientApps (same namespace).
+  #   port (HTTP/OIDC): every pod in the namespace (envoy, ui BFF, api, mcp) plus
+  #     httpExtraFrom (raw NetworkPolicy peers, e.g. a namespaceSelector).
+  # Ingress only: no egress rules and no namespace default-deny are added.
+  networkPolicy:
+    enabled: true
+    # api: CreatePassword (DEX_GRPC_ADDR); mcp: DCR CreateClient. Add any new
+    # gRPC caller here or it will be refused.
+    grpcClientApps:
+      - home-os-api
+      - home-os-mcp
+    httpExtraFrom: []
   # Dex's Postgres password is never rendered into the ConfigMap: the Deployment
   # reads it from a Secret into DEX_DB_PASSWORD and Dex expands it at startup.
   # existingSecret: Secret holding the password; empty = the database Secret
