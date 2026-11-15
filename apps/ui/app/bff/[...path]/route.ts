@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 
 /**
@@ -8,15 +9,42 @@ import { NextRequest, NextResponse } from "next/server";
  * server-to-server call to the Go API. Request and response bodies are
  * streamed, so multipart uploads and file downloads pass through unbuffered.
  *
+ * Session refresh (#4423): the id_token cookie expires at the token's exp, and
+ * the httpOnly `home-os-refresh` cookie holds the Dex refresh token. When the
+ * id_token is missing, about to expire, or rejected by the API (401), the BFF
+ * redeems the refresh token at Dex, writes BOTH rotated cookies back (Dex
+ * rotates refresh tokens on every use) and retries once. If Dex rejects the
+ * refresh token, both cookies are cleared and the client gets 401.
+ *
  * Env: API_INTERNAL_URL — base URL of the Go API reachable from the UI pod
- * (default http://home-os-api:8080). Read at request time, not build time.
+ * (default http://home-os-api:8080). DEX_TOKEN_URL — Dex token endpoint
+ * (default http://home-os-dex:5556/dex/token). Both read at request time.
  */
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const COOKIE_NAME = "home-os-token";
+const REFRESH_COOKIE = "home-os-refresh";
+// Removed in #4412; expired here too so a dead session leaves nothing behind.
+const LEGACY_CLIENT_COOKIE = "home-os-token-client";
 const DEFAULT_API_URL = "http://home-os-api:8080";
+const DEFAULT_DEX_TOKEN_URL = "http://home-os-dex:5556/dex/token";
+const DEX_CLIENT_ID = "home-os-ui"; // public client: no secret
+
+// Same cookie sizing as app/api/auth/callback/route.ts.
+const DEFAULT_TOKEN_MAX_AGE = 60 * 60 * 24;
+const REFRESH_MAX_AGE = 60 * 60 * 24 * 30;
+// Refresh this many seconds before exp so the token can't expire in flight.
+const EXPIRY_SKEW_SECONDS = 30;
+// How long a completed refresh is remembered, keyed by the refresh token it
+// consumed, so requests still carrying the rotated-out token reuse its result.
+const REFRESH_RESULT_TTL_MS = 60_000;
+const DEX_TIMEOUT_MS = 10_000;
+// Bodies up to this size are buffered so a request can be replayed after a
+// 401 → refresh. Larger or chunked bodies stream and are not retried (the
+// proactive exp check still refreshes before sending them).
+const MAX_REPLAY_BODY_BYTES = 1024 * 1024;
 
 // Hop-by-hop headers (RFC 9110 §7.6.1) never cross a proxy.
 const HOP_BY_HOP = [
@@ -59,11 +87,206 @@ function errorResponse(status: number, code: string, message: string) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Dex refresh
+// ---------------------------------------------------------------------------
+
+type SessionTokens = {
+  idToken: string;
+  /** Epoch ms when the id_token cookie should expire. */
+  expiresAt: number;
+  /** New refresh token, or null if Dex didn't return one (keep the old cookie). */
+  refreshToken: string | null;
+};
+
+type RefreshOutcome =
+  | { ok: true; tokens: SessionTokens }
+  // rejected: Dex refused the refresh token, so the session is over.
+  // unavailable: Dex unreachable / 5xx. Transient, so don't log the user out.
+  | { ok: false; reason: "rejected" | "unavailable" };
+
+// Single-flight state, per server process. Keys are sha256(refresh token) so
+// raw tokens are never used as map keys. Values never reach a log.
+const inflightRefreshes = new Map<string, Promise<RefreshOutcome>>();
+const recentRefreshes = new Map<string, { at: number; tokens: SessionTokens }>();
+
+function dexTokenUrl(): string {
+  return process.env.DEX_TOKEN_URL || DEFAULT_DEX_TOKEN_URL;
+}
+
+// exp claim in epoch seconds, or null. The signature is not checked: this only
+// decides when to refresh and sizes the cookie; the Go API validates tokens.
+function jwtExp(jwt: string): number | null {
+  const payload = jwt.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return typeof claims.exp === "number" ? claims.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+function expiresSoon(jwt: string): boolean {
+  const exp = jwtExp(jwt);
+  return exp !== null && exp - Date.now() / 1000 < EXPIRY_SKEW_SECONDS;
+}
+
+async function redeemRefreshToken(refreshToken: string): Promise<RefreshOutcome> {
+  let res: Response;
+  try {
+    res = await fetch(dexTokenUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: DEX_CLIENT_ID,
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(DEX_TIMEOUT_MS),
+    });
+  } catch (err) {
+    console.error("[bff] refresh: Dex unreachable:", err instanceof Error ? err.name : "unknown");
+    return { ok: false, reason: "unavailable" };
+  }
+
+  if (!res.ok) {
+    // Dex error bodies are {error, error_description}; log only the code.
+    let code = "";
+    try {
+      const body = await res.json();
+      if (typeof body?.error === "string") code = body.error;
+    } catch {
+      /* not JSON */
+    }
+    console.warn("[bff] refresh rejected by Dex:", res.status, code);
+    return { ok: false, reason: res.status >= 500 ? "unavailable" : "rejected" };
+  }
+
+  let tokens: Record<string, unknown>;
+  try {
+    tokens = await res.json();
+  } catch {
+    console.error("[bff] refresh: Dex returned a non-JSON body");
+    return { ok: false, reason: "unavailable" };
+  }
+
+  const idToken = tokens.id_token;
+  if (typeof idToken !== "string" || !idToken) {
+    console.warn("[bff] refresh: Dex response had no id_token");
+    return { ok: false, reason: "rejected" };
+  }
+
+  let maxAgeSeconds: number;
+  const exp = jwtExp(idToken);
+  if (exp !== null) maxAgeSeconds = Math.floor(exp - Date.now() / 1000);
+  else if (typeof tokens.expires_in === "number" && Number.isFinite(tokens.expires_in))
+    maxAgeSeconds = Math.floor(tokens.expires_in);
+  else maxAgeSeconds = DEFAULT_TOKEN_MAX_AGE;
+  if (maxAgeSeconds <= 0) {
+    console.warn("[bff] refresh: Dex issued an already-expired id_token");
+    return { ok: false, reason: "rejected" };
+  }
+
+  const newRefresh = tokens.refresh_token;
+  return {
+    ok: true,
+    tokens: {
+      idToken,
+      expiresAt: Date.now() + maxAgeSeconds * 1000,
+      refreshToken: typeof newRefresh === "string" && newRefresh ? newRefresh : null,
+    },
+  };
+}
+
+/**
+ * Refresh the session, at most once per refresh token. Concurrent requests
+ * with the same refresh cookie share one Dex call. Requests that arrive just
+ * after it finished, still carrying the now rotated-out token, get the cached
+ * result instead of a Dex rejection that would log the user out.
+ */
+function refreshSession(refreshToken: string): Promise<RefreshOutcome> {
+  const key = createHash("sha256").update(refreshToken).digest("hex");
+  const now = Date.now();
+
+  recentRefreshes.forEach((v, k) => {
+    if (now - v.at > REFRESH_RESULT_TTL_MS) recentRefreshes.delete(k);
+  });
+  const cached = recentRefreshes.get(key);
+  if (cached && cached.tokens.expiresAt - now > EXPIRY_SKEW_SECONDS * 1000) {
+    return Promise.resolve({ ok: true, tokens: cached.tokens });
+  }
+
+  const pending = inflightRefreshes.get(key);
+  if (pending) return pending;
+
+  const p = redeemRefreshToken(refreshToken)
+    .then((outcome) => {
+      if (outcome.ok) recentRefreshes.set(key, { at: Date.now(), tokens: outcome.tokens });
+      return outcome;
+    })
+    .finally(() => inflightRefreshes.delete(key));
+  inflightRefreshes.set(key, p);
+  return p;
+}
+
+function setSessionCookies(response: NextResponse, tokens: SessionTokens) {
+  const maxAge = Math.max(1, Math.floor((tokens.expiresAt - Date.now()) / 1000));
+  response.cookies.set(COOKIE_NAME, tokens.idToken, { ...baseCookie(), maxAge });
+  if (tokens.refreshToken) {
+    response.cookies.set(REFRESH_COOKIE, tokens.refreshToken, {
+      ...baseCookie(),
+      maxAge: REFRESH_MAX_AGE,
+    });
+  }
+}
+
+// Refresh failed for good: clear the session so the client goes to /login.
+function sessionEnded(): NextResponse {
+  const response = errorResponse(401, "UNAUTHORIZED", "session expired");
+  for (const name of [COOKIE_NAME, REFRESH_COOKIE, LEGACY_CLIENT_COOKIE]) {
+    response.cookies.set(name, "", { ...baseCookie(), maxAge: 0 });
+  }
+  return response;
+}
+
+function baseCookie() {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax" as const,
+    path: "/",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Proxy
+// ---------------------------------------------------------------------------
+
 async function proxy(
   request: NextRequest,
   { params }: { params: { path?: string[] } },
 ): Promise<Response> {
-  const token = request.cookies.get(COOKIE_NAME)?.value;
+  let token = request.cookies.get(COOKIE_NAME)?.value;
+  const refreshCookie = request.cookies.get(REFRESH_COOKIE)?.value;
+  let rotated: SessionTokens | null = null;
+
+  // Proactive refresh: the token cookie is gone (the browser drops it at exp)
+  // or about to expire, and we hold a refresh token.
+  if ((!token || expiresSoon(token)) && refreshCookie) {
+    const outcome = await refreshSession(refreshCookie);
+    if (outcome.ok) {
+      rotated = outcome.tokens;
+      token = outcome.tokens.idToken;
+    } else if (outcome.reason === "rejected") {
+      return sessionEnded();
+    } else if (!token) {
+      return errorResponse(503, "AUTH_UNAVAILABLE", "auth provider unavailable");
+    }
+    // unavailable but the old token hasn't quite expired: try it anyway.
+  }
+
   if (!token) {
     return errorResponse(401, "UNAUTHORIZED", "no session");
   }
@@ -82,7 +305,6 @@ async function proxy(
   request.headers.forEach((value, key) => {
     if (!STRIP_REQUEST.has(key.toLowerCase())) headers.set(key, value);
   });
-  headers.set("authorization", `Bearer ${token}`);
   // Ask for an uncompressed body: fetch would decode it but keep the
   // Content-Encoding header, which would corrupt the response.
   headers.set("accept-encoding", "identity");
@@ -91,24 +313,61 @@ async function proxy(
 
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(target, {
+  // Buffer small bodies so the request can be replayed after a refresh.
+  let body: ArrayBuffer | ReadableStream<Uint8Array> | undefined;
+  let replayable = true;
+  if (hasBody && request.body) {
+    const lenHeader = request.headers.get("content-length");
+    const len = lenHeader === null ? NaN : Number(lenHeader);
+    if (Number.isFinite(len) && len <= MAX_REPLAY_BODY_BYTES) {
+      body = await request.arrayBuffer();
+    } else {
+      body = request.body;
+      replayable = false;
+    }
+  }
+  const streaming = body instanceof ReadableStream;
+
+  const send = (bearer: string) => {
+    headers.set("authorization", `Bearer ${bearer}`);
+    return fetch(target, {
       method: request.method,
       headers,
-      body: hasBody ? request.body : undefined,
+      body,
       redirect: "manual",
       cache: "no-store",
       signal: request.signal,
       // Required by undici to stream a ReadableStream request body.
-      ...(hasBody ? { duplex: "half" } : {}),
+      ...(streaming ? { duplex: "half" } : {}),
     } as RequestInit);
+  };
+
+  let upstream: Response;
+  try {
+    upstream = await send(token);
+
+    // Reactive refresh: the API rejected the token (revoked, clock skew, …).
+    // Only once per request, and only if we didn't just refresh.
+    if (upstream.status === 401 && replayable && refreshCookie && !rotated) {
+      const outcome = await refreshSession(refreshCookie);
+      if (outcome.ok) {
+        rotated = outcome.tokens;
+        await upstream.body?.cancel().catch(() => {});
+        upstream = await send(outcome.tokens.idToken);
+      } else if (outcome.reason === "rejected") {
+        await upstream.body?.cancel().catch(() => {});
+        return sessionEnded();
+      }
+      // unavailable: pass the API's 401 through unchanged.
+    }
   } catch (err) {
     if (request.signal.aborted) {
       return new Response(null, { status: 499 });
     }
-    console.error("[bff] upstream request failed:", target, err);
-    return errorResponse(502, "BAD_GATEWAY", "API unavailable");
+    console.error("[bff] upstream request failed:", target, err instanceof Error ? err.message : err);
+    const res = errorResponse(502, "BAD_GATEWAY", "API unavailable");
+    if (rotated) setSessionCookies(res, rotated);
+    return res;
   }
 
   const resHeaders = new Headers();
@@ -137,11 +396,14 @@ async function proxy(
   const nullBody =
     request.method === "HEAD" || [101, 204, 205, 304].includes(upstream.status);
 
-  return new Response(nullBody ? null : upstream.body, {
+  const response = new NextResponse(nullBody ? null : upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers: resHeaders,
   });
+  // Write the rotated id_token AND refresh token back (Dex rotates both).
+  if (rotated) setSessionCookies(response, rotated);
+  return response;
 }
 
 export const GET = proxy;
