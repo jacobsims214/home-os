@@ -238,6 +238,7 @@ func checkPUTPreconditions(ifMatch, ifNoneMatch, currentETag string, exists bool
 //   - 200 OK                   — an existing resource was updated
 //   - 400 Bad Request          — invalid iCalendar data or empty body
 //   - 404 Not Found            — calendar doesn't exist
+//   - 403 Forbidden            — RRULE icalx refuses to expand (CALDAV:valid-calendar-data)
 //   - 412 Precondition Failed  — If-Match or If-None-Match:* precondition failed
 //   - 500 Internal Server Error — database or marshal error
 func HandlePUT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path string) {
@@ -338,6 +339,9 @@ func HandlePUT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 			slog.String("event_uid", eventUID),
 			slog.String("error", err.Error()))
 		http.Error(w, "Bad Request: invalid iCalendar data", http.StatusBadRequest)
+		return
+	}
+	if rejectUnsupportedRecurrence(w, body, eventUID) {
 		return
 	}
 

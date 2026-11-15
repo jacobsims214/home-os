@@ -14,8 +14,26 @@ import (
 // FREQ=MINUTELY rule over a wide window cannot exhaust memory.
 const MaxOccurrences = 10000
 
+// MaxIterations caps how many instances one expansion pulls from the RRULE
+// iterator in total, including those before the window that are skipped.
+// Together with the skip-ahead and the rule checks in checkRule it bounds the
+// CPU one Expand call can spend, whatever the rule and however old DTSTART is.
+const MaxIterations = 100000
+
 // ErrTooManyOccurrences is returned when expansion would exceed MaxOccurrences.
 var ErrTooManyOccurrences = errors.New("icalx: too many occurrences in range")
+
+// ErrExpansionBudget is returned when expansion would pull more than
+// MaxIterations instances from the rule (counting those before the window).
+// Whether the series overlaps the window is then unknown.
+var ErrExpansionBudget = errors.New("icalx: recurrence expansion budget exceeded")
+
+// ErrUnsupportedRule is returned (wrapped, with detail) for RRULEs icalx
+// refuses to expand because they are sub-minute (FREQ=SECONDLY), can loop
+// without producing instances (BYSETPOS on HOURLY/MINUTELY, BYHOUR/BYMINUTE
+// the INTERVAL never reaches), or never produce any instance. Families never
+// need these; CalDAV PUT rejects them so they are never stored.
+var ErrUnsupportedRule = errors.New("icalx: unsupported recurrence rule")
 
 // Occurrence is one instance of an event within an expansion window.
 type Occurrence struct {
@@ -187,19 +205,15 @@ func (e *Event) instances(from, to time.Time, loc *time.Location) ([]time.Time, 
 
 	set := &rrule.Set{}
 	if e.RRule != "" {
-		ruleLoc := e.Start.Location()
-		opt, err := rrule.StrToROptionInLocation(strings.TrimPrefix(e.RRule, "RRULE:"), ruleLoc)
+		opt, err := e.ruleOption(loc)
 		if err != nil {
-			return nil, fmt.Errorf("icalx: UID %q RRULE: %w", e.UID, err)
+			return nil, err
 		}
-		opt.Dtstart = e.Start
-		if (e.AllDay || e.Floating) && untilIsUTC(e.RRule) {
-			// UNTIL in UTC on a floating/all-day series: convert it to the
-			// viewer's wall clock, which is what the series is expanded in.
-			opt.Until = wallUTC(opt.Until.In(loc))
-			if e.AllDay {
-				opt.Until = time.Date(opt.Until.Year(), opt.Until.Month(), opt.Until.Day(), 0, 0, 0, 0, time.UTC)
-			}
+		if err := checkRule(e.UID, opt); err != nil {
+			return nil, err
+		}
+		if opt.Count == 0 {
+			opt.Dtstart = skipAhead(opt, lo)
 		}
 		r, err := rrule.NewRRule(*opt)
 		if err != nil {
@@ -215,11 +229,17 @@ func (e *Event) instances(from, to time.Time, loc *time.Location) ([]time.Time, 
 	}
 
 	var out []time.Time
+	iterations := 0
 	next := set.Iterator()
 	for {
 		t, ok := next()
 		if !ok || !t.Before(hi) {
 			break
+		}
+		// Count every instance, including skipped ones: MaxOccurrences
+		// alone only bounds what lands inside the window.
+		if iterations++; iterations > MaxIterations {
+			return nil, ErrExpansionBudget
 		}
 		if t.Before(lo) {
 			continue
@@ -230,6 +250,199 @@ func (e *Event) instances(from, to time.Time, loc *time.Location) ([]time.Time, 
 		}
 	}
 	return out, nil
+}
+
+// ruleOption parses e.RRule into rrule-go options anchored at e.Start. loc is
+// the viewer's zone, used for a UTC UNTIL on a floating or all-day series.
+func (e *Event) ruleOption(loc *time.Location) (*rrule.ROption, error) {
+	opt, err := rrule.StrToROptionInLocation(strings.TrimPrefix(e.RRule, "RRULE:"), e.Start.Location())
+	if err != nil {
+		return nil, fmt.Errorf("icalx: UID %q RRULE: %w", e.UID, err)
+	}
+	opt.Dtstart = e.Start
+	if (e.AllDay || e.Floating) && untilIsUTC(e.RRule) {
+		// UNTIL in UTC on a floating/all-day series: convert it to the
+		// viewer's wall clock, which is what the series is expanded in.
+		opt.Until = wallUTC(opt.Until.In(loc))
+		if e.AllDay {
+			opt.Until = time.Date(opt.Until.Year(), opt.Until.Month(), opt.Until.Day(), 0, 0, 0, 0, time.UTC)
+		}
+	}
+	if opt.Interval < 1 {
+		opt.Interval = 1
+	}
+	return opt, nil
+}
+
+// Validate reports whether every RRULE in o can be expanded. It returns an
+// error wrapping ErrUnsupportedRule for rules Expand refuses (see
+// ErrUnsupportedRule), or the parse error for a malformed RRULE. CalDAV PUT
+// calls it so such rules are rejected instead of stored.
+func (o *Object) Validate() error {
+	for _, ev := range o.events() {
+		if ev.RRule == "" {
+			continue
+		}
+		opt, err := ev.ruleOption(time.UTC)
+		if err != nil {
+			return err
+		}
+		if err := checkRule(ev.UID, opt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkRule rejects rules that rrule-go cannot iterate in bounded time.
+// rrule-go only checks UNTIL and COUNT on produced instances, so a rule that
+// produces nothing runs to year 9999 (or, for the lattice case, forever).
+func checkRule(uid string, opt *rrule.ROption) error {
+	unsupported := func(why string) error {
+		return fmt.Errorf("%w: UID %q: %s", ErrUnsupportedRule, uid, why)
+	}
+	switch opt.Freq {
+	case rrule.SECONDLY:
+		return unsupported("FREQ=SECONDLY is not supported")
+	case rrule.HOURLY, rrule.MINUTELY:
+		if len(opt.Bysetpos) > 0 {
+			return unsupported("BYSETPOS with FREQ=HOURLY or MINUTELY is not supported")
+		}
+		if !latticeReachable(opt) {
+			return unsupported("BYHOUR/BYMINUTE are never reached at this INTERVAL")
+		}
+	}
+	if neverMatches(*opt) {
+		return unsupported("rule produces no instances")
+	}
+	return nil
+}
+
+// latticeReachable reports whether a HOURLY/MINUTELY rule's BYHOUR/BYMINUTE
+// can ever be hit. rrule-go advances the hour (minute) counter by INTERVAL and
+// loops until it lands on an allowed value, with no exit, so the visited
+// values, DTSTART's value plus multiples of gcd(INTERVAL, 24) hours
+// (gcd(INTERVAL, 1440) minutes) mod one day, must include an allowed one.
+func latticeReachable(opt *rrule.ROption) bool {
+	h0, m0 := opt.Dtstart.Hour(), opt.Dtstart.Minute()
+	hours := opt.Byhour
+	if len(hours) == 0 {
+		hours = seq(24)
+	}
+	if opt.Freq == rrule.HOURLY {
+		if len(opt.Byhour) == 0 {
+			return true
+		}
+		g := gcd(opt.Interval, 24)
+		for _, h := range hours {
+			if (h-h0)%g == 0 {
+				return true
+			}
+		}
+		return false
+	}
+	if len(opt.Byhour) == 0 && len(opt.Byminute) == 0 {
+		return true
+	}
+	minutes := opt.Byminute
+	if len(minutes) == 0 {
+		minutes = seq(60)
+	}
+	g := gcd(opt.Interval, 1440)
+	for _, h := range hours {
+		for _, m := range minutes {
+			if (h*60+m-(h0*60+m0))%g == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// neverMatches reports whether the rule produces no instance at all. Every
+// rrule-go day mask (month, weekday, week number, year day, month day) repeats
+// every 400 Gregorian years (146097 days, a whole number of weeks), so the
+// rule is run from DTSTART moved forward by whole 400-year cycles to between
+// 400 and 800 years before rrule-go's MAXYEAR (9999), keeping its alignment.
+// No instance there means none ever. The probe costs at most those 800 years
+// of iteration, and returns at the first instance for any rule that matches.
+// A rule whose INTERVAL period doesn't divide the cycle may be judged empty;
+// such rules (e.g. YEARLY;INTERVAL=401) are not something families write.
+func neverMatches(opt rrule.ROption) bool {
+	d := opt.Dtstart
+	y := d.Year()
+	if y < 9600 {
+		y += (9600 - y) / 400 * 400
+	}
+	opt.Dtstart = time.Date(y, d.Month(), d.Day(), d.Hour(), d.Minute(), d.Second(), 0, time.UTC)
+	opt.Count = 0
+	// Without UNTIL rrule-go stops at DTSTART+~292y; look at the whole span.
+	opt.Until = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	r, err := rrule.NewRRule(opt)
+	if err != nil {
+		return false // NewRRule on the real DTSTART reports it
+	}
+	_, ok := r.Iterator()()
+	return !ok
+}
+
+// skipAhead returns a DTSTART for a COUNT-less HOURLY, MINUTELY, DAILY or
+// WEEKLY rule moved forward by whole INTERVAL periods to at least one period
+// before lo, so expansion doesn't walk every instance since the original
+// DTSTART. rrule-go advances those rules by adding to wall-clock fields
+// (normalising overflow), which is plain arithmetic on the wall clock read as
+// UTC, so the moved DTSTART is on the same lattice and yields exactly the same
+// instances from there on. Defaults derived from DTSTART (minute and second,
+// weekday) are unchanged because periods are whole hours, minutes, days or
+// weeks. Other frequencies, and short histories, return DTSTART as is.
+func skipAhead(opt *rrule.ROption, lo time.Time) time.Time {
+	var unit int64
+	switch opt.Freq {
+	case rrule.MINUTELY:
+		unit = 60
+	case rrule.HOURLY:
+		unit = 3600
+	case rrule.DAILY:
+		unit = 86400
+	case rrule.WEEKLY:
+		unit = 7 * 86400
+	default:
+		return opt.Dtstart
+	}
+	ds := opt.Dtstart
+	ruleLoc := ds.Location()
+	period := unit * int64(opt.Interval)
+	dWall := wallUTC(ds).Unix()
+	target := wallUTC(lo.In(ruleLoc)).Unix()
+	k := (target-dWall)/period - 1
+	// A wall time in a DST gap is normalised by time.Date, which would move
+	// the counters off the lattice: step back a period and retry.
+	for ; k > 0; k-- {
+		w := time.Unix(dWall+k*period, 0).UTC()
+		s := time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), w.Second(), 0, ruleLoc)
+		if wallUTC(s).Equal(w) {
+			return s
+		}
+	}
+	return ds
+}
+
+func gcd(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	if a < 0 {
+		return -a
+	}
+	return a
+}
+
+func seq(n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = i
+	}
+	return out
 }
 
 // untilIsUTC reports whether the rule's UNTIL is a UTC date-time ("...Z").

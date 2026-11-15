@@ -2,9 +2,13 @@ package icalx
 
 import (
 	"errors"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/teambition/rrule-go"
 )
 
 func mustLoc(t *testing.T, name string) *time.Location {
@@ -638,5 +642,220 @@ func TestFormatDuration(t *testing.T) {
 		if back, err := parseDuration(tc.want); err != nil || back != tc.in {
 			t.Errorf("parseDuration(%q) = %v, %v", tc.want, back, err)
 		}
+	}
+}
+
+// TestExpandBoundedCost: one stored RRULE must not be able to pin a CPU on
+// every REPORT. Each pathological rule with decades of history is expanded
+// into a one-hour window in 2026 and must return (a result or a bounded
+// error) in well under 100 ms. Before the fix FREQ=SECONDLY from 1970 took
+// minutes and HOURLY;INTERVAL=6;BYHOUR=1 never returned.
+func TestExpandBoundedCost(t *testing.T) {
+	from := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	to := from.Add(time.Hour)
+	tests := []struct {
+		name    string
+		dtstart string
+		rule    string
+		wantErr error // nil: must succeed
+		wantN   int   // with wantErr nil: occurrences in the window
+	}{
+		{"secondly since 1970", "DTSTART:19700101T000000Z", "FREQ=SECONDLY", ErrUnsupportedRule, 0},
+		{"secondly interval since 1996", "DTSTART:19960101T000000Z", "FREQ=SECONDLY;INTERVAL=3", ErrUnsupportedRule, 0},
+		{"minutely since 1970", "DTSTART:19700101T000000Z", "FREQ=MINUTELY", nil, 60},
+		{"minutely in a TZID since 1970", "DTSTART;TZID=America/New_York:19700101T000000", "FREQ=MINUTELY;INTERVAL=5", nil, 12},
+		{"hourly since 1970", "DTSTART:19700101T003000Z", "FREQ=HOURLY", nil, 1},
+		{"daily since 1970", "DTSTART:19700101T143000Z", "FREQ=DAILY", nil, 1},
+		{"minutely COUNT huge since 1970", "DTSTART:19700101T000000Z", "FREQ=MINUTELY;COUNT=1000000000", ErrExpansionBudget, 0},
+		{"minutely BYSECOND every second", "DTSTART:19700101T000000Z", "FREQ=MINUTELY;BYSECOND=" + intList(60), ErrTooManyOccurrences, 0},
+		{"daily dense BYHOUR x BYMINUTE since 1970", "DTSTART:19700101T000000Z",
+			"FREQ=DAILY;BYHOUR=" + intList(24) + ";BYMINUTE=" + intList(60), nil, 60},
+		{"monthly dense BYMONTHDAY x BYHOUR x BYMINUTE since 1970", "DTSTART:19700101T000000Z",
+			"FREQ=MONTHLY;BYMONTHDAY=" + intList(29)[2:] + ";BYHOUR=" + intList(24) + ";BYMINUTE=" + intList(60), ErrExpansionBudget, 0},
+		{"hourly BYHOUR off the INTERVAL lattice (rrule-go spins forever)", "DTSTART:19700101T000000Z", "FREQ=HOURLY;INTERVAL=6;BYHOUR=1", ErrUnsupportedRule, 0},
+		{"minutely BYMINUTE off the INTERVAL lattice", "DTSTART:19700101T000000Z", "FREQ=MINUTELY;INTERVAL=10;BYMINUTE=5", ErrUnsupportedRule, 0},
+		{"hourly BYSETPOS", "DTSTART:19700101T000000Z", "FREQ=HOURLY;BYSETPOS=2", ErrUnsupportedRule, 0},
+		{"daily never matches (Feb 30)", "DTSTART:19700101T000000Z", "FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30", ErrUnsupportedRule, 0},
+		{"minutely never matches (Feb 30)", "DTSTART:19700101T000000Z", "FREQ=MINUTELY;BYMONTH=2;BYMONTHDAY=30", ErrUnsupportedRule, 0},
+		{"daily BYSETPOS never matches", "DTSTART:19700101T000000Z", "FREQ=DAILY;BYSETPOS=2", ErrUnsupportedRule, 0},
+		{"yearly Feb 29 on a Monday still matches", "DTSTART:19700101T000000Z", "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29;BYDAY=MO", nil, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj, err := Parse(cal(vevent("UID:p@test", tt.dtstart, "DURATION:PT1S", "RRULE:"+tt.rule)...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			occs, err := obj.Expand(from, to, time.UTC)
+			elapsed := time.Since(start)
+			if elapsed > 100*time.Millisecond {
+				t.Errorf("Expand took %v, want < 100ms", elapsed)
+			}
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if len(occs) != tt.wantN {
+				t.Fatalf("got %d occurrences, want %d: %q", len(occs), tt.wantN, fmtStarts(occs))
+			}
+		})
+	}
+}
+
+// intList returns "0,1,...,n-1".
+func intList(n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = strconv.Itoa(i)
+	}
+	return strings.Join(parts, ",")
+}
+
+// TestExpandSkipAheadExact: skipping DTSTART forward must not shift the
+// series. FREQ=MINUTELY;INTERVAL=7 from 2020 lands at :02, :09, :16, :23 in
+// the first half hour of 2026 (3156480 minutes later, which is 5 mod 7).
+func TestExpandSkipAheadExact(t *testing.T) {
+	obj, err := Parse(cal(vevent("UID:m7@test", "DTSTART:20200101T000000Z", "DTEND:20200101T000100Z", "RRULE:FREQ=MINUTELY;INTERVAL=7")...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	occs, err := obj.Expand(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 1, 1, 0, 30, 0, 0, time.UTC), time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	equalStrings(t, fmtStarts(occs), []string{
+		"2026-01-01T00:02 +0000", "2026-01-01T00:09 +0000", "2026-01-01T00:16 +0000", "2026-01-01T00:23 +0000",
+	})
+}
+
+// TestExpandSkipAheadMatchesFullWalk compares Expand (which skips ahead) with
+// a full walk of the same rule from the original DTSTART, for each frequency
+// skip-ahead applies to, in a TZID across the 2026 DST changes, floating and
+// all-day.
+func TestExpandSkipAheadMatchesFullWalk(t *testing.T) {
+	ny := mustLoc(t, "America/New_York")
+	windows := [][2]time.Time{
+		{time.Date(2026, 3, 8, 0, 17, 0, 0, ny), time.Date(2026, 3, 8, 5, 0, 0, 0, ny)},   // spring forward
+		{time.Date(2026, 11, 1, 0, 0, 0, 0, ny), time.Date(2026, 11, 1, 3, 11, 0, 0, ny)}, // fall back
+		{time.Date(2026, 6, 1, 0, 0, 0, 0, ny), time.Date(2026, 7, 15, 0, 0, 0, 0, ny)},
+	}
+	tests := []struct {
+		name  string
+		props []string
+	}{
+		{"minutely/7 TZID", []string{"DTSTART;TZID=America/New_York:20190305T080300", "DURATION:PT1M", "RRULE:FREQ=MINUTELY;INTERVAL=7"}},
+		{"minutely/13 BYHOUR TZID", []string{"DTSTART;TZID=America/New_York:20190305T080300", "DURATION:PT1M", "RRULE:FREQ=MINUTELY;INTERVAL=13;BYHOUR=1,2,3,9"}},
+		{"hourly/5 TZID", []string{"DTSTART;TZID=America/New_York:20180101T023000", "DURATION:PT20M", "RRULE:FREQ=HOURLY;INTERVAL=5"}},
+		{"hourly/6 BYHOUR UTC", []string{"DTSTART:20150101T030000Z", "DURATION:PT1H", "RRULE:FREQ=HOURLY;INTERVAL=6;BYHOUR=3,9;BYDAY=SU,MO,WE"}},
+		{"daily/3 BYHOUR TZID", []string{"DTSTART;TZID=America/New_York:20100102T020000", "DURATION:PT30M", "RRULE:FREQ=DAILY;INTERVAL=3;BYHOUR=2,7,19"}},
+		{"daily BYSETPOS floating", []string{"DTSTART:20100102T020000", "DURATION:PT30M", "RRULE:FREQ=DAILY;BYHOUR=2,7,19;BYSETPOS=-1"}},
+		{"weekly/2 BYDAY TZID with UNTIL", []string{"DTSTART;TZID=America/New_York:20000103T090000", "DURATION:PT1H", "RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,TH,SU;UNTIL=20261105T000000Z"}},
+		{"weekly/3 BYSETPOS WKST", []string{"DTSTART:19990106T120000Z", "DURATION:PT1H", "RRULE:FREQ=WEEKLY;INTERVAL=3;BYDAY=MO,WE,SA;BYSETPOS=2;WKST=SU"}},
+		{"daily/4 all-day", []string{"DTSTART;VALUE=DATE:20050307", "DTEND;VALUE=DATE:20050308", "RRULE:FREQ=DAILY;INTERVAL=4"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj, err := Parse(cal(vevent(append([]string{"UID:sa@test"}, tt.props...)...)...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := obj.Master
+			for _, w := range windows {
+				got, err := obj.Expand(w[0], w[1], ny)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := fullWalk(t, m, w[0], w[1], ny)
+				equalStrings(t, fmtStarts(got), want)
+			}
+		})
+	}
+}
+
+// fullWalk expands m's RRULE from its original DTSTART with no skip-ahead and
+// returns the starts of the instances overlapping [from, to), sorted (rrule-go
+// emits wall times in a DST gap out of order; Expand sorts).
+func fullWalk(t *testing.T, m *Event, from, to time.Time, loc *time.Location) []string {
+	t.Helper()
+	opt, err := m.ruleOption(loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := rrule.NewRRule(*opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var starts []time.Time
+	next := r.Iterator()
+	for {
+		s, ok := next()
+		if !ok {
+			break
+		}
+		start, end := m.span(s, loc)
+		if start.After(to.Add(48 * time.Hour)) {
+			break
+		}
+		if overlaps(start, end, from, to) {
+			starts = append(starts, start)
+		}
+	}
+	sort.SliceStable(starts, func(i, j int) bool { return starts[i].Before(starts[j]) })
+	out := make([]string, len(starts))
+	for i, s := range starts {
+		out[i] = s.Format("2006-01-02T15:04 -0700")
+	}
+	return out
+}
+
+func TestValidate(t *testing.T) {
+	tests := []struct {
+		rule    string
+		wantErr error
+	}{
+		{"FREQ=WEEKLY;BYDAY=TU,TH", nil},
+		{"FREQ=MINUTELY;INTERVAL=15", nil},
+		{"FREQ=SECONDLY", ErrUnsupportedRule},
+		{"FREQ=HOURLY;INTERVAL=6;BYHOUR=1", ErrUnsupportedRule},
+		{"FREQ=YEARLY;BYMONTH=4;BYMONTHDAY=31", ErrUnsupportedRule},
+	}
+	for _, tt := range tests {
+		obj, err := Parse(cal(vevent("UID:v@test", "DTSTART:20260101T000000Z", "RRULE:"+tt.rule)...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = obj.Validate()
+		if tt.wantErr == nil && err != nil || tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+			t.Errorf("%s: Validate() = %v, want %v", tt.rule, err, tt.wantErr)
+		}
+	}
+}
+
+// BenchmarkExpandPathological: 30 years of history, one-hour window.
+func BenchmarkExpandPathological(b *testing.B) {
+	from := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	for _, rule := range []string{
+		"FREQ=SECONDLY",
+		"FREQ=MINUTELY",
+		"FREQ=MINUTELY;BYMONTH=2;BYMONTHDAY=30",
+		"FREQ=DAILY;BYSETPOS=2",
+		"FREQ=MINUTELY;COUNT=1000000000",
+		"FREQ=MONTHLY;BYMONTHDAY=" + intList(29)[2:] + ";BYHOUR=" + intList(24) + ";BYMINUTE=" + intList(60),
+	} {
+		obj, err := Parse(cal(vevent("UID:b@test", "DTSTART:19960101T000000Z", "DURATION:PT1S", "RRULE:"+rule)...))
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Run(rule[:min(len(rule), 40)], func(b *testing.B) {
+			for b.Loop() {
+				_, _ = obj.Expand(from, from.Add(time.Hour), time.UTC)
+			}
+		})
 	}
 }

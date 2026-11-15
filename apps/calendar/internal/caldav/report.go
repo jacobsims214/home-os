@@ -704,6 +704,11 @@ func recurringInTimeRange(icalText string, rangeStart, rangeEnd time.Time) (in, 
 		// More instances in the window than the expansion cap: certainly
 		// at least one overlaps.
 		return true, true
+	case errors.Is(err, icalx.ErrExpansionBudget), errors.Is(err, icalx.ErrUnsupportedRule):
+		// icalx refused to spend more on this rule (#4656): whether it
+		// overlaps is unknown, so include it rather than silently drop it
+		// (the JSON check only sees the first instance).
+		return true, true
 	case err != nil:
 		logging.Logger.Warn("caldav: calendar-query: expand recurring event",
 			slog.String("event_uid", obj.UID),
