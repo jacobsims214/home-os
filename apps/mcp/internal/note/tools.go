@@ -464,6 +464,80 @@ func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 	return "note_update", tool, handler
 }
 
+// NewNoteDeleteTool creates the note_delete MCP tool (catalog v2, class X).
+// It deletes one note in the authenticated household and returns the note as
+// it was, so the model can tell the user what was removed. A note that does
+// not exist or belongs to another household is reported as not found and
+// nothing is deleted, so ids from other households reveal nothing. Deleting
+// is a single DELETE ... RETURNING statement; a repeat of the call finds
+// nothing and changes nothing more (idempotent). Notes write no outbox events
+// and nothing references them, so the row is all there is to remove. Results
+// are built with internal/respond.
+func NewNoteDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+	tool := mcp.NewTool("note_delete",
+		mcp.WithDescription("Delete a note."),
+		mcp.WithString("note_id",
+			mcp.Description("The note's id (UUID), e.g. from note_find"),
+			mcp.Required(),
+		),
+		mcp.WithTitleAnnotation("Delete note"),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
+		respond.Schema[noteResult](),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		claims := server.ClaimsFromContext(ctx)
+		if claims == nil {
+			return respond.Fail(respond.Error{
+				Message: "You are not signed in to a household.",
+				Fix:     "Tell the user to reconnect Home OS; retrying will not help.",
+			}), nil
+		}
+
+		raw, _ := req.GetArguments()["note_id"].(string)
+		example := map[string]any{"note_id": "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"}
+		if raw == "" {
+			return respond.Invalid("note_id", "note_id is required.",
+				"Pass the note's id as note_id. Call note_find to find it.", example), nil
+		}
+		noteID, err := uuid.Parse(raw)
+		if err != nil {
+			return respond.Invalid("note_id", fmt.Sprintf("note_id %q is not a UUID.", raw),
+				"Pass the note's id (a UUID) from note_find, not its title.", example), nil
+		}
+
+		n, err := scanNote(pool.QueryRow(ctx,
+			`WITH deleted AS (
+				DELETE FROM notes
+				WHERE id = $1 AND household_id = $2
+				RETURNING *
+			)
+			SELECT `+noteColumns+`
+			FROM deleted n LEFT JOIN users u ON u.id = n.author_id`,
+			noteID, claims.HouseholdID,
+		))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return respond.NotFound("note", raw,
+				"Call note_find to find the note_id; it may already be deleted."), nil
+		}
+		if err != nil {
+			return respond.Failed("delete the note", err), nil
+		}
+
+		name := "(untitled)"
+		if n.Title != nil && *n.Title != "" {
+			name = *n.Title
+		}
+		return respond.OK(fmt.Sprintf("Deleted note %q.", name), n,
+			"It cannot be restored. Save it again with note_create if this was a mistake."), nil
+	}
+
+	return "note_delete", tool, handler
+}
+
 // joinAnd joins parts as "a", "a and b" or "a, b and c".
 func joinAnd(parts []string) string {
 	switch len(parts) {
