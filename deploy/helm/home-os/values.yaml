@@ -1,7 +1,11 @@
 global:
   imageRegistry: ghcr.io/jacobsims214/home-os
   imageTag: latest
+  # Pull policy for the home-os app images (global.imageTag, a moving tag by default).
   imagePullPolicy: Always
+  # Pull policy for the pinned third-party images below (envoy, dex, typesense,
+  # tika, CNPG postgres). Their tags are exact versions, so the node cache is safe.
+  thirdPartyImagePullPolicy: IfNotPresent
   # Public origin of Home OS as browsers and OAuth clients see it
   # (scheme://host[:port], no trailing slash), e.g. https://homeos.example.com.
   # Drives the Dex issuer (<publicUrl>/dex), the home-os-ui redirect URI, the
@@ -13,6 +17,8 @@ namespace: home-os
 
 envoy:
   enabled: true
+  # Pinned: runs as uid 101 (the image's envoy user), see templates/envoy.
+  image: envoyproxy/envoy:v1.31.10
   port: 8000
   https:
     enabled: false
@@ -66,7 +72,9 @@ ui:
 
 typesense:
   replicas: 1
-  image: typesense/typesense:27.1
+  # Pinned. 30.x supports built-in auto-embedding (embed fields with ts/* models)
+  # for semantic search. The image has no USER; the chart runs it as uid 10000.
+  image: typesense/typesense:30.2
   port: 8108
   persistence:
     size: 10Gi
@@ -76,7 +84,9 @@ typesense:
 
 tika:
   replicas: 1
-  image: apache/tika:latest-full
+  # Pinned to the exact build (4.2.0-1-full == latest-full as of 2026-11-15).
+  # The image runs as uid 35002.
+  image: apache/tika:4.2.0-1-full
   port: 9998
   resources:
     requests: { cpu: 200m, memory: 512Mi }
@@ -91,7 +101,8 @@ dex:
   mcpRedirectURIs:
     - "http://127.0.0.1:19876/mcp/oauth/callback"
   replicas: 1
-  image: dex
+  # Pinned. The image runs as uid 1001.
+  image: ghcr.io/dexidp/dex:v2.42.0
   port: 5556
   grpcPort: 5557
   # Dex's Postgres password is never rendered into the ConfigMap: the Deployment
@@ -115,6 +126,10 @@ database:
     existingSecret: ""
     instances: 2
     storage: 10Gi
+    # CNPG operand image, pinned to an immutable build tag (PostgreSQL 16.16,
+    # "system" flavour so barman-cloud backups keep working). Stay on major 16:
+    # a major bump needs a CNPG major upgrade, not just a tag change.
+    imageName: ghcr.io/cloudnative-pg/postgresql:16.16-202611122305-system-bookworm
     backup:
       enabled: true
       schedule: "0 2 * * *"

@@ -19,6 +19,7 @@ spec:
       containers:
       - name: tika
         image: "{{ .Values.tika.image }}"
+        imagePullPolicy: {{ .Values.global.thirdPartyImagePullPolicy }}
         {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: {{ .Values.tika.port }}

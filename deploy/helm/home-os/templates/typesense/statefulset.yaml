@@ -20,6 +20,7 @@ spec:
       containers:
       - name: typesense
         image: "{{ .Values.typesense.image }}"
+        imagePullPolicy: {{ .Values.global.thirdPartyImagePullPolicy }}
         {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: {{ .Values.typesense.port }}

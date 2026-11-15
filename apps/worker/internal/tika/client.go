@@ -1,6 +1,6 @@
 // Package tika provides a client for the Apache Tika Server REST API.
 //
-// Tika runs as a sidecar container (apache/tika:latest-full) on port 9998 and
+// Tika runs as a sidecar container (apache/tika:4.2.0-1-full) on port 9998 and
 // performs OCR and text extraction from uploaded files (PDFs, Office docs,
 // images). The worker calls ExtractText to pull plain text out of a file's
 // raw bytes; the result is then stored on the files row via the file module's

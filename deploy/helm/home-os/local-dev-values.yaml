@@ -61,7 +61,6 @@ ui:
 
 typesense:
   replicas: 1
-  image: typesense/typesense:27.1
   port: 8108
   persistence:
     size: 5Gi
@@ -71,7 +70,6 @@ typesense:
 
 tika:
   replicas: 1
-  image: apache/tika:latest-full
   port: 9998
   resources:
     requests: { cpu: 200m, memory: 512Mi }
@@ -80,7 +78,6 @@ tika:
 dex:
   uiRedirectURI: "http://localhost:8000/api/auth/callback"
   replicas: 1
-  image: dex
   port: 5556
   grpcPort: 5557
   # Dex reads its DB password from home-os-db-secret (secrets.dbPassword below).

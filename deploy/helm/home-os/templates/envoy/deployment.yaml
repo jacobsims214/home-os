@@ -18,7 +18,8 @@ spec:
       {{- include "home-os.podSecurityContext" (dict "uid" 101) | nindent 6 }}
       containers:
       - name: envoy
-        image: envoyproxy/envoy:v1.31-latest
+        image: "{{ .Values.envoy.image }}"
+        imagePullPolicy: {{ .Values.global.thirdPartyImagePullPolicy }}
         {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: 8080

@@ -18,7 +18,8 @@ spec:
       {{- include "home-os.podSecurityContext" (dict "uid" 1001) | nindent 6 }}
       containers:
       - name: dex
-        image: ghcr.io/dexidp/dex:v2.42.0
+        image: "{{ .Values.dex.image }}"
+        imagePullPolicy: {{ .Values.global.thirdPartyImagePullPolicy }}
         {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         args: ["dex", "serve", "/etc/dex/config.yaml"]
         ports:

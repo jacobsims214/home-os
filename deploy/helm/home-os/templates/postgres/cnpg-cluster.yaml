@@ -6,7 +6,8 @@ metadata:
   namespace: {{ .Values.namespace }}
 spec:
   instances: {{ .Values.database.managed.instances }}
-  imageName: ghcr.io/cloudnative-pg/postgresql:16
+  imageName: {{ .Values.database.managed.imageName | quote }}
+  imagePullPolicy: {{ .Values.global.thirdPartyImagePullPolicy }}
   storage:
     size: {{ .Values.database.managed.storage }}
   bootstrap:
