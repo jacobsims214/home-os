@@ -184,8 +184,8 @@ services:
 
   worker:
     build:
-      context: ../apps/worker
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: apps/worker/Dockerfile
       target: builder
     restart: unless-stopped
     command: go run ./cmd/worker
@@ -197,9 +197,11 @@ services:
       migrations:
         condition: service_completed_successfully
     volumes:
-      - ../apps/worker:/app
-      - worker_gopath:/root/go/pkg/mod
-    working_dir: /app
+      - ../apps/worker:/src/apps/worker
+      - ../apps/api:/src/apps/api
+      - ../packages/icalx:/src/packages/icalx
+      - worker_gopath:/go/pkg/mod
+    working_dir: /src/apps/worker
     environment:
       DATABASE_URL: postgres://homeos:homeos@postgres:5432/homeos?sslmode=disable
       TYPESENSE_HOST: typesense

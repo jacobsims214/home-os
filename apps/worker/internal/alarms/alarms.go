@@ -1,0 +1,317 @@
+// Package alarms turns VALARMs in stored calendar events into in-app
+// notifications.
+//
+// Every tick the job reads the calendar_objects rows that carry full
+// iCalendar text (calendar_objects.ical_raw, written by CalDAV since
+// migration 036), asks packages/icalx which alarms fired in the window
+// (now-Lookback, now], and inserts one `calendar_alarm` notification per
+// household member for each firing.
+//
+// # Deduplication
+//
+// A firing is identified by (calendar object, occurrence, firing instant):
+// the occurrence is its RECURRENCE-ID (or start, for a single event), and the
+// firing instant distinguishes several alarms and REPEAT firings on the same
+// occurrence. That key is hashed into a deterministic UUIDv5 and stored as the
+// notification's entity_id with entity_type 'calendar_alarm', and a row is
+// only inserted when no notification with that entity_id exists for the
+// member. Because the key lives in the notifications table itself, a restart
+// (or a second replica, serialised by an advisory lock) never re-notifies a
+// firing that was already delivered, however often the window overlaps it.
+//
+// Editing an event so its alarm fires at a new time produces a new key, and
+// so a new notification, which is what a user who moved a reminder expects.
+//
+// # Time zones
+//
+// Events with a TZID or a UTC time fire at their own instant. Floating and
+// all-day events are placed in the household's time zone (households.timezone;
+// UTC when unset or unknown), so a floating 09:00 event with a 30-minute alarm
+// fires at 08:30 household time.
+package alarms
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/icalx"
+)
+
+const (
+	// DefaultInterval is how often the job looks for alarms that fired.
+	DefaultInterval = 30 * time.Second
+	// DefaultLookback is how far back each run looks. It is much longer than
+	// the interval so a slow run, a brief DB outage or a restart does not
+	// drop a reminder; dedupe makes the overlap harmless. Alarms that fired
+	// longer ago than this (for example during a long outage) are skipped on
+	// purpose: a reminder for something that already started is noise.
+	DefaultLookback = 15 * time.Minute
+
+	// NotificationType and EntityType are written on every alarm notification.
+	NotificationType = "calendar_alarm"
+	EntityType       = "calendar_alarm"
+
+	// advisoryLockKey serialises runs across worker replicas.
+	advisoryLockKey int64 = 0x616c61726d73 // "alarms"
+)
+
+// dedupeNamespace is the UUIDv5 namespace for alarm firing keys.
+var dedupeNamespace = uuid.MustParse("6b1e2a8c-3f0d-4c55-9a51-2d1f0e7c4a10")
+
+// Job finds fired alarms and writes notifications.
+type Job struct {
+	pool     *pgxpool.Pool
+	interval time.Duration
+	lookback time.Duration
+	now      func() time.Time
+}
+
+// Option configures a Job.
+type Option func(*Job)
+
+// WithInterval sets the polling interval.
+func WithInterval(d time.Duration) Option {
+	return func(j *Job) {
+		if d > 0 {
+			j.interval = d
+		}
+	}
+}
+
+// WithLookback sets how far back each run looks for firings.
+func WithLookback(d time.Duration) Option {
+	return func(j *Job) {
+		if d > 0 {
+			j.lookback = d
+		}
+	}
+}
+
+// WithClock replaces time.Now (tests).
+func WithClock(now func() time.Time) Option {
+	return func(j *Job) { j.now = now }
+}
+
+// New returns a Job using pool.
+func New(pool *pgxpool.Pool, opts ...Option) *Job {
+	j := &Job{pool: pool, interval: DefaultInterval, lookback: DefaultLookback, now: time.Now}
+	for _, o := range opts {
+		o(j)
+	}
+	return j
+}
+
+// Run processes alarms every interval until ctx is cancelled, then returns
+// ctx.Err(). A failed run is logged and retried on the next tick.
+func (j *Job) Run(ctx context.Context) error {
+	slog.Info("alarm job started", "interval", j.interval, "lookback", j.lookback)
+	ticker := time.NewTicker(j.interval)
+	defer ticker.Stop()
+	for {
+		if n, err := j.Process(ctx, j.now()); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			slog.Error("alarm job run failed", "error", err)
+		} else if n > 0 {
+			slog.Info("alarm notifications created", "count", n)
+		}
+		select {
+		case <-ctx.Done():
+			slog.Info("alarm job stopped")
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// candidate is a calendar object that may hold alarms.
+type candidate struct {
+	ObjectID    uuid.UUID
+	HouseholdID uuid.UUID
+	Timezone    string
+	ICalRaw     string
+}
+
+// Firing is one alarm firing that should produce notifications.
+type Firing struct {
+	ObjectID    uuid.UUID
+	HouseholdID uuid.UUID
+	Key         uuid.UUID // dedupe key, stored as notifications.entity_id
+	At          time.Time
+	Title       string
+	Body        string
+}
+
+// candidatesSQL selects objects with stored iCalendar text that mention a
+// VALARM. Rows without ical_raw predate migration 036 and carry no alarms.
+const candidatesSQL = `
+	SELECT co.id, c.household_id, h.timezone, co.ical_raw
+	FROM calendar_objects co
+	JOIN calendars c ON c.id = co.calendar_id
+	JOIN households h ON h.id = c.household_id
+	WHERE co.ical_raw IS NOT NULL
+	  AND co.ical_raw ILIKE '%BEGIN:VALARM%'
+`
+
+// insertSQL writes one notification per household member for a firing,
+// skipping members who already have a notification for this firing key.
+const insertSQL = `
+	INSERT INTO notifications (household_id, user_id, type, title, body, entity_type, entity_id)
+	SELECT $1::uuid, m.user_id, $2::varchar, $3::varchar, $4::text, $5::varchar, $6::uuid
+	FROM memberships m
+	WHERE m.household_id = $1::uuid
+	  AND NOT EXISTS (
+		SELECT 1 FROM notifications n
+		WHERE n.entity_type = $5::varchar AND n.entity_id = $6::uuid AND n.user_id = m.user_id
+	  )
+`
+
+// Process creates notifications for every alarm that fired in
+// (now-lookback, now] and returns how many notification rows it inserted.
+func (j *Job) Process(ctx context.Context, now time.Time) (int, error) {
+	tx, err := j.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, advisoryLockKey); err != nil {
+		return 0, fmt.Errorf("advisory lock: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, candidatesSQL)
+	if err != nil {
+		return 0, fmt.Errorf("query calendar objects: %w", err)
+	}
+	cands, err := pgx.CollectRows(rows, pgx.RowToStructByPos[candidate])
+	if err != nil {
+		return 0, fmt.Errorf("collect calendar objects: %w", err)
+	}
+
+	var firings []Firing
+	for _, c := range cands {
+		fs, err := FiringsFor(c.ObjectID, c.HouseholdID, c.ICalRaw, householdLocation(c.Timezone), now, j.lookback)
+		if err != nil {
+			// One bad event must not stop everyone else's reminders.
+			slog.Warn("alarm job: skipping calendar object", "calendar_object_id", c.ObjectID, "error", err)
+			continue
+		}
+		firings = append(firings, fs...)
+	}
+
+	inserted := 0
+	for _, f := range firings {
+		tag, err := tx.Exec(ctx, insertSQL, f.HouseholdID, NotificationType, f.Title, f.Body, EntityType, f.Key)
+		if err != nil {
+			return 0, fmt.Errorf("insert alarm notification for %s: %w", f.ObjectID, err)
+		}
+		inserted += int(tag.RowsAffected())
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return inserted, nil
+}
+
+// FiringsFor parses one calendar object and returns its alarm firings in
+// (now-lookback, now], with times and text in loc.
+func FiringsFor(objectID, householdID uuid.UUID, raw string, loc *time.Location, now time.Time, lookback time.Duration) ([]Firing, error) {
+	obj, err := icalx.Parse([]byte(raw))
+	if err != nil {
+		return nil, fmt.Errorf("parse: %w", err)
+	}
+	// icalx windows are [from, to); shift by 1ns for (now-lookback, now].
+	from := now.Add(-lookback).Add(time.Nanosecond)
+	to := now.Add(time.Nanosecond)
+	afs, err := obj.Alarms(from, to, loc)
+	if err != nil {
+		// Includes icalx.ErrTooManyOccurrences for runaway rules.
+		return nil, fmt.Errorf("expand alarms: %w", err)
+	}
+	out := make([]Firing, 0, len(afs))
+	seen := make(map[uuid.UUID]bool, len(afs))
+	for _, af := range afs {
+		key := DedupeKey(objectID, af.Occurrence, af.At)
+		if seen[key] {
+			continue // two alarms at the same instant: one reminder
+		}
+		seen[key] = true
+		title, body := message(af, loc)
+		out = append(out, Firing{
+			ObjectID:    objectID,
+			HouseholdID: householdID,
+			Key:         key,
+			At:          af.At,
+			Title:       title,
+			Body:        body,
+		})
+	}
+	return out, nil
+}
+
+// DedupeKey identifies one firing of one alarm on one occurrence.
+func DedupeKey(objectID uuid.UUID, occ icalx.Occurrence, at time.Time) uuid.UUID {
+	instance := occ.RecurrenceID
+	if instance.IsZero() {
+		instance = occ.Start
+	}
+	name := fmt.Sprintf("%s|%d|%d", objectID, instance.UTC().Unix(), at.UTC().Unix())
+	return uuid.NewSHA1(dedupeNamespace, []byte(name))
+}
+
+// householdLocation loads the household's IANA zone, falling back to UTC.
+func householdLocation(tz string) *time.Location {
+	tz = strings.TrimSpace(tz)
+	if tz == "" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		slog.Warn("alarm job: unknown household timezone, using UTC", "timezone", tz)
+		return time.UTC
+	}
+	return loc
+}
+
+// message builds the notification title and body for a firing.
+func message(af icalx.AlarmFiring, loc *time.Location) (string, string) {
+	ev := af.Occurrence.Event
+	title := ""
+	if ev != nil {
+		title = strings.TrimSpace(ev.Summary)
+	}
+	if title == "" {
+		title = strings.TrimSpace(af.Alarm.Summary)
+	}
+	if title == "" {
+		title = "Upcoming event"
+	}
+
+	start := af.Occurrence.Start.In(loc)
+	var when string
+	if af.Occurrence.AllDay {
+		when = "All day " + start.Format("Mon Jan 2")
+	} else {
+		when = "Starts " + start.Format("Mon Jan 2, 3:04 PM MST")
+	}
+	parts := []string{when}
+	if ev != nil && strings.TrimSpace(ev.Location) != "" {
+		parts = append(parts, "at "+strings.TrimSpace(ev.Location))
+	}
+	body := strings.Join(parts, " ")
+	if d := strings.TrimSpace(af.Alarm.Description); d != "" && !strings.EqualFold(d, "reminder") && d != title {
+		body = d + " — " + body
+	}
+	if r := []rune(title); len(r) > 500 { // notifications.title is VARCHAR(500)
+		title = string(r[:500])
+	}
+	return title, body
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/api/pkg/smtp"
+	"home-os/worker/internal/alarms"
 	"home-os/worker/internal/config"
 	"home-os/worker/internal/fileprocessor"
 	"home-os/worker/internal/files"
@@ -23,7 +24,7 @@ import (
 )
 
 // shutdownTimeout bounds how long main waits for the background jobs to
-// return after SIGINT/SIGTERM. Both jobs watch ctx, and in-flight Tika and
+// return after SIGINT/SIGTERM. All jobs watch ctx, and in-flight Tika and
 // DB calls are bound to the same ctx, so they normally stop within
 // milliseconds; the bound only matters if something ignores cancellation.
 // It sits below Kubernetes' default 30s terminationGracePeriodSeconds so the
@@ -75,8 +76,12 @@ func main() {
 	)
 	slog.Info("file processor configured", "tika_url", cfg.TikaURL, "interval", cfg.FileProcessorPollInterval)
 
+	// Calendar alarms: VALARMs in calendar_objects.ical_raw become in-app
+	// notifications, one per household member per firing (deduped in DB).
+	alarmJob := alarms.New(pool)
+
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		runNotificationLoop(ctx, pool, smtpClient, cfg.PollInterval)
@@ -85,6 +90,12 @@ func main() {
 		defer wg.Done()
 		if err := processor.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("file processor exited", "error", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := alarmJob.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("alarm job exited", "error", err)
 		}
 	}()
 
