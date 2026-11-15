@@ -13,11 +13,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"home-os/api/internal/admin"
 	"home-os/api/internal/agenttoken"
 	"home-os/api/internal/asset"
 	"home-os/api/internal/auth"
@@ -150,7 +149,7 @@ func main() {
 		slog.Info("SMTP not configured; password reset emails will be skipped")
 	}
 
-	authHandler := auth.NewHandler(authRepo, &householdAdapter{repo: householdRepo}, cfg, smtpClient, dexClient, oidcVerifier)
+	authHandler := auth.NewHandler(authRepo, cfg, smtpClient, dexClient, oidcVerifier)
 
 	r.Get("/api/v1/auth/me", authHandler.Me)
 	r.Post("/api/v1/auth/caldav-password", authHandler.GenerateCaldavPassword)
@@ -171,6 +170,16 @@ func main() {
 	// the handler verifies the token itself. The /me routes stay protected.
 	householdHandler := household.NewHandler(householdRepo).WithVerifier(oidcVerifier)
 	r.Post("/api/v1/households", householdHandler.Create)
+
+	// Instance admin endpoints (families, users, deactivation). Outside
+	// RequireAuth: an instance admin need not be a household member. The
+	// handler's RequireInstanceAdmin verifies the Dex token and reads
+	// users.is_instance_admin and users.active from the DB on every request.
+	adminHandler := admin.NewHandler(admin.NewRepo(pool), oidcVerifier)
+	if dexClient != nil { // a nil *dex.Client must not become a non-nil interface
+		adminHandler.WithDex(dexClient)
+	}
+	adminHandler.RegisterRoutes(r)
 
 	// Protected endpoints (require valid JWT).
 	r.Group(func(r chi.Router) {
@@ -331,9 +340,6 @@ func main() {
 
 		// Agent tokens: each member creates, lists and revokes their own.
 		agenttoken.NewHandler(agenttoken.NewRepo(pool)).RegisterRoutes(r)
-
-		// Admin routes (require owner role — enforced in handler).
-		r.Post("/api/v1/admin/users", authHandler.AdminCreateUser)
 	})
 
 	// Start the HTTP server.
@@ -362,30 +368,4 @@ func main() {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}
-}
-
-// householdAdapter wraps household.Repo to satisfy auth.HouseholdCreator
-// without creating an import cycle (auth → household → auth).
-type householdAdapter struct {
-	repo *household.Repo
-}
-
-func (a *householdAdapter) CreateHousehold(ctx context.Context, name string) (string, error) {
-	hh, err := a.repo.CreateHousehold(ctx, name)
-	if err != nil {
-		return "", err
-	}
-	return hh.ID.String(), nil
-}
-
-func (a *householdAdapter) CreateMembership(ctx context.Context, householdID, userID, role string) error {
-	hhUUID, err := uuid.Parse(householdID)
-	if err != nil {
-		return fmt.Errorf("parse household id: %w", err)
-	}
-	userUUID, err := uuid.Parse(userID)
-	if err != nil {
-		return fmt.Errorf("parse user id: %w", err)
-	}
-	return a.repo.CreateMembership(ctx, hhUUID, userUUID, role)
 }

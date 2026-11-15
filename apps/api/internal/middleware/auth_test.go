@@ -73,7 +73,7 @@ func testDB(t *testing.T) *pgxpool.Pool {
 // the token itself), /bills behind RequireAuth.
 func router(pool *pgxpool.Pool, v *auth.Verifier) http.Handler {
 	r := chi.NewRouter()
-	authHandler := auth.NewHandler(auth.NewRepo(pool), nil, &config.Config{}, nil, nil, v)
+	authHandler := auth.NewHandler(auth.NewRepo(pool), &config.Config{}, nil, nil, v)
 	r.Get("/api/v1/auth/me", authHandler.Me)
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(v))

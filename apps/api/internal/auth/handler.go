@@ -20,26 +20,19 @@ import (
 	"home-os/api/pkg/smtp"
 )
 
-// HouseholdCreator is the subset of household.Repo that auth needs.
-// Defined as an interface to avoid an import cycle (auth → household → auth).
-type HouseholdCreator interface {
-	CreateHousehold(ctx context.Context, name string) (id string, err error)
-	CreateMembership(ctx context.Context, householdID, userID, role string) error
-}
-
 // Handler holds the dependencies needed by auth HTTP handlers.
 type Handler struct {
-	repo          *Repo
-	householdRepo HouseholdCreator
-	cfg           *config.Config
-	smtpClient    *smtp.Client
-	dexClient     *dex.Client
-	verifier      *Verifier
+	repo       *Repo
+	cfg        *config.Config
+	smtpClient *smtp.Client
+	dexClient  *dex.Client
+	verifier   *Verifier
 }
 
-// NewHandler creates a new auth handler.
-func NewHandler(repo *Repo, householdRepo HouseholdCreator, cfg *config.Config, smtpClient *smtp.Client, dexClient *dex.Client, verifier *Verifier) *Handler {
-	return &Handler{repo: repo, householdRepo: householdRepo, cfg: cfg, smtpClient: smtpClient, dexClient: dexClient, verifier: verifier}
+// NewHandler creates a new auth handler. Instance-admin user provisioning
+// lives in the admin package (it replaced AdminCreateUser here).
+func NewHandler(repo *Repo, cfg *config.Config, smtpClient *smtp.Client, dexClient *dex.Client, verifier *Verifier) *Handler {
+	return &Handler{repo: repo, cfg: cfg, smtpClient: smtpClient, dexClient: dexClient, verifier: verifier}
 }
 
 // --- token verification for handlers outside RequireAuth ---
@@ -122,112 +115,6 @@ type userResponse struct {
 	AvatarURL *string `json:"avatar_url,omitempty"`
 	CreatedAt string  `json:"created_at"`
 	UpdatedAt string  `json:"updated_at"`
-}
-
-// adminCreateUserRequest is the request body for AdminCreateUser.
-type adminCreateUserRequest struct {
-	Email         string `json:"email"`
-	Name          string `json:"name"`
-	Password      string `json:"password"`
-	HouseholdName string `json:"household_name"`
-}
-
-// adminCreateUserResponse is the response body for AdminCreateUser.
-type adminCreateUserResponse struct {
-	UserID      string `json:"user_id"`
-	HouseholdID string `json:"household_id"`
-}
-
-// AdminCreateUser creates a new user, a household, and an owner membership.
-// Requires a valid JWT with role "owner". POST /api/v1/admin/users.
-func (h *Handler) AdminCreateUser(w http.ResponseWriter, r *http.Request) {
-	claims := h.authenticate(w, r)
-	if claims == nil {
-		return
-	}
-
-	// Only users with the owner role can create new admin users.
-	if claims.Role != RoleOwner {
-		apierr.JSON(w, http.StatusForbidden, apierr.ErrorResponse{
-			Error: apierr.ErrorDetail{Code: "FORBIDDEN", Message: "Only owners can create users"},
-		})
-		return
-	}
-
-	var req adminCreateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		apierr.BadRequest(w, "invalid request body")
-		return
-	}
-
-	req.Email = strings.TrimSpace(req.Email)
-	req.Name = strings.TrimSpace(req.Name)
-
-	if req.Email == "" || req.Name == "" || req.Password == "" {
-		apierr.BadRequest(w, "email, name, and password are required")
-		return
-	}
-
-	if len(req.Password) < 8 {
-		apierr.BadRequest(w, "password must be at least 8 characters")
-		return
-	}
-
-	// Check for existing user.
-	existing, err := h.repo.GetUserByEmail(r.Context(), req.Email)
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-	if existing != nil {
-		apierr.Conflict(w, "email already registered")
-		return
-	}
-
-	// Hash password.
-	hash, err := HashPassword(req.Password)
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-
-	// Create user.
-	user, err := h.repo.CreateUser(r.Context(), req.Email, req.Name, hash)
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-
-	// Register password in Dex's local password database.
-	if h.dexClient != nil {
-		if err := h.dexClient.CreatePassword(r.Context(), req.Email, hash, user.ID.String()); err != nil {
-			slog.Warn("dex: failed to create password for admin-created user", "email", req.Email, "error", err)
-		}
-	} else {
-		slog.Info("dex: no client configured, skipping password creation", "email", req.Email)
-	}
-
-	// Create household.
-	householdName := req.HouseholdName
-	if householdName == "" {
-		householdName = req.Name + "'s Home"
-	}
-	hhID, err := h.householdRepo.CreateHousehold(r.Context(), householdName)
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-
-	// Create membership as owner.
-	if err := h.householdRepo.CreateMembership(r.Context(), hhID, user.ID.String(), RoleOwner); err != nil {
-		apierr.InternalError(w, err)
-		return
-	}
-
-	apierr.JSON(w, http.StatusCreated, adminCreateUserResponse{
-		UserID:      user.ID.String(),
-		HouseholdID: hhID,
-	})
 }
 
 // Me returns the currently authenticated user based on the Bearer token.

@@ -86,7 +86,7 @@ func caldavAuthenticates(t *testing.T, pool *pgxpool.Pool, username, password st
 
 func TestGenerateCaldavPassword_Unauthenticated(t *testing.T) {
 	signer := newDexTokenSigner(t)
-	h := NewHandler(nil, nil, &config.Config{}, nil, nil, signer.verifier())
+	h := NewHandler(nil, &config.Config{}, nil, nil, signer.verifier())
 
 	t.Run("no header", func(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, postCaldavPassword(h, "").Code)
@@ -119,7 +119,7 @@ func TestGenerateCaldavPassword_Member(t *testing.T) {
 	pool := resolverTestDB(t)
 	signer := newDexTokenSigner(t)
 	v := signer.verifier().WithResolver(NewMemberResolver(pool))
-	h := NewHandler(NewRepo(pool), nil, &config.Config{PublicURL: "https://home.example.com/"}, nil, nil, v)
+	h := NewHandler(NewRepo(pool), &config.Config{PublicURL: "https://home.example.com/"}, nil, nil, v)
 
 	sub := uniq("CiQcaldav")
 	email := uniq("caldav") + "@example.com"
@@ -256,7 +256,7 @@ func TestSelfVerifyingHandlers_ErrorMapping(t *testing.T) {
 			t.Run(hd.name+"/"+tc.name, func(t *testing.T) {
 				// repo is nil: every case must be answered before the handler
 				// touches the database.
-				h := NewHandler(nil, nil, &config.Config{}, nil, nil, signer.verifier().WithResolver(tc.resolver))
+				h := NewHandler(nil, &config.Config{}, nil, nil, signer.verifier().WithResolver(tc.resolver))
 				req := httptest.NewRequest(hd.method, hd.path, nil)
 				if tc.header != "" {
 					req.Header.Set("Authorization", tc.header)
