@@ -66,7 +66,13 @@ func TestBillCreate_VisibleToReadTools(t *testing.T) {
 	).Scan(&vendorID); err != nil {
 		t.Fatalf("insert vendor: %v", err)
 	}
-	propertyID := uuid.New()
+	var propertyID uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO properties (household_id, name) VALUES ($1, 'Lake house') RETURNING id`,
+		hh.HouseholdID,
+	).Scan(&propertyID); err != nil {
+		t.Fatalf("insert property: %v", err)
+	}
 
 	_, _, create := NewBillCreateTool(pool)
 	res, text := callTool(t, ctx, create, "bill_create", map[string]any{
@@ -76,8 +82,7 @@ func TestBillCreate_VisibleToReadTools(t *testing.T) {
 		"category":    "Utilities",
 		"autopay":     true,
 		"contact_id":  vendorID.String(),
-		"entity_type": "property",
-		"entity_id":   propertyID.String(),
+		"property_id": propertyID.String(),
 		"payment_url": "https://power.example.com/pay",
 		"notes":       "Paperless billing",
 	})
@@ -95,8 +100,9 @@ func TestBillCreate_VisibleToReadTools(t *testing.T) {
 	if !got.Autopay || got.Category == nil || *got.Category != "Utilities" {
 		t.Errorf("autopay/category not stored: %+v", got)
 	}
-	if got.ContactID == nil || *got.ContactID != vendorID.String() || got.EntityID == nil || *got.EntityID != propertyID.String() {
-		t.Errorf("vendor/entity not stored: %+v", got)
+	if got.ContactID == nil || *got.ContactID != vendorID.String() || got.PropertyID == nil || *got.PropertyID != propertyID.String() ||
+		strOrNil(got.SubjectType) != "property" || strOrNil(got.SubjectName) != "Lake house" || got.VehicleID != nil || got.AssetID != nil {
+		t.Errorf("vendor/subject not stored: %+v", got)
 	}
 	if want := today.Format("2006-01-02"); strOrNil(got.NextDueDate) != want || got.DaysUntilDue == nil || *got.DaysUntilDue != 0 {
 		t.Errorf("next due = %s (+%v days), want %s (+0)", strOrNil(got.NextDueDate), got.DaysUntilDue, want)
@@ -183,8 +189,8 @@ func TestBillCreate_MinimalFields(t *testing.T) {
 	if err := unmarshalData(text, &got); err != nil {
 		t.Fatalf("decode %q: %v", text, err)
 	}
-	if got.Autopay || got.Category != nil || got.ContactID != nil || got.EntityType != nil ||
-		got.EntityID != nil || got.PaymentURL != nil || got.Notes != nil {
+	if got.Autopay || got.Category != nil || got.ContactID != nil || got.PropertyID != nil || got.VehicleID != nil ||
+		got.AssetID != nil || got.SubjectType != nil || got.SubjectName != nil || got.PaymentURL != nil || got.Notes != nil {
 		t.Errorf("optional fields should be empty: %s", text)
 	}
 	if got.NextDueDate == nil || got.NextDueWeekday == nil {
@@ -241,9 +247,15 @@ func TestBillCreate_Validation(t *testing.T) {
 		{"autopay not a bool", valid(map[string]any{"autopay": "yes"}), "autopay must be a boolean"},
 		{"contact_id not a uuid", valid(map[string]any{"contact_id": "abc"}), "contact_id must be a UUID"},
 		{"vendor from another household", valid(map[string]any{"contact_id": otherVendor.String()}), "No contact with id"},
-		{"entity_type without entity_id", valid(map[string]any{"entity_type": "vehicle"}), "must be provided together"},
-		{"entity_id without entity_type", valid(map[string]any{"entity_id": uuid.NewString()}), "must be provided together"},
-		{"entity_id not a uuid", valid(map[string]any{"entity_type": "pet", "entity_id": "x"}), "entity_id must be a UUID"},
+		{"entity_type without entity_id", valid(map[string]any{"entity_type": "vehicle"}), "entity_type needs entity_id"},
+		{"entity_id without entity_type", valid(map[string]any{"entity_id": uuid.NewString()}), "entity_id was given without entity_type"},
+		{"legacy pet subject", valid(map[string]any{"entity_type": "pet", "entity_id": uuid.NewString()}), "can't be tied to a"},
+		{"legacy id not a uuid", valid(map[string]any{"entity_type": "property", "entity_id": "x"}), "property_id must be a UUID"},
+		{"property_id not a uuid", valid(map[string]any{"property_id": "Home"}), "property_id must be a UUID"},
+		{"vehicle with property", valid(map[string]any{"vehicle_id": uuid.NewString(), "property_id": uuid.NewString()}), "can't also be for a property"},
+		{"unknown property", valid(map[string]any{"property_id": uuid.NewString()}), "No property with id"},
+		{"unknown vehicle", valid(map[string]any{"vehicle_id": uuid.NewString()}), "No vehicle with id"},
+		{"unknown asset", valid(map[string]any{"asset_id": uuid.NewString()}), "No asset with id"},
 		{"payment_url not http", valid(map[string]any{"payment_url": "javascript:alert(1)"}), "payment_url must be"},
 	}
 	for _, tc := range tests {
@@ -305,12 +317,20 @@ func TestNextDueDate(t *testing.T) {
 
 // createTestBill creates a fully populated bill through bill_create, named
 // Electric unless a name is given. It passes the hidden aliases entity_type,
-// entity_id and payment_url too.
+// entity_id (mapped onto property_id, for a new property in the vendor's
+// family) and payment_url too.
 func createTestBill(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vendorID uuid.UUID, name ...string) billData {
 	t.Helper()
 	billName := "Electric"
 	if len(name) > 0 {
 		billName = name[0]
+	}
+	var propertyID uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO properties (household_id, name) SELECT household_id, 'Home' FROM vendors WHERE id = $1 RETURNING id`,
+		vendorID,
+	).Scan(&propertyID); err != nil {
+		t.Fatalf("insert property: %v", err)
 	}
 	_, _, create := NewBillCreateTool(pool)
 	res, text := callTool(t, ctx, create, "bill_create", map[string]any{
@@ -321,7 +341,7 @@ func createTestBill(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vendo
 		"autopay":     true,
 		"contact_id":  vendorID.String(),
 		"entity_type": "property",
-		"entity_id":   uuid.NewString(),
+		"entity_id":   propertyID.String(),
 		"payment_url": "https://power.example.com/pay",
 		"notes":       "Paperless billing",
 	})
@@ -399,7 +419,7 @@ func TestBillUpdate_PartialUpdate(t *testing.T) {
 	}
 	if got.Name != orig.Name || got.Autopay != orig.Autopay ||
 		*got.Category != *orig.Category || *got.ContactID != *orig.ContactID ||
-		*got.EntityType != *orig.EntityType || *got.EntityID != *orig.EntityID ||
+		strOrNil(got.PropertyID) != strOrNil(orig.PropertyID) || orig.PropertyID == nil ||
 		*got.PaymentURL != *orig.PaymentURL || *got.Notes != *orig.Notes {
 		t.Errorf("untouched fields changed:\n got %s\n was %+v", text, orig)
 	}
@@ -435,7 +455,13 @@ func TestBillUpdate_SetAndClearOptionalFields(t *testing.T) {
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	orig := createTestBill(t, ctx, pool, insertVendor(t, pool, hh.HouseholdID, "Power Co"))
 	newVendor := insertVendor(t, pool, hh.HouseholdID, "Gas Co")
-	vehicleID := uuid.New()
+	var vehicleID uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO vehicles (household_id, year, make, model) VALUES ($1, 2022, 'Honda', 'Odyssey') RETURNING id`,
+		hh.HouseholdID,
+	).Scan(&vehicleID); err != nil {
+		t.Fatalf("insert vehicle: %v", err)
+	}
 
 	_, _, update := NewBillUpdateTool(pool)
 	res, text := callTool(t, ctx, update, "bill_update", map[string]any{
@@ -444,8 +470,7 @@ func TestBillUpdate_SetAndClearOptionalFields(t *testing.T) {
 		"category":    "Fuel",
 		"autopay":     false,
 		"contact_id":  newVendor.String(),
-		"entity_type": "vehicle",
-		"entity_id":   vehicleID.String(),
+		"vehicle_id":  vehicleID.String(),
 		"payment_url": "http://gas.example.com",
 		"notes":       "new notes",
 	})
@@ -454,7 +479,8 @@ func TestBillUpdate_SetAndClearOptionalFields(t *testing.T) {
 	}
 	got := decodeUpdated(t, text)
 	if got.Name != "Gas" || got.Autopay || *got.Category != "Fuel" || *got.ContactID != newVendor.String() ||
-		*got.EntityType != "vehicle" || *got.EntityID != vehicleID.String() ||
+		strOrNil(got.VehicleID) != vehicleID.String() || got.PropertyID != nil || strOrNil(got.SubjectType) != "vehicle" ||
+		strOrNil(got.SubjectName) != "2022 Honda Odyssey" ||
 		*got.PaymentURL != "http://gas.example.com" || *got.Notes != "new notes" {
 		t.Errorf("fields not set: %s", text)
 	}
@@ -475,7 +501,7 @@ func TestBillUpdate_SetAndClearOptionalFields(t *testing.T) {
 		t.Fatalf("clearing update returned tool error: %s", text)
 	}
 	got = decodeUpdated(t, text)
-	if got.Category != nil || got.ContactID != nil || got.EntityType != nil || got.EntityID != nil ||
+	if got.Category != nil || got.ContactID != nil || got.PropertyID != nil || got.VehicleID != nil || got.SubjectType != nil ||
 		got.PaymentURL != nil || got.Notes != nil {
 		t.Errorf("optional fields not cleared: %s", text)
 	}
@@ -618,9 +644,12 @@ func TestBillUpdate_Validation(t *testing.T) {
 		{"autopay not a bool", withID(map[string]any{"autopay": "yes"}), "autopay must be a boolean"},
 		{"contact_id not a uuid", withID(map[string]any{"contact_id": "abc"}), "contact_id must be a UUID"},
 		{"vendor from another household", withID(map[string]any{"contact_id": otherVendor.String()}), "No contact with id"},
-		{"entity_type alone", withID(map[string]any{"entity_type": "pet"}), "must be provided together"},
-		{"entity_id alone", withID(map[string]any{"entity_id": uuid.NewString()}), "must be provided together"},
-		{"entity cleared on one side", withID(map[string]any{"entity_type": "", "entity_id": uuid.NewString()}), "set or cleared together"},
+		{"entity_type alone", withID(map[string]any{"entity_type": "vehicle"}), "entity_type needs entity_id"},
+		{"entity_id alone", withID(map[string]any{"entity_id": uuid.NewString()}), "entity_id was given without entity_type"},
+		{"legacy pet subject", withID(map[string]any{"entity_type": "pet", "entity_id": uuid.NewString()}), "can't be tied to a"},
+		{"vehicle_id not a uuid", withID(map[string]any{"vehicle_id": "Honda"}), "vehicle_id must be a UUID"},
+		{"vehicle with asset", withID(map[string]any{"vehicle_id": uuid.NewString(), "asset_id": uuid.NewString()}), "can't also be for a property"},
+		{"unknown property", withID(map[string]any{"property_id": uuid.NewString()}), "No property with id"},
 		{"payment_url not http", withID(map[string]any{"payment_url": "ftp://x.example.com"}), "payment_url must be"},
 		{"valid field with invalid field", withID(map[string]any{"amount": 5.0, "due_day": 0.0}), "due_day must be a whole number"},
 	}

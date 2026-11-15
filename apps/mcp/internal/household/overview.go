@@ -155,7 +155,7 @@ var howTo = []string{
 	"person_id comes from people[].id here or from person_find.",
 	"calendar_id accepts a calendar name, e.g. Family.",
 	"Not sure which area something is in? search_all looks everywhere at once.",
-	"Change the family's name or timezone with family_update.",
+	"The family owns everything (rename it or change its timezone with family_update): properties have rooms, and an asset sits in a room, a property or the family. Bills, loans and upkeep may be for one property, vehicle or asset; none needs a property.",
 }
 
 // NewFamilyOverviewTool creates family_overview (catalog v2; replaces

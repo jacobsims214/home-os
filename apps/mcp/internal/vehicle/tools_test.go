@@ -191,20 +191,20 @@ func TestVehicleFind(t *testing.T) {
 		VALUES ($1, 2019, 'Ford', 'F-150', 'Tow hitch 100%_ rated') RETURNING id`, hh.HouseholdID)
 	theirs := insertID(t, pool, `INSERT INTO vehicles (household_id, make, model) VALUES ($1, 'Tesla', 'Model 3') RETURNING id`, otherHH.HouseholdID)
 
-	// Linked records: a typed loan, a typed bill, a legacy-only bill, pending
-	// and done upkeep, and another family's loan on our vehicle id (must not count).
+	// Linked records: a typed loan, two typed bills, pending and done upkeep,
+	// and another family's bill on their own vehicle (must not count).
 	insertID(t, pool, `INSERT INTO loans (household_id, name, lender, original_amount, remaining_balance, monthly_payment, vehicle_id)
 		VALUES ($1, 'Odyssey loan', 'Honda Finance', 30000, 21000, 550, $2) RETURNING id`, hh.HouseholdID, odyssey)
-	insertID(t, pool, `INSERT INTO bills (household_id, name, amount, due_day, vehicle_id, entity_type)
-		VALUES ($1, 'Car insurance', 100, 5, $2, 'vehicle') RETURNING id`, hh.HouseholdID, odyssey)
-	insertID(t, pool, `INSERT INTO bills (household_id, name, amount, frequency, due_date, entity_type, entity_id)
-		VALUES ($1, 'Registration', 85, 'annual', '2027-03-01', 'vehicle', $2) RETURNING id`, hh.HouseholdID, odyssey)
+	insertID(t, pool, `INSERT INTO bills (household_id, name, amount, due_day, vehicle_id)
+		VALUES ($1, 'Car insurance', 100, 5, $2) RETURNING id`, hh.HouseholdID, odyssey)
+	insertID(t, pool, `INSERT INTO bills (household_id, name, amount, frequency, due_date, vehicle_id)
+		VALUES ($1, 'Registration', 85, 'annual', '2027-03-01', $2) RETURNING id`, hh.HouseholdID, odyssey)
 	insertID(t, pool, `INSERT INTO maintenance_tasks (household_id, name, due_date, vehicle_id)
 		VALUES ($1, 'Oil change', '2026-12-04', $2) RETURNING id`, hh.HouseholdID, odyssey)
 	insertID(t, pool, `INSERT INTO maintenance_tasks (household_id, name, status, vehicle_id)
 		VALUES ($1, 'Old tires', 'done', $2) RETURNING id`, hh.HouseholdID, odyssey)
-	insertID(t, pool, `INSERT INTO bills (household_id, name, amount, due_day, entity_type, entity_id)
-		VALUES ($1, 'Not ours', 1, 1, 'vehicle', $2) RETURNING id`, otherHH.HouseholdID, odyssey)
+	insertID(t, pool, `INSERT INTO bills (household_id, name, amount, due_day, vehicle_id)
+		VALUES ($1, 'Not ours', 1, 1, $2) RETURNING id`, otherHH.HouseholdID, theirs)
 
 	t.Run("list", func(t *testing.T) {
 		env := call(t, ctx, find, map[string]any{})

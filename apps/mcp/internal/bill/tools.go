@@ -3,7 +3,8 @@
 // bill_update, bill_delete and bill_pay. Every result is built with
 // internal/respond and every tool declares all four annotation hints and an
 // outputSchema. All operations are scoped to the authenticated household via
-// JWT claims.
+// JWT claims. Bills are about a property, vehicle or asset through the
+// typed subject columns (domain model v2, see subject.go).
 package bill
 
 import (
@@ -105,9 +106,14 @@ func daysBetween(a, b time.Time) int {
 
 // billColumns is the column list every bill query selects or returns, in
 // the order scanBill reads it.
+// The subject name is a scalar subquery, not a join, so the same list works
+// in RETURNING clauses.
 const billColumns = `id, name, amount, due_day, category, COALESCE(is_autopay, false),
-	vendor_id, entity_type, entity_id, payment_url, notes,
-	created_at, updated_at, paid_date, paid_for_due_date`
+	vendor_id, property_id, vehicle_id, asset_id, payment_url, notes,
+	created_at, updated_at, paid_date, paid_for_due_date,
+	COALESCE((SELECT a.name FROM assets a WHERE a.id = bills.asset_id),
+	         (SELECT NULLIF(concat_ws(' ', v.year, v.make, v.model), '') FROM vehicles v WHERE v.id = bills.vehicle_id),
+	         (SELECT p.name FROM properties p WHERE p.id = bills.property_id))`
 
 // billRow is a bills row as the tools load it. amount and due_day are
 // pointers because API-created rows can leave them NULL.
@@ -119,8 +125,9 @@ type billRow struct {
 	Category   *string
 	AutoPay    bool
 	VendorID   *uuid.UUID
-	EntityType *string
-	EntityID   *uuid.UUID
+	PropertyID *uuid.UUID
+	VehicleID  *uuid.UUID
+	AssetID    *uuid.UUID
 	PaymentURL *string
 	Notes      *string
 	CreatedAt  time.Time
@@ -129,14 +136,16 @@ type billRow struct {
 	// PaidFor is bills.paid_for_due_date: the due date paid_date covers,
 	// nil when not stored (coverage is then inferred from paid_date).
 	PaidFor *time.Time
+	// SubjectName is the name of the property, vehicle or asset.
+	SubjectName *string
 }
 
 // scanBill reads one row of billColumns.
 func scanBill(row pgx.Row) (billRow, error) {
 	var r billRow
 	err := row.Scan(&r.ID, &r.Name, &r.Amount, &r.DueDay, &r.Category, &r.AutoPay,
-		&r.VendorID, &r.EntityType, &r.EntityID, &r.PaymentURL, &r.Notes,
-		&r.CreatedAt, &r.UpdatedAt, &r.PaidDate, &r.PaidFor)
+		&r.VendorID, &r.PropertyID, &r.VehicleID, &r.AssetID, &r.PaymentURL, &r.Notes,
+		&r.CreatedAt, &r.UpdatedAt, &r.PaidDate, &r.PaidFor, &r.SubjectName)
 	return r, err
 }
 
@@ -159,8 +168,11 @@ type billData struct {
 	Category       *string   `json:"category"`
 	Autopay        bool      `json:"autopay"`
 	ContactID      *string   `json:"contact_id" jsonschema_description:"The contact (vendor) the bill is paid to."`
-	EntityType     *string   `json:"entity_type"`
-	EntityID       *string   `json:"entity_id"`
+	PropertyID     *string   `json:"property_id" jsonschema_description:"The house or other property the bill is for (an asset's property for an asset bill)."`
+	VehicleID      *string   `json:"vehicle_id" jsonschema_description:"The car or other vehicle the bill is for."`
+	AssetID        *string   `json:"asset_id" jsonschema_description:"The thing the bill is for."`
+	SubjectType    *string   `json:"subject_type" jsonschema_description:"property, vehicle or asset; null for a family-level bill."`
+	SubjectName    *string   `json:"subject_name" jsonschema_description:"Name of the property, vehicle or asset."`
 	PaymentURL     *string   `json:"payment_url"`
 	Notes          *string   `json:"notes"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -202,9 +214,13 @@ func (r billRow) data(today time.Time) billData {
 	b := billData{
 		ID: r.ID.String(), Name: r.Name, Amount: r.Amount, DueDay: r.DueDay,
 		Category: r.Category, Autopay: r.AutoPay, ContactID: uuidString(r.VendorID),
-		EntityType: r.EntityType, EntityID: uuidString(r.EntityID),
-		PaymentURL: r.PaymentURL, Notes: r.Notes,
+		PropertyID: uuidString(r.PropertyID), VehicleID: uuidString(r.VehicleID), AssetID: uuidString(r.AssetID),
+		SubjectType: subjectType(r.PropertyID, r.VehicleID, r.AssetID),
+		PaymentURL:  r.PaymentURL, Notes: r.Notes,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	if b.SubjectType != nil {
+		b.SubjectName = r.SubjectName
 	}
 	if r.PaidDate != nil {
 		b.PaidDate = dateOnly(*r.PaidDate)
@@ -263,16 +279,20 @@ type findInput struct {
 	category      string
 	dueWithinDays *int
 	autopay       *bool
-	entityType    *string
-	entityID      *uuid.UUID
-	limit         int
-	offset        int
+	propertyID    *uuid.UUID
+	vehicleID     *uuid.UUID
+	assetID       *uuid.UUID
+	// subjectKind is the legacy entity_type filter on its own: property,
+	// vehicle or asset (bills about any one of that kind).
+	subjectKind string
+	limit       int
+	offset      int
 }
 
 // filtered reports whether any filter narrows the list.
 func (in findInput) filtered() bool {
 	return in.id != nil || in.query != "" || in.category != "" || in.dueWithinDays != nil ||
-		in.autopay != nil || in.entityType != nil || in.entityID != nil
+		in.autopay != nil || in.propertyID != nil || in.vehicleID != nil || in.assetID != nil || in.subjectKind != ""
 }
 
 // NewBillFindTool creates the bill_find MCP tool (catalog v2, class R),
@@ -284,7 +304,8 @@ func (in findInput) filtered() bool {
 // bills whose next unpaid due date is within [today, today+N]; a bill
 // already paid for its current due date counts under the following one.
 // Pagination is limit + the opaque next_cursor (respond.EncodeCursor),
-// passed back as cursor.
+// passed back as cursor. property_id matches bills about that property,
+// including bills about its assets (their property_id is derived).
 func NewBillFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("List or search bills with amount and next due date. Use due_within_days for \"what's due soon?\". " +
@@ -296,6 +317,8 @@ func NewBillFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 			mcp.Description("Only bills next due within this many days; 0 = today, e.g. 7"),
 			mcp.Min(0), mcp.Max(maxDueWithinDays)),
 		mcp.WithBoolean("autopay", mcp.Description("true = only autopay bills, false = only manual ones")),
+		mcp.WithString("property_id", mcp.Description("Only bills for this property (UUID from property_find)")),
+		mcp.WithString("vehicle_id", mcp.Description("Only bills for this vehicle (UUID from vehicle_find)")),
 		mcp.WithNumber("limit", mcp.Description("Max bills to return, 1-100 (default 25)"), mcp.Min(1), mcp.Max(maxLimit)),
 		mcp.WithString("cursor", mcp.Description("next_cursor from the previous result, for the next page")),
 		respond.ListSchema[billData](),
@@ -326,9 +349,13 @@ func NewBillFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 			   AND ($3 = '' OR name ILIKE '%' || $3 || '%' OR category ILIKE '%' || $3 || '%' OR notes ILIKE '%' || $3 || '%')
 			   AND ($4 = '' OR lower(category) = lower($4))
 			   AND ($5::boolean IS NULL OR COALESCE(is_autopay, false) = $5)
-			   AND ($6::text IS NULL OR entity_type = $6)
-			   AND ($7::uuid IS NULL OR entity_id = $7)`,
-			claims.HouseholdID, in.id, escapeLike(in.query), in.category, in.autopay, in.entityType, in.entityID,
+			   AND ($6::uuid IS NULL OR property_id = $6)
+			   AND ($7::uuid IS NULL OR vehicle_id = $7)
+			   AND ($8::uuid IS NULL OR asset_id = $8)
+			   AND ($9 = '' OR ($9 = 'property' AND property_id IS NOT NULL)
+			        OR ($9 = 'vehicle' AND vehicle_id IS NOT NULL) OR ($9 = 'asset' AND asset_id IS NOT NULL))`,
+			claims.HouseholdID, in.id, escapeLike(in.query), in.category, in.autopay,
+			in.propertyID, in.vehicleID, in.assetID, in.subjectKind,
 		)
 		if err != nil {
 			return respond.Failed("find bills", err), nil
@@ -436,10 +463,35 @@ func findNext(in findInput, page []billData) []string {
 	}
 }
 
-// parseFindInput validates bill_find arguments.
+// parseFindInput validates bill_find arguments (already normalized, so
+// args is a copy it may change).
 func parseFindInput(args map[string]any) (findInput, error) {
 	in := findInput{limit: defaultLimit}
 	var err error
+	// Legacy filter: entity_type alone means "bills about any property /
+	// vehicle / asset"; with entity_id it maps onto the typed filters.
+	if given(args, "entity_type") && !given(args, "entity_id") {
+		kind, err := optionalString(args, "entity_type")
+		if err != nil {
+			return in, err
+		}
+		delete(args, "entity_type")
+		if kind != nil {
+			switch k := strings.ToLower(*kind); k {
+			case subjectProperty, subjectVehicle, subjectAsset:
+				in.subjectKind = k
+			default:
+				return in, badArg("entity_type", fmt.Sprintf("Bills can't be tied to a %q.", *kind),
+					"Pass property_id or vehicle_id, or leave them out.")
+			}
+		}
+	}
+	if err := subjectAliases(args); err != nil {
+		return in, err
+	}
+	if s, ok := args["property_id"].(string); ok && strings.TrimSpace(s) == "" {
+		delete(args, "property_id") // "not about anything" is no filter
+	}
 	if in.id, err = optionalUUID(args, "id"); err != nil {
 		return in, err
 	}
@@ -463,11 +515,15 @@ func parseFindInput(args map[string]any) (findInput, error) {
 	} else if ok {
 		in.autopay = &v
 	}
-	// Hidden aliases until domain model v2 (#4450) adds typed subjects.
-	if in.entityType, err = optionalString(args, "entity_type"); err != nil {
+	if in.propertyID, err = optionalUUID(args, "property_id"); err != nil {
 		return in, err
 	}
-	if in.entityID, err = optionalUUID(args, "entity_id"); err != nil {
+	if in.vehicleID, err = optionalUUID(args, "vehicle_id"); err != nil {
+		return in, err
+	}
+	// asset_id is not advertised on bill_find; it arrives via the legacy
+	// entity_type=asset alias.
+	if in.assetID, err = optionalUUID(args, "asset_id"); err != nil {
 		return in, err
 	}
 	if n, ok, err := wholeNumber(args, "limit", 1, maxLimit); err != nil {

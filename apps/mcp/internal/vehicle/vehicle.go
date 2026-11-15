@@ -38,20 +38,17 @@ const (
 // toolHandler is the signature every vehicle tool handler has.
 type toolHandler = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)
 
-// legacyLink matches a loans or bills row (alias t) tied to vehicle v. The
-// typed vehicle_id is the link (domain v2). Rows that only carry the legacy
-// entity_type/entity_id pair also count: bill_create/bill_update still write
-// only the legacy pair until #4450, and pre-039 rows 039 could not map have
-// no typed column. 040 (#4601) drops entity_type and must delete the second
-// half of this condition.
-const legacyLink = `(t.vehicle_id = v.id OR (t.vehicle_id IS NULL AND t.entity_type = 'vehicle' AND t.entity_id = v.id))`
+// vehicleLink matches a loans or bills row (alias t) tied to vehicle v by
+// its typed vehicle_id (domain model v2). The legacy entity_type/entity_id
+// pair is no longer read: 039 backfilled it and 040 drops it.
+const vehicleLink = `(t.vehicle_id = v.id)`
 
 // vehicleSelect loads vehicles with counts of what is linked to them.
 // Scanned by scanVehicle.
 var vehicleSelect = `SELECT v.id, v.year, v.make, v.model, v.vin, v.license_plate, v.color, v.notes,
 	       v.purchase_price::float8, v.purchase_date, v.current_value::float8, v.created_at, v.updated_at,
-	       (SELECT count(*) FROM loans t WHERE t.household_id = v.household_id AND ` + legacyLink + `),
-	       (SELECT count(*) FROM bills t WHERE t.household_id = v.household_id AND ` + legacyLink + `),
+	       (SELECT count(*) FROM loans t WHERE t.household_id = v.household_id AND ` + vehicleLink + `),
+	       (SELECT count(*) FROM bills t WHERE t.household_id = v.household_id AND ` + vehicleLink + `),
 	       (SELECT count(*) FROM maintenance_tasks m WHERE m.vehicle_id = v.id AND m.household_id = v.household_id
 	           AND m.status IN ('pending', 'in_progress'))
 	FROM vehicles v`
@@ -201,7 +198,7 @@ func loadRelated(ctx context.Context, q interface {
 
 	rows, err := q.Query(ctx, `SELECT t.id, t.name, t.lender, t.remaining_balance::float8, t.monthly_payment::float8
 		FROM loans t JOIN vehicles v ON v.id = $1 AND v.household_id = t.household_id
-		WHERE t.household_id = $2 AND `+legacyLink+` ORDER BY lower(t.name), t.id`, vehicleID, householdID)
+		WHERE t.household_id = $2 AND `+vehicleLink+` ORDER BY lower(t.name), t.id`, vehicleID, householdID)
 	if err != nil {
 		return nil, fmt.Errorf("load vehicle loans: %w", err)
 	}
@@ -218,7 +215,7 @@ func loadRelated(ctx context.Context, q interface {
 
 	rows, err = q.Query(ctx, `SELECT t.id, t.name, t.amount::float8, t.frequency, t.due_day, t.due_date
 		FROM bills t JOIN vehicles v ON v.id = $1 AND v.household_id = t.household_id
-		WHERE t.household_id = $2 AND `+legacyLink+` ORDER BY lower(t.name), t.id`, vehicleID, householdID)
+		WHERE t.household_id = $2 AND `+vehicleLink+` ORDER BY lower(t.name), t.id`, vehicleID, householdID)
 	if err != nil {
 		return nil, fmt.Errorf("load vehicle bills: %w", err)
 	}

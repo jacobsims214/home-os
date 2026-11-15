@@ -324,8 +324,8 @@ func TestBudgetSummary_Obligations(t *testing.T) {
 }
 
 // TestBudgetSummary_NetWorth checks values (asset current_value, else
-// purchase_price) and the loan split by typed subject, with the legacy
-// entity_type fallback for loans MCP loan_create wrote before #4450.
+// purchase_price) and the loan split by typed subject (domain model v2; the
+// legacy entity_type/entity_id pair is no longer read).
 func TestBudgetSummary_NetWorth(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
@@ -356,8 +356,8 @@ func TestBudgetSummary_NetWorth(t *testing.T) {
 	}{
 		{"Mortgage (typed)", "property_id", 250000, []any{house}},
 		{"Car loan (typed)", "vehicle_id", 9000, []any{car}},
-		{"Truck loan (legacy entity_type)", "entity_type, entity_id", 7000, []any{"vehicle", truck}},
-		{"HELOC (legacy entity_type)", "entity_type, entity_id", 20000, []any{"property", house}},
+		{"Truck loan (typed)", "vehicle_id", 7000, []any{truck}},
+		{"HELOC (typed)", "property_id", 20000, []any{house}},
 		{"HVAC financing (asset in the house)", "asset_id", 3000, []any{hvac}},
 		{"Student loan (family)", "", 12000, nil},
 	}

@@ -316,14 +316,12 @@ func loadObligations(ctx context.Context, pool *pgxpool.Pool, householdID string
 	return ob, nil
 }
 
-// Loan subject predicates. Typed subjects (038/039, domain model v2) win.
-// A loan with no typed subject falls back to the legacy entity_type/entity_id,
-// because MCP loan_create/loan_update write only those until #4450. Drop the
-// fallback when 040 drops the legacy columns.
+// Loan subject predicates over the typed subject columns (domain model v2,
+// 038/039). An asset loan also carries its asset's property_id
+// (derive_subject_property), so it is not counted as mortgage debt.
 const (
-	untypedLoan  = `(property_id IS NULL AND vehicle_id IS NULL AND asset_id IS NULL AND entity_id IS NOT NULL)`
-	propertyLoan = `((property_id IS NOT NULL AND asset_id IS NULL) OR (` + untypedLoan + ` AND entity_type = 'property'))`
-	vehicleLoan  = `(vehicle_id IS NOT NULL OR (` + untypedLoan + ` AND entity_type = 'vehicle'))`
+	propertyLoan = `(property_id IS NOT NULL AND asset_id IS NULL)`
+	vehicleLoan  = `(vehicle_id IS NOT NULL)`
 )
 
 // loadNetWorth sums what the family owns and owes. An asset counts at its

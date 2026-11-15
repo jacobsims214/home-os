@@ -22,9 +22,8 @@ import (
 
 // Column limits from the bills table (migrations 007 and 020).
 const (
-	maxNameLen       = 255
-	maxCategoryLen   = 100
-	maxEntityTypeLen = 50
+	maxNameLen     = 255
+	maxCategoryLen = 100
 	// NUMERIC(12,2) holds at most 9,999,999,999.99.
 	maxAmount = 9_999_999_999.99
 )
@@ -67,8 +66,7 @@ type createBillInput struct {
 	category   *string
 	autopay    bool
 	contactID  *uuid.UUID
-	entityType *string
-	entityID   *uuid.UUID
+	subject    subject
 	paymentURL *string
 	notes      *string
 }
@@ -129,8 +127,9 @@ func writeOutbox(ctx context.Context, tx pgx.Tx, eventType, householdID string, 
 // the same name (any case), amount and due_day created in the household in
 // the last 10 minutes returns that bill with duplicate true instead of a
 // second row (bills have no author column, so the guard is household-wide).
-// frequency, due_date and estimate arrive with #4468; typed subjects with
-// #4450 (entity_type/entity_id stay accepted as hidden aliases until then).
+// frequency, due_date and estimate arrive with #4468. The bill may be about
+// one property, vehicle or asset (typed subject columns, domain model v2);
+// the legacy entity_type/entity_id params are mapped onto them.
 func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Add a recurring monthly bill (electric, internet, Netflix) due on due_day each month. " +
@@ -142,6 +141,9 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		mcp.WithString("category", mcp.Description("Category, e.g. Utilities, Insurance, Subscription")),
 		mcp.WithBoolean("autopay", mcp.Description("true when it is paid automatically (default false)")),
 		mcp.WithString("contact_id", mcp.Description("Contact (vendor) id it is paid to, from contact_find")),
+		mcp.WithString("property_id", mcp.Description("House or other property it is for (UUID from property_find)")),
+		mcp.WithString("vehicle_id", mcp.Description("Car or other vehicle it is for (UUID from vehicle_find)")),
+		mcp.WithString("asset_id", mcp.Description("Thing it is for (UUID from asset_find)")),
 		mcp.WithString("notes", mcp.Description("Free-text notes, e.g. account number hint")),
 		respond.Schema[billData](),
 	}
@@ -153,7 +155,11 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return notSignedIn(), nil
 		}
 
-		in, err := parseCreateBillInput(normalizeArgs(req.GetArguments()))
+		args := normalizeArgs(req.GetArguments())
+		if err := subjectAliases(args); err != nil {
+			return invalid(err, createExample), nil
+		}
+		in, err := parseCreateBillInput(args)
 		if err != nil {
 			return invalid(err, createExample), nil
 		}
@@ -172,6 +178,11 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			if !ok {
 				return contactMissing(*in.contactID, createExample), nil
 			}
+		}
+		if res, err := checkSubject(ctx, tx, in.subject, claims.HouseholdID, createExample); err != nil {
+			return respond.Failed("create the bill", err), nil
+		} else if res != nil {
+			return res, nil
 		}
 
 		today, err := householdToday(ctx, tx, claims.HouseholdID)
@@ -204,13 +215,16 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 
 		r, err := scanBill(tx.QueryRow(ctx,
 			`INSERT INTO bills (household_id, name, amount, due_day, category, is_autopay,
-			                    vendor_id, entity_type, entity_id, payment_url, notes)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			                    vendor_id, property_id, vehicle_id, asset_id, payment_url, notes)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			 RETURNING `+billColumns,
 			claims.HouseholdID, in.name, in.amount, in.dueDay, in.category, in.autopay,
-			in.contactID, in.entityType, in.entityID, in.paymentURL, in.notes,
+			in.contactID, in.subject.propertyID, in.subject.vehicleID, in.subject.assetID, in.paymentURL, in.notes,
 		))
 		if err != nil {
+			if res := subjectDBError(err, createExample); res != nil {
+				return res, nil
+			}
 			return respond.Failed("create the bill", err), nil
 		}
 
@@ -243,6 +257,7 @@ type billUpdate struct {
 	values    []any
 	params    []string   // the catalog parameter names that changed, for the summary
 	contactID *uuid.UUID // set when contact_id is being set (not cleared)
+	subject   subject    // the new subject when any subject param was given
 }
 
 func (u *billUpdate) set(param, column string, value any) {
@@ -255,7 +270,9 @@ func (u *billUpdate) set(param, column string, value any) {
 // It changes only the fields given for a bill in the authenticated household
 // and returns the updated bill with its next due date (BillDue, honouring
 // paid_date, as bill_find reports it). A bill in another household is
-// reported as not found. Invalid input changes nothing.
+// reported as not found. Invalid input changes nothing. Giving any of
+// property_id / vehicle_id / asset_id replaces the bill's subject (the
+// others are cleared); a blank one makes it family-level.
 func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Change a bill; only the given fields change. An empty string clears category, contact_id or notes. " +
@@ -268,6 +285,9 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		mcp.WithString("category", mcp.Description("Category, e.g. Utilities; empty string clears it")),
 		mcp.WithBoolean("autopay", mcp.Description("true when it is paid automatically")),
 		mcp.WithString("contact_id", mcp.Description("Contact (vendor) id from contact_find; empty string clears it")),
+		mcp.WithString("property_id", mcp.Description("Move it to this property (UUID); \"\" unties it")),
+		mcp.WithString("vehicle_id", mcp.Description("Move it to this vehicle (UUID); \"\" unties it")),
+		mcp.WithString("asset_id", mcp.Description("Move it to this asset (UUID); \"\" unties it")),
 		mcp.WithString("notes", mcp.Description("Free-text notes; empty string clears them")),
 		respond.Schema[billData](),
 	}
@@ -280,7 +300,11 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		}
 
 		example := map[string]any{"bill_id": exampleBillID, "amount": 150.0}
-		in, err := parseUpdateBillInput(normalizeArgs(req.GetArguments()))
+		raw := normalizeArgs(req.GetArguments())
+		if err := subjectAliases(raw); err != nil {
+			return invalid(err, example), nil
+		}
+		in, err := parseUpdateBillInput(raw)
 		if err != nil {
 			return invalid(err, example), nil
 		}
@@ -299,6 +323,11 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			if !ok {
 				return contactMissing(*in.contactID, example), nil
 			}
+		}
+		if res, err := checkSubject(ctx, tx, in.subject, claims.HouseholdID, example); err != nil {
+			return respond.Failed("update the bill", err), nil
+		} else if res != nil {
+			return res, nil
 		}
 
 		// $1 is the bill id, $2 the household; the SET values follow.
@@ -333,6 +362,9 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return respond.NotFound("bill", in.billID.String(), "Call bill_find to get the bill_id."), nil
 		}
 		if err != nil {
+			if res := subjectDBError(err, example); res != nil {
+				return res, nil
+			}
 			return respond.Failed("update the bill", err), nil
 		}
 
@@ -810,20 +842,17 @@ func parseUpdateBillInput(args map[string]any) (billUpdate, error) {
 		u.set("contact_id", "vendor_id", contactID)
 	}
 
-	if given(args, "entity_type") || given(args, "entity_id") {
-		if !given(args, "entity_type") || !given(args, "entity_id") {
-			return u, entityPairError()
-		}
-		entityType, entityID, err := parseEntity(args)
-		if err != nil {
+	if subjectGiven(args) {
+		if u.subject, err = parseSubject(args); err != nil {
 			return u, err
 		}
-		if (entityType == nil) != (entityID == nil) {
-			return u, badArg("entity_type", "entity_type and entity_id must be set or cleared together.",
-				"Pass both as values, or both as empty strings to clear them.")
+		for _, p := range subjectParams {
+			if given(args, p) {
+				u.params = append(u.params, p)
+			}
 		}
-		u.set("entity_type", "entity_type", entityType)
-		u.set("entity_id", "entity_id", entityID)
+		u.columns = append(u.columns, "property_id", "vehicle_id", "asset_id")
+		u.values = append(u.values, u.subject.propertyID, u.subject.vehicleID, u.subject.assetID)
 	}
 
 	if given(args, "payment_url") {
@@ -844,7 +873,7 @@ func parseUpdateBillInput(args map[string]any) (billUpdate, error) {
 
 	if len(u.columns) == 0 {
 		return u, badArg("", "No fields to update.",
-			"Pass bill_id plus at least one of name, amount, due_day, category, autopay, contact_id, notes.")
+			"Pass bill_id plus at least one of name, amount, due_day, category, autopay, contact_id, property_id, vehicle_id, asset_id, notes.")
 	}
 	return u, nil
 }
@@ -853,13 +882,6 @@ func parseUpdateBillInput(args map[string]any) (billUpdate, error) {
 func given(args map[string]any, key string) bool {
 	v, present := args[key]
 	return present && v != nil
-}
-
-// entityPairError is the error for entity_type without entity_id or the
-// reverse (hidden aliases kept until domain model v2).
-func entityPairError() error {
-	return badArg("entity_type", "entity_type and entity_id must be provided together.",
-		"Pass both entity_type and entity_id, or neither.")
 }
 
 // parseCreateBillInput validates bill_create arguments (already normalized).
@@ -902,11 +924,8 @@ func parseCreateBillInput(args map[string]any) (createBillInput, error) {
 	if in.contactID, err = optionalUUID(args, "contact_id"); err != nil {
 		return in, err
 	}
-	if in.entityType, in.entityID, err = parseEntity(args); err != nil {
+	if in.subject, err = parseSubject(args); err != nil {
 		return in, err
-	}
-	if (in.entityType == nil) != (in.entityID == nil) {
-		return in, entityPairError()
 	}
 	if in.paymentURL, err = parsePaymentURL(args); err != nil {
 		return in, err
@@ -973,24 +992,6 @@ func optionalBool(args map[string]any, key string) (val, ok bool, err error) {
 	return b, true, nil
 }
 
-// parseEntity parses entity_type and entity_id. The caller checks that they
-// are given together.
-func parseEntity(args map[string]any) (*string, *uuid.UUID, error) {
-	entityType, err := optionalString(args, "entity_type")
-	if err != nil {
-		return nil, nil, err
-	}
-	entityID, err := optionalUUID(args, "entity_id")
-	if err != nil {
-		return nil, nil, err
-	}
-	if entityType != nil && utf8.RuneCountInString(*entityType) > maxEntityTypeLen {
-		return nil, nil, badArg("entity_type", fmt.Sprintf("entity_type must be at most %d characters.", maxEntityTypeLen),
-			"Pass property, vehicle or pet.")
-	}
-	return entityType, entityID, nil
-}
-
 func parsePaymentURL(args map[string]any) (*string, error) {
 	paymentURL, err := optionalString(args, "payment_url")
 	if err != nil || paymentURL == nil {
@@ -1024,10 +1025,12 @@ func optionalString(args map[string]any, key string) (*string, error) {
 
 // uuidFixes says where to get each id parameter.
 var uuidFixes = map[string]string{
-	"bill_id":    "Pass the bill's id (a UUID) from bill_find, not its name.",
-	"id":         "Pass a bill's id (a UUID) from bill_find, or use query to search by name.",
-	"contact_id": "Pass a contact's id (a UUID) from contact_find, not its name.",
-	"entity_id":  "Pass the id (a UUID) of the property, vehicle or pet.",
+	"bill_id":     "Pass the bill's id (a UUID) from bill_find, not its name.",
+	"id":          "Pass a bill's id (a UUID) from bill_find, or use query to search by name.",
+	"contact_id":  "Pass a contact's id (a UUID) from contact_find, not its name.",
+	"property_id": "Pass the property's id (a UUID) from property_find, not its name.",
+	"vehicle_id":  "Pass the vehicle's id (a UUID) from vehicle_find, not its name.",
+	"asset_id":    "Pass the asset's id (a UUID) from asset_find, not its name.",
 }
 
 // optionalUUID parses an optional UUID string argument.
