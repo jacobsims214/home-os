@@ -33,16 +33,16 @@ type Calendar struct {
 
 // Event represents a calendar event parsed from calendar_objects + ical_data JSON.
 type Event struct {
-	ID          string `json:"id"`
-	CalendarID  string `json:"calendar_id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Start       string `json:"start"`
-	End         string `json:"end"`
-	AllDay      bool   `json:"all_day"`
-	Location    string `json:"location"`
-	Color       string `json:"color"`
-	EventType   string `json:"event_type"`
+	ID           string `json:"id"`
+	CalendarID   string `json:"calendar_id"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	Start        string `json:"start"`
+	End          string `json:"end"`
+	AllDay       bool   `json:"all_day"`
+	Location     string `json:"location"`
+	Color        string `json:"color"`
+	EventType    string `json:"event_type"`
 	CalendarName string `json:"calendar_name,omitempty"`
 }
 
@@ -200,35 +200,115 @@ func marshalEventFields(title, description, start, end, location string, allDay 
 	return string(b), nil
 }
 
-// mergeEventFields merges non-empty optional fields into an existing ical_data JSON.
+// mergeEventFields merges the provided (non-nil) fields into an existing
+// ical_data JSON document. It works on the raw key/value map rather than
+// eventJSON so keys this package does not model survive the round-trip —
+// the CalDAV service persists `sequence` there, and dropping it would make
+// Apple Calendar miss revisions. When `sequence` is present it is
+// incremented, as the CalDAV PUT handler does (RFC 5545 §3.8.7.4).
 func mergeEventFields(existingIcalData string, title, description, start, end, location *string, allDay *bool) (string, error) {
-	var ej eventJSON
-	if err := json.Unmarshal([]byte(existingIcalData), &ej); err != nil {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(existingIcalData), &doc); err != nil {
 		return "", fmt.Errorf("parse existing ical_data: %w", err)
 	}
-	if title != nil {
-		ej.Title = *title
+	if doc == nil {
+		doc = map[string]json.RawMessage{}
 	}
-	if description != nil {
-		ej.Description = *description
+	set := func(key string, v any) error {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("marshal %s: %w", key, err)
+		}
+		doc[key] = b
+		return nil
 	}
-	if start != nil {
-		ej.Start = *start
-	}
-	if end != nil {
-		ej.End = *end
-	}
-	if location != nil {
-		ej.Location = *location
+	for _, f := range []struct {
+		key string
+		val *string
+	}{
+		{"title", title},
+		{"description", description},
+		{"start", start},
+		{"end", end},
+		{"location", location},
+	} {
+		if f.val != nil {
+			if err := set(f.key, *f.val); err != nil {
+				return "", err
+			}
+		}
 	}
 	if allDay != nil {
-		ej.AllDay = *allDay
+		if err := set("all_day", *allDay); err != nil {
+			return "", err
+		}
 	}
-	b, err := json.Marshal(ej)
+	if raw, ok := doc["sequence"]; ok {
+		var seq int
+		if err := json.Unmarshal(raw, &seq); err == nil {
+			if err := set("sequence", seq+1); err != nil {
+				return "", err
+			}
+		}
+	}
+	b, err := json.Marshal(doc)
 	if err != nil {
 		return "", fmt.Errorf("marshal merged event: %w", err)
 	}
 	return string(b), nil
+}
+
+// resolveUpdatedTimes works out an event's new start and end from its stored
+// times and the optional new values passed to update_event:
+//
+//   - both given: stored as given;
+//   - only start given: end moves with it, keeping the original duration;
+//   - only end given: start is unchanged;
+//   - neither: unchanged.
+//
+// The result must have end after start. Times are returned in UTC; callers
+// store them as RFC 3339, the convention the API and CalDAV service share.
+func resolveUpdatedTimes(oldStart, oldEnd string, newStart, newEnd *string) (time.Time, time.Time, error) {
+	var start, end time.Time
+	var err error
+
+	if newStart != nil {
+		if start, err = time.Parse(time.RFC3339, *newStart); err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid start_time format (use ISO 8601 with an offset, e.g. 2026-08-03T14:00:00-05:00): %w", err)
+		}
+	}
+	if newEnd != nil {
+		if end, err = time.Parse(time.RFC3339, *newEnd); err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid end_time format (use ISO 8601 with an offset, e.g. 2026-08-03T15:00:00-05:00): %w", err)
+		}
+	}
+
+	if newStart == nil || newEnd == nil {
+		storedStart, errS := time.Parse(time.RFC3339, oldStart)
+		storedEnd, errE := time.Parse(time.RFC3339, oldEnd)
+		switch {
+		case newStart == nil && newEnd == nil:
+			if errS != nil || errE != nil {
+				return time.Time{}, time.Time{}, fmt.Errorf("stored event has unreadable start/end; pass start_time and end_time")
+			}
+			start, end = storedStart, storedEnd
+		case newStart == nil: // end only
+			if errS != nil {
+				return time.Time{}, time.Time{}, fmt.Errorf("stored event has an unreadable start; pass start_time too")
+			}
+			start = storedStart
+		default: // start only: keep the original duration
+			if errS != nil || errE != nil || !storedEnd.After(storedStart) {
+				return time.Time{}, time.Time{}, fmt.Errorf("cannot keep the event's duration (stored start/end unreadable); pass end_time too")
+			}
+			end = start.Add(storedEnd.Sub(storedStart))
+		}
+	}
+
+	if !end.After(start) {
+		return time.Time{}, time.Time{}, fmt.Errorf("end_time must be after start_time")
+	}
+	return start.UTC(), end.UTC(), nil
 }
 
 // ─────────────────────────────────────────────
@@ -700,11 +780,11 @@ func NewCreateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 // NewUpdateEventTool creates the update_event tool and its handler.
 func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("update_event",
-		mcp.WithDescription("Update an existing calendar event. All fields except event_id are optional — only provided fields are updated."),
+		mcp.WithDescription("Update an existing calendar event. All fields except event_id are optional — only provided fields are updated. Moving start_time without end_time keeps the event's duration. Returns the updated event."),
 		mcp.WithString("event_id", mcp.Description("Event ID to update"), mcp.Required()),
 		mcp.WithString("title", mcp.Description("New title")),
 		mcp.WithString("start_time", mcp.Description("New start time (ISO 8601)")),
-		mcp.WithString("end_time", mcp.Description("New end time (ISO 8601)")),
+		mcp.WithString("end_time", mcp.Description("New end time (ISO 8601). Omit to keep the duration when moving start_time")),
 		mcp.WithBoolean("all_day", mcp.Description("Whether this is an all-day event")),
 		mcp.WithString("description", mcp.Description("New description")),
 		mcp.WithString("location", mcp.Description("New location")),
@@ -733,25 +813,31 @@ func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 			return mcp.NewToolResultError("event not found"), nil
 		}
 
-		// Load existing ical_data
-		var existingIcalData string
-		var existingEventType string
+		// Load the existing row. uid is what CalDAV clients know the event by
+		// and what calendar_changes must record; it differs from id for
+		// events created over CalDAV.
+		var existingIcalData, eventUID string
 		err = pool.QueryRow(ctx,
-			`SELECT ical_data, event_type FROM calendar_objects WHERE id = $1`,
+			`SELECT ical_data, uid FROM calendar_objects WHERE id = $1`,
 			eventID,
-		).Scan(&existingIcalData, &existingEventType)
+		).Scan(&existingIcalData, &eventUID)
 		if err != nil {
 			return mcp.NewToolResultError("event not found"), nil
 		}
+		var existing eventJSON
+		if err := json.Unmarshal([]byte(existingIcalData), &existing); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("parse stored event: %v", err)), nil
+		}
 
-		// Collect optional field pointers
+		// Collect optional field pointers. description and location may be
+		// cleared by passing an empty string.
 		var titlePtr, descPtr, startPtr, endPtr, locPtr *string
 		var allDayPtr *bool
 
 		if v := getStringArg(args, "title"); v != "" {
 			titlePtr = &v
 		}
-		if v := getStringArg(args, "description"); v != "" || args["description"] != nil {
+		if args["description"] != nil {
 			v := getStringArg(args, "description")
 			descPtr = &v
 		}
@@ -761,7 +847,7 @@ func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 		if v := getStringArg(args, "end_time"); v != "" {
 			endPtr = &v
 		}
-		if v := getStringArg(args, "location"); v != "" || args["location"] != nil {
+		if args["location"] != nil {
 			v := getStringArg(args, "location")
 			locPtr = &v
 		}
@@ -771,39 +857,21 @@ func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 			}
 		}
 
-		// Validate time formats if provided
-		if startPtr != nil {
-			if _, err := time.Parse(time.RFC3339, *startPtr); err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("invalid start_time format (use ISO 8601): %v", err)), nil
+		// Work out the new start/end: an explicit end_time is stored as
+		// given; a start-only move keeps the original duration.
+		var newStartStr, newEndStr *string
+		if startPtr != nil || endPtr != nil {
+			newStart, newEnd, err := resolveUpdatedTimes(existing.Start, existing.End, startPtr, endPtr)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
 			}
-		}
-		if endPtr != nil {
-			if _, err := time.Parse(time.RFC3339, *endPtr); err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("invalid end_time format (use ISO 8601): %v", err)), nil
-			}
+			s, e := newStart.Format(time.RFC3339), newEnd.Format(time.RFC3339)
+			newStartStr, newEndStr = &s, &e
 		}
 
-		// Merge existing ical_data with new fields
-		mergedIcalData, err := mergeEventFields(existingIcalData, titlePtr, descPtr, startPtr, endPtr, locPtr, allDayPtr)
+		mergedIcalData, err := mergeEventFields(existingIcalData, titlePtr, descPtr, newStartStr, newEndStr, locPtr, allDayPtr)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("merge event data: %v", err)), nil
-		}
-
-		// Validate merged start/end ordering
-		var mergedEj eventJSON
-		if err := json.Unmarshal([]byte(mergedIcalData), &mergedEj); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("parse merged event: %v", err)), nil
-		}
-		mergedStart, err := time.Parse(time.RFC3339, mergedEj.Start)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid start_time in merged data (use ISO 8601): %v", err)), nil
-		}
-		mergedEnd, err := time.Parse(time.RFC3339, mergedEj.End)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid end_time in merged data (use ISO 8601): %v", err)), nil
-		}
-		if !mergedEnd.After(mergedStart) {
-			return mcp.NewToolResultError("end_time must be after start_time"), nil
 		}
 
 		newEtag := uuid.New().String()
@@ -815,25 +883,29 @@ func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 		}
 		defer tx.Rollback(ctx)
 
-		// Update event_type if provided
-		eventType := getStringArg(args, "event_type")
-		if eventType != "" {
-			_, err = tx.Exec(ctx,
-				`UPDATE calendar_objects SET ical_data = $1, etag = $2, event_type = $3, updated_at = NOW() WHERE id = $4`,
-				mergedIcalData, newEtag, eventType, eventID,
-			)
-		} else {
-			_, err = tx.Exec(ctx,
-				`UPDATE calendar_objects SET ical_data = $1, etag = $2, updated_at = NOW() WHERE id = $3`,
-				mergedIcalData, newEtag, eventID,
-			)
+		// event_type is only changed when provided (COALESCE keeps it otherwise).
+		var eventTypeArg *string
+		if v := getStringArg(args, "event_type"); v != "" {
+			eventTypeArg = &v
+		}
+		row := eventRow{ID: eventID}
+		err = tx.QueryRow(ctx,
+			`UPDATE calendar_objects co
+			    SET ical_data = $1, etag = $2, event_type = COALESCE($3, co.event_type), updated_at = NOW()
+			   FROM calendars c
+			  WHERE co.id = $4 AND c.id = co.calendar_id
+			RETURNING co.calendar_id, co.ical_data, co.event_type, c.name, co.created_at, co.updated_at`,
+			mergedIcalData, newEtag, eventTypeArg, eventID,
+		).Scan(&row.CalendarID, &row.IcalData, &row.EventType, &row.CalendarName, &row.CreatedAt, &row.UpdatedAt)
+		if err == pgx.ErrNoRows {
+			return mcp.NewToolResultError("event not found"), nil
 		}
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("update event: %v", err)), nil
 		}
 
-		// Record change and bump ctag
-		if err := recordChangeAndBumpCtag(ctx, tx, calendarID, eventID, "update"); err != nil {
+		// Record change (by uid, which CalDAV sync-collection reports) and bump ctag
+		if err := recordChangeAndBumpCtag(ctx, tx, calendarID, eventUID, "update"); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("record change: %v", err)), nil
 		}
 
@@ -841,8 +913,17 @@ func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 			return mcp.NewToolResultError(fmt.Sprintf("commit: %v", err)), nil
 		}
 
-		slog.Info("update_event: updated", "event_id", eventID)
-		return mcp.NewToolResultText(`{"success":true}`), nil
+		updated, err := parseEventFromRow(row)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("event updated but could not be read back: %v", err)), nil
+		}
+		out, err := json.Marshal(updated)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("event updated but could not be encoded: %v", err)), nil
+		}
+
+		slog.Info("update_event: updated", "event_id", eventID, "uid", eventUID)
+		return mcp.NewToolResultText(string(out)), nil
 	}
 
 	return tool, handler
