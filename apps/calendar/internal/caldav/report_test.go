@@ -1,7 +1,11 @@
 package caldav
 
 import (
+	"context"
 	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -375,4 +379,229 @@ func TestEventInTimeRangeBoundaries(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ----- XML-illegal characters in stored iCalendar (#4659) -----
+
+func TestXMLSafeText(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"plain", "SUMMARY:Bin day\r\n", "SUMMARY:Bin day\r\n"},
+		{"tab lf cr kept", "a\tb\nc\rd", "a\tb\nc\rd"},
+		{"emoji and accents kept", "SUMMARY:Café 🎂 naïve\r\n", "SUMMARY:Café 🎂 naïve\r\n"},
+		{"vertical tab and escape", "SUMMARY:a\x0Bb\x1Bc", "SUMMARY:a\uFFFDb\uFFFDc"},
+		{"other C0", "\x01\x08\x0C\x0E\x1F", "\uFFFD\uFFFD\uFFFD\uFFFD\uFFFD"},
+		{"nul", "a\x00b", "a\uFFFDb"},
+		{"FFFE FFFF", "a\uFFFEb\uFFFFc", "a\uFFFDb\uFFFDc"},
+		{"FFFD and BOM are legal", "\uFFFD\uFEFF", "\uFFFD\uFEFF"},
+		{"DEL is legal", "a\x7Fb", "a\x7Fb"},
+		{"invalid UTF-8", "a\xffb", "a\uFFFDb"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := xmlSafeText(tt.in); got != tt.want {
+				t.Errorf("xmlSafeText(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// parseXMLDoc fails the test unless doc is well-formed XML, and returns the
+// character data of every C:calendar-data element in document order.
+func parseXMLDoc(t *testing.T, doc string) []string {
+	t.Helper()
+	dec := xml.NewDecoder(strings.NewReader(doc))
+	var out []string
+	var cur *strings.Builder
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return out
+		}
+		if err != nil {
+			t.Fatalf("response is not well-formed XML: %v\n%q", err, doc)
+		}
+		switch el := tok.(type) {
+		case xml.StartElement:
+			if el.Name.Space == nsC && el.Name.Local == "calendar-data" {
+				cur = &strings.Builder{}
+			}
+		case xml.CharData:
+			if cur != nil {
+				cur.Write(el)
+			}
+		case xml.EndElement:
+			if el.Name.Space == nsC && el.Name.Local == "calendar-data" && cur != nil {
+				out = append(out, cur.String())
+				cur = nil
+			}
+		}
+	}
+}
+
+func TestWriteReportResponseNonXMLChars(t *testing.T) {
+	text := "BEGIN:VCALENDAR\r\nSUMMARY:a\x0Bb\x1Bc\uFFFF\r\nDESCRIPTION:x]]>y \x01\r\nEND:VCALENDAR\r\n"
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">`)
+	writeReportResponse(&b, "cal", "evt", "e", text)
+	b.WriteString(`</D:multistatus>`)
+	out := b.String()
+	if !strings.Contains(out, "]]]]><![CDATA[>") {
+		t.Errorf("]]> not split across CDATA sections:\n%s", out)
+	}
+	got := parseXMLDoc(t, out)
+	want := "BEGIN:VCALENDAR\r\nSUMMARY:a\uFFFDb\uFFFDc\uFFFD\r\nDESCRIPTION:x]]>y \uFFFD\r\nEND:VCALENDAR\r\n"
+	// encoding/xml normalises CRLF to LF in character data.
+	want = strings.ReplaceAll(want, "\r\n", "\n")
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("calendar-data = %q, want %q", got, want)
+	}
+}
+
+// nonXMLFixture is a client VCALENDAR with accents and emoji (legal) whose
+// SUMMARY is the placeholder TITLE.
+func nonXMLFixture(uid, title string) string {
+	return "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\n" +
+		"UID:" + uid + "\r\nDTSTAMP:20261101T000000Z\r\nDTSTART:20261120T070000Z\r\n" +
+		"DTEND:20261120T073000Z\r\nSUMMARY:" + title + "\r\n" +
+		"DESCRIPTION:Crème brûlée 🎂 for Zoë\\, naïve façade\r\nX-CUSTOM:kept ✓\r\n" +
+		"END:VEVENT\r\nEND:VCALENDAR\r\n"
+}
+
+// TestCalDAVNonXMLCharsIntegration: PUT refuses XML-illegal runes and keeps
+// valid UTF-8 byte for byte; rows stored before that check (raw, and
+// JSON-only rows edited by the API) still produce well-formed REPORT and
+// PROPFIND multistatus responses that include the event.
+func TestCalDAVNonXMLCharsIntegration(t *testing.T) {
+	repo, pool := testRepo(t)
+	ctx := context.Background()
+	hid, calUID, calID := seedCalendar(t, pool)
+	colPath := "/dav/" + calUID + "/"
+
+	put := func(uid, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		w := httptest.NewRecorder()
+		HandlePUT(w, davRequest(http.MethodPut, colPath+uid+".ics", hid, body, nil), repo, colPath+uid+".ics")
+		return w
+	}
+
+	// PUT with \x0B / \x1B / U+FFFF is refused and nothing is stored.
+	for name, title := range map[string]string{"vt": "a\x0Bb", "esc": "a\x1Bb", "ffff": "a\uFFFFb"} {
+		w := put("evt-refused", nonXMLFixture("evt-refused", title))
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "<C:valid-calendar-data/>") {
+			t.Errorf("%s: PUT = %d %s, want 403 valid-calendar-data", name, w.Code, w.Body)
+		}
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM calendar_objects WHERE calendar_id = $1 AND uid = 'evt-refused'`, calID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("refused PUT stored %d rows", n)
+	}
+
+	// Valid UTF-8 (accents, emoji) round-trips byte for byte.
+	good := nonXMLFixture("evt-good", "Zoë's 🎉 party")
+	if w := put("evt-good", good); w.Code != http.StatusCreated {
+		t.Fatalf("PUT good = %d: %s", w.Code, w.Body)
+	}
+	var raw string
+	if err := pool.QueryRow(ctx, `SELECT ical_raw FROM calendar_objects WHERE calendar_id = $1 AND uid = 'evt-good'`, calID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw != good {
+		t.Fatalf("ical_raw not byte-exact:\n got %q\nwant %q", raw, good)
+	}
+
+	// Rows as stored before #4659: one raw (served verbatim), one JSON-only
+	// (generated from ical_data). Put them in through valid PUTs, then put
+	// the control characters into the stored text directly.
+	const bad = "Bad\x0Bsum\x1Bmary"
+	for _, uid := range []string{"evt-badraw", "evt-badjson"} {
+		if w := put(uid, nonXMLFixture(uid, "PLACEHOLDER")); w.Code != http.StatusCreated {
+			t.Fatalf("PUT %s = %d: %s", uid, w.Code, w.Body)
+		}
+		var jsonData string
+		if err := pool.QueryRow(ctx, `SELECT ical_data FROM calendar_objects WHERE calendar_id = $1 AND uid = $2`, calID, uid).Scan(&jsonData); err != nil {
+			t.Fatal(err)
+		}
+		var ev ical.CalEvent
+		if err := json.Unmarshal([]byte(jsonData), &ev); err != nil {
+			t.Fatal(err)
+		}
+		ev.Title = bad
+		b, _ := json.Marshal(&ev)
+		q := `UPDATE calendar_objects SET ical_data = $1, ical_raw = replace(ical_raw, 'PLACEHOLDER', $2) WHERE calendar_id = $3 AND uid = $4`
+		if uid == "evt-badjson" {
+			q = `UPDATE calendar_objects SET ical_data = $1, ical_raw = NULL WHERE calendar_id = $3 AND uid = $4 AND $2::text IS NOT NULL`
+		}
+		if _, err := pool.Exec(ctx, q, string(b), bad, calID, uid); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// GET keeps the stored bytes (text/calendar, not XML).
+	w := httptest.NewRecorder()
+	HandleGET(w, davRequest(http.MethodGet, colPath+"evt-badraw.ics", hid, "", nil), repo, colPath+"evt-badraw.ics")
+	if want := nonXMLFixture("evt-badraw", bad); w.Body.String() != want {
+		t.Errorf("GET of pre-fix raw row changed:\n got %q\nwant %q", w.Body, want)
+	}
+
+	hrefs := func(body string) []string {
+		var out []string
+		for _, uid := range []string{"evt-good", "evt-badraw", "evt-badjson"} {
+			if strings.Contains(body, "<D:href>"+colPath+uid+".ics</D:href>") {
+				out = append(out, uid)
+			}
+		}
+		return out
+	}
+	check := func(name, body string) {
+		t.Helper()
+		datas := parseXMLDoc(t, body)
+		if got := hrefs(body); len(got) != 3 {
+			t.Errorf("%s: events returned = %v, want all three:\n%s", name, got, body)
+		}
+		var sawBad, sawGood int
+		for _, d := range datas {
+			if strings.Contains(d, "SUMMARY:Bad\uFFFDsum\uFFFDmary") {
+				sawBad++
+			}
+			if strings.Contains(d, "SUMMARY:Zoë's 🎉 party") && strings.Contains(d, "Crème brûlée 🎂 for Zoë") {
+				sawGood++
+			}
+		}
+		if sawBad != 2 || sawGood != 1 {
+			t.Errorf("%s: calendar-data bad=%d good=%d, want 2 and 1:\n%q", name, sawBad, sawGood, datas)
+		}
+		// The valid client body is still served verbatim inside the XML.
+		if !strings.Contains(body, "<![CDATA["+good+"]]>") {
+			t.Errorf("%s: valid raw body not served byte for byte", name)
+		}
+	}
+
+	hrefList := ""
+	for _, uid := range []string{"evt-good", "evt-badraw", "evt-badjson"} {
+		hrefList += "<D:href>" + colPath + uid + ".ics</D:href>"
+	}
+	for name, body := range map[string]string{
+		"calendar-query": `<?xml version="1.0"?><C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><D:getetag/><C:calendar-data/></D:prop><C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="20261119T000000Z" end="20261121T000000Z"/></C:comp-filter></C:comp-filter></C:filter></C:calendar-query>`,
+		"multiget":       `<?xml version="1.0"?><C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><D:getetag/><C:calendar-data/></D:prop>` + hrefList + `</C:calendar-multiget>`,
+		"sync":           `<?xml version="1.0"?><D:sync-collection xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:sync-token/><D:prop><C:calendar-data/></D:prop></D:sync-collection>`,
+	} {
+		w := httptest.NewRecorder()
+		HandleREPORT(w, davRequest("REPORT", colPath, hid, body, nil), repo, colPath)
+		if w.Code != http.StatusMultiStatus {
+			t.Fatalf("%s REPORT = %d: %s", name, w.Code, w.Body)
+		}
+		check(name, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	HandlePROPFIND(w, davRequest("PROPFIND", colPath, hid, propfindEventPropsBody, map[string]string{"Depth": "1"}), repo, colPath)
+	if w.Code != http.StatusMultiStatus {
+		t.Fatalf("PROPFIND = %d: %s", w.Code, w.Body)
+	}
+	check("propfind", w.Body.String())
 }

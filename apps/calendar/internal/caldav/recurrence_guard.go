@@ -2,7 +2,6 @@ package caldav
 
 import (
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -32,9 +31,6 @@ func rejectUnsupportedRecurrence(w http.ResponseWriter, body []byte, eventUID st
 	logging.Logger.Warn("caldav: PUT rejected: unsupported recurrence rule",
 		slog.String("event_uid", eventUID),
 		slog.String("error", err.Error()))
-	w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)
-	w.WriteHeader(http.StatusForbidden)
-	fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?>`+"\n"+
-		`<D:error xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><C:valid-calendar-data/></D:error>`+"\n")
+	writeValidCalendarDataError(w)
 	return true
 }

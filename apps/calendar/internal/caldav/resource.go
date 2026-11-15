@@ -239,7 +239,8 @@ func checkPUTPreconditions(ifMatch, ifNoneMatch, currentETag string, exists bool
 //   - 200 OK                   — an existing resource was updated
 //   - 400 Bad Request          — invalid iCalendar data or empty body
 //   - 404 Not Found            — calendar doesn't exist
-//   - 403 Forbidden            — RRULE icalx refuses to expand (CALDAV:valid-calendar-data)
+//   - 403 Forbidden            — RRULE icalx refuses to expand, or the body
+//     holds a character XML 1.0 forbids (CALDAV:valid-calendar-data)
 //   - 412 Precondition Failed  — If-Match or If-None-Match:* precondition failed
 //   - 500 Internal Server Error — database or marshal error
 func HandlePUT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path string) {
@@ -318,6 +319,9 @@ func HandlePUT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 			slog.String("event_uid", eventUID),
 			slog.String("error", err.Error()))
 		http.Error(w, "Bad Request: invalid iCalendar data", http.StatusBadRequest)
+		return
+	}
+	if rejectNonXMLChars(w, body, eventUID) {
 		return
 	}
 	if rejectUnsupportedRecurrence(w, body, eventUID) {
@@ -594,6 +598,40 @@ func rawMatchesEvent(raw string, ev *ical.CalEvent) bool {
 		parsed.AllDay == ev.AllDay &&
 		parsed.Start.Equal(ev.Start) &&
 		parsed.End.Equal(ev.End)
+}
+
+// rejectNonXMLChars answers a PUT with 403 Forbidden and the
+// CALDAV:valid-calendar-data precondition when a valid-UTF-8 body contains a
+// rune XML 1.0 forbids (C0 controls other than HTAB/LF/CR such as \x0B or
+// \x1B, U+FFFE, U+FFFF). RFC 5545 §3.1 already excludes CONTROL characters
+// other than HTAB from property values, and the body is served verbatim from
+// ical_raw inside REPORT/PROPFIND XML, where one such rune would make the
+// whole multistatus unparseable (#4659). The body is refused rather than
+// silently stripped so ical_raw stays byte-exact for everything we accept.
+// Bodies that are not valid UTF-8 are left to the existing handling
+// (rawForStorage does not keep them). It reports whether it wrote the response.
+func rejectNonXMLChars(w http.ResponseWriter, body []byte, eventUID string) bool {
+	if !utf8.Valid(body) {
+		return false
+	}
+	i := firstNonXMLChar(string(body))
+	if i < 0 {
+		return false
+	}
+	logging.Logger.Warn("caldav: PUT rejected: character not allowed in XML",
+		slog.String("event_uid", eventUID),
+		slog.Int("offset", i))
+	writeValidCalendarDataError(w)
+	return true
+}
+
+// writeValidCalendarDataError writes 403 Forbidden with the
+// CALDAV:valid-calendar-data precondition element (RFC 4791 §5.3.2.1).
+func writeValidCalendarDataError(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)
+	w.WriteHeader(http.StatusForbidden)
+	fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?>`+"\n"+
+		`<D:error xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><C:valid-calendar-data/></D:error>`+"\n")
 }
 
 // rawForStorage returns the PUT body to keep in ical_raw and the RRULE value

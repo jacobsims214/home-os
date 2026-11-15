@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"home-os/calendar/internal/auth"
 	"home-os/calendar/internal/db"
@@ -204,7 +205,9 @@ func writeSingleEventProp(w io.Writer, name xml.Name, obj *db.CalendarObject, ic
 		case "displayname":
 			fmt.Fprintf(w, "        <D:displayname>%s.ics</D:displayname>\n", xmlEscape(obj.UID))
 		case "getcontentlength":
-			// Octets of the GET body, which is written as-is (UTF-8).
+			// Octets of the GET body, which is written as-is (UTF-8). It is
+			// not recomputed from calendar-data: that one may have had
+			// XML-illegal runes replaced (calendarDataCDATA), GET has not.
 			fmt.Fprintf(w, "        <D:getcontentlength>%d</D:getcontentlength>\n", len(icalText))
 		case "getlastmodified":
 			fmt.Fprintf(w, "        <D:getlastmodified>%s</D:getlastmodified>\n", obj.UpdatedAt.UTC().Format(http.TimeFormat))
@@ -214,10 +217,8 @@ func writeSingleEventProp(w io.Writer, name xml.Name, obj *db.CalendarObject, ic
 	case nsC:
 		switch name.Local {
 		case "calendar-data":
-			// A "]]>" inside client text would end the CDATA section early;
-			// split it across two sections, as writeReportResponse does.
-			fmt.Fprintf(w, "        <C:calendar-data><![CDATA[%s]]></C:calendar-data>\n",
-				strings.ReplaceAll(icalText, "]]>", "]]]]><![CDATA[>"))
+			// XML-illegal runes replaced, "]]>" split: see calendarDataCDATA.
+			fmt.Fprintf(w, "        <C:calendar-data>%s</C:calendar-data>\n", calendarDataCDATA(icalText))
 		}
 	}
 }
@@ -528,14 +529,98 @@ func prefixForNamespace(ns string) string {
 	}
 }
 
-// xmlEscape escapes special XML characters in a string.
+// xmlEscape escapes special XML characters in a string. Runes XML 1.0 does
+// not allow at all (see xmlSafeText) are replaced first, since no escape can
+// make them legal.
 func xmlEscape(s string) string {
+	s = xmlSafeText(s)
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	s = strings.ReplaceAll(s, "'", "&apos;")
 	s = strings.ReplaceAll(s, "\"", "&quot;")
 	return s
+}
+
+// isXMLChar reports whether r matches XML 1.0's Char production (§2.2):
+// #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF].
+// Everything else (the other C0 controls, surrogates, U+FFFE, U+FFFF) is
+// forbidden even inside CDATA and even as a character reference.
+func isXMLChar(r rune) bool {
+	switch {
+	case r == 0x9 || r == 0xA || r == 0xD:
+		return true
+	case r >= 0x20 && r <= 0xD7FF:
+		return true
+	case r >= 0xE000 && r <= 0xFFFD:
+		return true
+	case r >= 0x10000 && r <= utf8.MaxRune:
+		return true
+	}
+	return false
+}
+
+// firstNonXMLChar returns the byte offset of the first rune in s that XML 1.0
+// does not allow, or of the first invalid UTF-8 byte, or -1 if there is none.
+func firstNonXMLChar(s string) int {
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < utf8.RuneSelf {
+			if c < 0x20 && c != 0x9 && c != 0xA && c != 0xD {
+				return i
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if (r == utf8.RuneError && size == 1) || !isXMLChar(r) {
+			return i
+		}
+		i += size
+	}
+	return -1
+}
+
+// xmlSafeText returns s with every rune XML 1.0 forbids (and every invalid
+// UTF-8 byte) replaced by U+FFFD, so it can be written into an XML document.
+// It returns s itself, without allocating, when there is nothing to replace,
+// which is the case for every iCalendar body PUT accepts since #4659.
+//
+// Stored text can still carry such runes: rows written before PUT refused
+// them, and API/MCP edits to ical_data that the generated iCalendar copies
+// from. One of them inside a REPORT or PROPFIND multistatus would make the
+// whole response unparseable and stop sync for the calendar, so every text
+// that goes into a CalDAV XML body passes through here.
+func xmlSafeText(s string) string {
+	i := firstNonXMLChar(s)
+	if i < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteString(s[:i])
+	for i < len(s) {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if (r == utf8.RuneError && size == 1) || !isXMLChar(r) {
+			b.WriteRune(utf8.RuneError)
+		} else {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
+}
+
+// calendarDataCDATA returns icalText as the content of a C:calendar-data
+// element: one or more CDATA sections holding xmlSafeText(icalText), with any
+// "]]>" split across two sections so it cannot end the CDATA early (client
+// VCALENDARs are served verbatim from ical_raw, #4406/#4615).
+//
+// The result can differ from the GET body (which is text/calendar, not XML,
+// and is served unchanged) by the runes xmlSafeText replaced, so for such a
+// row calendar-data and getcontentlength do not describe identical bytes.
+func calendarDataCDATA(icalText string) string {
+	return "<![CDATA[" + strings.ReplaceAll(xmlSafeText(icalText), "]]>", "]]]]><![CDATA[>") + "]]>"
 }
 
 // ----- PROPFIND handler -----

@@ -585,12 +585,10 @@ func writeReportResponse(w io.Writer, calUID, eventUID, etag, icalText string) {
 	fmt.Fprint(w, "      <D:prop>\n")
 	fmt.Fprintf(w, "        <D:getetag>\"%s\"</D:getetag>\n", xmlEscape(etag))
 	fmt.Fprint(w, "        <C:calendar-data>")
-	fmt.Fprint(w, "<![CDATA[")
-	// A "]]>" inside the text would end the CDATA section early. Client
-	// VCALENDARs are now served verbatim (ical_raw), so split any occurrence
-	// across two CDATA sections.
-	fmt.Fprint(w, strings.ReplaceAll(icalText, "]]>", "]]]]><![CDATA[>"))
-	fmt.Fprint(w, "]]>")
+	// Client VCALENDARs are served verbatim (ical_raw): calendarDataCDATA
+	// replaces runes XML 1.0 forbids, which would make the whole multistatus
+	// unparseable, and splits any "]]>" so it cannot end the CDATA early.
+	fmt.Fprint(w, calendarDataCDATA(icalText))
 	fmt.Fprint(w, "</C:calendar-data>\n")
 	fmt.Fprint(w, "      </D:prop>\n")
 	fmt.Fprintf(w, "      <D:status>HTTP/1.1 200 OK</D:status>\n")
