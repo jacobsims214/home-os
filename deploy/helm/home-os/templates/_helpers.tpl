@@ -119,3 +119,8 @@ http://localhost:{{ .Values.envoy.port }}
 {{ include "home-os.publicUrl" . }}
 {{- end -}}
 {{- end -}}
+
+{{/* In-cluster API base URL (Service home-os-api, port api.port), used by the UI server side. */}}
+{{- define "home-os.apiInternalUrl" -}}
+http://home-os-api:{{ .Values.api.port }}
+{{- end -}}
