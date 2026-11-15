@@ -113,6 +113,12 @@ dex:
   # (dex.dbPassword was removed; setting it fails the render.)
   existingSecret: ""
   existingSecretPasswordKey: password
+  # expiry.refreshTokens.reuseInterval: how long Dex still accepts a refresh
+  # token after rotating it, returning the current token instead of rejecting.
+  # Needed when ui.replicas > 1: each BFF single-flights refreshes per process
+  # only, so two pods can redeem the same token at once. Empty = Dex default (0,
+  # no reuse; the losing pod logs the user out).
+  refreshTokenReuseInterval: "10s"
 
 # Workloads get DB_PASSWORD from a Secret (secretKeyRef) and DATABASE_URL is
 # assembled from parts with $(DB_PASSWORD), so no password is rendered into env.

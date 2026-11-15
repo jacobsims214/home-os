@@ -58,3 +58,12 @@ data:
       {{- end }}
     
     enablePasswordDB: true
+    {{- with .Values.dex.refreshTokenReuseInterval }}
+
+    # Refresh tokens rotate on use. Within this window Dex hands the current
+    # token to a request presenting the just-rotated one, so the UI replicas
+    # (whose BFFs single-flight per process only) can refresh concurrently.
+    expiry:
+      refreshTokens:
+        reuseInterval: {{ . | quote }}
+    {{- end }}

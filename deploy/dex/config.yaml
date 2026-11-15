@@ -48,3 +48,10 @@ staticPasswords:
     hash: "$2a$10$0I8e4nSeZdrhyXBUjjjbVuIg5zRGfYtO8D1qDDCLgmZQ8LdHwdVxC"
     username: admin
     userID: 7d4b1f0e-5c1a-4c3e-9a57-2f1d0c9e6b11
+
+# Refresh tokens rotate on use. Within this window Dex hands the current token
+# to a request presenting the just-rotated one, so concurrent BFF refreshes
+# don't reject each other. Same value as the chart (dex.refreshTokenReuseInterval).
+expiry:
+  refreshTokens:
+    reuseInterval: "10s"
