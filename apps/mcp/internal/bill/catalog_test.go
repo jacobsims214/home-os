@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/testutil"
 )
 
@@ -114,8 +115,9 @@ func TestBillFind_Filters(t *testing.T) {
 	}
 }
 
-// TestBillFind_Pagination pages with limit and the cursor from the narrow
-// hint, and rejects a bad cursor with an actionable error.
+// TestBillFind_Pagination pages with limit and next_cursor passed back as
+// cursor, still accepts the legacy plain-offset cursor, and rejects a bad
+// cursor with an actionable error.
 func TestBillFind_Pagination(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
@@ -127,15 +129,15 @@ func TestBillFind_Pagination(t *testing.T) {
 	if names(page1) != "Bill 1,Bill 2" || !env.Truncated || env.Total == nil || *env.Total != 5 {
 		t.Fatalf("page 1 = %s truncated=%v total=%v", names(page1), env.Truncated, env.Total)
 	}
-	if !strings.Contains(env.Narrow, `cursor="2"`) || env.Summary != "Found 5 bills; showing 1-2." {
+	if env.NextCursor != respond.EncodeCursor(2) || env.Summary != "Found 5 bills; showing 1-2." {
 		t.Errorf("page 1 narrow/summary = %q / %q", env.Narrow, env.Summary)
 	}
-	page2, env := findBills(t, ctx, pool, map[string]any{"limit": float64(2), "cursor": "2"})
-	if names(page2) != "Bill 3,Bill 4" || !strings.Contains(env.Narrow, `cursor="4"`) {
-		t.Errorf("page 2 = %s narrow %q", names(page2), env.Narrow)
+	page2, env := findBills(t, ctx, pool, map[string]any{"limit": float64(2), "cursor": env.NextCursor})
+	if names(page2) != "Bill 3,Bill 4" || env.NextCursor != respond.EncodeCursor(4) || strings.Contains(env.Narrow, "cursor=") {
+		t.Errorf("page 2 = %s next_cursor %q narrow %q", names(page2), env.NextCursor, env.Narrow)
 	}
-	page3, env := findBills(t, ctx, pool, map[string]any{"limit": float64(2), "cursor": "4"})
-	if names(page3) != "Bill 5" || env.Truncated {
+	page3, env := findBills(t, ctx, pool, map[string]any{"limit": float64(2), "cursor": "4"}) // legacy plain offset
+	if names(page3) != "Bill 5" || env.Truncated || env.NextCursor != "" {
 		t.Errorf("page 3 = %s truncated=%v", names(page3), env.Truncated)
 	}
 

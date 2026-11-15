@@ -19,15 +19,16 @@ import (
 // envelope is the respond wire shape; Data is set for single-object
 // results, Items/Total/Truncated/Narrow for lists.
 type envelope struct {
-	OK        bool            `json:"ok"`
-	Summary   string          `json:"summary"`
-	Data      json.RawMessage `json:"data"`
-	Items     []personRow     `json:"items"`
-	Total     int             `json:"total"`
-	Truncated bool            `json:"truncated"`
-	Narrow    string          `json:"narrow"`
-	Next      []string        `json:"next"`
-	Error     *struct {
+	OK         bool            `json:"ok"`
+	Summary    string          `json:"summary"`
+	Data       json.RawMessage `json:"data"`
+	Items      []personRow     `json:"items"`
+	Total      int             `json:"total"`
+	Truncated  bool            `json:"truncated"`
+	Narrow     string          `json:"narrow"`
+	NextCursor string          `json:"next_cursor"`
+	Next       []string        `json:"next"`
+	Error      *struct {
 		Message string `json:"message"`
 		Fix     string `json:"fix"`
 		Field   string `json:"field"`

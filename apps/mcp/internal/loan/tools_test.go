@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/testutil"
 )
 
@@ -78,15 +79,16 @@ func outputSchema(t *testing.T, name string) *jsonschema.Resolved {
 
 // wireEnvelope is the JSON every loan tool returns.
 type wireEnvelope struct {
-	OK        bool            `json:"ok"`
-	Summary   string          `json:"summary"`
-	Data      json.RawMessage `json:"data"`
-	Items     json.RawMessage `json:"items"`
-	Total     *int            `json:"total"`
-	Truncated bool            `json:"truncated"`
-	Narrow    string          `json:"narrow"`
-	Next      []string        `json:"next"`
-	Error     *struct {
+	OK         bool            `json:"ok"`
+	Summary    string          `json:"summary"`
+	Data       json.RawMessage `json:"data"`
+	Items      json.RawMessage `json:"items"`
+	Total      *int            `json:"total"`
+	Truncated  bool            `json:"truncated"`
+	Narrow     string          `json:"narrow"`
+	NextCursor string          `json:"next_cursor"`
+	Next       []string        `json:"next"`
+	Error      *struct {
 		Message string         `json:"message"`
 		Fix     string         `json:"fix"`
 		Field   string         `json:"field"`
@@ -481,11 +483,11 @@ func TestLoanFind(t *testing.T) {
 
 	// Pagination.
 	p1 := call(t, f.ctx, f.find, "loan_find", map[string]any{"limit": 2.0})
-	if len(p1.loans(t)) != 2 || !p1.Truncated || p1.Total == nil || *p1.Total != 3 || !strings.Contains(p1.Narrow, `cursor="2"`) {
+	if len(p1.loans(t)) != 2 || !p1.Truncated || p1.Total == nil || *p1.Total != 3 || p1.NextCursor != respond.EncodeCursor(2) {
 		t.Fatalf("page 1 = %+v", p1)
 	}
-	p2 := call(t, f.ctx, f.find, "loan_find", map[string]any{"limit": 2.0, "cursor": "2"})
-	if l := p2.loans(t); len(l) != 1 || l[0].ID != student.ID || p2.Truncated || p2.Summary != "Found 3 loans; showing 3-3." {
+	p2 := call(t, f.ctx, f.find, "loan_find", map[string]any{"limit": 2.0, "cursor": p1.NextCursor})
+	if l := p2.loans(t); len(l) != 1 || l[0].ID != student.ID || p2.Truncated || p2.NextCursor != "" || p2.Summary != "Found 3 loans; showing 3-3." {
 		t.Errorf("page 2 = %+v", p2)
 	}
 

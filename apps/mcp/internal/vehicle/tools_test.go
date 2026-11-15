@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/testutil"
 )
 
@@ -46,15 +47,16 @@ func outputSchema(t *testing.T) *jsonschema.Resolved {
 }
 
 type wireEnvelope struct {
-	OK        bool            `json:"ok"`
-	Summary   string          `json:"summary"`
-	Items     json.RawMessage `json:"items"`
-	Returned  *int            `json:"returned"`
-	Total     *int            `json:"total"`
-	Truncated bool            `json:"truncated"`
-	Narrow    string          `json:"narrow"`
-	Next      []string        `json:"next"`
-	Error     *struct {
+	OK         bool            `json:"ok"`
+	Summary    string          `json:"summary"`
+	Items      json.RawMessage `json:"items"`
+	Returned   *int            `json:"returned"`
+	Total      *int            `json:"total"`
+	Truncated  bool            `json:"truncated"`
+	Narrow     string          `json:"narrow"`
+	NextCursor string          `json:"next_cursor"`
+	Next       []string        `json:"next"`
+	Error      *struct {
 		Message string         `json:"message"`
 		Fix     string         `json:"fix"`
 		Field   string         `json:"field"`
@@ -295,11 +297,11 @@ func TestVehicleFind(t *testing.T) {
 
 	t.Run("paging", func(t *testing.T) {
 		env := call(t, ctx, find, map[string]any{"limit": 1})
-		if got := env.vehicles(t); len(got) != 1 || got[0].ID != f150 || !env.Truncated || !strings.Contains(env.Narrow, `cursor="1"`) {
+		if got := env.vehicles(t); len(got) != 1 || got[0].ID != f150 || !env.Truncated || env.NextCursor != respond.EncodeCursor(1) {
 			t.Fatalf("page 1: %+v", env)
 		}
-		env = call(t, ctx, find, map[string]any{"limit": "1", "cursor": "1"})
-		if got := env.vehicles(t); len(got) != 1 || got[0].ID != odyssey || env.Truncated {
+		env = call(t, ctx, find, map[string]any{"limit": "1", "cursor": env.NextCursor})
+		if got := env.vehicles(t); len(got) != 1 || got[0].ID != odyssey || env.Truncated || env.NextCursor != "" {
 			t.Fatalf("page 2: %+v", env)
 		}
 		if env.Summary != "Found 2 vehicles; showing 2-2." {

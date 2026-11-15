@@ -3,7 +3,6 @@ package loan
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -43,8 +42,8 @@ func (in findInput) filtered() bool {
 // replacing list_loans and get_loan. It lists the household's loans sorted
 // by name, each with its next payment date (from due_day, in the family's
 // timezone) and its subject. property_id matches loans on that property,
-// including loans on its assets. Pagination is limit + an opaque offset
-// cursor, given in the narrow hint because respond has no next_cursor.
+// including loans on its assets. Pagination is limit + the opaque
+// next_cursor (respond.EncodeCursor), passed back as cursor.
 func NewLoanFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("List or search loans with lender, rate, monthly payment, due day and balance. " +
@@ -54,7 +53,7 @@ func NewLoanFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		mcp.WithString("property_id", mcp.Description("Only loans on this property (UUID from property_find)")),
 		mcp.WithString("vehicle_id", mcp.Description("Only loans on this vehicle (UUID from vehicle_find)")),
 		mcp.WithNumber("limit", mcp.Description("Max loans to return, 1-100 (default 25)"), mcp.Min(1), mcp.Max(maxLimit)),
-		mcp.WithString("cursor", mcp.Description("Cursor from a previous result's narrow hint, for the next page")),
+		mcp.WithString("cursor", mcp.Description("next_cursor from the previous result, for the next page")),
 		respond.ListSchema[loanData](),
 	}
 	tool := mcp.NewTool("loan_find", append(opts, annotations("Find loans", true, false, true)...)...)
@@ -109,8 +108,9 @@ func NewLoanFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 
 		return respond.List(findSummary(in, page, total), page, respond.Page{
-			Total:  total - in.offset,
-			Narrow: fmt.Sprintf("Pass cursor=%q for the next page, or add query, property_id or vehicle_id.", strconv.Itoa(end)),
+			Total:      total - in.offset,
+			NextCursor: respond.CursorAfter(end, total),
+			Narrow:     "Pass next_cursor as cursor for the next page, or add query, property_id or vehicle_id.",
 		}, findNext(in, page)...), nil
 	}
 	return "loan_find", tool, handler
@@ -207,10 +207,10 @@ func parseFindInput(raw map[string]any) (findInput, error) {
 	if c, err := optionalString(args, "cursor"); err != nil {
 		return in, err
 	} else if c != nil {
-		off, convErr := strconv.Atoi(*c)
-		if convErr != nil || off < 0 {
+		off, ok := respond.DecodeCursor(*c)
+		if !ok {
 			return in, badArg("cursor", fmt.Sprintf("cursor %q is not a cursor from loan_find.", *c),
-				"Pass the cursor value from the previous result's narrow hint, or leave cursor out for the first page.")
+				"Pass next_cursor from the previous result as cursor, or leave cursor out for the first page.")
 		}
 		in.offset = off
 	}

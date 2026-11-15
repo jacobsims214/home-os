@@ -20,7 +20,7 @@
 //
 //	mcp.NewTool("notes_search", ..., respond.ListSchema[note.Note]())
 //	return respond.List("Found 20 of 143 notes.", notes, respond.Page{Total: 143,
-//	    Narrow: "Pass query or tag to narrow the results."}), nil
+//	    NextCursor: respond.EncodeCursor(20), Narrow: "Pass query or tag to narrow the results."}), nil
 //
 //	return respond.Invalid("due_date", "due_date \"next week\" is not a date.",
 //	    "Pass due_date as YYYY-MM-DD.", map[string]any{"due_date": "2026-12-01"}), nil
@@ -31,8 +31,11 @@
 package respond
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -49,15 +52,16 @@ type Envelope[T any] struct {
 
 // ListEnvelope is the structuredContent of a list result (List).
 type ListEnvelope[T any] struct {
-	OK        bool     `json:"ok" jsonschema_description:"true when the call succeeded. When false read error.fix and retry."`
-	Summary   string   `json:"summary" jsonschema_description:"One-line plain-language description of what was found."`
-	Items     []T      `json:"items,omitzero" jsonschema_description:"The returned items. Always present (possibly empty) when ok is true."`
-	Returned  *int     `json:"returned,omitempty" jsonschema_description:"Number of items returned in this response."`
-	Total     *int     `json:"total,omitempty" jsonschema_description:"Number of items that matched in total."`
-	Truncated bool     `json:"truncated,omitempty" jsonschema_description:"true when more items matched than were returned."`
-	Narrow    string   `json:"narrow,omitempty" jsonschema_description:"How to narrow or page the query when truncated."`
-	Next      []string `json:"next,omitempty" jsonschema_description:"Suggested next steps."`
-	Error     *Error   `json:"error,omitempty" jsonschema_description:"What went wrong and how to fix it. Present only when ok is false."`
+	OK         bool     `json:"ok" jsonschema_description:"true when the call succeeded. When false read error.fix and retry."`
+	Summary    string   `json:"summary" jsonschema_description:"One-line plain-language description of what was found."`
+	Items      []T      `json:"items,omitzero" jsonschema_description:"The returned items. Always present (possibly empty) when ok is true."`
+	Returned   *int     `json:"returned,omitempty" jsonschema_description:"Number of items returned in this response."`
+	Total      *int     `json:"total,omitempty" jsonschema_description:"Number of items that matched in total."`
+	Truncated  bool     `json:"truncated,omitempty" jsonschema_description:"true when more items matched than were returned."`
+	NextCursor string   `json:"next_cursor,omitempty" jsonschema_description:"Pass as cursor, with the same filters, for the next page. Absent on the last page."`
+	Narrow     string   `json:"narrow,omitempty" jsonschema_description:"How to narrow or page the query when truncated."`
+	Next       []string `json:"next,omitempty" jsonschema_description:"Suggested next steps."`
+	Error      *Error   `json:"error,omitempty" jsonschema_description:"What went wrong and how to fix it. Present only when ok is false."`
 }
 
 // Error is the corrective payload of a failed call.
@@ -76,6 +80,9 @@ type Page struct {
 	// Narrow tells the model how to narrow or page the query. It is only
 	// emitted when the list is truncated; a generic hint is used if empty.
 	Narrow string
+	// NextCursor is the cursor for the page after this one (EncodeCursor),
+	// empty on the last page. Setting it marks the list truncated.
+	NextCursor string
 }
 
 // defaultNarrow is used when a truncated list gives no Narrow hint.
@@ -96,8 +103,9 @@ func OK[T any](summary string, data T, next ...string) *mcp.CallToolResult {
 }
 
 // List is a successful list result. Items beyond what is returned are
-// reported through page: when page.Total exceeds len(items) the result is
-// marked truncated and carries page.Narrow (or a generic hint).
+// reported through page: when page.Total exceeds len(items), or a
+// page.NextCursor is given, the result is marked truncated and carries
+// page.Narrow (or a generic hint) and next_cursor.
 func List[T any](summary string, items []T, page Page, next ...string) *mcp.CallToolResult {
 	if items == nil {
 		items = []T{}
@@ -110,14 +118,64 @@ func List[T any](summary string, items []T, page Page, next ...string) *mcp.Call
 		OK: true, Summary: summary, Items: items,
 		Returned: &returned, Total: &total, Next: next,
 	}
-	if total > returned {
+	if total > returned || page.NextCursor != "" {
 		env.Truncated = true
+		env.NextCursor = page.NextCursor
 		env.Narrow = page.Narrow
 		if env.Narrow == "" {
 			env.Narrow = defaultNarrow
 		}
 	}
 	return build(env, false)
+}
+
+// cursorPrefix marks an EncodeCursor cursor inside its base64.
+const cursorPrefix = "o:"
+
+// legacyCursorPrefixes are the base64 cursor prefixes event_find and
+// maintenance_find emitted before EncodeCursor; DecodeCursor accepts them for
+// one release so in-flight agent sessions keep paging.
+var legacyCursorPrefixes = []string{"evt:", "maintenance:"}
+
+// EncodeCursor is the opaque paging cursor every find tool returns as
+// next_cursor and accepts back as cursor: the offset of the next page.
+func EncodeCursor(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(cursorPrefix + strconv.Itoa(offset)))
+}
+
+// CursorAfter is the next_cursor for a page ending at offset end (exclusive)
+// of total matches: EncodeCursor(end), or "" when nothing follows.
+func CursorAfter(end, total int) string {
+	if end >= total {
+		return ""
+	}
+	return EncodeCursor(end)
+}
+
+// DecodeCursor reads a cursor from EncodeCursor and returns its offset; ok
+// is false when c is not a cursor. For one release it also accepts the older
+// forms tools emitted in narrow text: a plain offset ("25") and the base64
+// "evt:N" and "maintenance:N" cursors.
+func DecodeCursor(c string) (offset int, ok bool) {
+	c = strings.TrimSpace(c)
+	if c == "" {
+		return 0, false
+	}
+	if n, err := strconv.Atoi(c); err == nil { // legacy plain offset
+		return n, n >= 0
+	}
+	b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(c, "="))
+	if err != nil {
+		return 0, false
+	}
+	s := string(b)
+	for _, p := range append([]string{cursorPrefix}, legacyCursorPrefixes...) {
+		if rest, found := strings.CutPrefix(s, p); found {
+			n, err := strconv.Atoi(rest)
+			return n, err == nil && n >= 0
+		}
+	}
+	return 0, false
 }
 
 // Fail is an isError result built from e. Its summary is e.Message.

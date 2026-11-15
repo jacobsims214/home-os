@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -284,7 +283,8 @@ func (in findInput) filtered() bool {
 // that date (bills without a due day last), then name. due_within_days keeps
 // bills whose next unpaid due date is within [today, today+N]; a bill
 // already paid for its current due date counts under the following one.
-// Pagination is limit + an opaque offset cursor.
+// Pagination is limit + the opaque next_cursor (respond.EncodeCursor),
+// passed back as cursor.
 func NewBillFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("List or search bills with amount and next due date. Use due_within_days for \"what's due soon?\". " +
@@ -297,7 +297,7 @@ func NewBillFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 			mcp.Min(0), mcp.Max(maxDueWithinDays)),
 		mcp.WithBoolean("autopay", mcp.Description("true = only autopay bills, false = only manual ones")),
 		mcp.WithNumber("limit", mcp.Description("Max bills to return, 1-100 (default 25)"), mcp.Min(1), mcp.Max(maxLimit)),
-		mcp.WithString("cursor", mcp.Description("Cursor from a previous result's narrow hint, for the next page")),
+		mcp.WithString("cursor", mcp.Description("next_cursor from the previous result, for the next page")),
 		respond.ListSchema[billData](),
 	}
 	tool := mcp.NewTool("bill_find", append(opts, readAnnotations("Find bills")...)...)
@@ -369,8 +369,9 @@ func NewBillFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 		page := bills[in.offset:end]
 
 		return respond.List(findSummary(in, page, total), page, respond.Page{
-			Total:  total - in.offset,
-			Narrow: fmt.Sprintf("Pass cursor=%q for the next page, or add category, query or due_within_days.", strconv.Itoa(end)),
+			Total:      total - in.offset,
+			NextCursor: respond.CursorAfter(end, total),
+			Narrow:     "Pass next_cursor as cursor for the next page, or add category, query or due_within_days.",
 		}, findNext(in, page)...), nil
 	}
 
@@ -477,10 +478,10 @@ func parseFindInput(args map[string]any) (findInput, error) {
 	if c, err := optionalString(args, "cursor"); err != nil {
 		return in, err
 	} else if c != nil {
-		off, convErr := strconv.Atoi(*c)
-		if convErr != nil || off < 0 {
+		off, ok := respond.DecodeCursor(*c)
+		if !ok {
 			return in, badArg("cursor", fmt.Sprintf("cursor %q is not a cursor from bill_find.", *c),
-				"Pass the cursor value from the previous result's narrow hint, or leave cursor out for the first page.")
+				"Pass next_cursor from the previous result as cursor, or leave cursor out for the first page.")
 		}
 		in.offset = off
 	}

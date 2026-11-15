@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/testutil"
 )
@@ -49,16 +50,17 @@ type wireSummary struct {
 
 // envelope is a respond envelope (single or list) as a client decodes it.
 type envelope[T any] struct {
-	OK        bool     `json:"ok"`
-	Summary   string   `json:"summary"`
-	Data      *T       `json:"data"`
-	Items     []T      `json:"items"`
-	Returned  *int     `json:"returned"`
-	Total     *int     `json:"total"`
-	Truncated bool     `json:"truncated"`
-	Narrow    string   `json:"narrow"`
-	Next      []string `json:"next"`
-	Error     *struct {
+	OK         bool     `json:"ok"`
+	Summary    string   `json:"summary"`
+	Data       *T       `json:"data"`
+	Items      []T      `json:"items"`
+	Returned   *int     `json:"returned"`
+	Total      *int     `json:"total"`
+	Truncated  bool     `json:"truncated"`
+	Narrow     string   `json:"narrow"`
+	NextCursor string   `json:"next_cursor"`
+	Next       []string `json:"next"`
+	Error      *struct {
 		Message string         `json:"message"`
 		Fix     string         `json:"fix"`
 		Field   string         `json:"field"`
@@ -608,15 +610,15 @@ func TestNoteFind(t *testing.T) {
 		if !same(ids(first.Items), []uuid.UUID{wifi, plumber, oil}) || !first.Truncated || *first.Total != 4 {
 			t.Fatalf("page 1: %v truncated=%v total=%v", ids(first.Items), first.Truncated, *first.Total)
 		}
-		m := regexp.MustCompile(`cursor="([^"]+)"`).FindStringSubmatch(first.Narrow)
-		if m == nil || first.Summary != "Found 4 notes; showing 1–3." || !strings.Contains(first.Next[len(first.Next)-1], m[1]) {
-			t.Fatalf("narrow/summary/next: %q %q %v", first.Narrow, first.Summary, first.Next)
+		if first.NextCursor != respond.EncodeCursor(3) || first.Summary != "Found 4 notes; showing 1–3." ||
+			strings.Contains(first.Narrow, "cursor=") || strings.Contains(strings.Join(first.Next, " "), "cursor=") {
+			t.Fatalf("next_cursor/summary/narrow/next: %q %q %q %v", first.NextCursor, first.Summary, first.Narrow, first.Next)
 		}
-		second := find.mustOK(t, ctx, map[string]any{"limit": "3", "cursor": m[1]})
-		if !same(ids(second.Items), []uuid.UUID{roof}) || second.Truncated || second.Summary != "Found 4 notes; showing 4–4." {
+		second := find.mustOK(t, ctx, map[string]any{"limit": "3", "cursor": first.NextCursor})
+		if !same(ids(second.Items), []uuid.UUID{roof}) || second.Truncated || second.NextCursor != "" || second.Summary != "Found 4 notes; showing 4–4." {
 			t.Fatalf("page 2: %v truncated=%v %q", ids(second.Items), second.Truncated, second.Summary)
 		}
-		past := find.mustOK(t, ctx, map[string]any{"cursor": encodeCursor(10)})
+		past := find.mustOK(t, ctx, map[string]any{"cursor": respond.EncodeCursor(10)})
 		if len(past.Items) != 0 || past.Summary != "No more notes past this cursor." {
 			t.Errorf("past the end: %+v", past)
 		}

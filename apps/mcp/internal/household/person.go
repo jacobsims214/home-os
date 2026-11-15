@@ -2,7 +2,6 @@ package household
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
@@ -126,7 +125,7 @@ func NewPersonFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		offset := 0
 		if c := strings.TrimSpace(str(args, "cursor")); c != "" {
-			if offset, ok = decodeCursor(c); !ok {
+			if offset, ok = respond.DecodeCursor(c); !ok {
 				return respond.Invalid("cursor", "cursor is not one person_find returned.",
 					"Pass the cursor exactly as the previous person_find result gave it, or leave it out to start over.",
 					map[string]any{}), nil
@@ -193,13 +192,12 @@ func NewPersonFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		next := []string{"Pass id=<person id> for one person; pass person_id to other tools."}
 		page := respond.Page{}
 		if remaining := total - offset - len(items); remaining > 0 {
-			c := encodeCursor(offset + len(items))
 			page = respond.Page{
-				Total:  len(items) + remaining,
-				Narrow: fmt.Sprintf("%d more. Pass cursor=%q with the same filters for the next page, or add query to narrow.", remaining, c),
+				NextCursor: respond.EncodeCursor(offset + len(items)),
+				Total:      len(items) + remaining,
+				Narrow:     fmt.Sprintf("%d more. Pass next_cursor as cursor with the same filters for the next page, or add query to narrow.", remaining),
 			}
 			summary = fmt.Sprintf("%d of %d people: %s.", len(items), total, strings.Join(names, ", "))
-			next = append(next, fmt.Sprintf("Next page: person_find cursor=%s with the same filters.", c))
 		}
 		return respond.List(summary, items, page, next...), nil
 	}
@@ -246,22 +244,6 @@ func intArg(args map[string]any, key string) (int, bool, bool) {
 	default:
 		return 0, true, false
 	}
-}
-
-// encodeCursor and decodeCursor make the opaque person_find cursor: the
-// offset of the next page. respond.ListEnvelope has no next_cursor field, so
-// the cursor travels in narrow and in the last next hint (as in note_find).
-func encodeCursor(offset int) string {
-	return base64.RawURLEncoding.EncodeToString([]byte("o:" + strconv.Itoa(offset)))
-}
-
-func decodeCursor(c string) (int, bool) {
-	b, err := base64.RawURLEncoding.DecodeString(c)
-	if err != nil || !strings.HasPrefix(string(b), "o:") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimPrefix(string(b), "o:"))
-	return n, err == nil && n >= 0
 }
 
 // familyClock returns today's date (YYYY-MM-DD) and weekday (Mon) in tz,

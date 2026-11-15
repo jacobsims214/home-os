@@ -101,13 +101,14 @@ func seedNamedCalendar(t *testing.T, pool *pgxpool.Pool, householdID uuid.UUID, 
 
 // listEnvelope is the list result shape, for truncation checks.
 type listEnvelope struct {
-	OK        bool              `json:"ok"`
-	Summary   string            `json:"summary"`
-	Items     []json.RawMessage `json:"items"`
-	Total     int               `json:"total"`
-	Truncated bool              `json:"truncated"`
-	Narrow    string            `json:"narrow"`
-	Next      []string          `json:"next"`
+	OK         bool              `json:"ok"`
+	Summary    string            `json:"summary"`
+	Items      []json.RawMessage `json:"items"`
+	Total      int               `json:"total"`
+	Truncated  bool              `json:"truncated"`
+	Narrow     string            `json:"narrow"`
+	NextCursor string            `json:"next_cursor"`
+	Next       []string          `json:"next"`
 }
 
 func decodeList(t *testing.T, text string) listEnvelope {
@@ -187,20 +188,14 @@ func TestEventFind(t *testing.T) {
 				seen = append(seen, ev.ID)
 			}
 			if page < 2 {
-				if !env.Truncated || !strings.Contains(env.Narrow, "cursor=") {
-					t.Fatalf("page %d should be truncated with a cursor: %s", page, text)
+				if !env.Truncated || env.NextCursor == "" || strings.Contains(env.Narrow, "cursor=") {
+					t.Fatalf("page %d should be truncated with next_cursor: %s", page, text)
 				}
 				if !strings.Contains(env.Summary, "of 5") {
 					t.Errorf("page %d summary = %q", page, env.Summary)
 				}
-				var c string
-				for _, n := range env.Next {
-					if _, after, ok := strings.Cut(n, `cursor="`); ok {
-						c, _, _ = strings.Cut(after, `"`)
-					}
-				}
-				args["cursor"] = c
-			} else if env.Truncated || len(env.Items) != 1 {
+				args["cursor"] = env.NextCursor
+			} else if env.Truncated || env.NextCursor != "" || len(env.Items) != 1 {
 				t.Errorf("last page should hold 1 item and not be truncated: %s", text)
 			}
 		}

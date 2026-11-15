@@ -23,7 +23,6 @@ package file
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -677,21 +676,6 @@ func notSignedIn() *mcp.CallToolResult {
 		Message: "You are not signed in to a household.",
 		Fix:     "Tell the user to reconnect Home OS; retrying will not help.",
 	})
-}
-
-// encodeCursor and decodeCursor make the opaque document_find cursor: the
-// offset of the next page.
-func encodeCursor(offset int) string {
-	return base64.RawURLEncoding.EncodeToString([]byte("o:" + strconv.Itoa(offset)))
-}
-
-func decodeCursor(c string) (int, bool) {
-	b, err := base64.RawURLEncoding.DecodeString(c)
-	if err != nil || !strings.HasPrefix(string(b), "o:") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimPrefix(string(b), "o:"))
-	return n, err == nil && n >= 0
 }
 
 // likePattern escapes LIKE wildcards in q and wraps it in %...% (ESCAPE '\').

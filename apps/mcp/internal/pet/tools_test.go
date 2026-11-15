@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/testutil"
 )
 
@@ -47,15 +48,16 @@ func outputSchema(t *testing.T) *jsonschema.Resolved {
 
 // wireEnvelope is the JSON pet_find returns.
 type wireEnvelope struct {
-	OK        bool            `json:"ok"`
-	Summary   string          `json:"summary"`
-	Items     json.RawMessage `json:"items"`
-	Returned  int             `json:"returned"`
-	Total     *int            `json:"total"`
-	Truncated bool            `json:"truncated"`
-	Narrow    string          `json:"narrow"`
-	Next      []string        `json:"next"`
-	Error     *struct {
+	OK         bool            `json:"ok"`
+	Summary    string          `json:"summary"`
+	Items      json.RawMessage `json:"items"`
+	Returned   int             `json:"returned"`
+	Total      *int            `json:"total"`
+	Truncated  bool            `json:"truncated"`
+	Narrow     string          `json:"narrow"`
+	NextCursor string          `json:"next_cursor"`
+	Next       []string        `json:"next"`
+	Error      *struct {
 		Message string         `json:"message"`
 		Fix     string         `json:"fix"`
 		Field   string         `json:"field"`
@@ -337,14 +339,14 @@ func TestPetFind(t *testing.T) {
 		t.Errorf("foreign query leaked: %+v", got)
 	}
 
-	// Pagination: limit + cursor from the narrow hint.
+	// Pagination: limit + next_cursor passed back as cursor.
 	env = call(t, ctx, find, map[string]any{"limit": 2})
-	if got := env.pets(t); len(got) != 2 || !env.Truncated || *env.Total != 3 || !strings.Contains(env.Narrow, `cursor="2"`) ||
+	if got := env.pets(t); len(got) != 2 || !env.Truncated || *env.Total != 3 || env.NextCursor != respond.EncodeCursor(2) ||
 		env.Summary != "Found 3 pets; showing 1-2." {
 		t.Fatalf("page 1: %+v", env)
 	}
-	env = call(t, ctx, find, map[string]any{"limit": "2", "cursor": "2"})
-	if got := env.pets(t); len(got) != 1 || got[0].ID != rex || env.Truncated {
+	env = call(t, ctx, find, map[string]any{"limit": "2", "cursor": env.NextCursor})
+	if got := env.pets(t); len(got) != 1 || got[0].ID != rex || env.Truncated || env.NextCursor != "" {
 		t.Fatalf("page 2: %+v", env)
 	}
 	env = call(t, ctx, find, map[string]any{"cursor": "9"})

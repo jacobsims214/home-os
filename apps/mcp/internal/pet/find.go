@@ -3,7 +3,6 @@ package pet
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -64,16 +63,15 @@ const petSelect = `
 
 // NewPetFindTool creates the pet_find MCP tool (catalog v2, class R),
 // replacing list_pets and get_pet. Every pet comes back in full (pets have
-// few fields), with its vet. Pagination is limit + an opaque offset cursor,
-// given in the narrow hint because respond has no next_cursor (same pattern
-// as bill_find and property_find).
+// few fields), with its vet. Pagination is limit + the opaque next_cursor
+// (respond.EncodeCursor), passed back as cursor.
 func NewPetFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("List or search pets with species, breed, birthday and vet. Pass id for full details."),
 		mcp.WithString("id", mcp.Description("A pet_id (UUID) to get exactly that pet")),
 		mcp.WithString("query", mcp.Description("Text in the name, species, breed, notes or vet name, e.g. beagle")),
 		mcp.WithNumber("limit", mcp.Description("Max pets to return, 1-100 (default 25)"), mcp.Min(1), mcp.Max(maxLimit)),
-		mcp.WithString("cursor", mcp.Description("Cursor from a previous result's narrow hint, for the next page")),
+		mcp.WithString("cursor", mcp.Description("next_cursor from the previous result, for the next page")),
 		respond.ListSchema[petData](),
 	}
 	tool := mcp.NewTool("pet_find", append(opts, annotations("Find pets", true, false, true)...)...)
@@ -104,8 +102,9 @@ func NewPetFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		end := in.offset + len(page)
 		return respond.List(findSummary(in, page, total), page, respond.Page{
-			Total:  max(total-in.offset, len(page)),
-			Narrow: fmt.Sprintf("Pass cursor=%q for the next page, or add query.", strconv.Itoa(end)),
+			Total:      max(total-in.offset, len(page)),
+			NextCursor: respond.CursorAfter(end, total),
+			Narrow:     "Pass next_cursor as cursor for the next page, or add query.",
 		}, findNext(in, page)...), nil
 	}
 	return "pet_find", tool, handler
@@ -243,10 +242,10 @@ func parseFindInput(raw map[string]any) (findInput, error) {
 	if c, err := optionalString(args, "cursor"); err != nil {
 		return in, err
 	} else if c != nil {
-		off, convErr := strconv.Atoi(*c)
-		if convErr != nil || off < 0 {
+		off, ok := respond.DecodeCursor(*c)
+		if !ok {
 			return in, badArg("cursor", fmt.Sprintf("cursor %q is not a cursor from pet_find.", *c),
-				"Pass the cursor value from the previous result's narrow hint, or leave cursor out for the first page.")
+				"Pass next_cursor from the previous result as cursor, or leave cursor out for the first page.")
 		}
 		in.offset = off
 	}

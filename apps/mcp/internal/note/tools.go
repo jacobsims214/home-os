@@ -9,7 +9,6 @@ package note
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"strconv"
@@ -242,21 +241,6 @@ const (
 	maxFindLimit     = 100
 )
 
-// encodeCursor and decodeCursor make the opaque note_find cursor: the offset
-// of the next page.
-func encodeCursor(offset int) string {
-	return base64.RawURLEncoding.EncodeToString([]byte("o:" + strconv.Itoa(offset)))
-}
-
-func decodeCursor(c string) (int, bool) {
-	b, err := base64.RawURLEncoding.DecodeString(c)
-	if err != nil || !strings.HasPrefix(string(b), "o:") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimPrefix(string(b), "o:"))
-	return n, err == nil && n >= 0
-}
-
 // intArg reads a numeric argument sent as a JSON number or a numeric string.
 func intArg(args map[string]any, key string) (int, bool, bool) {
 	switch v := args[key].(type) {
@@ -281,7 +265,7 @@ func intArg(args map[string]any, key string) (int, bool, bool) {
 // (query, matched case-insensitively in title and body) and by what they
 // are about. Items carry a 100-character preview; note_get reads a whole
 // note. Paging uses limit (default 25, max 100) and an opaque cursor that a
-// truncated result hands back in narrow and next.
+// truncated result hands back as next_cursor.
 func NewNoteFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("note_find",
 		mcp.WithDescription("List or search notes by text or what they're about. Returns titles and short previews; read a whole note with note_get."),
@@ -337,7 +321,7 @@ func NewNoteFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 		}
 		offset := 0
 		if c := strings.TrimSpace(str(args, "cursor")); c != "" {
-			if offset, ok = decodeCursor(c); !ok {
+			if offset, ok = respond.DecodeCursor(c); !ok {
 				return respond.Invalid("cursor", "cursor is not one note_find returned.",
 					"Pass the cursor exactly as the previous note_find result gave it, or leave it out to start over.",
 					map[string]any{"query": "wifi"}), nil
@@ -408,12 +392,11 @@ func NewNoteFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 		}
 		page := respond.Page{}
 		if remaining > 0 {
-			c := encodeCursor(offset + len(items))
 			page = respond.Page{
-				Total:  len(items) + remaining,
-				Narrow: fmt.Sprintf("%d more. Pass cursor=%q with the same filters for the next page, or add query or about_type to narrow.", remaining, c),
+				NextCursor: respond.EncodeCursor(offset + len(items)),
+				Total:      len(items) + remaining,
+				Narrow:     fmt.Sprintf("%d more. Pass next_cursor as cursor with the same filters for the next page, or add query or about_type to narrow.", remaining),
 			}
-			next = append(next, fmt.Sprintf("Next page: note_find cursor=%s with the same filters.", c))
 		}
 		return respond.List(summary, items, page, next...), nil
 	}

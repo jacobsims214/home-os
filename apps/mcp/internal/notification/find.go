@@ -3,7 +3,6 @@ package notification
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -36,7 +35,7 @@ type findResult struct {
 	Total         int                `json:"total" jsonschema_description:"How many notifications match the filter in all."`
 	Returned      int                `json:"returned" jsonschema_description:"How many are in notifications."`
 	Truncated     bool               `json:"truncated" jsonschema_description:"true when more match; pass next_cursor as cursor for the next page."`
-	NextCursor    *string            `json:"next_cursor" jsonschema_description:"Pass as cursor for the next page; null on the last page."`
+	NextCursor    string             `json:"next_cursor,omitempty" jsonschema_description:"Pass as cursor, with the same filters, for the next page. Absent on the last page."`
 	Notifications []notificationData `json:"notifications" jsonschema_description:"Newest first."`
 }
 
@@ -121,8 +120,7 @@ func findNotifications(ctx context.Context, pool *pgxpool.Pool, householdID stri
 	res.Returned = len(res.Notifications)
 	if end := in.offset + res.Returned; end < res.Total && res.Returned > 0 {
 		res.Truncated = true
-		c := strconv.Itoa(end)
-		res.NextCursor = &c
+		res.NextCursor = respond.EncodeCursor(end)
 	}
 	return res, tx.Commit(ctx)
 }
@@ -158,8 +156,8 @@ func matchNoun(in findInput) string {
 // findNext is notification_find's next-step hints (at most three).
 func findNext(in findInput, res findResult) []string {
 	var next []string
-	if res.NextCursor != nil {
-		next = append(next, fmt.Sprintf("Pass cursor=%q for the next page.", *res.NextCursor))
+	if res.NextCursor != "" {
+		next = append(next, "Pass next_cursor as cursor for the next page.")
 	}
 	for _, n := range res.Notifications {
 		if n.Open != nil && !n.Read {
@@ -208,8 +206,8 @@ func parseFindInput(raw map[string]any) (findInput, error) {
 	if c, err := optionalString(args, "cursor"); err != nil {
 		return in, err
 	} else if c != nil {
-		off, convErr := strconv.Atoi(*c)
-		if convErr != nil || off < 0 {
+		off, ok := respond.DecodeCursor(*c)
+		if !ok {
 			return in, badArg("cursor", fmt.Sprintf("cursor %q is not a cursor from notification_find.", *c),
 				"Pass next_cursor from the previous result, or leave cursor out for the first page.")
 		}

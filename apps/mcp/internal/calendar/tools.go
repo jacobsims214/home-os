@@ -954,9 +954,8 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		p := respond.Page{Total: total - lo}
 		var next []string
 		if hi < total {
-			c := encodeCursor(hi)
-			p.Narrow = fmt.Sprintf("%d more. Call again with cursor=%q, or narrow from/to, query or calendar_id.", total-hi, c)
-			next = append(next, fmt.Sprintf("Next page: the same call with cursor=%q.", c))
+			p.NextCursor = respond.EncodeCursor(hi)
+			p.Narrow = fmt.Sprintf("%d more. Pass next_cursor as cursor with the same filters, or narrow from/to, query or calendar_id.", total-hi)
 		}
 		if len(page) > 0 {
 			next = append(next, eventHints(page[0])...)

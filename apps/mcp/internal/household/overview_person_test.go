@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/testutil"
 )
@@ -264,14 +265,11 @@ func TestPersonFind(t *testing.T) {
 		if !env.OK || !env.Truncated || env.Total != 2 || len(env.Items) != 1 || env.Items[0].ID != ownerPerson {
 			t.Fatalf("page 1 = %+v", env)
 		}
-		start := strings.Index(env.Narrow, `cursor="`)
-		if start < 0 {
-			t.Fatalf("narrow has no cursor: %q", env.Narrow)
+		if env.NextCursor != respond.EncodeCursor(1) {
+			t.Fatalf("page 1 next_cursor = %q", env.NextCursor)
 		}
-		rest := env.Narrow[start+len(`cursor="`):]
-		cursor := rest[:strings.Index(rest, `"`)]
-		env, _ = callEnvelope(t, ctx, h, rs, map[string]any{"limit": 1, "cursor": cursor})
-		if !env.OK || env.Truncated || len(env.Items) != 1 || env.Items[0].ID != mgrPerson {
+		env, _ = callEnvelope(t, ctx, h, rs, map[string]any{"limit": 1, "cursor": env.NextCursor})
+		if !env.OK || env.Truncated || env.NextCursor != "" || len(env.Items) != 1 || env.Items[0].ID != mgrPerson {
 			t.Fatalf("page 2 = %+v", env)
 		}
 	})

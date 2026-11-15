@@ -3,7 +3,6 @@ package asset
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -39,8 +38,8 @@ func (in findInput) filtered() bool {
 // sorted by name, each with its property and room names and its warranty
 // status in the family's timezone. query matches name, maker, model, serial
 // number, category, room and property; category matches exactly, any case.
-// Pagination is limit + an offset cursor, given in the narrow hint and the
-// last next hint because respond has no next_cursor field.
+// Pagination is limit + the opaque next_cursor (respond.EncodeCursor),
+// passed back as cursor.
 func NewAssetFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("List or search things the family owns by name, maker, model, room or property. " +
@@ -51,7 +50,7 @@ func NewAssetFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		mcp.WithString("property_id", mcp.Description("Only assets at this property (UUID from property_find)")),
 		mcp.WithString("room_id", mcp.Description("Only assets in this room (UUID from property_find id=...)")),
 		mcp.WithNumber("limit", mcp.Description("Max assets to return, 1-100 (default 25)"), mcp.Min(1), mcp.Max(maxLimit)),
-		mcp.WithString("cursor", mcp.Description("Cursor from a previous result's narrow hint, for the next page")),
+		mcp.WithString("cursor", mcp.Description("next_cursor from the previous result, for the next page")),
 		respond.ListSchema[assetData](),
 	}
 	tool := mcp.NewTool("asset_find", append(opts, annotations("Find assets", true, false, true)...)...)
@@ -105,12 +104,10 @@ func NewAssetFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			page = append(page, r.data(today))
 		}
 		next := findNext(in, page)
-		if end < total {
-			next = append(next, fmt.Sprintf("More assets: call asset_find again with cursor=%q.", strconv.Itoa(end)))
-		}
 		return respond.List(findSummary(in, page, total), page, respond.Page{
-			Total:  total - in.offset,
-			Narrow: fmt.Sprintf("Pass cursor=%q for the next page, or add query, category, property_id or room_id.", strconv.Itoa(end)),
+			Total:      total - in.offset,
+			NextCursor: respond.CursorAfter(end, total),
+			Narrow:     "Pass next_cursor as cursor for the next page, or add query, category, property_id or room_id.",
 		}, next...), nil
 	}
 	return "asset_find", tool, handler
@@ -183,10 +180,10 @@ func parseFindInput(args map[string]any) (findInput, error) {
 	if c, err := optionalString(args, "cursor"); err != nil {
 		return in, err
 	} else if c != nil {
-		off, convErr := strconv.Atoi(*c)
-		if convErr != nil || off < 0 {
+		off, ok := respond.DecodeCursor(*c)
+		if !ok {
 			return in, badArg("cursor", fmt.Sprintf("cursor %q is not a cursor from asset_find.", *c),
-				"Pass the cursor value from the previous result's narrow hint, or leave cursor out for the first page.")
+				"Pass next_cursor from the previous result as cursor, or leave cursor out for the first page.")
 		}
 		in.offset = off
 	}

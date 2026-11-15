@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/search"
 	"home-os/mcp/internal/testutil"
 )
@@ -76,15 +77,16 @@ func outputSchema(t *testing.T, name string) *jsonschema.Resolved {
 
 // wireEnvelope is the JSON every asset tool returns.
 type wireEnvelope struct {
-	OK        bool            `json:"ok"`
-	Summary   string          `json:"summary"`
-	Data      json.RawMessage `json:"data"`
-	Items     json.RawMessage `json:"items"`
-	Total     *int            `json:"total"`
-	Truncated bool            `json:"truncated"`
-	Narrow    string          `json:"narrow"`
-	Next      []string        `json:"next"`
-	Error     *struct {
+	OK         bool            `json:"ok"`
+	Summary    string          `json:"summary"`
+	Data       json.RawMessage `json:"data"`
+	Items      json.RawMessage `json:"items"`
+	Total      *int            `json:"total"`
+	Truncated  bool            `json:"truncated"`
+	Narrow     string          `json:"narrow"`
+	NextCursor string          `json:"next_cursor"`
+	Next       []string        `json:"next"`
+	Error      *struct {
 		Message string         `json:"message"`
 		Fix     string         `json:"fix"`
 		Field   string         `json:"field"`
@@ -523,11 +525,11 @@ func TestAssetFind(t *testing.T) {
 
 	t.Run("paging", func(t *testing.T) {
 		e := call(t, f.ctx, f.find, "asset_find", map[string]any{"limit": 3})
-		if ids(e.assets(t)) != "Dishwasher,Fridge,Laptop" || !e.Truncated || *e.Total != 4 || !strings.Contains(e.Narrow, `cursor="3"`) {
+		if ids(e.assets(t)) != "Dishwasher,Fridge,Laptop" || !e.Truncated || *e.Total != 4 || e.NextCursor != respond.EncodeCursor(3) {
 			t.Fatalf("page 1 = %s truncated=%v total=%v narrow=%q", ids(e.assets(t)), e.Truncated, deref2(e.Total), e.Narrow)
 		}
-		e2 := call(t, f.ctx, f.find, "asset_find", map[string]any{"limit": 3, "cursor": "3"})
-		if ids(e2.assets(t)) != "Lawn mower" || e2.Truncated {
+		e2 := call(t, f.ctx, f.find, "asset_find", map[string]any{"limit": 3, "cursor": e.NextCursor})
+		if ids(e2.assets(t)) != "Lawn mower" || e2.Truncated || e2.NextCursor != "" {
 			t.Errorf("page 2 = %s truncated=%v", ids(e2.assets(t)), e2.Truncated)
 		}
 	})

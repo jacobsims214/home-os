@@ -3,7 +3,6 @@ package vehicle
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -34,8 +33,8 @@ func (in findInput) filtered() bool { return in.id != nil || in.query != "" }
 // replacing list_vehicles and get_vehicle. It lists the family's vehicles by
 // make, model and year, each with counts of the loans, bills and pending
 // upkeep tied to it by vehicle_id. With id it also returns those records in
-// data.related. Pagination is limit + an opaque offset cursor, given in the
-// narrow hint because respond has no next_cursor (bill/loan pattern).
+// data.related. Pagination is limit + the opaque next_cursor
+// (respond.EncodeCursor), passed back as cursor.
 func NewVehicleFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("List or search the family's vehicles. Pass id for full details: VIN, plate, value, " +
@@ -43,7 +42,7 @@ func NewVehicleFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		mcp.WithString("id", mcp.Description("A vehicle_id (UUID) to get that vehicle in full")),
 		mcp.WithString("query", mcp.Description("Text in the make, model, year, VIN, plate, color or notes, e.g. Honda")),
 		mcp.WithNumber("limit", mcp.Description("Max vehicles to return, 1-100 (default 25)"), mcp.Min(1), mcp.Max(maxLimit)),
-		mcp.WithString("cursor", mcp.Description("Cursor from a previous result's narrow hint, for the next page")),
+		mcp.WithString("cursor", mcp.Description("next_cursor from the previous result, for the next page")),
 		respond.ListSchema[vehicleData](),
 	}
 	tool := mcp.NewTool("vehicle_find", append(opts, annotations("Find vehicles", true, false, true)...)...)
@@ -94,8 +93,9 @@ func NewVehicleFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 
 		return respond.List(findSummary(in, page, total), page, respond.Page{
-			Total:  total - in.offset,
-			Narrow: fmt.Sprintf("Pass cursor=%q for the next page, or add query.", strconv.Itoa(end)),
+			Total:      total - in.offset,
+			NextCursor: respond.CursorAfter(end, total),
+			Narrow:     "Pass next_cursor as cursor for the next page, or add query.",
 		}, findNext(in, page)...), nil
 	}
 	return "vehicle_find", tool, handler
@@ -183,10 +183,10 @@ func parseFindInput(args map[string]any) (findInput, error) {
 	if c, err := optionalString(args, "cursor"); err != nil {
 		return in, err
 	} else if c != nil {
-		off, convErr := strconv.Atoi(*c)
-		if convErr != nil || off < 0 {
+		off, ok := respond.DecodeCursor(*c)
+		if !ok {
 			return in, badArg("cursor", fmt.Sprintf("cursor %q is not a cursor from vehicle_find.", *c),
-				"Pass the cursor value from the previous result's narrow hint, or leave cursor out for the first page.")
+				"Pass next_cursor from the previous result as cursor, or leave cursor out for the first page.")
 		}
 		in.offset = off
 	}

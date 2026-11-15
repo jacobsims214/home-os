@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/testutil"
 )
 
@@ -71,15 +72,16 @@ type wireItem struct {
 }
 
 type envelope[T any] struct {
-	OK        bool     `json:"ok"`
-	Summary   string   `json:"summary"`
-	Data      *T       `json:"data"`
-	Items     []T      `json:"items"`
-	Total     *int     `json:"total"`
-	Truncated bool     `json:"truncated"`
-	Narrow    string   `json:"narrow"`
-	Next      []string `json:"next"`
-	Error     *struct {
+	OK         bool     `json:"ok"`
+	Summary    string   `json:"summary"`
+	Data       *T       `json:"data"`
+	Items      []T      `json:"items"`
+	Total      *int     `json:"total"`
+	Truncated  bool     `json:"truncated"`
+	Narrow     string   `json:"narrow"`
+	NextCursor string   `json:"next_cursor"`
+	Next       []string `json:"next"`
+	Error      *struct {
 		Message string `json:"message"`
 		Fix     string `json:"fix"`
 		Field   string `json:"field"`
@@ -551,11 +553,11 @@ func TestDocumentFindAndGet(t *testing.T) {
 		if ids(first.Items) != "receipt,policy" || !first.Truncated || *first.Total != 3 {
 			t.Fatalf("first page: %s %+v", ids(first.Items), first)
 		}
-		i := strings.Index(first.Narrow, `cursor="`)
-		cursor := first.Narrow[i+8:]
-		cursor = cursor[:strings.Index(cursor, `"`)]
-		second := find.mustOK(t, ctx, map[string]any{"limit": "2", "cursor": cursor})
-		if ids(second.Items) != "report" || second.Truncated {
+		if first.NextCursor != respond.EncodeCursor(2) {
+			t.Fatalf("first page next_cursor = %q", first.NextCursor)
+		}
+		second := find.mustOK(t, ctx, map[string]any{"limit": "2", "cursor": first.NextCursor})
+		if ids(second.Items) != "report" || second.Truncated || second.NextCursor != "" {
 			t.Errorf("second page: %s %+v", ids(second.Items), second)
 		}
 	})

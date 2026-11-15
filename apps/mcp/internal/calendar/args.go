@@ -2,10 +2,7 @@ package calendar
 
 import (
 	"context"
-	"encoding/base64"
-	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -312,7 +309,6 @@ func calendarNames(ctx context.Context, q querier, householdID string) string {
 const (
 	defaultLimit = 25
 	maxLimit     = 100
-	cursorPrefix = "evt:"
 )
 
 // pageArgs reads limit (default 25, 1–100) and the opaque cursor, which
@@ -327,29 +323,9 @@ func pageArgs(args map[string]any) (limit, offset int, bad *mcp.CallToolResult) 
 	if c == "" {
 		return int(f), 0, nil
 	}
-	if off, err := decodeCursor(c); err == nil {
+	if off, ok := respond.DecodeCursor(c); ok {
 		return int(f), off, nil
 	}
 	return 0, 0, respond.Invalid("cursor", "cursor is not one this tool returned.",
 		"Pass the cursor exactly as given in the previous result, or omit it for the first page.", nil)
-}
-
-func encodeCursor(offset int) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(cursorPrefix + strconv.Itoa(offset)))
-}
-
-func decodeCursor(c string) (int, error) {
-	b, err := base64.RawURLEncoding.DecodeString(c)
-	if err != nil {
-		return 0, err
-	}
-	s, ok := strings.CutPrefix(string(b), cursorPrefix)
-	if !ok {
-		return 0, errors.New("bad cursor")
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil || n < 0 {
-		return 0, errors.New("bad cursor")
-	}
-	return n, nil
 }

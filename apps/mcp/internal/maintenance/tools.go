@@ -203,9 +203,8 @@ func NewMaintenanceFindTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) 
 		page := respond.Page{}
 		if offset+len(items) < total {
 			page.Total = total
-			cursor := encodeCursor(offset + len(items))
-			page.Narrow = fmt.Sprintf("Pass cursor=%q for the next page, or add due_within_days, status or query to narrow.", cursor)
-			next = append(next, fmt.Sprintf("Next page: maintenance_find cursor=%s", cursor))
+			page.NextCursor = respond.EncodeCursor(offset + len(items))
+			page.Narrow = "Pass next_cursor as cursor for the next page, or add due_within_days, status or query to narrow."
 		}
 		return respond.List(summary, items, page, next...), nil
 	}

@@ -105,15 +105,16 @@ func checkShape(t *testing.T, name string, res *mcp.CallToolResult, text string)
 
 // wireEnvelope is the JSON every bill tool returns.
 type wireEnvelope struct {
-	OK        bool            `json:"ok"`
-	Summary   string          `json:"summary"`
-	Data      json.RawMessage `json:"data"`
-	Items     json.RawMessage `json:"items"`
-	Total     *int            `json:"total"`
-	Truncated bool            `json:"truncated"`
-	Narrow    string          `json:"narrow"`
-	Next      []string        `json:"next"`
-	Error     *struct {
+	OK         bool            `json:"ok"`
+	Summary    string          `json:"summary"`
+	Data       json.RawMessage `json:"data"`
+	Items      json.RawMessage `json:"items"`
+	Total      *int            `json:"total"`
+	Truncated  bool            `json:"truncated"`
+	Narrow     string          `json:"narrow"`
+	NextCursor string          `json:"next_cursor"`
+	Next       []string        `json:"next"`
+	Error      *struct {
 		Message string         `json:"message"`
 		Fix     string         `json:"fix"`
 		Field   string         `json:"field"`

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/testutil"
 )
 
@@ -47,15 +48,16 @@ func outputSchema(t *testing.T) *jsonschema.Resolved {
 
 // wireEnvelope is the JSON contact_find returns.
 type wireEnvelope struct {
-	OK        bool            `json:"ok"`
-	Summary   string          `json:"summary"`
-	Items     json.RawMessage `json:"items"`
-	Returned  int             `json:"returned"`
-	Total     *int            `json:"total"`
-	Truncated bool            `json:"truncated"`
-	Narrow    string          `json:"narrow"`
-	Next      []string        `json:"next"`
-	Error     *struct {
+	OK         bool            `json:"ok"`
+	Summary    string          `json:"summary"`
+	Items      json.RawMessage `json:"items"`
+	Returned   int             `json:"returned"`
+	Total      *int            `json:"total"`
+	Truncated  bool            `json:"truncated"`
+	Narrow     string          `json:"narrow"`
+	NextCursor string          `json:"next_cursor"`
+	Next       []string        `json:"next"`
+	Error      *struct {
 		Message string         `json:"message"`
 		Fix     string         `json:"fix"`
 		Field   string         `json:"field"`
@@ -355,13 +357,13 @@ func TestContactFind(t *testing.T) {
 		t.Errorf("foreign query leaked: %+v", got)
 	}
 
-	// Pagination: limit + cursor from the narrow hint.
+	// Pagination: limit + next_cursor passed back as cursor.
 	env = call(t, ctx, find, map[string]any{"limit": 3})
-	if got := ids(env.contacts(t)); len(got) != 3 || !env.Truncated || *env.Total != 4 || !strings.Contains(env.Narrow, `cursor="3"`) {
+	if got := ids(env.contacts(t)); len(got) != 3 || !env.Truncated || *env.Total != 4 || env.NextCursor != respond.EncodeCursor(3) {
 		t.Fatalf("page 1: %+v", env)
 	}
-	env = call(t, ctx, find, map[string]any{"limit": "3", "cursor": "3"})
-	if got := ids(env.contacts(t)); len(got) != 1 || got[0] != sparky || env.Truncated {
+	env = call(t, ctx, find, map[string]any{"limit": "3", "cursor": env.NextCursor})
+	if got := ids(env.contacts(t)); len(got) != 1 || got[0] != sparky || env.Truncated || env.NextCursor != "" {
 		t.Fatalf("page 2: %+v", env)
 	}
 	env = call(t, ctx, find, map[string]any{"cursor": "9"})

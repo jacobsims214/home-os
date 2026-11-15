@@ -20,7 +20,7 @@ import (
 // date. from/to filter on the document date (the upload day when a document
 // has none), both inclusive. Items carry a snippet, never the whole text.
 // Paging: limit (default 25, max 100) and an opaque cursor that a truncated
-// result hands back in narrow and in the last next hint.
+// result hands back as next_cursor.
 func NewDocumentFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("document_find",
 		mcp.WithDescription("Find documents by words in them (\"car insurance\"), category, person, what they're about, or date. Returns title, category, dates and a snippet; read one with document_get."),
@@ -109,7 +109,7 @@ func NewDocumentFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		offset := 0
 		if c := str(args, "cursor"); c != "" {
-			if offset, ok = decodeCursor(c); !ok {
+			if offset, ok = respond.DecodeCursor(c); !ok {
 				return respond.Invalid("cursor", "cursor is not one document_find returned.",
 					"Pass the cursor exactly as the previous document_find result gave it, or leave it out to start over.",
 					map[string]any{"query": "insurance"}), nil
@@ -250,13 +250,11 @@ func NewDocumentFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		next := []string{fmt.Sprintf("Read one with document_get document_id=%s.", items[0].ID)}
 		page := respond.Page{}
 		if remaining > 0 {
-			c := encodeCursor(offset + len(items))
 			page = respond.Page{
-				Total: len(items) + remaining,
-				Narrow: fmt.Sprintf("%d more. Pass cursor=%q with the same filters for the next page, or add query, category or from/to to narrow.",
-					remaining, c),
+				NextCursor: respond.EncodeCursor(offset + len(items)),
+				Total:      len(items) + remaining,
+				Narrow:     fmt.Sprintf("%d more. Pass next_cursor as cursor with the same filters for the next page, or add query, category or from/to to narrow.", remaining),
 			}
-			next = append(next, fmt.Sprintf("Next page: document_find cursor=%s with the same filters.", c))
 		}
 		return respond.List(strings.TrimSpace(summary), items, page, next...), nil
 	}

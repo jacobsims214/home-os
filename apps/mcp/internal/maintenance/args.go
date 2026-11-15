@@ -2,7 +2,6 @@ package maintenance
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,7 +75,6 @@ const (
 	maxNameRunes = 255
 	// duplicateWindow is the §1 loop guard window for maintenance_create.
 	duplicateWindow = 10 * time.Minute
-	cursorPrefix    = "maintenance:"
 	exampleTaskID   = "7c1e2a9b-4d3f-4a8e-b6c5-2f9d0e1a3b4c"
 	exampleUUID     = "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"
 )
@@ -179,32 +177,12 @@ func pageArgs(args map[string]any) (limit, offset int, bad *mcp.CallToolResult) 
 	if c == "" {
 		return limit, 0, nil
 	}
-	off, err := decodeCursor(c)
-	if err != nil {
+	off, ok := respond.DecodeCursor(c)
+	if !ok {
 		return 0, 0, respond.Invalid("cursor", "cursor is not one this tool returned.",
 			"Pass the cursor exactly as given in the previous result, or omit it for the first page.", nil)
 	}
 	return limit, off, nil
-}
-
-func encodeCursor(offset int) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(cursorPrefix + strconv.Itoa(offset)))
-}
-
-func decodeCursor(c string) (int, error) {
-	b, err := base64.RawURLEncoding.DecodeString(c)
-	if err != nil {
-		return 0, err
-	}
-	s, ok := strings.CutPrefix(string(b), cursorPrefix)
-	if !ok {
-		return 0, errors.New("bad cursor")
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil || n < 0 {
-		return 0, errors.New("bad cursor")
-	}
-	return n, nil
 }
 
 // parseID checks that value is a UUID; findTool is where a valid id comes from.

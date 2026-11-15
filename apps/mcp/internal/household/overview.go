@@ -151,7 +151,7 @@ var howTo = []string{
 	"Dates are YYYY-MM-DD in the family timezone; times are ISO 8601 with an offset, e.g. 2026-11-19T17:30:00-05:00.",
 	"Every date in a result also carries local_date and weekday; trust those over your own weekday math.",
 	"find tools list and search in one call; pass id for exactly one full record.",
-	"When a list is truncated, pass the cursor from narrow to get the next page.",
+	"When a list is truncated, pass its next_cursor back as cursor (same filters) to get the next page.",
 	"person_id comes from people[].id here or from person_find.",
 	"calendar_id accepts a calendar name, e.g. Family.",
 	"Not sure which area something is in? search_all looks everywhere at once.",

@@ -2,6 +2,7 @@ package respond_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -141,6 +142,7 @@ func TestList(t *testing.T) {
 		wantTotal     float64
 		wantTruncated bool
 		wantNarrow    string
+		wantCursor    string
 	}{
 		{name: "complete", items: three, page: respond.Page{Total: 3}, wantReturned: 3, wantTotal: 3},
 		{name: "total unset means complete", items: three, wantReturned: 3, wantTotal: 3},
@@ -150,6 +152,19 @@ func TestList(t *testing.T) {
 			page:         respond.Page{Total: 143, Narrow: "Pass tag or query to narrow the results."},
 			wantReturned: 3, wantTotal: 143, wantTruncated: true,
 			wantNarrow: "Pass tag or query to narrow the results.",
+		},
+		{
+			name: "next cursor", items: three,
+			page:         respond.Page{Total: 9, NextCursor: respond.EncodeCursor(3), Narrow: "Pass next_cursor as cursor for the next page."},
+			wantReturned: 3, wantTotal: 9, wantTruncated: true,
+			wantNarrow: "Pass next_cursor as cursor for the next page.", wantCursor: respond.EncodeCursor(3),
+		},
+		{
+			name: "next cursor alone marks truncated", items: three,
+			page:         respond.Page{NextCursor: respond.EncodeCursor(3)},
+			wantReturned: 3, wantTotal: 3, wantTruncated: true,
+			wantNarrow: "More items matched than were returned. Add filters or a more specific query to narrow the results.",
+			wantCursor: respond.EncodeCursor(3),
 		},
 		{
 			name: "truncated default hint", items: three, page: respond.Page{Total: 10},
@@ -180,6 +195,47 @@ func TestList(t *testing.T) {
 			gotNarrow, _ := sc["narrow"].(string)
 			if gotNarrow != tc.wantNarrow {
 				t.Fatalf("narrow = %q, want %q", gotNarrow, tc.wantNarrow)
+			}
+			gotCursor, _ := sc["next_cursor"].(string)
+			if _, present := sc["next_cursor"]; present != (tc.wantCursor != "") || gotCursor != tc.wantCursor {
+				t.Fatalf("next_cursor = %v (present %v), want %q", sc["next_cursor"], present, tc.wantCursor)
+			}
+		})
+	}
+}
+
+func TestCursor(t *testing.T) {
+	b64 := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	for _, off := range []int{0, 1, 25, 1000} {
+		if got, ok := respond.DecodeCursor(respond.EncodeCursor(off)); !ok || got != off {
+			t.Fatalf("round trip %d: got %d, %v", off, got, ok)
+		}
+	}
+	tests := []struct {
+		name   string
+		cursor string
+		want   int
+		ok     bool
+	}{
+		{"current form", respond.EncodeCursor(40), 40, true},
+		{"padded base64", base64.URLEncoding.EncodeToString([]byte("o:7")), 7, true},
+		{"surrounding space", " " + respond.EncodeCursor(5) + " ", 5, true},
+		{"legacy plain offset", "25", 25, true},
+		{"legacy event_find", b64("evt:50"), 50, true},
+		{"legacy maintenance_find", b64("maintenance:2"), 2, true},
+		{"empty", "", 0, false},
+		{"negative offset", "-3", 0, false},
+		{"negative encoded", b64("o:-3"), 0, false},
+		{"made up", "page2", 0, false},
+		{"not base64 of a cursor", "abc", 0, false},
+		{"unknown prefix", b64("x:4"), 0, false},
+		{"prefix without number", b64("o:"), 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := respond.DecodeCursor(tc.cursor)
+			if ok != tc.ok || (ok && got != tc.want) {
+				t.Fatalf("DecodeCursor(%q) = %d, %v; want %d, %v", tc.cursor, got, ok, tc.want, tc.ok)
 			}
 		})
 	}

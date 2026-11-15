@@ -14,6 +14,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/auth"
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/testutil"
 )
@@ -300,7 +301,7 @@ func TestNotificationFind(t *testing.T) {
 	if strings.Contains(fmt.Sprint(ids), alarmAmber) || strings.Contains(fmt.Sprint(ids), foreign) {
 		t.Fatal("leaked another member's or family's notification")
 	}
-	if d.UnreadCount != 3 || d.Total != 4 || d.Returned != 4 || d.Truncated || d.NextCursor != nil {
+	if d.UnreadCount != 3 || d.Total != 4 || d.Returned != 4 || d.Truncated || d.NextCursor != "" {
 		t.Errorf("counts = %+v", d)
 	}
 	if env.Summary != "Found 4 notifications; you have 3 unread notifications." {
@@ -360,14 +361,14 @@ func TestNotificationFind(t *testing.T) {
 	// Paging.
 	env = call[findResult](t, ctx, "notification_find", find, map[string]any{"limit": 3})
 	d = env.data(t)
-	if d.Returned != 3 || d.Total != 4 || !d.Truncated || d.NextCursor == nil || *d.NextCursor != "3" {
+	if d.Returned != 3 || d.Total != 4 || !d.Truncated || d.NextCursor != respond.EncodeCursor(3) {
 		t.Fatalf("page 1 = %+v", d)
 	}
-	if env.Summary != "Showing 1-3 of 4 notifications; you have 3 unread notifications." || !strings.Contains(env.Next[0], `cursor="3"`) {
+	if env.Summary != "Showing 1-3 of 4 notifications; you have 3 unread notifications." || env.Next[0] != "Pass next_cursor as cursor for the next page." {
 		t.Errorf("page 1 summary/next = %q %v", env.Summary, env.Next)
 	}
-	d = call[findResult](t, ctx, "notification_find", find, map[string]any{"limit": "3", "cursor": *d.NextCursor}).data(t)
-	if d.Returned != 1 || d.Notifications[0].ID != readN || d.Truncated || d.NextCursor != nil {
+	d = call[findResult](t, ctx, "notification_find", find, map[string]any{"limit": "3", "cursor": d.NextCursor}).data(t)
+	if d.Returned != 1 || d.Notifications[0].ID != readN || d.Truncated || d.NextCursor != "" {
 		t.Errorf("page 2 = %+v", d)
 	}
 	env = call[findResult](t, ctx, "notification_find", find, map[string]any{"cursor": "40"})

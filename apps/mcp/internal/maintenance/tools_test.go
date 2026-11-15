@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/testutil"
 )
 
@@ -82,15 +83,16 @@ func outputSchema(t *testing.T, name string) *jsonschema.Resolved {
 
 // envelope is the JSON every maintenance tool returns.
 type envelope struct {
-	OK        bool            `json:"ok"`
-	Summary   string          `json:"summary"`
-	Data      *taskData       `json:"data"`
-	Items     []taskData      `json:"items"`
-	Total     *int            `json:"total"`
-	Truncated bool            `json:"truncated"`
-	Narrow    string          `json:"narrow"`
-	Next      []string        `json:"next"`
-	Error     *map[string]any `json:"error"`
+	OK         bool            `json:"ok"`
+	Summary    string          `json:"summary"`
+	Data       *taskData       `json:"data"`
+	Items      []taskData      `json:"items"`
+	Total      *int            `json:"total"`
+	Truncated  bool            `json:"truncated"`
+	Narrow     string          `json:"narrow"`
+	NextCursor string          `json:"next_cursor"`
+	Next       []string        `json:"next"`
+	Error      *map[string]any `json:"error"`
 }
 
 // call runs a tool and checks the respond invariants: one text block equal
@@ -489,12 +491,11 @@ func TestFind(t *testing.T) {
 
 	// Paging.
 	p1 := mustOK(t, f.ctx, pool, "maintenance_find", map[string]any{"limit": 2})
-	if len(p1.Items) != 2 || !p1.Truncated || *p1.Total != 3 || !strings.Contains(p1.Narrow, "cursor=") {
+	if len(p1.Items) != 2 || !p1.Truncated || *p1.Total != 3 || p1.NextCursor != respond.EncodeCursor(2) {
 		t.Fatalf("page 1 = %+v", p1)
 	}
-	cursor := strings.TrimSuffix(strings.SplitN(p1.Next[len(p1.Next)-1], "cursor=", 2)[1], "")
-	p2 := mustOK(t, f.ctx, pool, "maintenance_find", map[string]any{"limit": 2, "cursor": cursor})
-	if names(p2.Items) != "Gutters" || p2.Truncated {
+	p2 := mustOK(t, f.ctx, pool, "maintenance_find", map[string]any{"limit": 2, "cursor": p1.NextCursor})
+	if names(p2.Items) != "Gutters" || p2.Truncated || p2.NextCursor != "" {
 		t.Errorf("page 2 = %+v", p2)
 	}
 
