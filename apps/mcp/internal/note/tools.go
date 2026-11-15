@@ -7,6 +7,7 @@ package note
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 	"unicode/utf8"
@@ -16,10 +17,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 )
 
-// noteColumns is the SELECT list shared by list_notes and create_note. It
+// noteColumns is the SELECT list shared by list_notes, create_note and note_get. It
 // needs "notes n LEFT JOIN users u ON u.id = n.author_id" in the FROM clause.
 const noteColumns = `n.id, n.entity_type, n.entity_id, n.title, n.body,
 	n.author_id, u.name, n.created_at, n.updated_at`
@@ -29,25 +31,37 @@ const noteColumns = `n.id, n.entity_type, n.entity_id, n.title, n.body,
 // id), since the notes table requires both columns.
 const householdEntityType = "household"
 
-// noteResult is one note as returned by list_notes and create_note.
+// noteResult is one note as returned by list_notes, create_note and
+// note_get. IDs are strings, not uuid.UUID: the outputSchema is inferred
+// with jsonschema-go, which sees uuid.UUID as a [16]byte array and would
+// reject the string UUIDs that are actually on the wire.
 type noteResult struct {
-	ID             uuid.UUID  `json:"id"`
-	EntityType     string     `json:"entity_type"`
-	EntityID       uuid.UUID  `json:"entity_id"`
-	Title          *string    `json:"title"`
-	Body           string     `json:"body"`
-	ContentPreview string     `json:"content_preview"`
-	AuthorID       *uuid.UUID `json:"author_id"`
-	AuthorName     *string    `json:"author_name"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID             string    `json:"id"`
+	EntityType     string    `json:"entity_type"`
+	EntityID       string    `json:"entity_id"`
+	Title          *string   `json:"title"`
+	Body           string    `json:"body"`
+	ContentPreview string    `json:"content_preview"`
+	AuthorID       *string   `json:"author_id"`
+	AuthorName     *string   `json:"author_name"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func scanNote(row pgx.Row) (noteResult, error) {
-	var n noteResult
-	if err := row.Scan(&n.ID, &n.EntityType, &n.EntityID, &n.Title, &n.Body,
-		&n.AuthorID, &n.AuthorName, &n.CreatedAt, &n.UpdatedAt); err != nil {
+	var (
+		n            noteResult
+		id, entityID uuid.UUID
+		authorID     *uuid.UUID
+	)
+	if err := row.Scan(&id, &n.EntityType, &entityID, &n.Title, &n.Body,
+		&authorID, &n.AuthorName, &n.CreatedAt, &n.UpdatedAt); err != nil {
 		return noteResult{}, err
+	}
+	n.ID, n.EntityID = id.String(), entityID.String()
+	if authorID != nil {
+		s := authorID.String()
+		n.AuthorID = &s
 	}
 	n.ContentPreview = truncate(n.Body, 100)
 	return n, nil
@@ -218,6 +232,75 @@ func NewCreateNoteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 	}
 
 	return "create_note", tool, handler
+}
+
+// NewNoteGetTool creates the note_get MCP tool (catalog v2, class R).
+// It returns one note in full: title, complete body, author (id + name),
+// entity link and timestamps. A note that does not exist or belongs to
+// another household is reported as not found, so ids from other households
+// reveal nothing. Results are built with internal/respond.
+func NewNoteGetTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+	tool := mcp.NewTool("note_get",
+		mcp.WithDescription("Read one note in full, with who wrote it and when."),
+		mcp.WithString("note_id",
+			mcp.Description("The note's id (UUID), e.g. from note_find"),
+			mcp.Required(),
+		),
+		mcp.WithTitleAnnotation("Get note"),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
+		respond.Schema[noteResult](),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		claims := server.ClaimsFromContext(ctx)
+		if claims == nil {
+			return respond.Fail(respond.Error{
+				Message: "You are not signed in to a household.",
+				Fix:     "Tell the user to reconnect Home OS; retrying will not help.",
+			}), nil
+		}
+
+		raw, _ := req.GetArguments()["note_id"].(string)
+		example := map[string]any{"note_id": "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"}
+		if raw == "" {
+			return respond.Invalid("note_id", "note_id is required.",
+				"Pass the note's id as note_id. Call note_find to find it.", example), nil
+		}
+		noteID, err := uuid.Parse(raw)
+		if err != nil {
+			return respond.Invalid("note_id", fmt.Sprintf("note_id %q is not a UUID.", raw),
+				"Pass the note's id (a UUID) from note_find, not its title.", example), nil
+		}
+
+		n, err := scanNote(pool.QueryRow(ctx,
+			`SELECT `+noteColumns+`
+			 FROM notes n LEFT JOIN users u ON u.id = n.author_id
+			 WHERE n.id = $1 AND n.household_id = $2`,
+			noteID, claims.HouseholdID,
+		))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return respond.NotFound("note", raw, "Call note_find to find the note_id."), nil
+		}
+		if err != nil {
+			return respond.Failed("get the note", err), nil
+		}
+
+		title := "(untitled)"
+		if n.Title != nil && *n.Title != "" {
+			title = *n.Title
+		}
+		summary := fmt.Sprintf("Found note %q.", title)
+		if n.AuthorName != nil && *n.AuthorName != "" {
+			summary = fmt.Sprintf("Found note %q by %s.", title, *n.AuthorName)
+		}
+		return respond.OK(summary, n,
+			fmt.Sprintf("Use note_update note_id=%s with append_text to add to it.", n.ID)), nil
+	}
+
+	return "note_get", tool, handler
 }
 
 // truncate returns the first n characters of s, respecting Unicode boundaries.

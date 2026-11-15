@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -251,4 +252,240 @@ func TestCreateNote_RecordsAuthor(t *testing.T) {
 			t.Errorf("got %s", text)
 		}
 	})
+}
+
+// noteGetWire is a note_get result as a client sees it after JSON decoding.
+type noteGetWire struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	StructuredContent map[string]any `json:"structuredContent"`
+	IsError           bool           `json:"isError"`
+}
+
+// noteGetEnvelope is the respond envelope note_get puts in structuredContent.
+type noteGetEnvelope struct {
+	OK      bool          `json:"ok"`
+	Summary string        `json:"summary"`
+	Data    *authoredNote `json:"data"`
+	Next    []string      `json:"next"`
+	Error   *struct {
+		Message string         `json:"message"`
+		Fix     string         `json:"fix"`
+		Field   string         `json:"field"`
+		Example map[string]any `json:"example"`
+	} `json:"error"`
+}
+
+// noteGetOutputSchema resolves the outputSchema note_get advertises in tools/list.
+func noteGetOutputSchema(t *testing.T, tool mcp.Tool) *jsonschema.Resolved {
+	t.Helper()
+	b, err := json.Marshal(tool)
+	if err != nil {
+		t.Fatalf("marshal tool: %v", err)
+	}
+	var raw struct {
+		OutputSchema json.RawMessage `json:"outputSchema"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal tool: %v", err)
+	}
+	if len(raw.OutputSchema) == 0 {
+		t.Fatalf("tool %s declares no outputSchema", tool.Name)
+	}
+	var s jsonschema.Schema
+	if err := json.Unmarshal(raw.OutputSchema, &s); err != nil {
+		t.Fatalf("unmarshal outputSchema: %v", err)
+	}
+	rs, err := s.Resolve(nil)
+	if err != nil {
+		t.Fatalf("resolve outputSchema: %v", err)
+	}
+	return rs
+}
+
+// TestNoteGet runs note_get against a real, fully migrated Postgres. Every
+// result (success and error) must mirror structuredContent in its single
+// text block and validate against the tool's outputSchema.
+func TestNoteGet(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	otherCtx, _ := testutil.SeedHousehold(t, pool)
+
+	name, tool, get := NewNoteGetTool(pool)
+	_, _, create := NewCreateNoteTool(pool)
+	if name != "note_get" || tool.Name != "note_get" {
+		t.Fatalf("tool name: got %q / %q", name, tool.Name)
+	}
+	if got := tool.InputSchema.Required; len(got) != 1 || got[0] != "note_id" {
+		t.Errorf("required params: want [note_id], got %v", got)
+	}
+	a := tool.Annotations
+	if a.Title != "Get note" || a.ReadOnlyHint == nil || !*a.ReadOnlyHint ||
+		a.DestructiveHint == nil || *a.DestructiveHint ||
+		a.IdempotentHint == nil || !*a.IdempotentHint ||
+		a.OpenWorldHint == nil || *a.OpenWorldHint {
+		t.Errorf("annotations: want class R (read-only, idempotent, not destructive, closed world), got %+v", a)
+	}
+	rs := noteGetOutputSchema(t, tool)
+
+	call := func(t *testing.T, ctx context.Context, args map[string]any) (noteGetWire, noteGetEnvelope) {
+		t.Helper()
+		var req mcp.CallToolRequest
+		req.Params.Name = "note_get"
+		req.Params.Arguments = args
+		res, err := get(ctx, req)
+		if err != nil {
+			t.Fatalf("note_get returned a protocol error: %v", err)
+		}
+		b, err := json.Marshal(res)
+		if err != nil {
+			t.Fatalf("marshal result: %v", err)
+		}
+		var w noteGetWire
+		if err := json.Unmarshal(b, &w); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(w.Content) != 1 || w.Content[0].Type != "text" {
+			t.Fatalf("want exactly one text block, got %+v", w.Content)
+		}
+		var fromText map[string]any
+		if err := json.Unmarshal([]byte(w.Content[0].Text), &fromText); err != nil {
+			t.Fatalf("text block is not JSON: %v", err)
+		}
+		x, _ := json.Marshal(fromText)
+		y, _ := json.Marshal(w.StructuredContent)
+		if string(x) != string(y) {
+			t.Fatalf("text and structuredContent differ:\n%s\n%s", x, y)
+		}
+		if err := rs.Validate(w.StructuredContent); err != nil {
+			t.Fatalf("structuredContent does not match outputSchema: %v\n%s", err, y)
+		}
+		var env noteGetEnvelope
+		if err := json.Unmarshal([]byte(w.Content[0].Text), &env); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		return w, env
+	}
+
+	// A body far beyond list previews, with multi-byte characters and newlines.
+	longBody := strings.Repeat("Line with ümlauts and emoji 🏠.\n", 200)
+	var mine authoredNote
+	callJSON(t, ctx, create, map[string]any{"title": "Wi-Fi setup", "content": longBody}, &mine)
+
+	vehicleID := uuid.New()
+	var linked authoredNote
+	callJSON(t, ctx, create, map[string]any{
+		"title": "Tires", "content": "Rotate every 6k miles", "entity_type": "vehicle", "entity_id": vehicleID.String(),
+	}, &linked)
+
+	var theirs authoredNote
+	callJSON(t, otherCtx, create, map[string]any{"title": "Secret", "content": "other household"}, &theirs)
+
+	t.Run("returns the complete body, author and timestamps", func(t *testing.T) {
+		w, env := call(t, ctx, map[string]any{"note_id": mine.ID.String()})
+		if w.IsError || !env.OK || env.Data == nil {
+			t.Fatalf("want success, got isError=%v %+v", w.IsError, env)
+		}
+		n := env.Data
+		if n.ID != mine.ID || n.Title == nil || *n.Title != "Wi-Fi setup" {
+			t.Errorf("id/title: got %s / %v", n.ID, n.Title)
+		}
+		if n.Body != longBody {
+			t.Errorf("body: want %d bytes, got %d", len(longBody), len(n.Body))
+		}
+		if n.AuthorID == nil || *n.AuthorID != hh.UserID || n.AuthorName == nil || *n.AuthorName != "Test Owner" {
+			t.Errorf("author: got %v / %v", n.AuthorID, n.AuthorName)
+		}
+		if n.EntityType != "household" || n.EntityID != hh.HouseholdID {
+			t.Errorf("entity: got %s/%s", n.EntityType, n.EntityID)
+		}
+		for _, key := range []string{"created_at", "updated_at"} {
+			data := w.StructuredContent["data"].(map[string]any)
+			if s, _ := data[key].(string); s == "" {
+				t.Errorf("%s missing from data", key)
+			}
+		}
+		if env.Summary != `Found note "Wi-Fi setup" by Test Owner.` {
+			t.Errorf("summary: got %q", env.Summary)
+		}
+		if len(env.Next) == 0 || !strings.Contains(env.Next[0], "note_update") || !strings.Contains(env.Next[0], mine.ID.String()) {
+			t.Errorf("next: want a note_update hint with the id, got %v", env.Next)
+		}
+	})
+
+	t.Run("returns the entity link", func(t *testing.T) {
+		_, env := call(t, ctx, map[string]any{"note_id": linked.ID.String()})
+		if env.Data == nil || env.Data.EntityType != "vehicle" || env.Data.EntityID != vehicleID {
+			t.Fatalf("entity: got %+v", env.Data)
+		}
+	})
+
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		args      map[string]any
+		wantField string
+		wantMsg   string
+	}{
+		{
+			name:    "other household's note is not found",
+			ctx:     ctx,
+			args:    map[string]any{"note_id": theirs.ID.String()},
+			wantMsg: `No note with id "` + theirs.ID.String() + `" was found.`,
+		},
+		{
+			name:    "own note is not found from the other household",
+			ctx:     otherCtx,
+			args:    map[string]any{"note_id": mine.ID.String()},
+			wantMsg: `No note with id "` + mine.ID.String() + `" was found.`,
+		},
+		{
+			name:    "unknown id is not found",
+			ctx:     ctx,
+			args:    map[string]any{"note_id": "00000000-0000-0000-0000-000000000001"},
+			wantMsg: `No note with id "00000000-0000-0000-0000-000000000001" was found.`,
+		},
+		{
+			name:      "title instead of id is invalid",
+			ctx:       ctx,
+			args:      map[string]any{"note_id": "Wi-Fi setup"},
+			wantField: "note_id",
+			wantMsg:   `note_id "Wi-Fi setup" is not a UUID.`,
+		},
+		{
+			name:      "missing note_id is invalid",
+			ctx:       ctx,
+			args:      nil,
+			wantField: "note_id",
+			wantMsg:   "note_id is required.",
+		},
+		{
+			name:    "no claims is refused",
+			ctx:     context.Background(),
+			args:    map[string]any{"note_id": mine.ID.String()},
+			wantMsg: "You are not signed in to a household.",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w, env := call(t, tc.ctx, tc.args)
+			if !w.IsError || env.OK || env.Error == nil {
+				t.Fatalf("want isError result, got isError=%v %+v", w.IsError, env)
+			}
+			if env.Data != nil {
+				t.Errorf("error result leaked data: %+v", env.Data)
+			}
+			if env.Error.Message != tc.wantMsg || env.Summary != tc.wantMsg {
+				t.Errorf("message: want %q, got %q (summary %q)", tc.wantMsg, env.Error.Message, env.Summary)
+			}
+			if env.Error.Field != tc.wantField {
+				t.Errorf("field: want %q, got %q", tc.wantField, env.Error.Field)
+			}
+			if env.Error.Fix == "" {
+				t.Error("fix hint is empty")
+			}
+		})
+	}
 }
