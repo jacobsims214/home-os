@@ -31,6 +31,9 @@ const claimsKey claimsCtxKey = "claims"
 type Server struct {
 	mcpServer *server.MCPServer
 	sseServer *server.SSEServer
+	// httpServer serves the Streamable HTTP transport (MCP 2025-03-26+) at
+	// /mcp; the legacy SSE transport stays at /mcp/sse for older clients.
+	httpServer *server.StreamableHTTPServer
 	cfg       *config.Config
 	pool      *pgxpool.Pool
 	verifier  *auth.Verifier
@@ -66,6 +69,17 @@ func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) 
 	s.sseServer = server.NewSSEServer(s.mcpServer,
 		server.WithStaticBasePath("/mcp"),
 		server.WithSSEContextFunc(func(ctx context.Context, r *http.Request) context.Context {
+			if claims := ClaimsFromContext(r.Context()); claims != nil {
+				return context.WithValue(ctx, claimsKey, claims)
+			}
+			return ctx
+		}),
+	)
+
+	s.httpServer = server.NewStreamableHTTPServer(s.mcpServer,
+		server.WithEndpointPath("/mcp"),
+		server.WithStateLess(true),
+		server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
 			if claims := ClaimsFromContext(r.Context()); claims != nil {
 				return context.WithValue(ctx, claimsKey, claims)
 			}
@@ -168,6 +182,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// so the same AuthMiddleware is applied here. The WithSSEContextFunc option
 	// (configured in NewServer) bridges these claims into the tool handler context.
 	r.With(s.AuthMiddleware()).Handle("/mcp/message", s.sseServer.MessageHandler())
+
+	// Streamable HTTP endpoint — same Bearer auth; stateless, so every POST
+	// carries its own identity and no session affinity is needed.
+	r.With(s.AuthMiddleware()).Handle("/mcp", s.httpServer)
 
 	slog.Info("starting MCP server", "addr", addr, "tools", s.toolCount)
 
