@@ -14,10 +14,11 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Allow static assets and API routes
+  // Allow static assets, API routes and the BFF proxy (which answers 401 itself)
   if (
     pathname.startsWith("/_next") ||
     pathname.startsWith("/api") ||
+    pathname.startsWith("/bff") ||
     pathname.startsWith("/sw.js") ||
     pathname.includes(".")
   ) {
