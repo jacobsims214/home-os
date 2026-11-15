@@ -1,3 +1,18 @@
+{{- /*
+Schema migrations (golang-migrate `up`, packages/db). Runs every migration the
+image carries, so it must use the same image tag as the apps (#4679).
+
+Ordering (#4678):
+- Argo CD: a Sync-phase hook at sync-wave -1. Argo applies waves in order and
+  waits for each wave to be healthy before the next, so the sequence is
+  wave -3 Namespace + home-os-db-secret, wave -2 CNPG Cluster (healthy = ready),
+  wave -1 this Job (healthy = Complete), wave 0 Deployments/StatefulSets.
+  If the Job fails (backoffLimit/activeDeadlineSeconds), the sync stops
+  before any Deployment is changed. Argo ignores the helm.sh/hook annotations
+  because argocd.argoproj.io/hook is present.
+- Plain helm: post-install/post-upgrade hook (unchanged). It cannot be pre-*:
+  on a fresh install the CNPG Cluster and DB Secret would not exist yet.
+*/ -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -7,7 +22,12 @@ metadata:
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
   template:
     spec:
       restartPolicy: Never

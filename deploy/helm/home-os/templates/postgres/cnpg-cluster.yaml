@@ -4,6 +4,11 @@ kind: Cluster
 metadata:
   name: home-os-postgres
   namespace: {{ .Values.namespace }}
+  annotations:
+    # Argo CD: before the migrations Job (wave -1) and the workloads (wave 0).
+    # Argo's built-in postgresql.cnpg.io/Cluster health check keeps wave -1
+    # waiting until the cluster is ready (#4678).
+    argocd.argoproj.io/sync-wave: "-2"
 spec:
   instances: {{ .Values.database.managed.instances }}
   imageName: {{ .Values.database.managed.imageName | quote }}
