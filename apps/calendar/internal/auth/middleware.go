@@ -24,7 +24,8 @@ import (
 // so the production call site in main.go is unchanged.
 type caldavRepo interface {
 	GetUserByEmailForCalDAV(ctx context.Context, email string) (*db.CalDAVUser, error)
-	GetHouseholdIDForUser(ctx context.Context, userID string) (string, error)
+	ListHouseholdIDsForUser(ctx context.Context, userID string) ([]string, error)
+	GetCalendarHouseholdID(ctx context.Context, caldavUID string) (string, error)
 }
 
 // contextKey is used for context value keys to avoid collisions.
@@ -37,7 +38,18 @@ const (
 	UserIDKey contextKey = "user_id"
 	// EmailKey is the context key for the user's email injected by AuthMiddleware.
 	EmailKey contextKey = "email"
+	// HouseholdIDsKey is the context key for every household the user belongs
+	// to ([]string, default household first).
+	HouseholdIDsKey contextKey = "household_ids"
+	// HouseholdScopeKey is the context key for the household named in a
+	// /dav/households/<id>/ request path. Empty for unscoped requests.
+	HouseholdScopeKey contextKey = "household_scope"
 )
+
+// householdsPrefix is the path prefix for household-scoped CalDAV URLs:
+// /dav/households/<household_id>/... is served exactly like /dav/... but
+// against that one household.
+const householdsPrefix = "/dav/households/"
 
 // AuthMiddleware returns an HTTP middleware that validates CalDAV Basic Auth
 // credentials against the users table's caldav_password_hash column.
@@ -46,6 +58,13 @@ const (
 // password generated from the Home OS settings page (not the main account
 // password). On success, the middleware injects household_id and user_id
 // into the request context.
+//
+// Households: a user's default household is their oldest membership (see
+// db.ListHouseholdIDsForUser), so the same user always lands in the same
+// household. Users in several families can address any of them with
+// /dav/households/<id>/...; the prefix is stripped before the CalDAV handler
+// runs, and the full membership list is available via HouseholdIDsFromContext
+// so discovery can list every household's calendars.
 //
 // Per-IP rate limiting (10 attempts per minute, golang.org/x/time/rate) is
 // applied to every request that reaches the credential check. Bypass paths
@@ -225,8 +244,10 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 			// password a few times is back to a clean slate.
 			limiter.recordSuccess(ip)
 
-			// Get the user's household from their first membership.
-			householdID, err := repo.GetHouseholdIDForUser(r.Context(), user.ID)
+			// Load every household the user belongs to. The list is ordered
+			// oldest membership first, so its first element is a stable
+			// default household for unscoped requests.
+			householdIDs, err := repo.ListHouseholdIDsForUser(r.Context(), user.ID)
 			if err != nil {
 				logging.Logger.Error("caldav auth: household lookup error",
 					slog.String("user_id", user.ID),
@@ -237,13 +258,117 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Inject household_id, user_id, and email into context.
+			householdID, scope, path, ok, err := resolveHousehold(r.Context(), repo, r.URL.Path, householdIDs)
+			if err != nil {
+				logging.Logger.Error("caldav auth: calendar household lookup error",
+					slog.String("user_id", user.ID),
+					slog.String("path", r.URL.Path),
+					slog.String("error", err.Error()))
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			if !ok {
+				// Scoped to a household the user is not a member of. 404
+				// rather than 403 so household IDs can't be probed.
+				http.Error(w, "Not Found", http.StatusNotFound)
+				return
+			}
+
+			// Inject household context, user_id, and email.
 			ctx := context.WithValue(r.Context(), HouseholdIDKey, householdID)
+			ctx = context.WithValue(ctx, HouseholdIDsKey, householdIDs)
+			ctx = context.WithValue(ctx, HouseholdScopeKey, scope)
 			ctx = context.WithValue(ctx, UserIDKey, user.ID)
 			ctx = context.WithValue(ctx, EmailKey, email)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			r2 := r.WithContext(ctx)
+			if path != r.URL.Path {
+				u := *r.URL
+				u.Path = path
+				u.RawPath = ""
+				r2.URL = &u
+			}
+			next.ServeHTTP(w, r2)
 		})
 	}
+}
+
+// resolveHousehold picks the household a CalDAV request runs against.
+//
+//   - /dav/households/<id>/rest: the scoped household, if the user is a
+//     member (ok=false otherwise). The returned path is /dav/rest, so the
+//     CalDAV handlers serve it unchanged.
+//   - /dav/<calendar-uid>/...: calendar UIDs are globally unique, so for a
+//     user in several households the calendar's own household is used when
+//     it is one of theirs. This lets the unscoped calendar hrefs listed by
+//     discovery work for every household.
+//   - anything else: the default household (householdIDs[0]).
+//
+// A user with no memberships gets an empty household, as before.
+func resolveHousehold(ctx context.Context, repo caldavRepo, path string, householdIDs []string) (householdID, scope, newPath string, ok bool, err error) {
+	if len(householdIDs) > 0 {
+		householdID = householdIDs[0]
+	}
+
+	if strings.HasPrefix(path, householdsPrefix) {
+		rest := strings.TrimPrefix(path, householdsPrefix)
+		id, tail, _ := strings.Cut(rest, "/")
+		if id == "" {
+			// /dav/households/ itself: nothing is served there.
+			return householdID, "", path, true, nil
+		}
+		if !containsString(householdIDs, id) {
+			return "", "", path, false, nil
+		}
+		return id, id, "/dav/" + tail, true, nil
+	}
+
+	if len(householdIDs) < 2 {
+		return householdID, "", path, true, nil
+	}
+	seg, _, _ := strings.Cut(strings.TrimPrefix(path, "/dav/"), "/")
+	if seg == "" || seg == "calendars" || seg == "households" || !strings.HasPrefix(path, "/dav/") {
+		return householdID, "", path, true, nil
+	}
+	owner, err := repo.GetCalendarHouseholdID(ctx, seg)
+	if err != nil {
+		return "", "", path, false, err
+	}
+	if owner != "" && containsString(householdIDs, owner) {
+		householdID = owner
+	}
+	return householdID, "", path, true, nil
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// HouseholdIDsFromContext returns every household the authenticated user
+// belongs to, default household first. Returns nil if not found.
+func HouseholdIDsFromContext(ctx context.Context) []string {
+	v, _ := ctx.Value(HouseholdIDsKey).([]string)
+	return v
+}
+
+// HouseholdScopeFromContext returns the household ID from a
+// /dav/households/<id>/ request path, or "" for unscoped requests.
+func HouseholdScopeFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(HouseholdScopeKey).(string)
+	return v
+}
+
+// DAVBase returns the URL base that hrefs for the current request should use:
+// "/dav/households/<id>/" for household-scoped requests, "/dav/" otherwise.
+func DAVBase(ctx context.Context) string {
+	if scope := HouseholdScopeFromContext(ctx); scope != "" {
+		return householdsPrefix + scope + "/"
+	}
+	return "/dav/"
 }
 
 // HouseholdIDFromContext extracts the household_id injected by AuthMiddleware.

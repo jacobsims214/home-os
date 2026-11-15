@@ -329,9 +329,12 @@ func writePropStatNotFound(w io.Writer, props []xmlElement) {
 // writePrincipalResponse writes the response for a PROPFIND on the principal
 // URL (/dav/) itself — returns properties of the principal resource.
 // The email is used for calendar-user-address-set and email-address-set.
-func writePrincipalResponse(w io.Writer, calendars []db.Calendar, props []xmlElement, includeCalendarSet bool, email string) {
+// base is the request's URL base ("/dav/" or "/dav/households/<id>/", see
+// auth.DAVBase): the response href and calendar-home-set are built from it so
+// a household-scoped principal points at that household's home set.
+func writePrincipalResponse(w io.Writer, calendars []db.Calendar, props []xmlElement, includeCalendarSet bool, email, base string) {
 	fmt.Fprint(w, "  <D:response>\n")
-	fmt.Fprint(w, "    <D:href>/dav/</D:href>\n")
+	fmt.Fprintf(w, "    <D:href>%s</D:href>\n", xmlEscape(base))
 
 	// If no specific props requested, return all known principal props.
 	if len(props) == 0 {
@@ -340,7 +343,7 @@ func writePrincipalResponse(w io.Writer, calendars []db.Calendar, props []xmlEle
 		fmt.Fprint(w, "        <D:resourcetype><D:principal/></D:resourcetype>\n")
 		fmt.Fprint(w, "        <D:current-user-principal><D:href>/dav/</D:href></D:current-user-principal>\n")
 		fmt.Fprint(w, "        <D:principal-URL><D:href>/dav/</D:href></D:principal-URL>\n")
-		fmt.Fprint(w, "        <C:calendar-home-set><D:href>/dav/calendars/</D:href></C:calendar-home-set>\n")
+		fmt.Fprintf(w, "        <C:calendar-home-set><D:href>%scalendars/</D:href></C:calendar-home-set>\n", xmlEscape(base))
 		fmt.Fprintf(w, "        <D:displayname>%s</D:displayname>\n", xmlEscape(email))
 		fmt.Fprintf(w, "        <C:calendar-user-address-set><D:href>mailto:%s</D:href></C:calendar-user-address-set>\n", xmlEscape(email))
 		fmt.Fprintf(w, "        <CS:email-address-set><CS:email-address>%s</CS:email-address></CS:email-address-set>\n", xmlEscape(email))
@@ -362,7 +365,7 @@ func writePrincipalResponse(w io.Writer, calendars []db.Calendar, props []xmlEle
 			fmt.Fprint(w, "    <D:propstat>\n")
 			fmt.Fprint(w, "      <D:prop>\n")
 			for _, p := range known {
-				writeSinglePrincipalProp(w, p.XMLName, email)
+				writeSinglePrincipalProp(w, p.XMLName, email, base)
 			}
 			fmt.Fprint(w, "      </D:prop>\n")
 			fmt.Fprint(w, "      <D:status>HTTP/1.1 200 OK</D:status>\n")
@@ -408,7 +411,7 @@ func isKnownPrincipalProp(name xml.Name) bool {
 }
 
 // writeSinglePrincipalProp writes a single property for the principal resource.
-func writeSinglePrincipalProp(w io.Writer, name xml.Name, email string) {
+func writeSinglePrincipalProp(w io.Writer, name xml.Name, email, base string) {
 	switch name.Space {
 	case nsDAV:
 		switch name.Local {
@@ -421,7 +424,7 @@ func writeSinglePrincipalProp(w io.Writer, name xml.Name, email string) {
 		case "displayname":
 			fmt.Fprintf(w, "        <D:displayname>%s</D:displayname>\n", xmlEscape(email))
 		case "calendar-home-set":
-			fmt.Fprint(w, "        <C:calendar-home-set><D:href>/dav/calendars/</D:href></C:calendar-home-set>\n")
+			fmt.Fprintf(w, "        <C:calendar-home-set><D:href>%scalendars/</D:href></C:calendar-home-set>\n", xmlEscape(base))
 		case "current-user-privilege-set":
 			fmt.Fprint(w, "        <D:current-user-privilege-set>\n")
 			fmt.Fprint(w, "          <D:privilege><D:read/></D:privilege>\n")
@@ -444,7 +447,7 @@ func writeSinglePrincipalProp(w io.Writer, name xml.Name, email string) {
 	case nsC:
 		switch name.Local {
 		case "calendar-home-set":
-			fmt.Fprint(w, "        <C:calendar-home-set><D:href>/dav/calendars/</D:href></C:calendar-home-set>\n")
+			fmt.Fprintf(w, "        <C:calendar-home-set><D:href>%scalendars/</D:href></C:calendar-home-set>\n", xmlEscape(base))
 		case "calendar-user-address-set":
 			fmt.Fprintf(w, "        <C:calendar-user-address-set><D:href>mailto:%s</D:href></C:calendar-user-address-set>\n", xmlEscape(email))
 		case "schedule-inbox-URL":
@@ -452,7 +455,7 @@ func writeSinglePrincipalProp(w io.Writer, name xml.Name, email string) {
 		case "schedule-outbox-URL":
 			fmt.Fprint(w, "        <C:schedule-outbox-URL><D:href>/dav/</D:href></C:schedule-outbox-URL>\n")
 		case "schedule-default-calendar-URL":
-			fmt.Fprint(w, "        <C:schedule-default-calendar-URL><D:href>/dav/calendars/</D:href></C:schedule-default-calendar-URL>\n")
+			fmt.Fprintf(w, "        <C:schedule-default-calendar-URL><D:href>%scalendars/</D:href></C:schedule-default-calendar-URL>\n", xmlEscape(base))
 		}
 	case nsCS:
 		switch name.Local {
@@ -539,12 +542,11 @@ func HandlePROPFIND(w http.ResponseWriter, r *http.Request, repo *db.Repo, path 
 
 	case path == "/dav/" || path == "":
 		// PROPFIND on principal URL.
-		householdID := auth.HouseholdIDFromContext(ctx)
-		calendars, err := repo.ListCalendars(ctx, householdID)
+		calendars, err := listDiscoveryCalendars(ctx, repo)
 		if err != nil {
 			logging.Logger.Error("caldav: list calendars",
 				slog.String("path", path),
-				slog.String("household_id", householdID),
+				slog.String("household_id", auth.HouseholdIDFromContext(ctx)),
 				slog.String("error", err.Error()))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
@@ -556,18 +558,18 @@ func HandlePROPFIND(w http.ResponseWriter, r *http.Request, repo *db.Repo, path 
 
 		buf := &strings.Builder{}
 		writeXMLHeader(buf)
-		writePrincipalResponse(buf, calendars, requestedProps, depth != "0", auth.EmailFromContext(ctx))
+		writePrincipalResponse(buf, calendars, requestedProps, depth != "0", auth.EmailFromContext(ctx), auth.DAVBase(ctx))
 		writeXMLFooter(buf)
 		w.Write([]byte(buf.String()))
 
 	case path == "/dav/calendars/" || path == "/dav/calendars":
 		// PROPFIND on calendar home-set — return only calendars, no principal.
-		householdID := auth.HouseholdIDFromContext(ctx)
-		calendars, err := repo.ListCalendars(ctx, householdID)
+		// Unscoped, this lists every household the user belongs to.
+		calendars, err := listDiscoveryCalendars(ctx, repo)
 		if err != nil {
 			logging.Logger.Error("caldav: list calendars",
 				slog.String("path", path),
-				slog.String("household_id", householdID),
+				slog.String("household_id", auth.HouseholdIDFromContext(ctx)),
 				slog.String("error", err.Error()))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
@@ -640,6 +642,29 @@ func HandlePROPFIND(w http.ResponseWriter, r *http.Request, repo *db.Repo, path 
 	default:
 		http.Error(w, "Not Found", http.StatusNotFound)
 	}
+}
+
+// listDiscoveryCalendars returns the calendars a discovery PROPFIND (principal
+// or calendar home-set) lists. A household-scoped request
+// (/dav/households/<id>/...) lists only that household. An unscoped request
+// lists the calendars of every household the user belongs to, default
+// household first, so a member of two families sees both in one account.
+// Calendar hrefs stay /dav/<uid>/: caldav_uid is globally unique and the auth
+// middleware routes each one to its own household.
+func listDiscoveryCalendars(ctx context.Context, repo *db.Repo) ([]db.Calendar, error) {
+	householdIDs := auth.HouseholdIDsFromContext(ctx)
+	if auth.HouseholdScopeFromContext(ctx) != "" || len(householdIDs) == 0 {
+		return repo.ListCalendars(ctx, auth.HouseholdIDFromContext(ctx))
+	}
+	var all []db.Calendar
+	for _, hid := range householdIDs {
+		cals, err := repo.ListCalendars(ctx, hid)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, cals...)
+	}
+	return all, nil
 }
 
 // extractCalendarUID extracts the calendar UID from a path like /dav/{uid}/.

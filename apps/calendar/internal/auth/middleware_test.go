@@ -192,16 +192,26 @@ type fakeRepo struct {
 	user *db.CalDAVUser
 	// err, when non-nil, is returned instead of user (simulates a DB error).
 	err error
-	// householdID is returned by GetHouseholdIDForUser.
-	householdID string
+	// householdIDs is returned by ListHouseholdIDsForUser (already in the
+	// repo's deterministic order: oldest membership first).
+	householdIDs []string
+	// calendarOwners maps caldav_uid -> household_id for GetCalendarHouseholdID.
+	calendarOwners map[string]string
+	// calendarLookups counts GetCalendarHouseholdID calls.
+	calendarLookups int
 }
 
 func (f *fakeRepo) GetUserByEmailForCalDAV(_ context.Context, _ string) (*db.CalDAVUser, error) {
 	return f.user, f.err
 }
 
-func (f *fakeRepo) GetHouseholdIDForUser(_ context.Context, _ string) (string, error) {
-	return f.householdID, nil
+func (f *fakeRepo) ListHouseholdIDsForUser(_ context.Context, _ string) ([]string, error) {
+	return f.householdIDs, nil
+}
+
+func (f *fakeRepo) GetCalendarHouseholdID(_ context.Context, uid string) (string, error) {
+	f.calendarLookups++
+	return f.calendarOwners[uid], nil
 }
 
 // basicAuth encodes an email:password pair into a Basic Authorization header
@@ -427,7 +437,7 @@ func TestAuthMiddleware_SuccessDoesNotRecordAuthFailure(t *testing.T) {
 			Email:              "user@example.com",
 			CalDAVPasswordHash: &hashStr,
 		},
-		householdID: "h-1",
+		householdIDs: []string{"h-1"},
 	}
 
 	rec := doAuth(t, AuthMiddleware(repo), basicAuth(t, "user@example.com", "correct-horse-battery-staple"))
@@ -441,6 +451,128 @@ func TestAuthMiddleware_SuccessDoesNotRecordAuthFailure(t *testing.T) {
 	} {
 		if got := testutil.ToFloat64(metrics.AuthFailuresTotal.WithLabelValues(reason)); got != 0 {
 			t.Fatalf("successful auth incremented reason %q: got %v, want 0", reason, got)
+		}
+	}
+}
+
+// authedUser returns a fakeRepo user with a real bcrypt hash plus the matching
+// Basic auth header.
+func authedUser(t *testing.T) (*db.CalDAVUser, string) {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte("pw-123"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("bcrypt hash: %v", err)
+	}
+	h := string(hash)
+	return &db.CalDAVUser{ID: "u-1", Email: "user@example.com", CalDAVPasswordHash: &h},
+		basicAuth(t, "user@example.com", "pw-123")
+}
+
+// seen captures what the CalDAV handler would see after the middleware ran.
+type seen struct {
+	called    bool
+	path      string
+	household string
+	scope     string
+	all       []string
+	base      string
+}
+
+func serveThrough(t *testing.T, repo *fakeRepo, header, path string) (*httptest.ResponseRecorder, seen) {
+	t.Helper()
+	var got seen
+	req := httptest.NewRequest("PROPFIND", path, nil)
+	req.RemoteAddr = "192.0.2.50:1234"
+	req.Header.Set("Authorization", header)
+	rec := httptest.NewRecorder()
+	AuthMiddleware(repo)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = seen{
+			called:    true,
+			path:      r.URL.Path,
+			household: HouseholdIDFromContext(r.Context()),
+			scope:     HouseholdScopeFromContext(r.Context()),
+			all:       HouseholdIDsFromContext(r.Context()),
+			base:      DAVBase(r.Context()),
+		}
+		w.WriteHeader(http.StatusMultiStatus)
+	})).ServeHTTP(rec, req)
+	return rec, got
+}
+
+// TestAuthMiddleware_HouseholdResolution covers the default household, the
+// /dav/households/<id>/ scope, and routing an unscoped calendar UID to the
+// household that owns it.
+func TestAuthMiddleware_HouseholdResolution(t *testing.T) {
+	user, header := authedUser(t)
+	twoFamilies := []string{"h-old", "h-new"}
+	owners := map[string]string{
+		"cal-old":     "h-old",
+		"cal-new":     "h-new",
+		"cal-foreign": "h-stranger",
+	}
+
+	cases := []struct {
+		name       string
+		households []string
+		path       string
+		wantCode   int
+		wantPath   string
+		wantHH     string
+		wantScope  string
+		wantBase   string
+		wantLookup int
+	}{
+		{"default is first (oldest) membership", twoFamilies, "/dav/", 207, "/dav/", "h-old", "", "/dav/", 0},
+		{"home set uses default", twoFamilies, "/dav/calendars/", 207, "/dav/calendars/", "h-old", "", "/dav/", 0},
+		{"no memberships yields empty household", nil, "/dav/", 207, "/dav/", "", "", "/dav/", 0},
+		{"scoped principal", twoFamilies, "/dav/households/h-new/", 207, "/dav/", "h-new", "h-new", "/dav/households/h-new/", 0},
+		{"scoped without trailing slash", twoFamilies, "/dav/households/h-new", 207, "/dav/", "h-new", "h-new", "/dav/households/h-new/", 0},
+		{"scoped home set", twoFamilies, "/dav/households/h-new/calendars/", 207, "/dav/calendars/", "h-new", "h-new", "/dav/households/h-new/", 0},
+		{"scoped event", twoFamilies, "/dav/households/h-old/cal-old/e1.ics", 207, "/dav/cal-old/e1.ics", "h-old", "h-old", "/dav/households/h-old/", 0},
+		{"scoped to a household the user is not in", twoFamilies, "/dav/households/h-stranger/", 404, "", "", "", "", 0},
+		{"unscoped calendar in second household", twoFamilies, "/dav/cal-new/", 207, "/dav/cal-new/", "h-new", "", "/dav/", 1},
+		{"unscoped event in second household", twoFamilies, "/dav/cal-new/e1.ics", 207, "/dav/cal-new/e1.ics", "h-new", "", "/dav/", 1},
+		{"foreign calendar falls back to default", twoFamilies, "/dav/cal-foreign/", 207, "/dav/cal-foreign/", "h-old", "", "/dav/", 1},
+		{"unknown calendar falls back to default", twoFamilies, "/dav/cal-missing/", 207, "/dav/cal-missing/", "h-old", "", "/dav/", 1},
+		{"single household skips the calendar lookup", []string{"h-only"}, "/dav/cal-new/", 207, "/dav/cal-new/", "h-only", "", "/dav/", 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &fakeRepo{user: user, householdIDs: tc.households, calendarOwners: owners}
+			rec, got := serveThrough(t, repo, header, tc.path)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if repo.calendarLookups != tc.wantLookup {
+				t.Errorf("calendar lookups = %d, want %d", repo.calendarLookups, tc.wantLookup)
+			}
+			if tc.wantCode != 207 {
+				if got.called {
+					t.Fatalf("handler ran for a rejected request")
+				}
+				return
+			}
+			if got.path != tc.wantPath || got.household != tc.wantHH || got.scope != tc.wantScope || got.base != tc.wantBase {
+				t.Errorf("got path=%q household=%q scope=%q base=%q, want path=%q household=%q scope=%q base=%q",
+					got.path, got.household, got.scope, got.base, tc.wantPath, tc.wantHH, tc.wantScope, tc.wantBase)
+			}
+			if len(got.all) != len(tc.households) {
+				t.Errorf("household list = %v, want %v", got.all, tc.households)
+			}
+		})
+	}
+}
+
+// TestAuthMiddleware_DefaultHouseholdIsStable: the same user lands in the same
+// default household on every request.
+func TestAuthMiddleware_DefaultHouseholdIsStable(t *testing.T) {
+	user, header := authedUser(t)
+	repo := &fakeRepo{user: user, householdIDs: []string{"h-a", "h-b", "h-c"}}
+	for i := 0; i < 5; i++ {
+		_, got := serveThrough(t, repo, header, "/dav/")
+		if got.household != "h-a" {
+			t.Fatalf("request %d: household = %q, want h-a", i, got.household)
 		}
 	}
 }

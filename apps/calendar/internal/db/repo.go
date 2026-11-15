@@ -65,20 +65,63 @@ func (r *Repo) GetUserByEmailForCalDAV(ctx context.Context, email string) (*CalD
 	return &u, nil
 }
 
-// GetHouseholdIDForUser returns the household_id for a user's first membership.
-// Returns empty string if the user has no memberships.
+// GetHouseholdIDForUser returns the user's default household: the one from
+// their oldest membership (ties broken by household_id so the choice is
+// stable). Returns empty string if the user has no memberships.
 func (r *Repo) GetHouseholdIDForUser(ctx context.Context, userID string) (string, error) {
-	row := r.pool.QueryRow(ctx, `
-		SELECT household_id FROM memberships WHERE user_id = $1 LIMIT 1
-	`, userID)
+	ids, err := r.ListHouseholdIDsForUser(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if len(ids) == 0 {
+		return "", nil
+	}
+	return ids[0], nil
+}
 
+// ListHouseholdIDsForUser returns every household the user belongs to, in a
+// deterministic order: oldest membership first, ties broken by household_id.
+// The first element is the user's default CalDAV household. Returns an empty
+// slice if the user has no memberships.
+func (r *Repo) ListHouseholdIDsForUser(ctx context.Context, userID string) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT household_id::text FROM memberships
+		WHERE user_id = $1
+		ORDER BY created_at ASC, household_id ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("db: list households for user: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("db: scan household id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("db: rows iteration: %w", err)
+	}
+	return ids, nil
+}
+
+// GetCalendarHouseholdID returns the household that owns the calendar with the
+// given CalDAV UID (caldav_uid is globally unique). Returns empty string if no
+// such calendar exists. Callers must check the result against the
+// authenticated user's memberships before trusting it.
+func (r *Repo) GetCalendarHouseholdID(ctx context.Context, caldavUID string) (string, error) {
 	var householdID string
-	err := row.Scan(&householdID)
+	err := r.pool.QueryRow(ctx, `
+		SELECT household_id::text FROM calendars WHERE caldav_uid = $1
+	`, caldavUID).Scan(&householdID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return "", nil
 		}
-		return "", fmt.Errorf("db: get household for user: %w", err)
+		return "", fmt.Errorf("db: get calendar household: %w", err)
 	}
 	return householdID, nil
 }
