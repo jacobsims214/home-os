@@ -144,6 +144,8 @@ func registerAll(srv *server.Server, cfg *config.Config, pool *pgxpool.Pool) {
 	// Register household tools.
 	srv.RegisterTool("get_household", household.NewGetHouseholdTool(), household.HandleGetHousehold(pool))
 	srv.RegisterTool("list_members", household.NewListMembersTool(), household.HandleListMembers(pool))
+	familyUpdateName, familyUpdateTool, familyUpdateHandler := household.NewFamilyUpdateTool(pool)
+	srv.RegisterTool(familyUpdateName, familyUpdateTool, familyUpdateHandler)
 
 	// Register loan tools.
 	loanTools := loan.NewTools(pool)
