@@ -64,6 +64,14 @@ func registerAll(srv *server.Server, cfg *config.Config, pool *pgxpool.Pool) {
 	srv.RegisterTool(billUpcomingName, billUpcomingTool, billUpcomingHandler)
 	billSummaryName, billSummaryTool, billSummaryHandler := bill.NewGetBillSummaryTool(pool)
 	srv.RegisterTool(billSummaryName, billSummaryTool, billSummaryHandler)
+	billCreateName, billCreateTool, billCreateHandler := bill.NewCreateBillTool(pool)
+	srv.RegisterTool(billCreateName, billCreateTool, billCreateHandler)
+	billUpdateName, billUpdateTool, billUpdateHandler := bill.NewBillUpdateTool(pool)
+	srv.RegisterTool(billUpdateName, billUpdateTool, billUpdateHandler)
+	billDeleteName, billDeleteTool, billDeleteHandler := bill.NewBillDeleteTool(pool)
+	srv.RegisterTool(billDeleteName, billDeleteTool, billDeleteHandler)
+	billPayName, billPayTool, billPayHandler := bill.NewBillPayTool(pool)
+	srv.RegisterTool(billPayName, billPayTool, billPayHandler)
 
 	// Register maintenance tools.
 	maintListName, maintListTool, maintListHandler := maintenance.NewListMaintenanceTasksTool(pool)
