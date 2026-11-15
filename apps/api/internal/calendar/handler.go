@@ -86,7 +86,52 @@ func (h *Handler) CreateCalendar(w http.ResponseWriter, r *http.Request) {
 	apierr.JSON(w, http.StatusCreated, map[string]any{"data": cal})
 }
 
-// ListEvents GET /api/v1/calendars/:id/events
+// parseRange reads the optional start/end (RFC 3339) query parameters. With
+// both, recurring events are expanded into occurrences in [start, end), so
+// the window is bounded. It returns a client error message, or "".
+func parseRange(r *http.Request) (EventRange, string) {
+	var rg EventRange
+	for _, p := range []struct {
+		name string
+		dst  **time.Time
+	}{{"start", &rg.Start}, {"end", &rg.End}} {
+		v := r.URL.Query().Get(p.name)
+		if v == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return rg, "invalid " + p.name + ": use RFC 3339, e.g. 2026-11-15T00:00:00Z"
+		}
+		*p.dst = &t
+	}
+	if rg.expands() {
+		if !rg.End.After(*rg.Start) {
+			return rg, "end must be after start"
+		}
+		if rg.End.Sub(*rg.Start) > maxExpandRange {
+			return rg, "range too long: at most 3 years"
+		}
+	}
+	return rg, ""
+}
+
+// writeEventError answers a create/update error: 400 with the message for
+// invalid input (bad or unsupported RRULE, timezone, reminders), 500
+// otherwise.
+func writeEventError(w http.ResponseWriter, err error) {
+	if msg, ok := IsInvalidEvent(err); ok {
+		apierr.BadRequest(w, msg)
+		return
+	}
+	apierr.InternalError(w, err)
+}
+
+// ListEvents GET /api/v1/calendars/:id/events[?start=&end=]
+//
+// With both start and end, recurring events are returned as their
+// occurrences in [start, end) (overrides and EXDATEs applied), each with the
+// series id and a recurrence_id, sorted by start.
 func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())
 	if claims == nil {
@@ -115,20 +160,12 @@ func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		apierr.NotFound(w, "calendar not found")
 		return
 	}
-	var start, end *time.Time
-	if s := r.URL.Query().Get("start"); s != "" {
-		t, err := time.Parse(time.RFC3339, s)
-		if err == nil {
-			start = &t
-		}
+	rg, msg := parseRange(r)
+	if msg != "" {
+		apierr.BadRequest(w, msg)
+		return
 	}
-	if e := r.URL.Query().Get("end"); e != "" {
-		t, err := time.Parse(time.RFC3339, e)
-		if err == nil {
-			end = &t
-		}
-	}
-	events, err := h.repo.ListEvents(r.Context(), calID, start, end)
+	events, err := h.repo.ListEvents(r.Context(), calID, rg, h.repo.HouseholdLocation(r.Context(), hid))
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -145,18 +182,10 @@ func (h *Handler) ListAllEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	hid, _ := uuid.Parse(claims.HouseholdID)
 
-	var start, end *time.Time
-	if s := r.URL.Query().Get("start"); s != "" {
-		t, err := time.Parse(time.RFC3339, s)
-		if err == nil {
-			start = &t
-		}
-	}
-	if e := r.URL.Query().Get("end"); e != "" {
-		t, err := time.Parse(time.RFC3339, e)
-		if err == nil {
-			end = &t
-		}
+	rg, msg := parseRange(r)
+	if msg != "" {
+		apierr.BadRequest(w, msg)
+		return
 	}
 	var propertyID *uuid.UUID
 	if pidStr := r.URL.Query().Get("property_id"); pidStr != "" {
@@ -165,7 +194,7 @@ func (h *Handler) ListAllEvents(w http.ResponseWriter, r *http.Request) {
 			propertyID = &pid
 		}
 	}
-	events, err := h.repo.ListAllEvents(r.Context(), hid, start, end, propertyID)
+	events, err := h.repo.ListAllEvents(r.Context(), hid, rg, propertyID, h.repo.HouseholdLocation(r.Context(), hid))
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -211,18 +240,70 @@ func (h *Handler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "title required")
 		return
 	}
-	if ev.End.IsZero() {
-		ev.End = ev.Start.Add(time.Hour)
-	}
 	if ev.EventType == "" {
 		ev.EventType = "custom"
 	}
-	created, err := h.repo.CreateEvent(r.Context(), calID, &ev)
+	ev.remindersSet = true
+	created, err := h.repo.CreateEvent(r.Context(), calID, &ev, h.repo.HouseholdLocation(r.Context(), hid))
+	if err != nil {
+		writeEventError(w, err)
+		return
+	}
+	apierr.JSON(w, http.StatusCreated, map[string]any{"data": created})
+}
+
+// UpdateEvent PATCH /api/v1/calendars/:id/events/:eventId
+//
+// Partial update: omitted fields keep their value. "rrule": "" ends the
+// recurrence, "reminders": [] removes the reminders. ical_data, ical_raw and
+// rrule are rewritten together.
+func (h *Handler) UpdateEvent(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.ClaimsFromContext(r.Context())
+	if claims == nil {
+		apierr.Forbidden(w, "missing auth")
+		return
+	}
+	hid, err := uuid.Parse(claims.HouseholdID)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
-	apierr.JSON(w, http.StatusCreated, map[string]any{"data": created})
+	calID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		apierr.BadRequest(w, "invalid calendar id")
+		return
+	}
+	eventID, err := uuid.Parse(chi.URLParam(r, "eventId"))
+	if err != nil {
+		apierr.BadRequest(w, "invalid event id")
+		return
+	}
+	// 404 for a calendar of another household, and for an event that is
+	// not in this calendar, so neither existence leaks.
+	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	if cal == nil {
+		apierr.NotFound(w, "event not found")
+		return
+	}
+	var p EventPatch
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		apierr.BadRequest(w, "invalid body")
+		return
+	}
+	updated, err := h.repo.UpdateEvent(r.Context(), calID, eventID, p, h.repo.HouseholdLocation(r.Context(), hid))
+	if err != nil {
+		writeEventError(w, err)
+		return
+	}
+	if updated == nil {
+		apierr.NotFound(w, "event not found")
+		return
+	}
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": updated})
 }
 
 // DeleteEvent DELETE /api/v1/calendars/:id/events/:eventId

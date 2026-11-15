@@ -10,6 +10,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dexidp/dex v2.13.0+incompatible h1:EQPpzCi51omkwBe0KYpRGaV3rk6CVvjcqeMGCe3Q00w=
 github.com/dexidp/dex v2.13.0+incompatible/go.mod h1:cRGkPWqKhDD1FMCICe2JbYDdVR2xGLa38F6iuH/jNAs=
+github.com/emersion/go-ical v0.0.0-20261112170022-46c5b53a1723 h1:p8cDduDfznI5LDWxHDRD2B7b6y2TlFRVV4i5xzKq4xk=
+github.com/emersion/go-ical v0.0.0-20261112170022-46c5b53a1723/go.mod h1:BEksegNspIkjCQfmzWgsgbu6KdeJ/4LwUZs7DMBzjzw=
 github.com/go-chi/chi/v5 v5.3.0 h1:halUjDxhshgXHMrao5bB8eNBXo/rnzwr8m5m36glehM=
 github.com/go-chi/chi/v5 v5.3.0/go.mod h1:R+tYY2hNuVUUjxoPtqUdgBqevM9s9njzkTLutVsOCto=
 github.com/go-jose/go-jose/v4 v4.1.4 h1:moDMcTHmvE6Groj34emNPLs/qtYXRVcd6S7NHbHz3kA=
@@ -55,6 +57,8 @@ github.com/stretchr/testify v1.3.0/go.mod h1:M5WIy9Dh21IEIfnGCwXGc5bZfKNJtfHm1UV
 github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+github.com/teambition/rrule-go v1.8.2 h1:lIjpjvWTj9fFUZCmuoVDrKVOtdiyzbzc93qTmRVe/J8=
+github.com/teambition/rrule-go v1.8.2/go.mod h1:Ieq5AbrKGciP1V//Wq8ktsTXwSwJHDD5mD/wLBGl3p4=
 github.com/typesense/typesense-go/v3 v3.2.0 h1:pmrq46PkxhS0xowPMCnfOcBYCbIfMESas45py4jk8LQ=
 github.com/typesense/typesense-go/v3 v3.2.0/go.mod h1:Jx4PAXe3jRx6sc032nhN9Aj+OvMoPtQJW6p1a6H4Zeg=
 go.opentelemetry.io/auto/sdk v1.1.0 h1:cH53jehLUN6UFLY71z+NDOiNJqDdPRaXzTel0sJySYA=

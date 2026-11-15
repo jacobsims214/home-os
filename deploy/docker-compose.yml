@@ -132,8 +132,8 @@ services:
 
   api:
     build:
-      context: ../apps/api
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: apps/api/Dockerfile
       target: builder
     restart: unless-stopped
     command: go run ./cmd/api
@@ -149,9 +149,10 @@ services:
       home-os-dex:
         condition: service_healthy
     volumes:
-      - ../apps/api:/app
-      - api_gopath:/root/go/pkg/mod
-    working_dir: /app
+      - ../apps/api:/src/apps/api
+      - ../packages/icalx:/src/packages/icalx
+      - api_gopath:/go/pkg/mod
+    working_dir: /src/apps/api
     environment:
       PORT: "8080"
       DATABASE_URL: postgres://homeos:homeos@postgres:5432/homeos?sslmode=disable

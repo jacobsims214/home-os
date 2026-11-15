@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/icalx"
 )
 
 // Calendar represents a calendar collection.
@@ -41,6 +43,26 @@ type Event struct {
 	EntityID    string    `json:"entity_id,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+
+	// Recurrence (#4458), stored in ical_raw / rrule, not in the JSON.
+	// RRule is an RFC 5545 RRULE value ("FREQ=WEEKLY;BYDAY=TU,TH").
+	// TimeZone is the IANA zone a timed series repeats in (wall-clock time
+	// kept across DST); empty means UTC. ExDates are excluded instances
+	// (their original starts).
+	RRule     string      `json:"rrule,omitempty"`
+	ExDates   []time.Time `json:"exdates,omitempty"`
+	TimeZone  string      `json:"timezone,omitempty"`
+	Reminders []Reminder  `json:"reminders,omitempty"`
+
+	// Read-only. Recurring is true for a series (or one of its
+	// occurrences); RecurrenceID identifies an occurrence returned by a
+	// range listing (its original start). Occurrences share the series ID.
+	Recurring    bool       `json:"recurring,omitempty"`
+	RecurrenceID *time.Time `json:"recurrence_id,omitempty"`
+
+	// remindersSet: Reminders were given by the client (replace the
+	// event's alarms) rather than omitted (keep them).
+	remindersSet bool
 }
 
 // Repo handles calendar database operations.
@@ -134,99 +156,159 @@ func (r *Repo) CreateCalendar(ctx context.Context, householdID uuid.UUID, name, 
 	return &c, nil
 }
 
-// ListEvents returns all events for a calendar, optionally filtered by date range.
-func (r *Repo) ListEvents(ctx context.Context, calendarID uuid.UUID, start, end *time.Time) ([]Event, error) {
-	// Events are stored as JSON in ical_data column
-	rows, err := r.pool.Query(ctx,
-		`SELECT id, calendar_id, uid, ical_data, event_type, entity_type, entity_id, created_at, updated_at
-		 FROM calendar_objects WHERE calendar_id = $1 ORDER BY created_at`,
-		calendarID)
-	if err != nil {
-		return nil, fmt.Errorf("list events: %w", err)
-	}
-	defer rows.Close()
+// EventRange is an optional listing window. When both bounds are set,
+// recurring events are expanded into their occurrences in [Start, End).
+type EventRange struct {
+	Start, End *time.Time
+}
 
-	var events []Event
+func (rg EventRange) expands() bool { return rg.Start != nil && rg.End != nil }
+
+const eventColumns = `co.id, co.calendar_id, co.uid, co.ical_data, co.event_type, co.entity_type, co.entity_id, co.created_at, co.updated_at, co.ical_raw`
+
+// rangeFilter appends the calendar_objects.starts_at / ends_at (035)
+// prefilter for a listing window. The bounds are widened by 48h because
+// all-day events are stored at midnight UTC and placed in the household's
+// zone in Go; recurring series (rrule set, or an RDATE list in the raw) are
+// kept whenever they start before the window ends, since their stored end
+// is only the first occurrence's. Exact filtering happens in Go.
+func rangeFilter(query string, args []any, rg EventRange) (string, []any) {
+	if rg.End != nil {
+		args = append(args, rg.End.Add(allDayPrefilterSlop))
+		query += fmt.Sprintf(" AND co.starts_at <= $%d", len(args))
+	}
+	if rg.Start != nil {
+		args = append(args, rg.Start.Add(-allDayPrefilterSlop))
+		query += fmt.Sprintf(" AND (co.ends_at >= $%d OR co.rrule IS NOT NULL OR co.ical_raw LIKE '%%RDATE%%')", len(args))
+	}
+	return query, args
+}
+
+// HouseholdLocation returns the household's configured zone (households.
+// timezone), used to place all-day and floating occurrences. UTC when unset
+// or invalid.
+func (r *Repo) HouseholdLocation(ctx context.Context, householdID uuid.UUID) *time.Location {
+	var tz string
+	if err := r.pool.QueryRow(ctx, `SELECT timezone FROM households WHERE id = $1`, householdID).Scan(&tz); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("calendar: household timezone: %v", err)
+		}
+		return time.UTC
+	}
+	if tz == "" || tz == "UTC" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		log.Printf("calendar: household %s has invalid timezone %q: %v", householdID, tz, err)
+		return time.UTC
+	}
+	return loc
+}
+
+// collectEvents scans event rows, expanding recurring series over the range
+// when it has both bounds and applying the single-event range filter
+// otherwise. With a full range the result is sorted by start.
+func collectEvents(rows pgx.Rows, rg EventRange, loc *time.Location, what string) ([]Event, error) {
+	defer rows.Close()
+	events := []Event{}
 	for rows.Next() {
 		var id, calID, uid, icalData, eventType string
-		var entityType, entityID *string
+		var entityType, entityID, icalRaw *string
 		var createdAt, updatedAt time.Time
-		if err := rows.Scan(&id, &calID, &uid, &icalData, &eventType, &entityType, &entityID, &createdAt, &updatedAt); err != nil {
-			return nil, fmt.Errorf("list events: scan: %w", err)
+		if err := rows.Scan(&id, &calID, &uid, &icalData, &eventType, &entityType, &entityID, &createdAt, &updatedAt, &icalRaw); err != nil {
+			return nil, fmt.Errorf("%s: scan: %w", what, err)
 		}
 		ev, err := parseEventJSON(id, calID, icalData, eventType, entityType, entityID, createdAt, updatedAt)
 		if err != nil {
-			log.Printf("calendar: list events: skip malformed event id=%s: %v", id, err)
+			log.Printf("calendar: %s: skip malformed event id=%s: %v", what, id, err)
 			continue
 		}
-		// Apply date filter if provided
-		if start != nil && ev.End.Before(*start) {
+		obj := currentObject(ev, icalRaw)
+		attachRecurrence(ev, obj)
+		if ev.Recurring && rg.expands() {
+			events = append(events, expandEvent(*ev, obj, *rg.Start, *rg.End, loc)...)
 			continue
 		}
-		if end != nil && ev.Start.After(*end) {
+		if !ev.Recurring && !inRange(ev, rg.Start, rg.End) {
+			continue
+		}
+		if ev.Recurring && rg.End != nil && ev.Start.After(*rg.End) {
 			continue
 		}
 		events = append(events, *ev)
 	}
-	if events == nil {
-		events = []Event{}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: %w", what, err)
+	}
+	if rg.expands() {
+		sortByStart(events)
 	}
 	return events, nil
 }
 
-// ListAllEvents returns events across all calendars for a household in a date range.
-// If propertyID is provided, filters to calendars scoped to that property.
-func (r *Repo) ListAllEvents(ctx context.Context, householdID uuid.UUID, start, end *time.Time, propertyID *uuid.UUID) ([]Event, error) {
-	var query string
-	var args []any
-
-	if propertyID != nil {
-		query = `SELECT co.id, co.calendar_id, co.uid, co.ical_data, co.event_type, co.entity_type, co.entity_id, co.created_at, co.updated_at
-		 FROM calendar_objects co
-		 JOIN calendars c ON c.id = co.calendar_id
-		 WHERE c.household_id = $1 AND c.property_id = $2
-		 ORDER BY co.created_at`
-		args = []any{householdID, propertyID}
-	} else {
-		query = `SELECT co.id, co.calendar_id, co.uid, co.ical_data, co.event_type, co.entity_type, co.entity_id, co.created_at, co.updated_at
-		 FROM calendar_objects co
-		 JOIN calendars c ON c.id = co.calendar_id
-		 WHERE c.household_id = $1
-		 ORDER BY co.created_at`
-		args = []any{householdID}
+// ListEvents returns the events of a calendar. With a full range, recurring
+// events come back as their occurrences in the range (RECURRENCE-ID
+// overrides and EXDATEs applied), sorted by start; otherwise series are
+// returned once, as stored.
+func (r *Repo) ListEvents(ctx context.Context, calendarID uuid.UUID, rg EventRange, loc *time.Location) ([]Event, error) {
+	query, args := rangeFilter(`SELECT `+eventColumns+` FROM calendar_objects co WHERE co.calendar_id = $1`, []any{calendarID}, rg)
+	rows, err := r.pool.Query(ctx, query+` ORDER BY co.created_at`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list events: %w", err)
 	}
+	return collectEvents(rows, rg, loc, "list events")
+}
 
-	rows, err := r.pool.Query(ctx, query, args...)
+// ListAllEvents returns events across all calendars for a household, with
+// the same range and expansion rules as ListEvents. If propertyID is
+// provided, only calendars scoped to that property are read.
+func (r *Repo) ListAllEvents(ctx context.Context, householdID uuid.UUID, rg EventRange, propertyID *uuid.UUID, loc *time.Location) ([]Event, error) {
+	query := `SELECT ` + eventColumns + ` FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id WHERE c.household_id = $1`
+	args := []any{householdID}
+	if propertyID != nil {
+		args = append(args, *propertyID)
+		query += fmt.Sprintf(" AND c.property_id = $%d", len(args))
+	}
+	query, args = rangeFilter(query, args, rg)
+	rows, err := r.pool.Query(ctx, query+` ORDER BY co.created_at`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list all events: %w", err)
 	}
-	defer rows.Close()
+	return collectEvents(rows, rg, loc, "list all events")
+}
 
-	var events []Event
-	for rows.Next() {
-		var id, calID, uid, icalData, eventType string
-		var entityType, entityID *string
-		var createdAt, updatedAt time.Time
-		if err := rows.Scan(&id, &calID, &uid, &icalData, &eventType, &entityType, &entityID, &createdAt, &updatedAt); err != nil {
-			return nil, fmt.Errorf("list all events: scan: %w", err)
-		}
-		ev, err := parseEventJSON(id, calID, icalData, eventType, entityType, entityID, createdAt, updatedAt)
-		if err != nil {
-			log.Printf("calendar: list all events: skip malformed event id=%s: %v", id, err)
-			continue
-		}
-		if start != nil && ev.End.Before(*start) {
-			continue
-		}
-		if end != nil && ev.Start.After(*end) {
-			continue
-		}
-		events = append(events, *ev)
+// prepareEvent validates and normalises a create/update and defaults the
+// zone of a timed series to the household's, so a weekly 09:00 stays at
+// 09:00 across DST.
+func prepareEvent(ev *Event, loc *time.Location) error {
+	rr, err := normalizeRRule(ev.RRule)
+	if err != nil {
+		return err
 	}
-	if events == nil {
-		events = []Event{}
+	ev.RRule = rr
+	if err := normalizeTimes(ev); err != nil {
+		return err
 	}
-	return events, nil
+	if err := validateReminders(ev.Reminders); err != nil {
+		return err
+	}
+	if len(ev.ExDates) > maxExDates {
+		return invalidf("at most %d exdates", maxExDates)
+	}
+	if ev.AllDay {
+		ev.TimeZone = ""
+	} else if ev.TimeZone == "" && ev.RRule != "" && loc != nil && loc != time.UTC {
+		ev.TimeZone = loc.String()
+	}
+	if ev.TimeZone != "" {
+		if _, err := resolveZone(ev.TimeZone); err != nil {
+			return err
+		}
+	}
+	ev.Recurring = ev.RRule != ""
+	ev.RecurrenceID = nil
+	return nil
 }
 
 // CreateEvent inserts a new event into a calendar, records a calendar_changes
@@ -235,15 +317,27 @@ func (r *Repo) ListAllEvents(ctx context.Context, householdID uuid.UUID, start, 
 // operation rolls back, so Apple Calendar sync is never left pointing at a
 // stale CTag while the event row has already been written, and sync-collection
 // is never left blind to a created event.
-func (r *Repo) CreateEvent(ctx context.Context, calendarID uuid.UUID, ev *Event) (*Event, error) {
+//
+// The JSON (ical_data), the full iCalendar (ical_raw, built by icalx with
+// the RRULE, EXDATEs and reminder VALARMs) and the rrule column are written
+// together from the same values, so CalDAV serves the raw text. An invalid
+// or unsupported rule is an errInvalidEvent (HTTP 400).
+func (r *Repo) CreateEvent(ctx context.Context, calendarID uuid.UUID, ev *Event, loc *time.Location) (*Event, error) {
+	if err := prepareEvent(ev, loc); err != nil {
+		return nil, err
+	}
 	ev.ID = uuid.New().String()
 	ev.CalendarID = calendarID.String()
 	ev.CreatedAt = time.Now()
-	ev.UpdatedAt = time.Now()
+	ev.UpdatedAt = ev.CreatedAt
 
 	icalData, err := marshalEventJSON(ev)
 	if err != nil {
 		return nil, fmt.Errorf("create event: marshal: %w", err)
+	}
+	icalRaw, rrule, err := applyToObject(&icalx.Object{UID: ev.ID}, ev, 0)
+	if err != nil {
+		return nil, err
 	}
 	etag := uuid.New().String()
 
@@ -262,9 +356,9 @@ func (r *Repo) CreateEvent(ctx context.Context, calendarID uuid.UUID, ev *Event)
 	defer tx.Rollback(ctx)
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO calendar_objects (id, calendar_id, uid, ical_data, etag, event_type, entity_type, entity_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		ev.ID, calendarID, ev.ID, icalData, etag, ev.EventType, entityType, entityID,
+		`INSERT INTO calendar_objects (id, calendar_id, uid, ical_data, etag, event_type, entity_type, entity_id, ical_raw, rrule)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		ev.ID, calendarID, ev.ID, icalData, etag, ev.EventType, entityType, entityID, icalRaw, rrule,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create event: insert: %w", err)
@@ -289,6 +383,157 @@ func (r *Repo) CreateEvent(ctx context.Context, calendarID uuid.UUID, ev *Event)
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("create event: commit: %w", err)
+	}
+	return ev, nil
+}
+
+// EventPatch is a partial update; nil fields keep their stored value.
+// RRule "" removes the recurrence; Reminders [] removes all reminders.
+type EventPatch struct {
+	Title       *string      `json:"title"`
+	Description *string      `json:"description"`
+	Location    *string      `json:"location"`
+	Color       *string      `json:"color"`
+	EventType   *string      `json:"event_type"`
+	Start       *time.Time   `json:"start"`
+	End         *time.Time   `json:"end"`
+	AllDay      *bool        `json:"all_day"`
+	RRule       *string      `json:"rrule"`
+	ExDates     *[]time.Time `json:"exdates"`
+	TimeZone    *string      `json:"timezone"`
+	Reminders   *[]Reminder  `json:"reminders"`
+}
+
+// UpdateEvent applies a patch to an event of calendarID, in one transaction
+// with a calendar_changes row (action=update) and a CTag bump. It returns
+// (nil, nil) when the event does not exist in that calendar.
+//
+// The event is read the way CalDAV serves it: from ical_raw when that is
+// still current (so a phone's ATTENDEEs, overrides, VTIMEZONEs and alarms
+// survive an API edit), from the JSON otherwise. The patched values are then
+// written to ical_data, ical_raw and rrule together; keys of the JSON this
+// package does not model are kept and CalDAV's `sequence` is bumped.
+func (r *Repo) UpdateEvent(ctx context.Context, calendarID, eventID uuid.UUID, p EventPatch, loc *time.Location) (*Event, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("update event: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var id, calID, uid, icalData, eventType string
+	var entityType, entityID, icalRaw *string
+	var createdAt, updatedAt time.Time
+	err = tx.QueryRow(ctx,
+		`SELECT `+eventColumns+` FROM calendar_objects co WHERE co.id = $1 AND co.calendar_id = $2 FOR UPDATE`,
+		eventID, calendarID,
+	).Scan(&id, &calID, &uid, &icalData, &eventType, &entityType, &entityID, &createdAt, &updatedAt, &icalRaw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update event: load: %w", err)
+	}
+	ev, err := parseEventJSON(id, calID, icalData, eventType, entityType, entityID, createdAt, updatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("update event: stored event: %w", err)
+	}
+	obj := currentObject(ev, icalRaw)
+	attachRecurrence(ev, obj)
+	if obj == nil {
+		obj = &icalx.Object{UID: uid}
+	}
+
+	wasAllDay := ev.AllDay
+	setStr := func(dst *string, v *string) {
+		if v != nil {
+			*dst = *v
+		}
+	}
+	setStr(&ev.Title, p.Title)
+	setStr(&ev.Description, p.Description)
+	setStr(&ev.Location, p.Location)
+	setStr(&ev.Color, p.Color)
+	setStr(&ev.EventType, p.EventType)
+	setStr(&ev.RRule, p.RRule)
+	setStr(&ev.TimeZone, p.TimeZone)
+	if p.AllDay != nil {
+		ev.AllDay = *p.AllDay
+	}
+	switch {
+	case p.Start != nil && p.End == nil:
+		// Moving the start keeps the duration.
+		d := ev.End.Sub(ev.Start)
+		ev.Start = *p.Start
+		ev.End = ev.Start.Add(d)
+		if ev.AllDay {
+			ev.End = civilUTC(ev.Start).Add(d)
+		}
+	case p.Start != nil:
+		ev.Start, ev.End = *p.Start, *p.End
+	case p.End != nil:
+		ev.End = *p.End
+	}
+	if wasAllDay != ev.AllDay && p.End == nil {
+		ev.End = time.Time{} // re-derive: one day, or one hour
+	}
+	if p.ExDates != nil {
+		ev.ExDates = *p.ExDates
+	}
+	if p.Reminders != nil {
+		ev.Reminders = *p.Reminders
+		ev.remindersSet = true
+	}
+	if ev.Title == "" {
+		return nil, invalidf("title required")
+	}
+	if err := prepareEvent(ev, loc); err != nil {
+		return nil, err
+	}
+
+	merged := map[string]any{}
+	if jerr := json.Unmarshal([]byte(icalData), &merged); jerr != nil {
+		merged = map[string]any{}
+	}
+	sequence := 1
+	if seq, ok := merged["sequence"].(float64); ok {
+		sequence = int(seq) + 1
+	}
+	b, err := marshalEventJSON(ev)
+	if err != nil {
+		return nil, fmt.Errorf("update event: marshal: %w", err)
+	}
+	fields := map[string]any{}
+	if err := json.Unmarshal([]byte(b), &fields); err != nil {
+		return nil, fmt.Errorf("update event: marshal: %w", err)
+	}
+	for k, v := range fields {
+		merged[k] = v
+	}
+	merged["sequence"] = sequence
+	newData, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("update event: marshal: %w", err)
+	}
+
+	newRaw, rrule, err := applyToObject(obj, ev, sequence)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.QueryRow(ctx,
+		`UPDATE calendar_objects
+		    SET ical_data = $1, ical_raw = $2, rrule = $3, event_type = $4, etag = $5, updated_at = NOW()
+		  WHERE id = $6
+		  RETURNING updated_at`,
+		string(newData), newRaw, rrule, ev.EventType, uuid.NewString(), eventID,
+	).Scan(&ev.UpdatedAt); err != nil {
+		return nil, fmt.Errorf("update event: update: %w", err)
+	}
+	if err := recordMaintenanceChange(ctx, tx, calID, uid, "update"); err != nil {
+		return nil, fmt.Errorf("update event: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("update event: commit: %w", err)
 	}
 	return ev, nil
 }
@@ -418,9 +663,12 @@ func (r *Repo) UpsertMaintenanceEvent(ctx context.Context, householdID, taskID u
 			merged[k] = v
 		}
 		b, _ := json.Marshal(merged)
+		// ical_raw / rrule are cleared with the JSON change so CalDAV
+		// regenerates the event from the JSON instead of serving a stale
+		// raw copy (#4406, #4458). A maintenance event has no recurrence.
 		if _, err := tx.Exec(ctx,
 			`UPDATE calendar_objects SET ical_data = $1, etag = $2, event_type = 'maintenance',
-			        entity_type = 'maintenance_task', updated_at = NOW()
+			        entity_type = 'maintenance_task', ical_raw = NULL, rrule = NULL, updated_at = NOW()
 			  WHERE id = $3`, string(b), uuid.NewString(), eventID); err != nil {
 			return fmt.Errorf("upsert maintenance event: update: %w", err)
 		}

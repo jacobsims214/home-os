@@ -265,6 +265,7 @@ func main() {
 		r.Get("/api/v1/calendars/events", calendarHandler.ListAllEvents)
 		r.Get("/api/v1/calendars/{id}/events", calendarHandler.ListEvents)
 		r.Post("/api/v1/calendars/{id}/events", calendarHandler.CreateEvent)
+		r.Patch("/api/v1/calendars/{id}/events/{eventId}", calendarHandler.UpdateEvent)
 		r.Delete("/api/v1/calendars/{id}/events/{eventId}", calendarHandler.DeleteEvent)
 
 		// Maintenance CRUD (with bidirectional calendar sync)

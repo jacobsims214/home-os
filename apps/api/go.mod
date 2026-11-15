@@ -13,11 +13,13 @@ require (
 	github.com/typesense/typesense-go/v3 v3.2.0
 	golang.org/x/crypto v0.52.0
 	google.golang.org/grpc v1.76.0
+	home-os/icalx v0.0.0
 )
 
 require (
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/emersion/go-ical v0.0.0-20261112170022-46c5b53a1723 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
@@ -28,6 +30,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
 	github.com/sony/gobreaker v1.0.0 // indirect
+	github.com/teambition/rrule-go v1.8.2 // indirect
 	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
@@ -39,3 +42,7 @@ require (
 )
 
 exclude google.golang.org/genproto v0.0.0-20211208223120-3a66f561d7aa
+
+// Local module (also listed in go.work). The replace lets the Docker build
+// (GOWORK=off, repository-root context) resolve it without the workspace.
+replace home-os/icalx => ../../packages/icalx
