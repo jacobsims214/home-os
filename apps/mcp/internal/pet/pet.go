@@ -7,8 +7,9 @@
 //
 // The vet follows migration 043: pets.vet_vendor_id links a family vendor
 // (a contact, usually with trade 'vet'). The old pets.vet_name / vet_phone
-// columns stay until 040 (#4601), so a pet with no linked vendor falls back
-// to them. 040 should delete that fallback (vetLegacy) with the columns.
+// columns stay (056, #4601, kept them: api, mcp and ui still use them), so a
+// pet with no linked vendor falls back to them. The migration that drops them
+// should delete that fallback (vetLegacy) with the columns.
 package pet
 
 import (
@@ -34,7 +35,7 @@ const (
 // Where a pet's vet came from.
 const (
 	vetContact = "contact" // pets.vet_vendor_id -> vendors
-	vetLegacy  = "legacy"  // pets.vet_name / vet_phone (until 040)
+	vetLegacy  = "legacy"  // pets.vet_name / vet_phone (kept by 056)
 )
 
 // toolHandler is the signature every pet tool handler has.

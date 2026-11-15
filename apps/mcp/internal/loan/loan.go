@@ -7,7 +7,7 @@
 // Subjects follow domain model v2 (migrations 038/039): a loan is tied to a
 // house, car or thing through the typed property_id / vehicle_id / asset_id
 // columns, never the legacy entity_type/entity_id (which these tools no
-// longer write; 040 drops them). The old entity_type/entity_id params are
+// longer write; 056 drops them). The old entity_type/entity_id params are
 // still accepted, unadvertised, and mapped onto the typed columns.
 package loan
 

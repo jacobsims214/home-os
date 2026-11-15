@@ -28,7 +28,6 @@ import (
 	"home-os/api/internal/file"
 	"home-os/api/internal/guides"
 	"home-os/api/internal/household"
-	"home-os/api/internal/integration"
 	"home-os/api/internal/invite"
 	"home-os/api/internal/link"
 	"home-os/api/internal/lists"
@@ -347,14 +346,6 @@ func main() {
 		r.Post("/api/v1/links", linkHandler.Create)
 		r.Get("/api/v1/links", linkHandler.List)
 		r.Delete("/api/v1/links/{id}", linkHandler.Delete)
-
-		// Integration CRUD
-		integrationRepo := integration.NewRepo(pool)
-		integrationHandler := integration.NewHandler(integrationRepo, cfg)
-		r.Get("/api/v1/integrations", integrationHandler.List)
-		r.Post("/api/v1/integrations/{type}/connect", integrationHandler.Connect)
-		r.Post("/api/v1/integrations/{type}/test", integrationHandler.Test)
-		r.Delete("/api/v1/integrations/{type}", integrationHandler.Disconnect)
 
 		// Invite routes (accept is registered above, outside this group).
 		r.Post("/api/v1/invites", inviteHandler.CreateInvite)

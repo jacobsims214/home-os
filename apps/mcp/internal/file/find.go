@@ -146,7 +146,7 @@ func NewDocumentFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			pattern = likePattern(query)
 		}
 
-		// Family documents may still have a NULL entity until 040, so
+		// Family documents may still have a NULL entity until 056, so
 		// about_type=family also matches those. entity_type is compared as
 		// text: a kind the DB does not know matches nothing instead of
 		// failing the domain cast.

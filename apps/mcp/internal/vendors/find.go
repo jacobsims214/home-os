@@ -44,7 +44,7 @@ func (in findInput) filtered() bool { return in.id != nil || in.trade != "" || i
 // stored trade containing the text ("plumb" finds plumber), or the free-text
 // specialty containing it (vendors whose specialty 043 could not map).
 // query ($6) matches the name, specialty, any trade, notes, email or phone.
-// vendors.property_id is deliberately not selected (dropped in 040).
+// vendors.property_id is deliberately not selected (dropped in 056).
 const contactSelect = `
 	SELECT v.id, v.name, v.trades, v.specialty, v.phone, v.email, v.website, v.notes,
 	       v.created_at, v.updated_at,

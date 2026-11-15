@@ -9,7 +9,7 @@
 // four annotation hints and an outputSchema with string ids. All operations
 // are scoped to the authenticated household via JWT claims.
 //
-// vendors.property_id is not read or returned: 040 drops it and the API
+// vendors.property_id is not read or returned: 056 drops it and the API
 // stopped reading it in #4449. Trades come from 043's vendors.trades.
 package vendors
 

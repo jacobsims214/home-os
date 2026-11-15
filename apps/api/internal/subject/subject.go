@@ -6,7 +6,7 @@
 //
 // The legacy polymorphic entity_type/entity_id request fields are still
 // accepted and mapped onto the typed columns, and responses still carry them
-// (derived), so clients written before v2 keep working. Migration 040 drops
+// (derived), so clients written before v2 keep working. Migration 056 drops
 // the columns themselves.
 package subject
 

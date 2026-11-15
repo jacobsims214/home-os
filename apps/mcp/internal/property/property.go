@@ -6,8 +6,8 @@
 // the authenticated household via JWT claims.
 //
 // Rooms follow domain model v2 (038): rooms.household_id exists but stays
-// nullable until 040, so rooms are always scoped through their property's
-// household_id, which is correct before and after 040. Mortgages are not
+// nullable until 056, so rooms are always scoped through their property's
+// household_id, which is correct before and after 056. Mortgages are not
 // read from the old properties.mortgage_* columns: 044 copied them into
 // loans(property_id), so the tools point to loan_find instead.
 package property

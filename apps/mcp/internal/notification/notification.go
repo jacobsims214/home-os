@@ -44,12 +44,6 @@ const (
 	scopePersonal = "personal" // user_id = the caller
 )
 
-// calendarAlarm is the notification type (and entity_type) the worker's
-// alarm job writes. Its entity_id is a per-firing dedupe UUID, not an event
-// id (#4443; #4601 may move it to a dedupe_key column), so it is never shown
-// as an about link.
-const calendarAlarm = "calendar_alarm"
-
 // toolHandler is the signature every notification tool handler has.
 type toolHandler = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)
 
@@ -90,6 +84,10 @@ var aboutKinds = map[string]struct{ about, open string }{
 	"vendor":           {"contact", "contact_find id=%s"},
 	"note":             {"note", "note_get note_id=%s"},
 	"person":           {"person", "person_find id=%s"},
+	// calendar_alarm reminders (worker, #4443) and item_changed rows for
+	// events (migration 054) point at the calendar object. The alarm's
+	// per-firing dedupe key lives in notifications.dedupe_key (056).
+	"calendar_event": {"event", "event_find id=%s"},
 }
 
 // row is one notifications row as scanned.
@@ -126,16 +124,15 @@ func (r row) data(loc *time.Location) notificationData {
 		s := r.readAt.In(loc).Format(time.RFC3339)
 		d.ReadAt = &s
 	}
-	d.AboutType, d.AboutID, d.Open = about(r.typ, r.entityType, r.entityID)
+	d.AboutType, d.AboutID, d.Open = about(r.entityType, r.entityID)
 	return d
 }
 
-// about maps the entity reference to catalog words. calendar_alarm rows
-// carry a dedupe UUID, not an event id, so they have no about link. Kinds
-// outside the catalog map come back raw with no open hint; household is the
-// family itself (no id).
-func about(typ string, entityType *string, entityID *uuid.UUID) (aboutType, aboutID, open *string) {
-	if entityType == nil || *entityType == "" || typ == calendarAlarm || *entityType == calendarAlarm {
+// about maps the entity reference to catalog words. Kinds outside the
+// catalog map come back raw with no open hint; household is the family
+// itself (no id).
+func about(entityType *string, entityID *uuid.UUID) (aboutType, aboutID, open *string) {
+	if entityType == nil || *entityType == "" {
 		return nil, nil, nil
 	}
 	if *entityType == "household" {

@@ -210,7 +210,7 @@ func (r docRow) displayTitle() string {
 }
 
 // about returns the catalog about_type and about_id. Family documents (and
-// rows with no entity, allowed until 040) have no about_id.
+// rows with no entity, allowed until 056) have no about_id.
 func (r docRow) about() (string, *string) {
 	if r.EntityType == nil || r.EntityID == nil {
 		return "family", nil

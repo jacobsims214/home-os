@@ -251,15 +251,17 @@ func (f fixture) addObject(t *testing.T, uid string, raw *string) string {
 }
 
 type notifRow struct {
-	UserID   string
-	Title    string
-	EntityID string
+	UserID     string
+	Title      string
+	DedupeKey  string
+	EntityType string
+	EntityID   string
 }
 
 func (f fixture) notifications(t *testing.T) []notifRow {
 	t.Helper()
 	rows, err := f.pool.Query(context.Background(),
-		`SELECT user_id::text, title, entity_id::text FROM notifications
+		`SELECT user_id::text, title, dedupe_key, entity_type, entity_id::text FROM notifications
 		 WHERE household_id = $1 AND type = 'calendar_alarm' ORDER BY created_at, user_id`, f.hh)
 	if err != nil {
 		t.Fatal(err)
@@ -286,7 +288,7 @@ func TestProcess(t *testing.T) {
 	t.Run("30-minute alarm notifies every member once", func(t *testing.T) {
 		f := newFixture(t, pool, "America/Chicago", 2)
 		raw := ics(event("dentist", "DTSTART;TZID=America/Chicago:20261120T150000", "DTEND;TZID=America/Chicago:20261120T160000", "-PT30M")...)
-		f.addObject(t, "dentist", &raw)
+		obj := f.addObject(t, "dentist", &raw)
 		start := mustTime(t, "2026-11-20T21:00:00Z") // 15:00 CST
 
 		j := New(pool)
@@ -314,8 +316,14 @@ func TestProcess(t *testing.T) {
 				t.Errorf("member %s got no notification", m)
 			}
 		}
-		if got[0].Title != "Dentist" || got[0].EntityID != got[1].EntityID {
+		if got[0].Title != "Dentist" || got[0].DedupeKey == "" || got[0].DedupeKey != got[1].DedupeKey {
 			t.Errorf("unexpected rows: %+v", got)
+		}
+		// The reminder opens its event; the dedupe key is not the entity.
+		for _, n := range got {
+			if n.EntityType != EntityType || n.EntityID != obj {
+				t.Errorf("notification about %s %s, want %s %s", n.EntityType, n.EntityID, EntityType, obj)
+			}
 		}
 	})
 
@@ -335,7 +343,7 @@ func TestProcess(t *testing.T) {
 			}
 		}
 		got := f.notifications(t)
-		if len(got) != 2 || got[0].EntityID == got[1].EntityID {
+		if len(got) != 2 || got[0].DedupeKey == got[1].DedupeKey {
 			t.Fatalf("want 2 distinct occurrence notifications, got %+v", got)
 		}
 	})
@@ -350,6 +358,39 @@ func TestProcess(t *testing.T) {
 
 		if n := process(t, New(pool), mustTime(t, "2026-12-01T11:30:00Z")); n != 1 {
 			t.Fatalf("inserted %d, want 1 (only the good event)", n)
+		}
+	})
+
+	t.Run("deleting the event clears the link, keeps the reminder", func(t *testing.T) {
+		f := newFixture(t, pool, "UTC", 1)
+		raw := ics(event("vet", "DTSTART:20261202T120000Z", "DTEND:20261202T130000Z", "-PT30M")...)
+		obj := f.addObject(t, "vet", &raw)
+		if n := process(t, New(pool), mustTime(t, "2026-12-02T11:30:00Z")); n != 1 {
+			t.Fatalf("inserted %d, want 1", n)
+		}
+		if _, err := pool.Exec(context.Background(), `DELETE FROM calendar_objects WHERE id = $1`, obj); err != nil {
+			t.Fatal(err)
+		}
+		var entityType, entityID *string
+		var key string
+		if err := pool.QueryRow(context.Background(),
+			`SELECT entity_type, entity_id::text, dedupe_key FROM notifications WHERE household_id = $1 AND type = 'calendar_alarm'`,
+			f.hh).Scan(&entityType, &entityID, &key); err != nil {
+			t.Fatal(err)
+		}
+		if entityType != nil || entityID != nil || key == "" {
+			t.Errorf("after delete: entity %v %v, dedupe_key %q; want NULL entity and the key kept", entityType, entityID, key)
+		}
+	})
+
+	t.Run("dedupe_key is unique per member", func(t *testing.T) {
+		f := newFixture(t, pool, "UTC", 1)
+		ins := `INSERT INTO notifications (household_id, user_id, type, title, dedupe_key) VALUES ($1, $2, 'calendar_alarm', 'x', 'k1')`
+		if _, err := pool.Exec(context.Background(), ins, f.hh, f.members[0]); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(context.Background(), ins, f.hh, f.members[0]); err == nil {
+			t.Error("second notification with the same member and dedupe_key was accepted")
 		}
 	})
 }

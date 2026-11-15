@@ -111,7 +111,7 @@ var areas = []area{
 	{Name: "property", Plural: "properties", From: "properties t", Scope: "t.household_id",
 		Title: "t.name", Doc: "concat_ws(' ', t.name, t.address, t.notes)",
 		OpenRef: "t.id", Open: "property_find id=%s", Sort: "t.created_at"},
-	// rooms.household_id stays nullable until migration 040, so rooms are
+	// rooms.household_id stays nullable until migration 056, so rooms are
 	// scoped through their property, which is authoritative. A room is opened
 	// through its property (property_find returns its rooms).
 	{Name: "room", Plural: "rooms", From: "rooms t JOIN properties p ON p.id = t.property_id", Scope: "p.household_id",

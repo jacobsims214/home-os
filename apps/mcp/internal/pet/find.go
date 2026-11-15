@@ -36,7 +36,7 @@ func (in findInput) filtered() bool { return in.id != nil || in.query != "" }
 // total before paging. The vet is the linked vendor (043 vet_vendor_id; the
 // composite FK keeps it in the pet's family, and the join repeats the
 // household check anyway), falling back to the old vet_name / vet_phone
-// columns until 040 drops them. query matches the name, species, breed,
+// columns until a later migration drops them (056 kept them). query matches the name, species, breed,
 // notes, microchip id, or the vet's name. Age is whole years in the
 // family's timezone.
 const petSelect = `
@@ -143,7 +143,7 @@ func findPets(ctx context.Context, pool *pgxpool.Pool, householdID string, in fi
 }
 
 // vet picks the pet's vet: the linked contact first, else the old columns
-// (until 040). A linked contact with no phone borrows the old vet_phone, so
+// (kept by 056). A linked contact with no phone borrows the old vet_phone, so
 // a number typed on the pet is never hidden.
 func vet(vendorID *uuid.UUID, name, phone, email, oldName, oldPhone *string) *vetData {
 	if vendorID != nil {

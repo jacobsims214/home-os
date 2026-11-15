@@ -40,7 +40,7 @@ type toolHandler = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 
 // vehicleLink matches a loans or bills row (alias t) tied to vehicle v by
 // its typed vehicle_id (domain model v2). The legacy entity_type/entity_id
-// pair is no longer read: 039 backfilled it and 040 drops it.
+// pair is no longer read: 039 backfilled it and 056 drops it.
 const vehicleLink = `(t.vehicle_id = v.id)`
 
 // vehicleSelect loads vehicles with counts of what is linked to them.

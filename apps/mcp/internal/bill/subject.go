@@ -20,7 +20,7 @@ import (
 // property_id / vehicle_id / asset_id columns. A vehicle excludes the other
 // two (bills_subject_check); an asset bill's property_id is derived from the
 // asset by derive_subject_property(). The legacy entity_type/entity_id pair
-// is never read or written (040 drops it); callers that still send it are
+// is never read or written (056 drops it); callers that still send it are
 // mapped onto the typed columns by subjectAliases.
 
 // Subject types reported in subject_type.

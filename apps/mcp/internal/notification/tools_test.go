@@ -276,11 +276,16 @@ func TestNotificationFind(t *testing.T) {
 
 	bill := insertID(t, pool, `INSERT INTO bills (household_id, name, amount, due_day) VALUES ($1, 'Electric', 142.50, 20) RETURNING id`, hh.HouseholdID)
 	task := uuid.NewString()
-	dedupe := uuid.NewString()
+	cal := insertID(t, pool, `INSERT INTO calendars (household_id, name, type, caldav_uid) VALUES ($1, 'Family', 'family', gen_random_uuid()::text) RETURNING id`, hh.HouseholdID)
+	event := insertID(t, pool, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag) VALUES ($1, 'dentist', '{}', 'e') RETURNING id`, cal)
 	billN := notify(t, pool, hh.HouseholdID, "", "bill_due", "Electric due soon", "bill", bill, 4*time.Hour)
 	maintN := notify(t, pool, hh.HouseholdID, "", "maintenance_due", "Change furnace filter due soon", "maintenance_task", task, 3*time.Hour)
-	alarmMine := notify(t, pool, hh.HouseholdID, hh.UserID.String(), "calendar_alarm", "Dentist in 30 minutes", "calendar_alarm", dedupe, 2*time.Hour)
-	alarmAmber := notify(t, pool, hh.HouseholdID, amber, "calendar_alarm", "Dentist in 30 minutes", "calendar_alarm", dedupe, 2*time.Hour)
+	// As the worker writes them since 056: about the event, firing key in dedupe_key.
+	alarmMine := notify(t, pool, hh.HouseholdID, hh.UserID.String(), "calendar_alarm", "Dentist in 30 minutes", "calendar_event", event, 2*time.Hour)
+	alarmAmber := notify(t, pool, hh.HouseholdID, amber, "calendar_alarm", "Dentist in 30 minutes", "calendar_event", event, 2*time.Hour)
+	if _, err := pool.Exec(context.Background(), `UPDATE notifications SET dedupe_key = 'firing-1' WHERE id IN ($1, $2)`, alarmMine, alarmAmber); err != nil {
+		t.Fatal(err)
+	}
 	readN := notify(t, pool, hh.HouseholdID, "", "info", "Welcome", "", nil, 48*time.Hour)
 	if _, err := pool.Exec(context.Background(), `UPDATE notifications SET read_at = NOW() - interval '1 day' WHERE id = $1`, readN); err != nil {
 		t.Fatal(err)
@@ -308,8 +313,9 @@ func TestNotificationFind(t *testing.T) {
 		t.Errorf("summary = %q", env.Summary)
 	}
 	alarm, maint, b, read := d.Notifications[0], d.Notifications[1], d.Notifications[2], d.Notifications[3]
-	if alarm.Scope != scopePersonal || alarm.AboutType != nil || alarm.AboutID != nil || alarm.Open != nil {
-		t.Errorf("calendar_alarm must not expose its dedupe entity_id: %+v", alarm)
+	if alarm.Scope != scopePersonal || alarm.AboutType == nil || *alarm.AboutType != "event" ||
+		alarm.AboutID == nil || *alarm.AboutID != event || alarm.Open == nil || *alarm.Open != "event_find id="+event {
+		t.Errorf("calendar_alarm must open its event: %+v", alarm)
 	}
 	if maint.Scope != scopeFamily || *maint.AboutType != "maintenance" || *maint.AboutID != task || *maint.Open != "maintenance_find id="+task {
 		t.Errorf("maintenance_due = %+v", maint)
@@ -334,7 +340,7 @@ func TestNotificationFind(t *testing.T) {
 		t.Errorf("local_date/weekday = %s %s", b.LocalDate, b.Weekday)
 	}
 	next := strings.Join(env.Next, " | ")
-	if !strings.Contains(next, "maintenance_find id="+task) || !strings.Contains(next, "notification_mark_read notification_ids=[\""+alarmMine+"\"]") {
+	if !strings.Contains(next, "event_find id="+event) || !strings.Contains(next, "notification_mark_read notification_ids=[\""+alarmMine+"\"]") {
 		t.Errorf("next = %v", env.Next)
 	}
 
@@ -410,8 +416,8 @@ func TestNotificationMarkRead(t *testing.T) {
 
 	billN := notify(t, pool, hh.HouseholdID, "", "bill_due", "Electric due soon", "", nil, 3*time.Hour)
 	maintN := notify(t, pool, hh.HouseholdID, "", "maintenance_due", "Filter due soon", "", nil, 2*time.Hour)
-	mine := notify(t, pool, hh.HouseholdID, hh.UserID.String(), "calendar_alarm", "Dentist", "calendar_alarm", uuid.NewString(), time.Hour)
-	amberN := notify(t, pool, hh.HouseholdID, amber, "calendar_alarm", "Dentist", "calendar_alarm", uuid.NewString(), time.Hour)
+	mine := notify(t, pool, hh.HouseholdID, hh.UserID.String(), "calendar_alarm", "Dentist", "", nil, time.Hour)
+	amberN := notify(t, pool, hh.HouseholdID, amber, "calendar_alarm", "Dentist", "", nil, time.Hour)
 	_, other := testutil.SeedHousehold(t, pool)
 	foreign := notify(t, pool, other.HouseholdID, "", "bill_due", "Other", "", nil, time.Hour)
 

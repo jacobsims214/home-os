@@ -218,11 +218,13 @@ func (f fixture) vehicle(t *testing.T, hh uuid.UUID) string {
 }
 
 // subjectColumns reads a loan's typed and legacy subject columns.
-func (f fixture) subjectColumns(t *testing.T, id string) (prop, veh, asset, entityType, entityID *string) {
+// subjectColumns reads a loan's typed subject (migration 056 dropped the
+// legacy entity_type/entity_id columns).
+func (f fixture) subjectColumns(t *testing.T, id string) (prop, veh, asset *string) {
 	t.Helper()
 	if err := f.pool.QueryRow(context.Background(),
-		`SELECT property_id::text, vehicle_id::text, asset_id::text, entity_type, entity_id::text FROM loans WHERE id = $1`, id,
-	).Scan(&prop, &veh, &asset, &entityType, &entityID); err != nil {
+		`SELECT property_id::text, vehicle_id::text, asset_id::text FROM loans WHERE id = $1`, id,
+	).Scan(&prop, &veh, &asset); err != nil {
 		t.Fatalf("read subject columns: %v", err)
 	}
 	return
@@ -361,9 +363,9 @@ func TestLoanCreate(t *testing.T) {
 	if len(env.Next) == 0 || !strings.Contains(env.Next[0], "budget_summary") {
 		t.Errorf("next = %v, want budget_summary first", env.Next)
 	}
-	prop, veh, asset, et, eid := f.subjectColumns(t, d.ID)
-	if deref(prop) != house || veh != nil || asset != nil || et != nil || eid != nil {
-		t.Errorf("columns = %v %v %v legacy %v %v; want typed property only", deref(prop), veh, asset, deref(et), deref(eid))
+	prop, veh, asset := f.subjectColumns(t, d.ID)
+	if deref(prop) != house || veh != nil || asset != nil {
+		t.Errorf("columns = %v %v %v; want typed property only", deref(prop), veh, asset)
 	}
 
 	// Loop guard: same name (any case) and amounts within 10 minutes.
@@ -384,8 +386,8 @@ func TestLoanCreate(t *testing.T) {
 	if deref(alias.VehicleID) != van || deref(alias.SubjectName) != "2022 Honda Odyssey" || alias.NextDueDate != nil {
 		t.Errorf("alias loan = %+v", alias)
 	}
-	if _, veh, _, et, _ := f.subjectColumns(t, alias.ID); deref(veh) != van || et != nil {
-		t.Errorf("alias columns veh=%v legacy=%v", deref(veh), deref(et))
+	if _, veh, _ := f.subjectColumns(t, alias.ID); deref(veh) != van {
+		t.Errorf("alias columns veh=%v", deref(veh))
 	}
 
 	// Validation: nothing is inserted.
@@ -558,8 +560,8 @@ func TestLoanUpdate(t *testing.T) {
 	}
 	// Legacy alias sets the typed property again.
 	call(t, f.ctx, f.upd, "loan_update", map[string]any{"loan_id": l.ID, "entity_type": "property", "entity_id": house})
-	if prop, veh, _, et, _ := f.subjectColumns(t, l.ID); deref(prop) != house || veh != nil || et != nil {
-		t.Errorf("alias update columns = %v %v %v", deref(prop), deref(veh), deref(et))
+	if prop, veh, _ := f.subjectColumns(t, l.ID); deref(prop) != house || veh != nil {
+		t.Errorf("alias update columns = %v %v", deref(prop), deref(veh))
 	}
 
 	cases := []struct {

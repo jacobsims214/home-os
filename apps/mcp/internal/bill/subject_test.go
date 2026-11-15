@@ -66,15 +66,6 @@ func TestBillSubjects(t *testing.T) {
 		t.Errorf("family-level bill has a subject: %+v", netflix)
 	}
 
-	var legacy int
-	if err := pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM bills WHERE household_id = $1 AND entity_id IS NOT NULL`, hh.HouseholdID).Scan(&legacy); err != nil {
-		t.Fatal(err)
-	}
-	if legacy != 0 {
-		t.Errorf("%d bills written with legacy entity_id", legacy)
-	}
-
 	ids := func(bills []billData) string {
 		var out []string
 		for _, b := range bills {

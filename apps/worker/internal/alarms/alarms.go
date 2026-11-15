@@ -12,10 +12,13 @@
 // A firing is identified by (calendar object, occurrence, firing instant):
 // the occurrence is its RECURRENCE-ID (or start, for a single event), and the
 // firing instant distinguishes several alarms and REPEAT firings on the same
-// occurrence. That key is hashed into a deterministic UUIDv5 and stored as the
-// notification's entity_id with entity_type 'calendar_alarm', and a row is
-// only inserted when no notification with that entity_id exists for the
-// member. Because the key lives in the notifications table itself, a restart
+// occurrence. That key is hashed into a deterministic UUIDv5 and stored in
+// notifications.dedupe_key (migration 056), which is unique per
+// (user_id, dedupe_key), so a row is only inserted when the member has no
+// notification for that firing yet. The notification's entity is the event
+// itself (entity_type 'calendar_event', entity_id = the calendar object id),
+// so a client can open the event from the reminder. Because the key lives in
+// the notifications table itself, a restart
 // (or a second replica, serialised by an advisory lock) never re-notifies a
 // firing that was already delivered, however often the window overlaps it.
 //
@@ -54,9 +57,11 @@ const (
 	// purpose: a reminder for something that already started is noise.
 	DefaultLookback = 15 * time.Minute
 
-	// NotificationType and EntityType are written on every alarm notification.
+	// NotificationType is written on every alarm notification; EntityType
+	// names what it is about (the calendar object), the same reference the
+	// item_changed notifications of migration 054 use for events.
 	NotificationType = "calendar_alarm"
-	EntityType       = "calendar_alarm"
+	EntityType       = "calendar_event"
 
 	// advisoryLockKey serialises runs across worker replicas.
 	advisoryLockKey int64 = 0x616c61726d73 // "alarms"
@@ -144,7 +149,7 @@ type candidate struct {
 type Firing struct {
 	ObjectID    uuid.UUID
 	HouseholdID uuid.UUID
-	Key         uuid.UUID // dedupe key, stored as notifications.entity_id
+	Key         uuid.UUID // dedupe key, stored as notifications.dedupe_key
 	At          time.Time
 	Title       string
 	Body        string
@@ -162,16 +167,15 @@ const candidatesSQL = `
 `
 
 // insertSQL writes one notification per household member for a firing,
-// skipping members who already have a notification for this firing key.
+// about the event ($6), skipping members who already have a notification for
+// this firing key ($7). The partial unique index idx_notifications_dedupe
+// (migration 056) makes the skip race-free.
 const insertSQL = `
-	INSERT INTO notifications (household_id, user_id, type, title, body, entity_type, entity_id)
-	SELECT $1::uuid, m.user_id, $2::varchar, $3::varchar, $4::text, $5::varchar, $6::uuid
+	INSERT INTO notifications (household_id, user_id, type, title, body, entity_type, entity_id, dedupe_key)
+	SELECT $1::uuid, m.user_id, $2::varchar, $3::varchar, $4::text, $5::varchar, $6::uuid, $7::text
 	FROM memberships m
 	WHERE m.household_id = $1::uuid
-	  AND NOT EXISTS (
-		SELECT 1 FROM notifications n
-		WHERE n.entity_type = $5::varchar AND n.entity_id = $6::uuid AND n.user_id = m.user_id
-	  )
+	ON CONFLICT (user_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
 `
 
 // Process creates notifications for every alarm that fired in
@@ -209,7 +213,7 @@ func (j *Job) Process(ctx context.Context, now time.Time) (int, error) {
 
 	inserted := 0
 	for _, f := range firings {
-		tag, err := tx.Exec(ctx, insertSQL, f.HouseholdID, NotificationType, f.Title, f.Body, EntityType, f.Key)
+		tag, err := tx.Exec(ctx, insertSQL, f.HouseholdID, NotificationType, f.Title, f.Body, EntityType, f.ObjectID, f.Key.String())
 		if err != nil {
 			return 0, fmt.Errorf("insert alarm notification for %s: %w", f.ObjectID, err)
 		}

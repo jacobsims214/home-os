@@ -240,10 +240,9 @@ func TestContactFind(t *testing.T) {
 		t.Errorf("empty next = %v", env.Next)
 	}
 
-	home := insertID(t, pool, `INSERT INTO properties (household_id, name) VALUES ($1, 'Home') RETURNING id`, hh.HouseholdID)
-	joe := insertID(t, pool, `INSERT INTO vendors (household_id, property_id, name, specialty, phone, email, notes, trades)
-		VALUES ($1, $2, 'Joe''s Plumbing', 'Plumbing', '555-0101', 'joe@example.com', 'Fixed the water heater 2025', ARRAY['plumber'])
-		RETURNING id`, hh.HouseholdID, home)
+	joe := insertID(t, pool, `INSERT INTO vendors (household_id, name, specialty, phone, email, notes, trades)
+		VALUES ($1, 'Joe''s Plumbing', 'Plumbing', '555-0101', 'joe@example.com', 'Fixed the water heater 2025', ARRAY['plumber'])
+		RETURNING id`, hh.HouseholdID)
 	vet := insertID(t, pool, `INSERT INTO vendors (household_id, name, phone, trades)
 		VALUES ($1, 'Paws Animal Clinic', '555-0202', ARRAY['vet']) RETURNING id`, hh.HouseholdID)
 	sparky := insertID(t, pool, `INSERT INTO vendors (household_id, name, website, trades)
