@@ -15,10 +15,16 @@ spec:
       labels:
         app: home-os-tika
     spec:
+      {{- include "home-os.podSecurityContext" (dict "uid" 35002) | nindent 6 }}
       containers:
       - name: tika
         image: "{{ .Values.tika.image }}"
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: {{ .Values.tika.port }}
+        volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         resources:
           {{- toYaml .Values.tika.resources | nindent 10 }}
+      volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}

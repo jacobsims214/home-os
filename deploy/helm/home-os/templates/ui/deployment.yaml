@@ -15,10 +15,12 @@ spec:
       labels:
         app: home-os-ui
     spec:
+      {{- include "home-os.podSecurityContext" (dict "uid" 100 "gid" 101) | nindent 6 }}
       containers:
       - name: ui
         image: "{{ .Values.global.imageRegistry }}/ui:{{ .Values.global.imageTag }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: {{ .Values.ui.port }}
         env:
@@ -37,5 +39,13 @@ spec:
           value: {{ include "home-os.dexIssuer" . | quote }}
         - name: DEX_UI_REDIRECT_URI
           value: {{ include "home-os.uiRedirectURI" . | quote }}
+        volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
+        - name: next-cache
+          mountPath: /app/.next/cache
         resources:
           {{- toYaml .Values.ui.resources | nindent 10 }}
+      volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}
+      - name: next-cache
+        emptyDir: {}

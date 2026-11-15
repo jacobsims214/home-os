@@ -15,10 +15,12 @@ spec:
       labels:
         app: home-os-worker
     spec:
+      {{- include "home-os.podSecurityContext" (dict "uid" 65532) | nindent 6 }}
       containers:
       - name: worker
         image: "{{ .Values.global.imageRegistry }}/worker:{{ .Values.global.imageTag }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         env:
         {{- include "home-os.databaseEnv" . | nindent 8 }}
         - name: TYPESENSE_HOST
@@ -36,5 +38,9 @@ spec:
           value: "http://home-os-tika:{{ .Values.tika.port }}"
         - name: LOG_LEVEL
           value: "info"
+        volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         resources:
           {{- toYaml .Values.worker.resources | nindent 10 }}
+      volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}

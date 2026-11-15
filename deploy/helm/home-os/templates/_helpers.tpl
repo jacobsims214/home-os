@@ -124,3 +124,43 @@ http://localhost:{{ .Values.envoy.port }}
 {{- define "home-os.apiInternalUrl" -}}
 http://home-os-api:{{ .Values.api.port }}
 {{- end -}}
+
+{{/*
+PodSecurity "restricted" (#4421). Every workload runs as a fixed non-root uid
+matching its image's own runtime user, with no privilege escalation, all
+capabilities dropped, the RuntimeDefault seccomp profile and a read-only root
+filesystem; writable paths are emptyDir mounts (home-os.tmpVolumeMount).
+
+Pod level. Use: {{- include "home-os.podSecurityContext" (dict "uid" 65532) | nindent 6 }}
+Optional "gid" (defaults to uid); fsGroup = gid so mounted volumes are writable.
+*/}}
+{{- define "home-os.podSecurityContext" -}}
+{{- $gid := .gid | default .uid -}}
+securityContext:
+  runAsNonRoot: true
+  runAsUser: {{ .uid }}
+  runAsGroup: {{ $gid }}
+  fsGroup: {{ $gid }}
+  seccompProfile:
+    type: RuntimeDefault
+{{- end -}}
+
+{{/* Container level. Use: {{- include "home-os.containerSecurityContext" . | nindent 8 }} */}}
+{{- define "home-os.containerSecurityContext" -}}
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+{{- end -}}
+
+{{/* emptyDir /tmp for read-only root filesystems: mount + volume. */}}
+{{- define "home-os.tmpVolumeMount" -}}
+- name: tmp
+  mountPath: /tmp
+{{- end -}}
+
+{{- define "home-os.tmpVolume" -}}
+- name: tmp
+  emptyDir: {}
+{{- end -}}

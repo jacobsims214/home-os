@@ -15,9 +15,11 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/dex/configmap.yaml") . | sha256sum }}
     spec:
+      {{- include "home-os.podSecurityContext" (dict "uid" 1001) | nindent 6 }}
       containers:
       - name: dex
         image: ghcr.io/dexidp/dex:v2.42.0
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         args: ["dex", "serve", "/etc/dex/config.yaml"]
         ports:
         - containerPort: 5556
@@ -39,9 +41,11 @@ spec:
               key: {{ include "home-os.dbSecretPasswordKey" . }}
               {{- end }}
         volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         - name: config
           mountPath: /etc/dex
       volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}
       - name: config
         configMap:
           name: home-os-dex-config

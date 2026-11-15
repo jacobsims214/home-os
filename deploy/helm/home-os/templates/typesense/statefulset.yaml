@@ -16,9 +16,11 @@ spec:
       labels:
         app: home-os-typesense
     spec:
+      {{- include "home-os.podSecurityContext" (dict "uid" 10000) | nindent 6 }}
       containers:
       - name: typesense
         image: "{{ .Values.typesense.image }}"
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: {{ .Values.typesense.port }}
         env:
@@ -30,8 +32,11 @@ spec:
         - name: TYPESENSE_DATA_DIR
           value: /data
         volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         - name: data
           mountPath: /data
+      volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}
   volumeClaimTemplates:
   - metadata:
       name: data

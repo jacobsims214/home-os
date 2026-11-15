@@ -11,9 +11,15 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      {{- include "home-os.podSecurityContext" (dict "uid" 65532) | nindent 6 }}
       containers:
       - name: migrations
         image: "{{ .Values.global.imageRegistry }}/migrations:{{ .Values.global.imageTag }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         env:
         {{- include "home-os.databaseEnv" . | nindent 8 }}
+        volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
+      volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}

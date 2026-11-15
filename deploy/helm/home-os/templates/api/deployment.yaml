@@ -15,10 +15,12 @@ spec:
       labels:
         app: home-os-api
     spec:
+      {{- include "home-os.podSecurityContext" (dict "uid" 65532) | nindent 6 }}
       containers:
       - name: api
         image: "{{ .Values.global.imageRegistry }}/api:{{ .Values.global.imageTag }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: {{ .Values.api.port }}
         env:
@@ -83,5 +85,9 @@ spec:
             secretKeyRef:
               name: {{ include "home-os.secretsName" . }}
               key: adminPassword
+        volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         resources:
           {{- toYaml .Values.api.resources | nindent 10 }}
+      volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}

@@ -15,10 +15,12 @@ spec:
       labels:
         app: home-os-mcp
     spec:
+      {{- include "home-os.podSecurityContext" (dict "uid" 65532) | nindent 6 }}
       containers:
       - name: mcp
         image: "{{ .Values.global.imageRegistry }}/mcp:{{ .Values.global.imageTag }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: {{ .Values.mcp.port }}
         - containerPort: {{ .Values.mcp.metadataPort }}
@@ -42,6 +44,8 @@ spec:
           value: {{ include "home-os.publicUrl" . | quote }}
         - name: DEX_ISSUER
           value: {{ include "home-os.dexIssuer" . | quote }}
+        volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         resources:
           {{- toYaml .Values.mcp.resources | nindent 10 }}
         readinessProbe:
@@ -56,3 +60,5 @@ spec:
             port: {{ .Values.mcp.port }}
           initialDelaySeconds: 15
           periodSeconds: 20
+      volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}
