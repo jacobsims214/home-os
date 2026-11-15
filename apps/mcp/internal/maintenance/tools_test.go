@@ -517,6 +517,13 @@ func TestUpdate(t *testing.T) {
 	car := insertID(t, pool, `INSERT INTO vehicles (household_id, make) VALUES ($1, 'Honda') RETURNING id`, f.id)
 
 	task := mustOK(t, f.ctx, pool, "maintenance_create", map[string]any{"name": "Filter", "due_date": f.day(3), "asset_id": furnace, "description": "16x25"}).Data
+	// A phone stored raw iCalendar for the event (CalDAV PUT): the sync
+	// must clear it with the JSON change, or CalDAV/the API would keep
+	// reading a raw for the old JSON (#4465).
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE calendar_objects SET ical_raw = 'BEGIN:VCALENDAR'||chr(13)||chr(10)||'END:VCALENDAR', rrule = 'FREQ=DAILY' WHERE entity_id = $1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	env := mustOK(t, f.ctx, pool, "maintenance_update", map[string]any{"task_id": task.ID, "due_date": f.day(10), "name": "Furnace filter", "description": ""})
 	d := env.Data
@@ -535,6 +542,9 @@ func TestUpdate(t *testing.T) {
 	}
 	if n := count(t, pool, `SELECT COUNT(*) FROM calendar_objects WHERE entity_id = $1`, task.ID); n != 1 {
 		t.Errorf("events = %d, want 1", n)
+	}
+	if n := count(t, pool, `SELECT COUNT(*) FROM calendar_objects WHERE entity_id = $1 AND (ical_raw IS NOT NULL OR rrule IS NOT NULL)`, task.ID); n != 0 {
+		t.Error("ical_raw/rrule not cleared by the calendar sync")
 	}
 	if n := count(t, pool, `SELECT COUNT(*) FROM calendar_changes WHERE action = 'update' AND calendar_id = $1`, f.maintCalendar); n != 1 {
 		t.Errorf("update changes = %d, want 1", n)

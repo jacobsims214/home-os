@@ -24,7 +24,7 @@ jobs:
     strategy:
       matrix:
         include:
-          # api, worker and calendar import repo-level modules
+          # api, worker, calendar and mcp import repo-level modules
           # (packages/icalx), so they build from the repository root.
           - service: api
             context: .
@@ -39,7 +39,7 @@ jobs:
             context: apps/ui
             file: apps/ui/Dockerfile
           - service: mcp
-            context: apps/mcp
+            context: .
             file: apps/mcp/Dockerfile
           - service: migrations
             context: packages/db

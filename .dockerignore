@@ -1,10 +1,10 @@
 # Build context for root-context images (apps/api, apps/worker,
-# apps/calendar; see release.yml and deploy/docker-compose.yml). Allowlist: exclude everything,
+# apps/calendar, apps/mcp; see release.yml and deploy/docker-compose.yml). Allowlist: exclude everything,
 # then re-include only the modules those Dockerfiles COPY. This keeps
 # .worktrees/, .git, .env*, node_modules, .next, tools/ and every other
 # local artefact out of the context by default.
 #
-# mcp and ui build from their own directories (context apps/<name>) and
+# ui builds from its own directory (context apps/ui) and
 # packages/db from packages/db; those builds read their own .dockerignore,
 # not this one.
 #
@@ -17,6 +17,7 @@
 !apps/api/
 !apps/worker/
 !apps/calendar/
+!apps/mcp/
 
 # Re-exclude local artefacts inside the re-included modules.
 **/.git
@@ -37,3 +38,4 @@ apps/api/api
 apps/api/home-os
 apps/calendar/calendar
 apps/worker/worker
+apps/mcp/mcp

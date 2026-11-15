@@ -19,7 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -59,7 +58,15 @@ type Event struct {
 	// to derive the weekday themselves. Empty when start is unreadable.
 	LocalDate string `json:"local_date" jsonschema_description:"Start day in the family timezone (YYYY-MM-DD)."`
 	Weekday   string `json:"weekday" jsonschema_description:"Weekday of local_date, e.g. Wednesday."`
-	Recurring bool   `json:"recurring" jsonschema_description:"true for a repeating series; event_update refuses these."`
+	Recurring bool   `json:"recurring" jsonschema_description:"true for a repeating series; edit it with scope this, following or all."`
+	// Recurrence, reminders and people (#4465), read from ical_raw while it
+	// is current for the JSON (the rule CalDAV serves by).
+	Repeat          *Repeat       `json:"repeat,omitempty" jsonschema_description:"How the event repeats; absent for one-off events."`
+	RRule           string        `json:"rrule,omitempty" jsonschema_description:"The RFC 5545 RRULE phones see."`
+	ExceptDates     []string      `json:"except_dates,omitempty" jsonschema_description:"Skipped occurrence dates (YYYY-MM-DD)."`
+	ReminderMinutes []int         `json:"reminder_minutes,omitempty" jsonschema_description:"Phone alerts, minutes before the start."`
+	People          []EventPerson `json:"people,omitempty" jsonschema_description:"Family members the event is for."`
+	RecurrenceID    string        `json:"recurrence_id,omitempty" jsonschema_description:"For one occurrence: its original start; pass it as occurrence_date."`
 }
 
 // eventJSON is the JSON structure stored in ical_data column.
@@ -104,13 +111,22 @@ type eventWriteResult struct {
 	Conflicts      []ConflictEvent `json:"conflicts" jsonschema_description:"Other events overlapping this one. The event is saved either way; tell the user."`
 	ConflictsError string          `json:"conflicts_error,omitempty" jsonschema_description:"Set when the overlap check failed; check with event_find."`
 	Duplicate      bool            `json:"duplicate,omitempty" jsonschema_description:"true when an identical event made in the last 10 minutes was returned instead of a new one."`
+	// Scope is set for an edit of a repeating event.
+	Scope string `json:"scope,omitempty" jsonschema_description:"Which occurrences changed: this, following or all."`
+	// OriginalEventID is set for scope following: the series was split and
+	// event is the new part.
+	OriginalEventID string `json:"original_event_id,omitempty" jsonschema_description:"scope following: the event that keeps the earlier occurrences."`
+	Note            string `json:"note,omitempty"`
 }
 
-// eventDeleteResult is event_delete's data: the event that was deleted.
+// eventDeleteResult is event_delete's data: the event that was deleted, or
+// for one occurrence (or the following ones) the series as it now stands.
 type eventDeleteResult struct {
-	Event         Event  `json:"event"`
-	SeriesDeleted bool   `json:"series_deleted" jsonschema_description:"true when a whole repeating series was deleted."`
-	Note          string `json:"note,omitempty"`
+	Event          Event  `json:"event"`
+	SeriesDeleted  bool   `json:"series_deleted" jsonschema_description:"true when a whole repeating series was deleted."`
+	Scope          string `json:"scope,omitempty" jsonschema_description:"this, following or all for a repeating event."`
+	OccurrenceDate string `json:"occurrence_date,omitempty" jsonschema_description:"The occurrence removed (scope this) or where the series now ends (following)."`
+	Note           string `json:"note,omitempty"`
 }
 
 // ─────────────────────────────────────────────
@@ -220,7 +236,20 @@ func parseEventFromRow(row eventRow, loc *time.Location) (*Event, error) {
 		Color:        ej.Color,
 		EventType:    row.EventType,
 		CalendarName: row.CalendarName,
-		Recurring:    isRecurringEvent(row.Rrule, row.IcalRaw),
+	}
+	if row.Rrule != nil || row.IcalRaw != nil {
+		series := loadSeries(ej, row.ID, row.Rrule, row.IcalRaw)
+		ev.Recurring = series.recurring() || (series.locked && isRecurringEvent(row.Rrule, row.IcalRaw))
+		var doc map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(row.IcalData), &doc)
+		attachSeries(ev, series, doc, loc)
+	} else if strings.Contains(row.IcalData, `"people"`) {
+		var doc struct {
+			People []EventPerson `json:"people"`
+		}
+		if json.Unmarshal([]byte(row.IcalData), &doc) == nil {
+			ev.People = doc.People
+		}
 	}
 	localizeAllDay(ev, loc)
 	if !ev.AllDay {
@@ -1013,9 +1042,13 @@ func plural(n int, one, many string) string {
 // eventHints are the next steps for one event.
 func eventHints(ev Event) []string {
 	if ev.Recurring {
+		day := ev.LocalDate
+		if ev.RecurrenceID != "" {
+			day = ev.RecurrenceID
+		}
 		return []string{
-			"This event repeats: event_update refuses it; ask the user to change it in their phone's calendar.",
-			fmt.Sprintf("Delete the whole series with event_delete event_id=%s (only if the user agrees).", ev.ID),
+			fmt.Sprintf("Change one occurrence with event_update event_id=%s scope=this occurrence_date=%s; scope=all changes every one.", ev.ID, day),
+			fmt.Sprintf("Skip one with event_delete event_id=%s scope=this occurrence_date=%s; scope=all deletes the series.", ev.ID, day),
 		}
 	}
 	return []string{
@@ -1047,153 +1080,7 @@ func eventRange(ev Event) (time.Time, time.Time, bool) {
 	return s, e, err == nil && e.After(s)
 }
 
-// ─────────────────────────────────────────────
-// event_create
-// ─────────────────────────────────────────────
-
-// duplicateWindow is the loop guard: an identical create within this window
-// returns the existing event instead of a second one.
-const duplicateWindow = "10 minutes"
-
-// NewEventCreateTool creates event_create (replaces create_event).
-func NewEventCreateTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
-	tool := mcp.NewTool("event_create", toolOptions(classC, "Create event",
-		mcp.WithDescription("Add an event. Returns the event plus any events it overlaps. calendar_id defaults to Family. For all_day events pass plain dates. Phones see it over CalDAV."),
-		mcp.WithString("title", mcp.Description("Event title, e.g. Dentist"), mcp.Required()),
-		mcp.WithString("start", mcp.Description("ISO 8601 with offset, e.g. 2026-11-19T17:30:00-05:00; a date if all_day"), mcp.Required()),
-		mcp.WithString("end", mcp.Description("ISO 8601 with offset; if all_day the last day, e.g. 2026-11-21"), mcp.Required()),
-		mcp.WithString("calendar_id", mcp.Description("Calendar name or id (default Family)")),
-		mcp.WithBoolean("all_day", mcp.Description("Whole days in the family timezone (default false)")),
-		mcp.WithString("location", mcp.Description("Where, e.g. Lincoln Elementary")),
-		mcp.WithString("description", mcp.Description("Notes for the event")),
-		mcp.WithString("event_type", mcp.Description("Event type (default event)")),
-		respond.Schema[eventWriteResult](),
-	)...)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return authRequired(), nil
-		}
-		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
-		args := req.GetArguments()
-		title := strings.TrimSpace(getStringArg(args, "title"))
-		startArg := strings.TrimSpace(getStringArg(args, "start"))
-		endArg := strings.TrimSpace(getStringArg(args, "end"))
-		allDay := getBoolArg(args, "all_day", false)
-		description := getStringArg(args, "description")
-		location := getStringArg(args, "location")
-		eventType := strings.TrimSpace(getStringArg(args, "event_type"))
-		if eventType == "" {
-			eventType = "event"
-		}
-
-		example := map[string]any{"title": "Dentist", "start": exampleTime(loc), "end": exampleTimePlus(loc, time.Hour)}
-		for _, f := range []struct{ name, val string }{{"title", title}, {"start", startArg}, {"end", endArg}} {
-			if f.val == "" {
-				return respond.Invalid(f.name, f.name+" is required.",
-					"Pass title, start and end (ISO 8601 with offset; plain dates with all_day:true).", example), nil
-			}
-		}
-
-		cal, bad := resolveCalendar(ctx, pool, claims.HouseholdID, "calendar_id", getStringArg(args, "calendar_id"))
-		if bad != nil {
-			return bad, nil
-		}
-
-		// All-day events are normalised to whole days (UTC-midnight dates,
-		// exclusive end; see allDayRange). Timed events are stored as UTC
-		// RFC 3339, as the API and CalDAV do. rangeStart/rangeEnd is the span
-		// the event occupies, used for the conflict check: all-day events
-		// cover household-local days, the same reading localizeAllDay gives
-		// existing all-day events.
-		var storedStart, storedEnd string
-		var rangeStart, rangeEnd time.Time
-		if allDay {
-			first, endExcl, err := allDayRange(startArg, endArg)
-			if err != nil {
-				return respond.Invalid("end", err.Error(),
-					"For all_day events pass start as the first day and end as the last day (YYYY-MM-DD).",
-					map[string]any{"title": "Trip", "all_day": true, "start": exampleDate(loc), "end": exampleDate(loc)}), nil
-			}
-			storedStart, storedEnd = storeAllDay(first, endExcl)
-			rangeStart = time.Date(first.Year(), first.Month(), first.Day(), 0, 0, 0, 0, loc)
-			rangeEnd = time.Date(endExcl.Year(), endExcl.Month(), endExcl.Day(), 0, 0, 0, 0, loc)
-		} else {
-			startT, bad := parseInstant("start", startArg, loc)
-			if bad != nil {
-				return bad, nil
-			}
-			endT, bad := parseInstant("end", endArg, loc)
-			if bad != nil {
-				return bad, nil
-			}
-			if !endT.After(startT) {
-				return respond.Invalid("end", "end must be after start.",
-					"Pass an end later than start, e.g. one hour after it.",
-					map[string]any{"title": title, "start": startT.In(loc).Format(time.RFC3339), "end": startT.Add(time.Hour).In(loc).Format(time.RFC3339)}), nil
-			}
-			storedStart, storedEnd = startT.UTC().Format(time.RFC3339), endT.UTC().Format(time.RFC3339)
-			rangeStart, rangeEnd = startT, endT
-		}
-
-		// Loop guard: the same event on the same calendar created moments
-		// ago comes back as it is, flagged duplicate, instead of a copy.
-		if row, ok := recentDuplicate(ctx, pool, cal.ID, title, storedStart, storedEnd, allDay); ok {
-			ev, err := parseEventFromRow(row, loc)
-			if err == nil {
-				res := eventWriteResult{Event: *ev, Duplicate: true}
-				res.Conflicts, res.ConflictsError = conflictsFor(ctx, pool, claims.HouseholdID, loc, rangeStart, rangeEnd, ev.ID)
-				return respond.OK(fmt.Sprintf("%q on %s already exists (created minutes ago); nothing new was added.", ev.Title, describeWhen(*ev, loc)), res,
-					fmt.Sprintf("To change it use event_update event_id=%s; don't create it again.", ev.ID)), nil
-			}
-		}
-
-		eventID := uuid.New().String()
-		uid := eventID
-		etag := uuid.New().String()
-		icalData, err := marshalEventFields(title, description, storedStart, storedEnd, location, allDay)
-		if err != nil {
-			return respond.Failed("encode the event", err), nil
-		}
-
-		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-		if err != nil {
-			return respond.Failed("create the event", err), nil
-		}
-		defer tx.Rollback(ctx)
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO calendar_objects (id, calendar_id, uid, ical_data, etag, event_type)
-			 VALUES ($1, $2, $3, $4, $5, $6)`,
-			eventID, cal.ID, uid, icalData, etag, eventType,
-		); err != nil {
-			return respond.Failed("create the event", err), nil
-		}
-		if err := recordChangeAndBumpCtag(ctx, tx, cal.ID, uid, "create"); err != nil {
-			return respond.Failed("create the event", err), nil
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return respond.Failed("create the event", err), nil
-		}
-		slog.Info("event_create: created", "event_id", eventID, "calendar_id", cal.ID)
-
-		ev, err := parseEventFromRow(eventRow{ID: eventID, CalendarID: cal.ID, IcalData: icalData, EventType: eventType, CalendarName: cal.Name}, loc)
-		if err != nil {
-			return respond.Failed("read back the new event", err), nil
-		}
-		// The event is committed, so a failed overlap lookup must not fail
-		// the call: it returns an empty list plus conflicts_error instead.
-		res := eventWriteResult{Event: *ev}
-		res.Conflicts, res.ConflictsError = conflictsFor(ctx, pool, claims.HouseholdID, loc, rangeStart, rangeEnd, eventID)
-
-		summary := fmt.Sprintf("Created %q on %s in %s.", ev.Title, describeWhen(*ev, loc), cal.Name)
-		if n := len(res.Conflicts); n > 0 {
-			summary += fmt.Sprintf(" It overlaps %d other %s.", n, plural(n, "event", "events"))
-		}
-		return respond.OK(summary, res, conflictHints(*ev, res.Conflicts, loc)...), nil
-	}
-	return tool, handler
-}
+// event_create, event_update and event_delete are in events_write.go.
 
 func exampleTimePlus(loc *time.Location, d time.Duration) string {
 	t, _ := time.Parse(time.RFC3339, exampleTime(loc))
@@ -1234,21 +1121,6 @@ func recentDuplicate(ctx context.Context, q querier, calendarID, title, start, e
 	return row, true
 }
 
-// ─────────────────────────────────────────────
-// event_update
-// ─────────────────────────────────────────────
-
-// recurringEditRefusal is the error event_update returns for a repeating
-// event. It tells the model what to do next rather than retry.
-const recurringEditRefusal = "This event repeats (it is a recurring series), and repeating events can't be edited from here yet: " +
-	"changing it would turn the whole series into a single event. Nothing was changed."
-
-const recurringEditFix = "Ask the user to make this change in their phone's calendar app. " +
-	"Only if the user agrees, you can instead delete the series with event_delete and create a one-off event with event_create."
-
-// recurringDeleteNote is added to event_delete's result for a repeating event.
-const recurringDeleteNote = "This was a repeating event: the whole series was deleted, not just one occurrence."
-
 // isRecurringEvent reports whether a calendar_objects row is part of a
 // recurring series: its rrule column is set, or its raw iCalendar carries an
 // RRULE, RDATE or RECURRENCE-ID property (an override of one occurrence).
@@ -1277,293 +1149,6 @@ func isRecurringEvent(rrule, icalRaw *string) bool {
 		}
 	}
 	return false
-}
-
-// NewEventUpdateTool creates event_update (replaces update_event).
-func NewEventUpdateTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
-	tool := mcp.NewTool("event_update", toolOptions(classU, "Update event",
-		mcp.WithDescription("Change an event; only the given fields change. Changing start keeps the duration unless you also pass end. Repeating events can't be edited yet. Returns the event and any overlaps."),
-		mcp.WithString("event_id", mcp.Description("The event's id from event_find"), mcp.Required()),
-		mcp.WithString("title", mcp.Description("New title")),
-		mcp.WithString("start", mcp.Description("New start with offset, e.g. 2026-11-19T17:30:00-05:00; a date if all_day")),
-		mcp.WithString("end", mcp.Description("New end; omit to keep the duration. If all_day the last day")),
-		mcp.WithBoolean("all_day", mcp.Description("true snaps to whole days; false needs start and end")),
-		mcp.WithString("location", mcp.Description("New location (\"\" clears it)")),
-		mcp.WithString("description", mcp.Description("New description (\"\" clears it)")),
-		mcp.WithString("event_type", mcp.Description("New event type")),
-		mcp.WithString("calendar_id", mcp.Description("Move to this calendar (name or id), e.g. Kids")),
-		respond.Schema[eventWriteResult](),
-	)...)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return authRequired(), nil
-		}
-		args := req.GetArguments()
-		eventID := strings.TrimSpace(getStringArg(args, "event_id"))
-		if eventID == "" {
-			return respond.Invalid("event_id", "event_id is required.", "Pass the id of the event from event_find.",
-				map[string]any{"event_id": "3f2b8c1e-7a4d-4e0b-9c2a-1d5e6f7a8b9c", "title": "New title"}), nil
-		}
-		if bad := checkUUID("event_id", eventID, "event_find"); bad != nil {
-			return bad, nil
-		}
-		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
-
-		var target *Calendar
-		if ref := strings.TrimSpace(getStringArg(args, "calendar_id")); ref != "" {
-			cal, bad := resolveCalendar(ctx, pool, claims.HouseholdID, "calendar_id", ref)
-			if bad != nil {
-				return bad, nil
-			}
-			target = &cal
-		}
-
-		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-		if err != nil {
-			return respond.Failed("update the event", err), nil
-		}
-		defer tx.Rollback(ctx)
-
-		// Read and lock the row inside the transaction, so a concurrent
-		// edit (or a CalDAV PUT) cannot land between the read and the write.
-		// uid is what CalDAV clients know the event by and what
-		// calendar_changes must record; it differs from id for events
-		// created over CalDAV.
-		var calendarID, existingIcalData, eventUID string
-		var rrule, icalRaw *string
-		err = tx.QueryRow(ctx,
-			`SELECT co.calendar_id::text, co.ical_data, co.uid, co.rrule, co.ical_raw
-			   FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
-			  WHERE co.id = $1 AND c.household_id = $2
-			  FOR UPDATE OF co`,
-			eventID, claims.HouseholdID,
-		).Scan(&calendarID, &existingIcalData, &eventUID, &rrule, &icalRaw)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return respond.NotFound("event", eventID, "Call event_find to find the event_id."), nil
-		}
-		if err != nil {
-			return respond.Failed("read the event", err), nil
-		}
-		// Writes here only touch the JSON in ical_data; CalDAV then
-		// regenerates the event without RRULE/EXDATE, so editing a series
-		// would silently flatten it to one event on every phone. Refuse
-		// until recurrence-aware writes exist (#4465).
-		if isRecurringEvent(rrule, icalRaw) {
-			return respond.Fail(respond.Error{Message: recurringEditRefusal, Fix: recurringEditFix}), nil
-		}
-		var existing eventJSON
-		if err := json.Unmarshal([]byte(existingIcalData), &existing); err != nil {
-			return respond.Failed("read the stored event", err), nil
-		}
-
-		// Optional fields. description and location may be cleared by
-		// passing an empty string.
-		var titlePtr, descPtr, startPtr, endPtr, locPtr *string
-		var allDayPtr *bool
-		if v := strings.TrimSpace(getStringArg(args, "title")); v != "" {
-			titlePtr = &v
-		}
-		if args["description"] != nil {
-			v := getStringArg(args, "description")
-			descPtr = &v
-		}
-		if v := strings.TrimSpace(getStringArg(args, "start")); v != "" {
-			startPtr = &v
-		}
-		if v := strings.TrimSpace(getStringArg(args, "end")); v != "" {
-			endPtr = &v
-		}
-		if args["location"] != nil {
-			v := getStringArg(args, "location")
-			locPtr = &v
-		}
-		if v, ok := args["all_day"].(bool); ok {
-			allDayPtr = &v
-		}
-		timesChanged := startPtr != nil || endPtr != nil || allDayPtr != nil
-
-		// New start/end: an explicit end is stored as given; a start-only
-		// move keeps the original duration. All-day events are always
-		// re-normalised to whole days.
-		allDay := existing.AllDay
-		if allDayPtr != nil {
-			allDay = *allDayPtr
-		}
-		var newStartStr, newEndStr *string
-		switch {
-		case allDay:
-			s, e, err := resolveUpdatedAllDay(existing, loc, startPtr, endPtr)
-			if err != nil {
-				return respond.Invalid("start", err.Error(),
-					"For all-day events pass start as the first day and end as the last day (YYYY-MM-DD).",
-					map[string]any{"event_id": eventID, "start": exampleDate(loc), "end": exampleDate(loc)}), nil
-			}
-			newStartStr, newEndStr = &s, &e
-		case existing.AllDay && startPtr == nil && endPtr == nil:
-			return respond.Invalid("start", "Pass start and end when turning off all_day.",
-				"Give the new timed start and end, ISO 8601 with offsets.",
-				map[string]any{"event_id": eventID, "all_day": false, "start": exampleTime(loc), "end": exampleTimePlus(loc, time.Hour)}), nil
-		case startPtr != nil || endPtr != nil:
-			// Parse up front for corrective errors (a naive time gets the
-			// family's offset as its fix).
-			for _, f := range []struct {
-				name string
-				val  *string
-			}{{"start", startPtr}, {"end", endPtr}} {
-				if f.val == nil {
-					continue
-				}
-				if _, bad := parseInstant(f.name, *f.val, loc); bad != nil {
-					return bad, nil
-				}
-			}
-			newStart, newEnd, err := resolveUpdatedTimes(existing.Start, existing.End, startPtr, endPtr)
-			if err != nil {
-				return respond.Invalid("end", err.Error(),
-					"Pass an end later than start, or omit end to keep the event's duration.",
-					map[string]any{"event_id": eventID, "start": exampleTime(loc), "end": exampleTimePlus(loc, time.Hour)}), nil
-			}
-			s, e := newStart.Format(time.RFC3339), newEnd.Format(time.RFC3339)
-			newStartStr, newEndStr = &s, &e
-		}
-
-		mergedIcalData, err := mergeEventFields(existingIcalData, titlePtr, descPtr, newStartStr, newEndStr, locPtr, allDayPtr)
-		if err != nil {
-			return respond.Failed("update the event", err), nil
-		}
-
-		// event_type is only changed when provided (COALESCE keeps it).
-		var eventTypeArg *string
-		if v := strings.TrimSpace(getStringArg(args, "event_type")); v != "" {
-			eventTypeArg = &v
-		}
-		// A move to another calendar is a delete there and a create here
-		// for CalDAV sync; moving to the same calendar is a plain update.
-		var moveTo *string
-		if target != nil && target.ID != calendarID {
-			moveTo = &target.ID
-		}
-		row, err := scanEventRow(tx.QueryRow(ctx,
-			`UPDATE calendar_objects co
-			    SET ical_data = $1, etag = $2, event_type = COALESCE($3, co.event_type),
-			        calendar_id = COALESCE($5::uuid, co.calendar_id), updated_at = NOW()
-			   FROM calendars c
-			  WHERE co.id = $4 AND c.id = COALESCE($5::uuid, co.calendar_id)
-			RETURNING `+eventColumns,
-			mergedIcalData, uuid.New().String(), eventTypeArg, eventID, moveTo))
-		if err != nil {
-			return respond.Failed("update the event", err), nil
-		}
-		if moveTo != nil {
-			if err := recordChangeAndBumpCtag(ctx, tx, calendarID, eventUID, "delete"); err != nil {
-				return respond.Failed("update the event", err), nil
-			}
-			if err := recordChangeAndBumpCtag(ctx, tx, *moveTo, eventUID, "create"); err != nil {
-				return respond.Failed("update the event", err), nil
-			}
-		} else if err := recordChangeAndBumpCtag(ctx, tx, calendarID, eventUID, "update"); err != nil {
-			return respond.Failed("update the event", err), nil
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return respond.Failed("update the event", err), nil
-		}
-		slog.Info("event_update: updated", "event_id", eventID, "uid", eventUID)
-
-		updated, err := parseEventFromRow(row, loc)
-		if err != nil {
-			return respond.Failed("read back the updated event", err), nil
-		}
-		res := eventWriteResult{Event: *updated, Conflicts: []ConflictEvent{}}
-		if timesChanged {
-			if s, e, ok := eventRange(*updated); ok {
-				res.Conflicts, res.ConflictsError = conflictsFor(ctx, pool, claims.HouseholdID, loc, s, e, eventID)
-			}
-		}
-		summary := fmt.Sprintf("Updated %q: %s", updated.Title, describeWhen(*updated, loc))
-		if moveTo != nil {
-			summary += ", now in " + updated.CalendarName
-		}
-		summary += "."
-		if n := len(res.Conflicts); n > 0 {
-			summary += fmt.Sprintf(" It now overlaps %d other %s.", n, plural(n, "event", "events"))
-		}
-		return respond.OK(summary, res, conflictHints(*updated, res.Conflicts, loc)...), nil
-	}
-	return tool, handler
-}
-
-// ─────────────────────────────────────────────
-// event_delete
-// ─────────────────────────────────────────────
-
-// NewEventDeleteTool creates event_delete (replaces delete_event).
-func NewEventDeleteTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
-	tool := mcp.NewTool("event_delete", toolOptions(classX, "Delete event",
-		mcp.WithDescription("Delete an event. For a repeating event this deletes the whole series, not one occurrence. Returns what was deleted."),
-		mcp.WithString("event_id", mcp.Description("The event's id from event_find"), mcp.Required()),
-		respond.Schema[eventDeleteResult](),
-	)...)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return authRequired(), nil
-		}
-		eventID := strings.TrimSpace(getStringArg(req.GetArguments(), "event_id"))
-		if eventID == "" {
-			return respond.Invalid("event_id", "event_id is required.", "Pass the id of the event from event_find.",
-				map[string]any{"event_id": "3f2b8c1e-7a4d-4e0b-9c2a-1d5e6f7a8b9c"}), nil
-		}
-		if bad := checkUUID("event_id", eventID, "event_find"); bad != nil {
-			return bad, nil
-		}
-		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
-
-		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-		if err != nil {
-			return respond.Failed("delete the event", err), nil
-		}
-		defer tx.Rollback(ctx)
-
-		var r eventRow
-		var eventUID string
-		err = tx.QueryRow(ctx,
-			`DELETE FROM calendar_objects co USING calendars c
-			  WHERE co.id = $1 AND c.id = co.calendar_id AND c.household_id = $2
-			RETURNING `+eventColumns+`, co.uid`,
-			eventID, claims.HouseholdID,
-		).Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt, &r.Rrule, &r.IcalRaw, &eventUID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return respond.NotFound("event", eventID, "Call event_find to find the event_id; it may already be deleted."), nil
-		}
-		if err != nil {
-			return respond.Failed("delete the event", err), nil
-		}
-		// Record the delete change (DB constraint allows 'create', 'update', 'delete').
-		if err := recordChangeAndBumpCtag(ctx, tx, r.CalendarID, eventUID, "delete"); err != nil {
-			return respond.Failed("delete the event", err), nil
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return respond.Failed("delete the event", err), nil
-		}
-
-		ev, err := parseEventFromRow(r, loc)
-		if err != nil { // deleted; the stored JSON was unreadable
-			ev = &Event{ID: r.ID, CalendarID: r.CalendarID, CalendarName: r.CalendarName, EventType: r.EventType,
-				Recurring: isRecurringEvent(r.Rrule, r.IcalRaw)}
-		}
-		res := eventDeleteResult{Event: *ev, SeriesDeleted: ev.Recurring}
-		summary := fmt.Sprintf("Deleted %q (%s) from %s.", ev.Title, describeWhen(*ev, loc), ev.CalendarName)
-		if ev.Recurring {
-			res.Note = recurringDeleteNote
-			summary = fmt.Sprintf("Deleted the whole repeating series %q from %s.", ev.Title, ev.CalendarName)
-		}
-		slog.Info("event_delete: deleted", "event_id", eventID, "series", ev.Recurring)
-		return respond.OK(summary, res, "Add a replacement with event_create if needed."), nil
-	}
-	return tool, handler
 }
 
 // ─────────────────────────────────────────────

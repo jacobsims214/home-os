@@ -268,7 +268,11 @@ func TestDeleteEvent(t *testing.T) {
 			eventID := seedEvent(t, pool, calendarID, uid, stored)
 			setRecurrence(t, pool, eventID, tt.rrule, tt.icalRaw)
 
-			text, isErr := callTool(t, handler, ctx, map[string]any{"event_id": eventID})
+			args := map[string]any{"event_id": eventID}
+			if tt.wantSeries {
+				args["scope"] = "all"
+			}
+			text, isErr := callTool(t, handler, ctx, args)
 			if isErr {
 				t.Fatalf("unexpected error: %s", text)
 			}
@@ -494,60 +498,50 @@ func TestUpdateEvent(t *testing.T) {
 		})
 	}
 
-	// Recurring events are refused without writing anything (#4629): an
-	// edit here would make ical_raw stale and CalDAV would regenerate the
-	// event without its RRULE, flattening the series on every phone.
-	recurring := []struct {
+	// A raw the JSON no longer matches (here: the stored JSON has a
+	// location the raw lacks) is stale: CalDAV serves the JSON as a single
+	// event, so the update treats it as one and rewrites ical_raw and
+	// rrule from the result (#4465).
+	stale := []struct {
 		name    string
 		rrule   *string
 		icalRaw *string
 	}{
 		{name: "rrule column set", rrule: ptr("FREQ=WEEKLY;BYDAY=TU"), icalRaw: ptr(weeklyRaw)},
 		{name: "only ical_raw carries RRULE", icalRaw: ptr(weeklyRaw)},
-		{name: "ical_raw is an occurrence override (RECURRENCE-ID)", icalRaw: ptr(overrideRaw)},
 	}
-	for _, tt := range recurring {
-		t.Run("recurring event is refused: "+tt.name, func(t *testing.T) {
+	for _, tt := range stale {
+		t.Run("stale recurring raw is rewritten: "+tt.name, func(t *testing.T) {
 			uid := "caldav-" + uuid.NewString() + "@example.com"
 			eventID := seedEvent(t, pool, calendarID, uid, stored)
 			setRecurrence(t, pool, eventID, tt.rrule, tt.icalRaw)
-			before := readRow(t, pool, eventID)
-			var ctagBefore string
-			if err := pool.QueryRow(context.Background(), `SELECT ctag FROM calendars WHERE id = $1`, calendarID).Scan(&ctagBefore); err != nil {
-				t.Fatalf("read ctag: %v", err)
-			}
-
 			text, isErr := callTool(t, handler, ctx, map[string]any{"event_id": eventID, "title": "Soccer (renamed)"})
-			if !isErr {
-				t.Fatalf("want an error result, got %q", text)
+			if isErr {
+				t.Fatalf("unexpected error: %s", text)
 			}
-			for _, want := range []string{"repeats", "phone", "Nothing was changed"} {
-				if !strings.Contains(text, want) {
-					t.Errorf("error %q does not mention %q", text, want)
-				}
-			}
-
-			if after := readRow(t, pool, eventID); after != before {
-				t.Errorf("refused update changed the row:\nbefore %+v\nafter  %+v", before, after)
-			}
-			var changes int
-			if err := pool.QueryRow(context.Background(),
-				`SELECT count(*) FROM calendar_changes WHERE calendar_id = $1 AND event_uid = $2`, calendarID, uid,
-			).Scan(&changes); err != nil {
-				t.Fatalf("count changes: %v", err)
-			}
-			if changes != 0 {
-				t.Errorf("%d calendar_changes rows added for a refused update", changes)
-			}
-			var ctagAfter string
-			if err := pool.QueryRow(context.Background(), `SELECT ctag FROM calendars WHERE id = $1`, calendarID).Scan(&ctagAfter); err != nil {
-				t.Fatalf("read ctag: %v", err)
-			}
-			if ctagAfter != ctagBefore {
-				t.Error("ctag was bumped for a refused update")
+			row := readRow(t, pool, eventID)
+			if row.Rrule != "" || strings.Contains(row.IcalRaw, "RRULE") || !strings.Contains(row.IcalRaw, "SUMMARY:Soccer (renamed)") ||
+				!strings.Contains(row.IcalRaw, "UID:"+uid) || !strings.Contains(row.IcalRaw, "LOCATION:Field 2") {
+				t.Errorf("raw not regenerated from the JSON: rrule=%q\n%s", row.Rrule, row.IcalRaw)
 			}
 		})
 	}
+
+	// A raw holding only overrides (an invitation to one occurrence) can't
+	// be rewritten without losing it: refused, nothing written.
+	t.Run("override-only raw is refused", func(t *testing.T) {
+		uid := "caldav-" + uuid.NewString() + "@example.com"
+		eventID := seedEvent(t, pool, calendarID, uid, stored)
+		setRecurrence(t, pool, eventID, nil, ptr(overrideRaw))
+		before := readRow(t, pool, eventID)
+		text, isErr := callTool(t, handler, ctx, map[string]any{"event_id": eventID, "title": "Soccer (renamed)"})
+		if !isErr || !strings.Contains(text, "Nothing was changed") || !strings.Contains(text, "phone") {
+			t.Fatalf("want a refusal, got isErr=%v %s", isErr, text)
+		}
+		if after := readRow(t, pool, eventID); after != before {
+			t.Errorf("refused update changed the row:\nbefore %+v\nafter  %+v", before, after)
+		}
+	})
 
 	t.Run("non-recurring event with ical_raw still updates", func(t *testing.T) {
 		uid := "caldav-" + uuid.NewString() + "@example.com"

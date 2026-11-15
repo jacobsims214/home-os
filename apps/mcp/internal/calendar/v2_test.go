@@ -30,9 +30,9 @@ func TestToolDefinitions(t *testing.T) {
 		{NewCalendarFindTool, "calendar_find", r, nil, nil},
 		{NewCalendarCreateTool, "calendar_create", c, []string{"name"}, []string{"color"}},
 		{NewEventFindTool, "event_find", r, nil, []string{"id", "from", "to", "query", "calendar_id", "limit", "cursor"}},
-		{NewEventCreateTool, "event_create", c, []string{"title", "start", "end"}, []string{"calendar_id", "all_day", "location", "description", "event_type"}},
-		{NewEventUpdateTool, "event_update", u, []string{"event_id"}, []string{"title", "start", "end", "all_day", "location", "description", "event_type", "calendar_id"}},
-		{NewEventDeleteTool, "event_delete", x, []string{"event_id"}, nil},
+		{NewEventCreateTool, "event_create", c, []string{"title", "start", "end"}, []string{"calendar_id", "all_day", "location", "description", "event_type", "person_ids", "repeat", "except_dates", "reminder_minutes"}},
+		{NewEventUpdateTool, "event_update", u, []string{"event_id"}, []string{"title", "start", "end", "all_day", "location", "description", "event_type", "calendar_id", "scope", "occurrence_date", "person_ids", "repeat", "except_dates", "reminder_minutes"}},
+		{NewEventDeleteTool, "event_delete", x, []string{"event_id"}, []string{"scope", "occurrence_date"}},
 		{NewCalendarFindFreeTimeTool, "calendar_find_free_time", r, []string{"from", "duration_minutes"}, []string{"to", "start_hour", "end_hour", "calendar_ids"}},
 		{NewAgendaGetTool, "agenda_get", r, nil, []string{"from", "to", "areas"}},
 	}

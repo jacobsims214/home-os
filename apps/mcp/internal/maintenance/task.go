@@ -207,9 +207,13 @@ func syncEvent(ctx context.Context, tx pgx.Tx, householdID string, taskID uuid.U
 			merged[k] = v
 		}
 		b, _ := json.Marshal(merged)
+		// ical_raw/rrule describe the old JSON (a phone may have PUT the
+		// event); clear them so CalDAV and the API regenerate the event from
+		// this JSON instead of serving or reading a stale raw (#4465, the
+		// same rule as the api's UpsertMaintenanceEvent since #4458).
 		if _, err := tx.Exec(ctx,
 			`UPDATE calendar_objects SET ical_data = $1, etag = $2, event_type = 'maintenance',
-			        entity_type = 'maintenance_task', updated_at = NOW()
+			        entity_type = 'maintenance_task', ical_raw = NULL, rrule = NULL, updated_at = NOW()
 			  WHERE id = $3`, string(b), uuid.NewString(), eventID); err != nil {
 			return "", fmt.Errorf("update calendar event: %w", err)
 		}
