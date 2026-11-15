@@ -464,6 +464,12 @@ func TestFindAvailableSlots(t *testing.T) {
 	seedEvent(t, pool, calendarID, uuid.NewString(),
 		`{"title":"Late call","start":"2026-11-02T04:15:00Z","end":"2026-11-02T04:45:00Z"}`)
 
+	// 2026-11-18: an all-day bill (does not block) and a timed event (does).
+	billID := seedEvent(t, pool, calendarID, uuid.NewString(),
+		`{"title":"Electric bill","start":"2026-11-18T00:00:00Z","end":"2026-11-19T00:00:00Z","all_day":true}`)
+	seedEvent(t, pool, calendarID, uuid.NewString(),
+		`{"title":"Piano lesson","start":"2026-11-18T22:30:00Z","end":"2026-11-18T23:30:00Z"}`)
+
 	_, handler := NewFindAvailableSlotsTool(pool)
 
 	decode := func(t *testing.T, args map[string]any) []AvailableSlot {
@@ -498,7 +504,15 @@ func TestFindAvailableSlots(t *testing.T) {
 			want: []AvailableSlot{
 				{Date: "2026-11-16", Start: "2026-11-16T16:00:00-05:00", End: "2026-11-16T19:00:00-05:00"},
 				{Date: "2026-11-17", Start: "2026-11-17T16:00:00-05:00", End: "2026-11-17T17:30:00-05:00"},
-				{Date: "2026-11-18", Start: "2026-11-18T16:00:00-05:00", End: "2026-11-18T19:00:00-05:00"},
+				{Date: "2026-11-18", Start: "2026-11-18T16:00:00-05:00", End: "2026-11-18T17:30:00-05:00"},
+			},
+		},
+		{
+			name: "all-day event does not block the day, timed event still does",
+			args: map[string]any{"date": "2026-11-18", "duration_minutes": 30.0},
+			want: []AvailableSlot{
+				{Date: "2026-11-18", Start: "2026-11-18T08:00:00-05:00", End: "2026-11-18T17:30:00-05:00"},
+				{Date: "2026-11-18", Start: "2026-11-18T18:30:00-05:00", End: "2026-11-18T20:00:00-05:00"},
 			},
 		},
 		{
@@ -530,6 +544,21 @@ func TestFindAvailableSlots(t *testing.T) {
 			}
 		})
 	}
+
+	// check_conflicts still reports the all-day event: only free-time search
+	// skips all-day events.
+	t.Run("check_conflicts still reports all-day overlap", func(t *testing.T) {
+		_, check := NewCheckConflictsTool(pool)
+		text, isErr := callTool(t, check, ctx, map[string]any{
+			"start_time": "2026-11-18T10:00:00-05:00", "end_time": "2026-11-18T11:00:00-05:00",
+		})
+		if isErr {
+			t.Fatalf("check_conflicts error: %s", text)
+		}
+		if !strings.Contains(text, billID) || !strings.Contains(text, "Electric bill") {
+			t.Errorf("check_conflicts = %s, want the all-day Electric bill (%s)", text, billID)
+		}
+	})
 
 	errTests := []struct {
 		name    string

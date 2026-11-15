@@ -1299,7 +1299,7 @@ func NewDeleteEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 // returned time carries the household's offset.
 func NewFindAvailableSlotsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("find_available_slots",
-		mcp.WithDescription("Find available time slots on a date or an inclusive date range, in the household's timezone. Available hours default to 8am-8pm local (start_hour/end_hour override them). Checks events across the specified calendars. Returns [{date, start, end}] with RFC 3339 times in the household's offset, ordered by start."),
+		mcp.WithDescription("Find available time slots on a date or an inclusive date range, in the household's timezone. To search several days (e.g. a whole week), make ONE call with date as the first day and end_date as the last day; do not call once per day. Available hours default to 8am-8pm local (start_hour/end_hour override them). Checks timed events across the specified calendars; all-day events (bills, birthdays, holidays, trips) do not block slots. Returns [{date, start, end}] with RFC 3339 times in the household's offset, ordered by start."),
 		mcp.WithString("date", mcp.Description("First (or only) date to check (YYYY-MM-DD)"), mcp.Required()),
 		mcp.WithNumber("duration_minutes", mcp.Description("Minimum slot duration in minutes"), mcp.Required()),
 		mcp.WithString("end_date", mcp.Description(fmt.Sprintf("Optional last date of the range, inclusive (YYYY-MM-DD). Defaults to date. At most %d days.", maxSlotRangeDays))),
@@ -1368,6 +1368,12 @@ func NewFindAvailableSlotsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.C
 
 		busy := make([]timeInterval, 0, len(events))
 		for _, ev := range events {
+			// All-day events (bills, birthdays, trips) are free time, as in
+			// calendar apps. Only free-time search skips them: check_conflicts
+			// and create_event's conflicts (findConflicts) still report them.
+			if ev.AllDay {
+				continue
+			}
 			evStart, evEnd, err := parseEventTime(ev)
 			if err != nil || !evEnd.After(evStart) {
 				continue
