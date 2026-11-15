@@ -41,6 +41,9 @@ type fakeStore struct {
 	order []uuid.UUID
 	now   func() time.Time
 	seq   int // makes updated_at strictly increase, like distinct transactions
+	// queue mirrors file_search_deletions; remove() fills it like the
+	// AFTER DELETE trigger does.
+	queue []files.SearchDeletion
 }
 
 // touch bumps a row's updated_at, as every UPDATE of files does.

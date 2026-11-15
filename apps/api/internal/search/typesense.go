@@ -423,6 +423,31 @@ func (c *Client) DeleteDocument(ctx context.Context, id string) error {
 	return nil
 }
 
+// DeleteFileDocuments removes every document of a file from the
+// worker-owned `files` collection: all chunk documents by file_id, plus the
+// document whose id is the file id (files indexed before chunking have no
+// file_id). A missing collection or document is success. The API calls it
+// right after a file delete so the file leaves search at once; the delete is
+// also queued in file_search_deletions (migration 053) and the worker
+// retries it, so a failure here never leaves the file searchable for long.
+func (c *Client) DeleteFileDocuments(ctx context.Context, fileID string) error {
+	q := url.Values{"filter_by": {fmt.Sprintf("file_id:=`%s`", fileID)}}
+	err := c.do(ctx, c.httpClient, http.MethodDelete,
+		"/collections/"+filesCollectionName+"/documents?"+q.Encode(), nil, nil)
+	if err != nil {
+		if isStatus(err, http.StatusNotFound) {
+			return nil // no collection, so nothing indexed
+		}
+		return fmt.Errorf("search: delete file %s: %w", fileID, err)
+	}
+	err = c.do(ctx, c.httpClient, http.MethodDelete,
+		"/collections/"+filesCollectionName+"/documents/"+url.PathEscape(fileID), nil, nil)
+	if err != nil && !isStatus(err, http.StatusNotFound) {
+		return fmt.Errorf("search: delete file %s: %w", fileID, err)
+	}
+	return nil
+}
+
 // --- search -----------------------------------------------------------------
 
 // Search queries all indexed collections (household_search + files), scoped to

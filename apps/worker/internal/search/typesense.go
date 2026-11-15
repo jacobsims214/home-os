@@ -485,9 +485,13 @@ func (c *Client) deleteByFilter(ctx context.Context, filter string) error {
 
 // DeleteFile removes all of a file's chunk documents. The document with
 // id = fileID is also deleted by id, which covers documents indexed before
-// chunking (they have no file_id). A missing file or document is success.
+// chunking (they have no file_id). A missing file, document or collection is
+// success: there is nothing left to find.
 func (c *Client) DeleteFile(ctx context.Context, fileID string) error {
 	if err := c.deleteByFilter(ctx, fmt.Sprintf("file_id:=`%s`", fileID)); err != nil {
+		if isStatus(err, http.StatusNotFound) {
+			return nil // no collection, so no documents
+		}
 		return fmt.Errorf("search: delete file %s: %w", fileID, err)
 	}
 	err := c.do(ctx, c.httpClient, http.MethodDelete,
@@ -496,6 +500,65 @@ func (c *Client) DeleteFile(ctx context.Context, fileID string) error {
 		return fmt.Errorf("search: delete file %s: %w", fileID, err)
 	}
 	return nil
+}
+
+// IndexedFileIDs returns the id of every file that has at least one
+// document in the collection, from the export endpoint (JSONL, id and file_id
+// only). Chunk documents carry file_id; documents indexed before chunking
+// have none, and their id is the file id. A missing collection returns no
+// ids. The processor compares the result with Postgres once per start to
+// remove files deleted before deletes were queued (migration 053).
+func (c *Client) IndexedFileIDs(ctx context.Context) ([]string, error) {
+	q := url.Values{"include_fields": {"id,file_id"}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.serverURL+"/collections/"+collectionName+"/documents/export?"+q.Encode(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("search: export ids: %w", err)
+	}
+	req.Header.Set("X-TYPESENSE-API-KEY", c.apiKey)
+	// The export streams the whole collection, so it gets the schema timeout.
+	resp, err := c.schemaClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("search: export ids: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return []string{}, nil
+	}
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("search: export ids: %w",
+			&statusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(b))})
+	}
+	seen := map[string]bool{}
+	ids := []string{}
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 64*1024), 1<<20)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var d struct {
+			ID     string `json:"id"`
+			FileID string `json:"file_id"`
+		}
+		if err := json.Unmarshal(line, &d); err != nil {
+			return nil, fmt.Errorf("search: export ids: decode line: %w", err)
+		}
+		id := d.FileID
+		if id == "" {
+			id = d.ID
+		}
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("search: export ids: read: %w", err)
+	}
+	return ids, nil
 }
 
 // Watermark is the newest file version in the index: the row_version

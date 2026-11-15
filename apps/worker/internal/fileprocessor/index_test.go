@@ -22,6 +22,8 @@ type fakeIndexer struct {
 	calls     []string
 	docs      map[string]search.FileDocument
 	chunks    map[string][]string
+	deleteErr error    // returned by DeleteFile while set
+	deletes   []string // successful DeleteFile ids, in order
 }
 
 func newFakeIndexer() *fakeIndexer {
@@ -32,7 +34,22 @@ func (f *fakeIndexer) InitCollection(context.Context) error { f.initCalls++; ret
 func (f *fakeIndexer) IndexWatermark(context.Context) (search.Watermark, error) {
 	return f.wm, f.wmErr
 }
-func (f *fakeIndexer) DeleteFile(_ context.Context, id string) error { delete(f.docs, id); return nil }
+func (f *fakeIndexer) DeleteFile(_ context.Context, id string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	delete(f.docs, id)
+	delete(f.chunks, id)
+	f.deletes = append(f.deletes, id)
+	return nil
+}
+func (f *fakeIndexer) IndexedFileIDs(context.Context) ([]string, error) {
+	ids := make([]string, 0, len(f.docs))
+	for id := range f.docs {
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
 func (f *fakeIndexer) IndexFile(_ context.Context, doc search.FileDocument, chunks []string) error {
 	f.calls = append(f.calls, doc.ID)
 	if len(f.failNext) > 0 {

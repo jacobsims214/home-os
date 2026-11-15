@@ -38,6 +38,14 @@
 // fails and the next tick resumes there; a file Typesense rejects outright
 // is logged and skipped.
 //
+// Search deletes: deleted files must never stay searchable. Every delete of
+// a files row (API, household cascade, any later path) queues the file id in
+// file_search_deletions via an AFTER DELETE trigger (migration 053). Each
+// tick ends with purgeOnce, which deletes the queued files' documents by
+// file_id and removes a queue row only after Typesense confirms; an outage
+// leaves the rows for the next tick. Once per start, sweepOrphans also
+// removes documents of files that were deleted before 053.
+//
 // Graceful shutdown: Run blocks until ctx is cancelled (SIGINT/SIGTERM).
 // An in-flight processFile call is allowed to complete; the next tick
 // is not started. This bounds shutdown latency to one Tika call
@@ -98,6 +106,9 @@ type store interface {
 	UpdateOCRStatus(ctx context.Context, fileID uuid.UUID, ocrStatus string, extractedText *string, ocrError *string) error
 	ListIndexable(ctx context.Context, after files.IndexCursor, limit int) ([]files.IndexableFile, error)
 	GetEntityName(ctx context.Context, entityType string, entityID uuid.UUID) (string, error)
+	ListSearchDeletions(ctx context.Context, limit int) ([]files.SearchDeletion, error)
+	AckSearchDeletion(ctx context.Context, d files.SearchDeletion) error
+	MissingFileIDs(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error)
 }
 
 // indexer is the slice of search.Client the processor uses. Tests supply a
@@ -107,12 +118,21 @@ type indexer interface {
 	IndexWatermark(ctx context.Context) (search.Watermark, error)
 	IndexFile(ctx context.Context, doc search.FileDocument, chunks []string) error
 	DeleteFile(ctx context.Context, fileID string) error
+	IndexedFileIDs(ctx context.Context) ([]string, error)
 }
 
 // DefaultIndexBatchLimit is the max number of files (re)indexed per tick.
 // Each file can be up to search.MaxChunks embeddings, so this is smaller
 // than the OCR batch.
 const DefaultIndexBatchLimit = 20
+
+// DefaultPurgeBatchLimit is the max queued search deletions handled per
+// tick. A delete is two small Typesense calls, so this can be large.
+const DefaultPurgeBatchLimit = 200
+
+// orphanCheckBatch is how many indexed file ids are checked against
+// Postgres per query in the start-up orphan sweep.
+const orphanCheckBatch = 1000
 
 // Processor runs the file OCR polling loop. Construct one with New and
 // run it with Run(ctx). A Processor is safe to run on a single goroutine
@@ -126,8 +146,12 @@ type Processor struct {
 	indexBatch   int
 	// indexCursor is where the next index sweep starts; indexReady reports
 	// whether it has been loaded from Typesense yet.
-	indexCursor    files.IndexCursor
-	indexReady     bool
+	indexCursor files.IndexCursor
+	indexReady  bool
+	purgeBatch  int
+	// orphansSwept reports whether the once-per-start sweep for documents
+	// of files deleted before migration 053 has completed.
+	orphansSwept   bool
 	maxRetries     int
 	retryBaseDelay time.Duration
 	now            func() time.Time
@@ -207,6 +231,7 @@ func New(repo *files.Repo, tikaClient *tika.Client, opts ...Option) *Processor {
 		interval:       DefaultInterval,
 		batchLimit:     DefaultBatchLimit,
 		indexBatch:     DefaultIndexBatchLimit,
+		purgeBatch:     DefaultPurgeBatchLimit,
 		maxRetries:     DefaultMaxRetries,
 		retryBaseDelay: DefaultRetryBaseDelay,
 		now:            time.Now,
@@ -247,16 +272,19 @@ func (p *Processor) Run(ctx context.Context) error {
 
 // processOnce runs a single polling tick: the OCR work (ocrOnce), then
 // the search index sweep (indexOnce), so a file OCR'd in this tick is
-// searchable by the end of it.
+// searchable by the end of it, then the search delete queue (purgeOnce).
+// Purging runs last, on the same goroutine as indexing, so a file deleted
+// while it was being indexed is removed again in the same tick.
 func (p *Processor) processOnce(ctx context.Context) error {
 	ocrErr := p.ocrOnce(ctx)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if err := p.indexOnce(ctx); err != nil {
-		return errors.Join(ocrErr, err)
+	indexErr := p.indexOnce(ctx)
+	if ctx.Err() != nil {
+		return errors.Join(ocrErr, indexErr, ctx.Err())
 	}
-	return ocrErr
+	return errors.Join(ocrErr, indexErr, p.purgeOnce(ctx))
 }
 
 // ocrOnce processes pending files first, then failed files whose retry is
@@ -434,6 +462,84 @@ func (p *Processor) indexOnce(ctx context.Context) error {
 	return nil
 }
 
+// purgeOnce removes deleted files from Typesense. Deleted files must never
+// stay searchable, and every delete of a files row queues the file in
+// file_search_deletions (migration 053's AFTER DELETE trigger), whichever
+// path deleted it. Each queued file's documents are deleted by file_id
+// (search.Client.DeleteFile) and the queue row is removed only after
+// Typesense confirms. A Typesense failure stops the purge; the next tick
+// retries from the same row. It returns an error only if the queue cannot be
+// read or acknowledged (a DB problem).
+//
+// With indexing disabled (no search client) the queue is left alone, so a
+// search client configured later still removes those files.
+func (p *Processor) purgeOnce(ctx context.Context) error {
+	if p.searchClient == nil {
+		return nil
+	}
+	if !p.orphansSwept {
+		if err := p.sweepOrphans(ctx); err != nil {
+			slog.Warn("search purge: orphan sweep failed; will retry next tick", "error", err)
+		} else {
+			p.orphansSwept = true
+		}
+	}
+
+	queued, err := p.repo.ListSearchDeletions(ctx, p.purgeBatch)
+	if err != nil {
+		return fmt.Errorf("list search deletions: %w", err)
+	}
+	for _, d := range queued {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		logger := slog.With("file_id", d.FileID, "household_id", d.HouseholdID)
+		if err := p.searchClient.DeleteFile(ctx, d.FileID.String()); err != nil {
+			logger.Error("failed to delete file from typesense; will retry next tick", "error", err)
+			return nil
+		}
+		if err := p.repo.AckSearchDeletion(ctx, d); err != nil {
+			return err
+		}
+		logger.Info("deleted file removed from typesense")
+	}
+	return nil
+}
+
+// sweepOrphans deletes the documents of every indexed file that no longer
+// has a files row. It runs once per worker start, for files deleted before
+// migration 053 queued deletes (and as a backstop if the queue was ever
+// lost, e.g. 053 rolled back and re-applied).
+func (p *Processor) sweepOrphans(ctx context.Context) error {
+	indexed, err := p.searchClient.IndexedFileIDs(ctx)
+	if err != nil {
+		return err
+	}
+	ids := make([]uuid.UUID, 0, len(indexed))
+	for _, s := range indexed {
+		if id, err := uuid.Parse(s); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	removed := 0
+	for start := 0; start < len(ids); start += orphanCheckBatch {
+		missing, err := p.repo.MissingFileIDs(ctx, ids[start:min(start+orphanCheckBatch, len(ids))])
+		if err != nil {
+			return err
+		}
+		for _, id := range missing {
+			if err := p.searchClient.DeleteFile(ctx, id.String()); err != nil {
+				return err
+			}
+			removed++
+		}
+	}
+	if removed > 0 {
+		slog.Info("search purge: removed documents of files deleted earlier", "files", removed)
+	}
+	return nil
+}
+
 // cursorFromWatermark converts the index watermark (row_version in unix
 // micros) back to a files cursor. Postgres timestamps have microsecond
 // precision, so the round trip is exact.
@@ -548,10 +654,8 @@ func (p *Processor) markFailed(ctx context.Context, fileID uuid.UUID, errMsg str
 		if err == pgx.ErrNoRows {
 			// File was deleted between ListPending and the update —
 			// nothing to mark, and that's fine. Also remove it from
-			// Typesense so stale search results don't outlive the file.
-			// (The API delete path doesn't emit an outbox event yet, so
-			// this is the worker's best delete-signal today; see
-			// architecture/search-platform.md for the planned outbox flow.)
+			// Typesense right away; the delete is queued in
+			// file_search_deletions too and purgeOnce drains it.
 			logger.Info("file disappeared before status update", "error", err)
 			p.removeFromSearch(ctx, fileID, logger)
 			return
@@ -563,7 +667,8 @@ func (p *Processor) markFailed(ctx context.Context, fileID uuid.UUID, errMsg str
 // removeFromSearch deletes a file from the Typesense `files` collection.
 // Best-effort: a Typesense failure is logged but never blocks the processor.
 // Called when the worker observes that a file has been deleted out from under
-// it (the only delete signal available to the OCR polling loop today).
+// it. The reliable delete signal is the file_search_deletions queue
+// (purgeOnce); this only makes the removal a tick sooner.
 func (p *Processor) removeFromSearch(ctx context.Context, fileID uuid.UUID, logger *slog.Logger) {
 	if p.searchClient == nil {
 		return

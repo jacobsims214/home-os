@@ -304,7 +304,7 @@ func main() {
 
 		// File storage (polymorphic, bytea in Postgres)
 		fileRepo := file.NewRepo(pool)
-		fileHandler := file.NewHandler(fileRepo)
+		fileHandler := file.NewHandler(fileRepo).WithSearch(searchClient)
 		r.Post("/api/v1/files/upload", fileHandler.UploadFile)
 		r.Get("/api/v1/files", fileHandler.ListFiles)
 		r.Get("/api/v1/files/{id}", fileHandler.GetFile)

@@ -27,13 +27,16 @@
 package file
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -48,14 +51,33 @@ import (
 // so an oversized upload is rejected early without buffering the whole stream.
 const maxUploadBytes = 25 << 20 // 25 MB
 
+// searchDeleteTimeout bounds the immediate Typesense delete after a file
+// delete. It is short because the delete is queued anyway (migration 053) and
+// the worker retries it; a slow Typesense must not slow the request.
+const searchDeleteTimeout = 5 * time.Second
+
+// SearchIndex removes a file's documents from search.
+// *search.Client satisfies it (DeleteFileDocuments).
+type SearchIndex interface {
+	DeleteFileDocuments(ctx context.Context, fileID string) error
+}
+
 // Handler holds dependencies for file HTTP handlers.
 type Handler struct {
-	repo *Repo
+	repo   *Repo
+	search SearchIndex // nil: no immediate search delete (the worker still purges)
 }
 
 // NewHandler creates a new file handler.
 func NewHandler(repo *Repo) *Handler {
 	return &Handler{repo: repo}
+}
+
+// WithSearch makes DeleteFile remove the file from Typesense right away.
+// Without it a deleted file leaves search on the worker's next tick.
+func (h *Handler) WithSearch(idx SearchIndex) *Handler {
+	h.search = idx
+	return h
 }
 
 // --- request / response types ---
@@ -380,6 +402,13 @@ func (h *Handler) UpdateFile(w http.ResponseWriter, r *http.Request) {
 
 // DeleteFile removes a file and its underlying blob. Returns 204 on success.
 //
+// Deleted files must never stay searchable. Deleting the row queues the file
+// in file_search_deletions (migration 053's trigger), which the worker drains
+// into Typesense; after the commit the handler also deletes the file's
+// documents directly, so it usually leaves search before the response. If
+// Typesense is unreachable that is logged and the delete still succeeds; the
+// queued row is retried by the worker until Typesense confirms.
+//
 // DELETE /api/v1/files/{id}
 func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	hid, err := householdID(r)
@@ -406,6 +435,16 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		}
 		apierr.InternalError(w, err)
 		return
+	}
+
+	if h.search != nil {
+		// Detached from the request so a client hang-up doesn't cancel it.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), searchDeleteTimeout)
+		if err := h.search.DeleteFileDocuments(ctx, id.String()); err != nil {
+			slog.Warn("file deleted but not yet removed from search; the worker will retry",
+				"file_id", id, "error", err)
+		}
+		cancel()
 	}
 
 	w.WriteHeader(http.StatusNoContent)

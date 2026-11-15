@@ -341,3 +341,77 @@ func (r *Repo) GetEntityName(ctx context.Context, entityType string, entityID uu
 	}
 	return *name, nil
 }
+
+// SearchDeletion is one row of file_search_deletions (migration 053): a file
+// deleted from Postgres whose Typesense documents still have to be removed.
+type SearchDeletion struct {
+	FileID      uuid.UUID
+	HouseholdID uuid.UUID
+	DeletedAt   time.Time
+}
+
+// ListSearchDeletions returns up to limit queued search deletions, oldest
+// first. The AFTER DELETE trigger on files fills the queue on every delete
+// path (API, household cascade, ...), so this is the worker's delete signal.
+func (r *Repo) ListSearchDeletions(ctx context.Context, limit int) ([]SearchDeletion, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT file_id, household_id, deleted_at
+		 FROM file_search_deletions
+		 ORDER BY deleted_at, file_id
+		 LIMIT $1`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list search deletions: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[SearchDeletion])
+	if err != nil {
+		return nil, fmt.Errorf("list search deletions: collect: %w", err)
+	}
+	if out == nil {
+		out = []SearchDeletion{}
+	}
+	return out, nil
+}
+
+// AckSearchDeletion removes a queue row once Typesense has confirmed the
+// delete. It matches deleted_at as well, so a row that was queued again
+// meanwhile (same id deleted again, which the trigger turns into an update)
+// is kept for the next tick.
+func (r *Repo) AckSearchDeletion(ctx context.Context, d SearchDeletion) error {
+	if _, err := r.pool.Exec(ctx,
+		`DELETE FROM file_search_deletions WHERE file_id = $1 AND deleted_at = $2`,
+		d.FileID, d.DeletedAt,
+	); err != nil {
+		return fmt.Errorf("ack search deletion %s: %w", d.FileID, err)
+	}
+	return nil
+}
+
+// MissingFileIDs returns the ids in ids that have no files row. The
+// processor uses it once per start to find documents left in Typesense by
+// files deleted before migration 053 queued deletes.
+func (r *Repo) MissingFileIDs(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
+	if len(ids) == 0 {
+		return []uuid.UUID{}, nil
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT u.id FROM unnest($1::uuid[]) AS u(id)
+		 WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.id = u.id)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("missing file ids: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return nil, fmt.Errorf("missing file ids: collect: %w", err)
+	}
+	if out == nil {
+		out = []uuid.UUID{}
+	}
+	return out, nil
+}

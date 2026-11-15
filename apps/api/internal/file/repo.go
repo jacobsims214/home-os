@@ -13,11 +13,15 @@
 //    missing blob). The tx also guarantees the size on files matches the
 //    actual byte length written to file_blobs.
 //
-//  - DeleteFile deletes the files row first (RETURNING blob_id) and then
-//    the blob row, both inside a tx, scoped by household_id. If the files
-//    row is missing or belongs to a different household we affect zero
-//    rows and return pgx.ErrNoRows — the caller can translate that to 404
-//    without leaking whether the file exists in another household.
+//  - DeleteFile deletes the files row scoped by household_id. Triggers do
+//    the rest in the same statement: files_delete_blob (migration 038)
+//    deletes the blob unless another file shares it, and
+//    files_queue_search_deletion (053) queues the file so the worker
+//    removes its Typesense documents. Every delete path (this one, a
+//    household cascade, future MCP tools) gets both. If the files row is
+//    missing or belongs to a different household we affect zero rows and
+//    return pgx.ErrNoRows — the caller can translate that to 404 without
+//    leaking whether the file exists in another household.
 //
 //  - Every method takes householdID and filters by it. This is the same
 //    tenant-isolation pattern used by apps/api/internal/note/repo.go and
@@ -219,46 +223,30 @@ func (r *Repo) ListFiles(ctx context.Context, householdID uuid.UUID, entityType 
 	return files, nil
 }
 
-// DeleteFile removes both the files row and its backing file_blobs row in a
-// single transaction, scoped to household_id. The files row is deleted first
-// (RETURNING blob_id) and the blob row second; deleting in the opposite
-// order would leave files referencing a missing blob mid-tx and would also
-// violate the file_blobs→files FK direction.
+// DeleteFile removes a file, scoped to household_id. Its blob goes in the
+// same statement: the files_delete_blob AFTER DELETE trigger (migration 038)
+// deletes the file_blobs row unless another file still references it, so no
+// blob is orphaned whichever path deletes a file. The same delete queues the
+// file in file_search_deletions (053) for the worker to remove from
+// Typesense; the handler also removes it directly (see Handler.DeleteFile).
+//
+// There used to be a second, unconditional DELETE FROM file_blobs here. It
+// is gone: the trigger already removed the row, and for a shared blob it
+// would have failed on the files -> file_blobs foreign key.
 //
 // Returns pgx.ErrNoRows if the file does not exist or belongs to a different
 // household — the caller can translate that to 404 without leaking
 // cross-tenant existence.
 func (r *Repo) DeleteFile(ctx context.Context, householdID, id uuid.UUID) error {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("delete file: begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	var blobID uuid.UUID
-	err = tx.QueryRow(ctx,
-		`DELETE FROM files WHERE id = $1 AND household_id = $2 RETURNING blob_id`,
+	tag, err := r.pool.Exec(ctx,
+		`DELETE FROM files WHERE id = $1 AND household_id = $2`,
 		id, householdID,
-	).Scan(&blobID)
+	)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Nothing to delete — preserve the prior contract of returning
-			// pgx.ErrNoRows for a missing file. The deferred Rollback is a
-			// no-op since we never wrote anything.
-			return pgx.ErrNoRows
-		}
-		return fmt.Errorf("delete file: delete metadata: %w", err)
+		return fmt.Errorf("delete file: %w", err)
 	}
-
-	if _, err = tx.Exec(ctx,
-		`DELETE FROM file_blobs WHERE id = $1`,
-		blobID,
-	); err != nil {
-		return fmt.Errorf("delete file: delete blob: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("delete file: commit: %w", err)
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
 	}
 	return nil
 }
