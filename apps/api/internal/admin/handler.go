@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 
 	"home-os/api/internal/auth"
+	"home-os/api/internal/db"
 	"home-os/api/pkg/apierr"
 )
 
@@ -116,7 +117,10 @@ func (h *Handler) RequireInstanceAdmin(next http.Handler) http.Handler {
 			apierr.Forbidden(w, "instance admin access required")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerCtxKey{}, c)))
+		// The admin is the database actor for what the route writes
+		// (050 authorship). No household: admin routes act instance-wide.
+		ctx := db.WithActor(context.WithValue(r.Context(), callerCtxKey{}, c), db.Actor{UserID: c.ID})
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"home-os/api/internal/auth"
+	"home-os/api/internal/db"
 	"home-os/api/pkg/apierr"
 )
 
@@ -82,7 +83,7 @@ func requireToken(verifier *auth.Verifier) func(http.Handler) http.Handler {
 				return
 			}
 
-			ctx = context.WithValue(r.Context(), claimsKey, claims)
+			ctx = WithClaims(r.Context(), claims)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -98,8 +99,19 @@ func ClaimsFromContext(ctx context.Context) *auth.Claims {
 	return nil
 }
 
-// WithClaims returns a copy of ctx carrying claims, as RequireAuth would.
-// It exists for tests that call handlers without a token verifier.
+// WithClaims returns a copy of ctx carrying claims, as RequireAuth does for
+// every authenticated request. It also makes claims.UserID the database actor
+// (db.WithActorIDs) for claims.HouseholdID, so every write the request makes
+// through a db.NewPool pool is attributed to that member by the 050
+// authorship triggers (created_by/updated_by, activity_log.actor_user_id)
+// and can raise 054 creator notifications. A UserID that is not a UUID (the
+// auth-disabled "local-dev" identity) leaves the write anonymous.
+//
+// Tests that call handlers without a token verifier use it directly.
 func WithClaims(ctx context.Context, claims *auth.Claims) context.Context {
-	return context.WithValue(ctx, claimsKey, claims)
+	ctx = context.WithValue(ctx, claimsKey, claims)
+	if claims != nil {
+		ctx = db.WithActorIDs(ctx, claims.UserID, claims.HouseholdID)
+	}
+	return ctx
 }

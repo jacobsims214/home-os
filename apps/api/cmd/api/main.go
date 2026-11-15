@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/api/internal/activity"
 	"home-os/api/internal/admin"
@@ -24,6 +23,7 @@ import (
 	"home-os/api/internal/bill"
 	"home-os/api/internal/calendar"
 	"home-os/api/internal/config"
+	"home-os/api/internal/db"
 	"home-os/api/internal/dex"
 	"home-os/api/internal/file"
 	"home-os/api/internal/household"
@@ -57,9 +57,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create the pgx connection pool.
+	// Create the pgx connection pool. db.NewPool sets app.user_id /
+	// app.household_id on each connection from the acquiring context, so
+	// writes made for an authenticated request (middleware.RequireAuth puts
+	// the member on the context) are attributed by the 050 authorship
+	// triggers; startup seeds and other context-less writes stay anonymous.
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("failed to create database pool", "error", err)
 		os.Exit(1)
