@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -14,6 +16,18 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// TestMain swaps the cost-12 dummy hash for a MinCost one so the many
+// rejected-login requests in these tests stay fast. The production cost is
+// checked against newDummyHash in TestAuthMiddleware_EveryCredentialRejectionRunsOneBcrypt.
+func TestMain(m *testing.M) {
+	cheap, err := bcrypt.GenerateFromPassword([]byte("dummy-for-tests"), bcrypt.MinCost)
+	if err != nil {
+		panic(err)
+	}
+	dummyHash = func() []byte { return cheap }
+	os.Exit(m.Run())
+}
 
 // TestClientIP verifies IP extraction from X-Forwarded-For (single hop,
 // multi-hop with proxies, whitespace) and the RemoteAddr fallback (with and
@@ -664,4 +678,144 @@ func serveOnce(t *testing.T, repo *fakeRepo, method, path, header string) onceRe
 		w.WriteHeader(http.StatusOK)
 	})).ServeHTTP(rec, req)
 	return onceResult{rec: rec, called: called}
+}
+
+// rejectionCases returns the four credential rejections that happen after the
+// user lookup, each against its own repo. All four send the same password so
+// only the account state differs. The wrong-password case's stored hash is a
+// real hash of a different password.
+func rejectionCases(t *testing.T) (header string, cases []struct {
+	name   string
+	repo   *fakeRepo
+	reason string
+}) {
+	t.Helper()
+	user, _ := authedUser(t) // stored hash is of "pw-123"
+	header = basicAuth(t, user.Email, "not-the-password")
+
+	inactive := *user
+	inactive.Active = false
+	noPassword := *user
+	noPassword.CalDAVPasswordHash = nil
+	emptyPassword := *user
+	empty := ""
+	emptyPassword.CalDAVPasswordHash = &empty
+
+	cases = []struct {
+		name   string
+		repo   *fakeRepo
+		reason string
+	}{
+		{"unknown email", &fakeRepo{}, "unknown_user"},
+		{"deactivated user", &fakeRepo{user: &inactive}, "inactive_user"},
+		{"no app password", &fakeRepo{user: &noPassword}, "no_caldav_password"},
+		{"empty app password hash", &fakeRepo{user: &emptyPassword}, "no_caldav_password"},
+		{"wrong password", &fakeRepo{user: user}, "bad_password"},
+	}
+	return header, cases
+}
+
+// TestAuthMiddleware_CredentialRejectionsAreIdentical verifies that an unknown
+// email, a deactivated account, an account without an app password and a
+// wrong password get byte-identical 401 responses (status, every header,
+// body), so the response can't be used to enumerate accounts.
+func TestAuthMiddleware_CredentialRejectionsAreIdentical(t *testing.T) {
+	header, cases := rejectionCases(t)
+
+	var (
+		wantName   string
+		wantHeader http.Header
+		wantBody   string
+	)
+	for _, tc := range cases {
+		got := serveOnce(t, tc.repo, "PROPFIND", "/dav/", header)
+		if got.called {
+			t.Fatalf("%s: next handler ran", tc.name)
+		}
+		if got.rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: status = %d, want 401", tc.name, got.rec.Code)
+		}
+		if body := got.rec.Body.String(); body != "Invalid credentials\n" {
+			t.Fatalf("%s: body = %q, want %q", tc.name, body, "Invalid credentials\n")
+		}
+		if got.rec.Header().Get("WWW-Authenticate") != `Basic realm="Home OS CalDAV"` {
+			t.Fatalf("%s: WWW-Authenticate = %q", tc.name, got.rec.Header().Get("WWW-Authenticate"))
+		}
+		if wantHeader == nil {
+			wantName, wantHeader, wantBody = tc.name, got.rec.Header().Clone(), got.rec.Body.String()
+			continue
+		}
+		if !reflect.DeepEqual(got.rec.Header(), wantHeader) {
+			t.Fatalf("%s headers %v differ from %s headers %v", tc.name, got.rec.Header(), wantName, wantHeader)
+		}
+		if got.rec.Body.String() != wantBody {
+			t.Fatalf("%s body %q differs from %s body %q", tc.name, got.rec.Body.String(), wantName, wantBody)
+		}
+	}
+}
+
+// TestAuthMiddleware_EveryCredentialRejectionRunsOneBcrypt verifies the timing
+// side of account enumeration without wall-clock measurements: every
+// credential rejection runs exactly one bcrypt compare. Unknown, deactivated
+// and no-app-password logins compare against the process's dummy hash; a
+// wrong password compares against the user's own hash. The production dummy
+// hash has the stored app-password cost (12, apps/api DefaultCost), so all
+// four take the same time.
+func TestAuthMiddleware_EveryCredentialRejectionRunsOneBcrypt(t *testing.T) {
+	// The production dummy hash must cost the same as a stored app password
+	// hash, or the dummy compare would be faster than a real one.
+	prod := newDummyHash()
+	if cost, err := bcrypt.Cost(prod); err != nil || cost != appPasswordCost {
+		t.Fatalf("production dummy hash cost = %d (err %v), want %d", cost, err, appPasswordCost)
+	}
+	if bcrypt.CompareHashAndPassword(prod, []byte("")) == nil {
+		t.Fatal("production dummy hash matches the empty password")
+	}
+
+	header, cases := rejectionCases(t)
+
+	type call struct{ hash string }
+	var calls []call
+	orig := compareHash
+	t.Cleanup(func() { compareHash = orig })
+	compareHash = func(hash, password []byte) error {
+		calls = append(calls, call{hash: string(hash)})
+		return orig(hash, password)
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			metrics.AuthFailuresTotal.Reset()
+			calls = nil
+
+			got := serveOnce(t, tc.repo, "PROPFIND", "/dav/", header)
+			if got.rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", got.rec.Code)
+			}
+			if len(calls) != 1 {
+				t.Fatalf("bcrypt compares = %d, want exactly 1", len(calls))
+			}
+			wantHash := string(dummyHash())
+			if tc.reason == "bad_password" {
+				wantHash = *tc.repo.user.CalDAVPasswordHash
+			}
+			if calls[0].hash != wantHash {
+				t.Fatalf("compared against %q, want %q", calls[0].hash, wantHash)
+			}
+			// The server-side reason label still tells the cases apart.
+			if n := testutil.ToFloat64(metrics.AuthFailuresTotal.WithLabelValues(tc.reason)); n != 1 {
+				t.Fatalf("reason %q count = %v, want 1", tc.reason, n)
+			}
+		})
+	}
+
+	// A successful login also runs exactly one compare (the real one).
+	calls = nil
+	user, okHeader := authedUser(t)
+	if got := serveOnce(t, &fakeRepo{user: user, householdIDs: []string{"h-1"}}, "PROPFIND", "/dav/", okHeader); !got.called {
+		t.Fatalf("valid login rejected: %d %q", got.rec.Code, got.rec.Body.String())
+	}
+	if len(calls) != 1 || calls[0].hash != *user.CalDAVPasswordHash {
+		t.Fatalf("successful login compares = %+v, want one against the user's hash", calls)
+	}
 }

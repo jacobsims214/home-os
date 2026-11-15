@@ -6,10 +6,12 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"home-os/calendar/internal/db"
 	"home-os/calendar/internal/logging"
@@ -26,6 +28,49 @@ type caldavRepo interface {
 	GetUserByEmailForCalDAV(ctx context.Context, email string) (*db.CalDAVUser, error)
 	ListHouseholdIDsForUser(ctx context.Context, userID string) ([]string, error)
 	GetCalendarHouseholdID(ctx context.Context, caldavUID string) (string, error)
+}
+
+// appPasswordCost is the bcrypt cost of stored CalDAV app password hashes
+// (apps/api/internal/auth.DefaultCost). The dummy hash uses the same cost so a
+// rejected unknown/deactivated/no-password login takes as long as a wrong
+// password for a real account.
+const appPasswordCost = 12
+
+// compareHash is bcrypt.CompareHashAndPassword, held in a variable so tests can
+// count calls and see which hash each rejection compared against. Production
+// code never reassigns it.
+var compareHash = bcrypt.CompareHashAndPassword
+
+// dummyHash is a bcrypt hash of a random secret nobody knows, generated once
+// per process at appPasswordCost. Logins that have no stored hash to check
+// (unknown email, deactivated account, no app password) compare against it
+// so every credential rejection costs one bcrypt of the same cost.
+//
+// It is a variable so the package's tests can swap in a cheap hash; they
+// check newDummyHash's cost separately.
+var dummyHash = sync.OnceValue(newDummyHash)
+
+// newDummyHash returns a bcrypt hash, at appPasswordCost, of 32 random bytes
+// that are then discarded.
+func newDummyHash() []byte {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		panic("caldav auth: generate dummy hash secret: " + err.Error())
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(base64.RawStdEncoding.EncodeToString(secret)), appPasswordCost)
+	if err != nil {
+		panic("caldav auth: generate dummy hash: " + err.Error())
+	}
+	return h
+}
+
+// invalidCredentials writes the one response every credential rejection after
+// the user lookup gets (unknown email, deactivated account, no app password,
+// wrong password): same status, headers and body, so the response can't tell
+// a caller which case it hit.
+func invalidCredentials(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Basic realm="Home OS CalDAV"`)
+	http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 }
 
 // contextKey is used for context value keys to avoid collisions.
@@ -61,7 +106,17 @@ const householdsPrefix = "/dav/households/"
 //
 // Deactivated users (users.active = false) get 401 on every authenticated
 // path, including /dav/households/<id>/..., even with a previously valid app
-// password. The response is identical to an unknown email's.
+// password.
+//
+// Account enumeration: once the header parses, an unknown email, a
+// deactivated account, an account with no app password and a wrong password
+// all get the identical 401 (same status, WWW-Authenticate header and
+// "Invalid credentials" body), and all four run exactly one bcrypt compare at
+// the stored hashes' cost: the first three against dummyHash, the last
+// against the user's hash. Neither the body nor the response time tells a
+// caller whether the email is an account or has an app password. The metrics
+// reason labels and log lines still distinguish the cases; they are
+// server-side only.
 //
 // Households: a user's default household is their oldest membership (see
 // db.ListHouseholdIDsForUser), so the same user always lands in the same
@@ -89,6 +144,9 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 	// persist across requests. A background goroutine inside the limiter
 	// evicts idle entries — see ratelimit.go.
 	limiter := newIPRateLimiter()
+	// Build the dummy hash now (~250 ms once per process) so the first
+	// rejected login doesn't pay for it and stand out.
+	dummyHash()
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +252,7 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 				return
 			}
 			if user == nil {
+				_ = compareHash(dummyHash(), []byte(password))
 				count := limiter.recordFailure(ip)
 				metrics.RecordAuthFailure("unknown_user")
 				if count >= failureLogThreshold {
@@ -207,40 +266,41 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 						slog.String("email", email),
 						slog.Int("failures", count))
 				}
-				w.Header().Set("WWW-Authenticate", `Basic realm="Home OS CalDAV"`)
-				http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+				invalidCredentials(w)
 				return
 			}
 			if !user.Active {
 				// Deactivated accounts are rejected before the password
-				// check, with exactly the same response as an unknown email
-				// (same body, no bcrypt), so a client can't tell whether the
-				// account exists, is deactivated, or has an app password.
-				// Previously issued app passwords stop working immediately.
+				// check, so previously issued app passwords stop working
+				// immediately. The dummy compare and shared response make
+				// this indistinguishable from an unknown email or a wrong
+				// password.
+				_ = compareHash(dummyHash(), []byte(password))
 				count := limiter.recordFailure(ip)
 				metrics.RecordAuthFailure("inactive_user")
 				logging.Logger.Warn("caldav auth: deactivated user",
 					slog.String("ip", ip),
 					slog.String("email", email),
 					slog.Int("failures", count))
-				w.Header().Set("WWW-Authenticate", `Basic realm="Home OS CalDAV"`)
-				http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+				invalidCredentials(w)
 				return
 			}
 			if user.CalDAVPasswordHash == nil || *user.CalDAVPasswordHash == "" {
+				// Same cost and response as a wrong password: a distinct
+				// message here would confirm the email is an active account.
+				_ = compareHash(dummyHash(), []byte(password))
 				count := limiter.recordFailure(ip)
 				metrics.RecordAuthFailure("no_caldav_password")
 				logging.Logger.Warn("caldav auth: no caldav password set",
 					slog.String("ip", ip),
 					slog.String("email", email),
 					slog.Int("failures", count))
-				w.Header().Set("WWW-Authenticate", `Basic realm="Home OS CalDAV"`)
-				http.Error(w, "No CalDAV password set. Generate one in Settings.", http.StatusUnauthorized)
+				invalidCredentials(w)
 				return
 			}
 
 			// Compare password against stored caldav_password_hash.
-			if err := bcrypt.CompareHashAndPassword([]byte(*user.CalDAVPasswordHash), []byte(password)); err != nil {
+			if err := compareHash([]byte(*user.CalDAVPasswordHash), []byte(password)); err != nil {
 				count := limiter.recordFailure(ip)
 				metrics.RecordAuthFailure("bad_password")
 				if count >= failureLogThreshold {
@@ -254,8 +314,7 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 						slog.String("email", email),
 						slog.Int("failures", count))
 				}
-				w.Header().Set("WWW-Authenticate", `Basic realm="Home OS CalDAV"`)
-				http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+				invalidCredentials(w)
 				return
 			}
 
