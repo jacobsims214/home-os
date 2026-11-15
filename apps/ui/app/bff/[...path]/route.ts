@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { DEX_UI_CLIENT_ID, dexTokenUrl } from "@/lib/auth/dex-config";
+import { isSameOrigin } from "@/lib/auth/same-origin";
 
 /**
  * BFF proxy: /bff/<path> → ${API_INTERNAL_URL}/api/v1/<path>
@@ -16,6 +17,13 @@ import { DEX_UI_CLIENT_ID, dexTokenUrl } from "@/lib/auth/dex-config";
  * redeems the refresh token at Dex, writes BOTH rotated cookies back (Dex
  * rotates refresh tokens on every use) and retries once. If Dex rejects the
  * refresh token, both cookies are cleared and the client gets 401.
+ *
+ * CSRF (#4646): every method except GET/HEAD must come from the app's own
+ * origin (lib/auth/same-origin.ts: Sec-Fetch-Site and Origin against
+ * PUBLIC_URL). Anything else, including a write with neither header (not a
+ * browser), gets 403 before any refresh or upstream call. The session cookies
+ * alone authenticate, so without this a sibling host on the same parent
+ * domain could write through the BFF.
  *
  * Env: API_INTERNAL_URL — base URL of the Go API reachable from the UI pod
  * (default http://home-os-api:8080). DEX_TOKEN_URL — Dex token endpoint
@@ -265,6 +273,11 @@ async function proxy(
   request: NextRequest,
   { params }: { params: { path?: string[] } },
 ): Promise<Response> {
+  // CSRF: refuse cross-site writes before touching Dex or the API.
+  if (request.method !== "GET" && request.method !== "HEAD" && !isSameOrigin(request)) {
+    return errorResponse(403, "FORBIDDEN", "cross-site request refused");
+  }
+
   let token = request.cookies.get(COOKIE_NAME)?.value;
   const refreshCookie = request.cookies.get(REFRESH_COOKIE)?.value;
   let rotated: SessionTokens | null = null;

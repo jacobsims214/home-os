@@ -7,7 +7,8 @@
  *
  * POST only: a GET (link, prefetch, <img>) must never log anyone out, so GET
  * answers 405. Cross-site POSTs are refused with 403 by checking Origin /
- * Sec-Fetch-Site, which every current browser sends on a form POST.
+ * Sec-Fetch-Site (lib/auth/same-origin.ts, shared with the BFF since #4646),
+ * which every current browser sends on a form POST.
  *
  * Dex is not called: it has no RP-initiated logout (end_session_endpoint) and
  * no RFC 7009 revocation endpoint for public clients, so ending the session
@@ -15,8 +16,9 @@
  * exp, but nothing in the browser holds it any more.
  *
  * Uses the standard Response (no next/server import) so `node --test` can load
- * this file directly (route.test.mjs).
+ * this file (route.test.mjs, via lib/auth/node-ts-resolve.mjs for the "@/" import).
  */
+import { isSameOrigin } from "@/lib/auth/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -39,23 +41,10 @@ function expiredCookie(name: string, path: string): string {
   return parts.join("; ");
 }
 
-// True unless the browser says this request came from another site.
-function isSameOrigin(request: Request): boolean {
-  const fetchSite = request.headers.get("sec-fetch-site");
-  if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") return false;
-
-  const origin = request.headers.get("origin");
-  if (origin === null) return true; // non-browser client: nothing to forge
-  const host = request.headers.get("x-forwarded-host") || request.headers.get("host");
-  try {
-    return host !== null && new URL(origin).host === host;
-  } catch {
-    return false; // "null" or malformed
-  }
-}
-
 export async function POST(request: Request): Promise<Response> {
-  if (!isSameOrigin(request)) {
+  // Headerless (non-browser) requests may log out: there is no browser session
+  // to forge, and logout only drops cookies.
+  if (!isSameOrigin(request, { allowHeaderless: true })) {
     return Response.json(
       { error: { code: "FORBIDDEN", message: "cross-site logout refused" } },
       { status: 403, headers: { "Cache-Control": "no-store" } },

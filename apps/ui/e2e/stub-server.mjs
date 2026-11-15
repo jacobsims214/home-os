@@ -19,9 +19,12 @@
  *                          and a code_verifier: the OIDC callback's exchange
  *                          (#4617). The redirect_uri it sent is recorded.
  *   GET  /e2e/stats        {dexRefreshes, apiRequests, apiUnauthorized,
- *                          codeExchanges, lastRedirectUri}
+ *                          codeExchanges, lastRedirectUri, apiWrites}
  *   *    /api/v1/*         401 unless the Bearer is a JWT minted here; fixed
  *                          seed data for the dashboard lists, [] otherwise.
+ *                          An authorized POST/PUT/PATCH/DELETE is recorded in
+ *                          apiWrites ("METHOD /path?query name", #4646) and
+ *                          a POST answers 201 with its JSON body echoed back.
  *   GET  /healthz          200 (Playwright webServer readiness probe)
  *
  * Plain node, no dependencies. Never use outside tests: the signing key is
@@ -43,7 +46,7 @@ const SEED_USER = {
 
 const key = randomBytes(32);
 const refreshTokens = new Set();
-const stats = { dexRefreshes: 0, apiRequests: 0, apiUnauthorized: 0, codeExchanges: 0, lastRedirectUri: null };
+const stats = { dexRefreshes: 0, apiRequests: 0, apiUnauthorized: 0, codeExchanges: 0, lastRedirectUri: null, apiWrites: [] };
 // The only authorization code the stub redeems (tests hand it to the callback).
 const E2E_CODE = "e2e-code";
 
@@ -158,6 +161,16 @@ const server = createServer(async (req, res) => {
       return send(res, 401, { error: { code: "UNAUTHORIZED", message: "invalid token" } });
     }
     const resource = path.slice("/api/v1/".length).replace(/\/+$/, "");
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      let body = {};
+      try {
+        body = JSON.parse((await readBody(req)) || "{}");
+      } catch {
+        /* not JSON */
+      }
+      stats.apiWrites.push(`${req.method} ${path}${url.search}${body.name ? ` ${body.name}` : ""}`);
+      if (req.method === "POST") return send(res, 201, { data: { id: `e2e-${stats.apiWrites.length}`, ...body } });
+    }
     if (resource === "auth/me" || resource === "users/me") return send(res, 200, { data: SEED_USER });
     return send(res, 200, { data: SEED[resource] ?? [] });
   }

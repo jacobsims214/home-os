@@ -1,7 +1,9 @@
 // Run: npm test (node --test; Node >= 23.6 strips TypeScript types natively).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GET, POST } from "./route.ts";
+import "../../../../lib/auth/node-ts-resolve.mjs";
+
+const { GET, POST } = await import("./route.ts");
 
 function post(headers = {}) {
   return new Request("https://home.example/api/auth/logout", {
@@ -58,4 +60,18 @@ test("GET never logs out", async () => {
   assert.equal(res.status, 405);
   assert.equal(res.headers.get("allow"), "POST");
   assert.deepEqual(res.headers.getSetCookie(), []);
+});
+
+test("with PUBLIC_URL set, Origin must match it (shared helper, #4646)", async () => {
+  const saved = process.env.PUBLIC_URL;
+  process.env.PUBLIC_URL = "https://home.example";
+  try {
+    assert.equal((await POST(post({ origin: "https://home.example" }))).status, 303);
+    // Host header alone no longer decides: the configured origin wins.
+    const spoofed = post({ host: "evil.example", origin: "https://evil.example" });
+    assert.equal((await POST(spoofed)).status, 403);
+  } finally {
+    if (saved === undefined) delete process.env.PUBLIC_URL;
+    else process.env.PUBLIC_URL = saved;
+  }
 });

@@ -23,7 +23,7 @@ export const testUser = {
   password: process.env.E2E_PASSWORD || "",
 };
 
-export type StubStats = { dexRefreshes: number; apiRequests: number; apiUnauthorized: number };
+export type StubStats = { dexRefreshes: number; apiRequests: number; apiUnauthorized: number; apiWrites: string[] };
 
 type Fixtures = {
   /** Page signed in as the seeded test user. */
