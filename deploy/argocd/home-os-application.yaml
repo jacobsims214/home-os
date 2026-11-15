@@ -12,7 +12,8 @@
 # Requires a chart revision with existingSecret support (home-os #4411,
 # feat/family-hub). Manual sync only: there is no syncPolicy.automated.
 #
-# Apply: kubectl apply -f home-os-argocd.yaml  (does not trigger a sync)
+# Apply: kubectl apply -f deploy/argocd/home-os-application.yaml
+#        (does not trigger a sync)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -25,12 +26,13 @@ spec:
     namespace: home-os
   source:
     repoURL: https://github.com/jacobsims214/home-os.git
-    targetRevision: main
+    # feat/family-hub until the integration PR merges (#4356). main's chart
+    # predates existingSecret (#4411) and would render empty Secrets. Switch
+    # this back to main in the same change that merges feat/family-hub to main.
+    targetRevision: feat/family-hub
     path: deploy/helm/home-os
     helm:
       parameters:
-        - name: global.imageTag
-          value: latest
         - name: dex.uiRedirectURI
           value: https://homeos.simstech.cloud/api/auth/callback
       valuesObject:
