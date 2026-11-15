@@ -39,8 +39,10 @@ spec:
           value: "info"
         - name: DEX_JWKS_URL
           value: "http://home-os-envoy.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.envoy.port }}/dex/keys"
+        - name: PUBLIC_BASE_URL
+          value: {{ include "home-os.publicUrl" . | quote }}
         - name: DEX_ISSUER
-          value: "http://localhost:8000/dex"
+          value: {{ include "home-os.dexIssuer" . | quote }}
         resources:
           {{- toYaml .Values.mcp.resources | nindent 10 }}
         readinessProbe:

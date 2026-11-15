@@ -2,6 +2,12 @@ global:
   imageRegistry: ghcr.io/jacobsims214/home-os
   imageTag: latest
   imagePullPolicy: Always
+  # Public origin of Home OS as browsers and OAuth clients see it
+  # (scheme://host[:port], no trailing slash), e.g. https://homeos.example.com.
+  # Drives the Dex issuer (<publicUrl>/dex), the home-os-ui redirect URI, the
+  # MCP protected-resource URL (<publicUrl>/mcp) and the API/UI/MCP env.
+  # Empty = http://localhost:<envoy.port> for local docker-desktop.
+  publicUrl: ""
 
 namespace: home-os
 
@@ -18,7 +24,8 @@ api:
   replicas: 2
   image: api
   port: 8080
-  publicUrl: "http://localhost:3000"
+  # Override for PUBLIC_URL; empty = global.publicUrl.
+  publicUrl: ""
   allowRegistration: "false"
   adminEmail: ""
   adminPassword: ""
@@ -77,7 +84,13 @@ tika:
     limits: { cpu: 1, memory: 2Gi }
 
 dex:
-  uiRedirectURI: "http://localhost:8000/api/auth/callback"
+  # Override for the home-os-ui redirect URI; empty = <global.publicUrl>/api/auth/callback.
+  uiRedirectURI: ""
+  # Redirect URIs for the home-os-mcp client. Each entry is rendered with tpl,
+  # so it may reference the public origin, e.g.
+  # '{{ include "home-os.publicUrl" . }}/mcp/oauth/callback'.
+  mcpRedirectURIs:
+    - "http://127.0.0.1:19876/mcp/oauth/callback"
   replicas: 1
   image: dex
   port: 5556
@@ -111,7 +124,6 @@ secrets:
   # Password for the 'app' Postgres user. Must match what is provisioned in the
   # database. For managed mode, the CNPG cluster is bootstrapped with this secret.
   # WARNING: The original password was committed to git; rotate it as part of this fix.
-  dbPassword: ""
   dbPassword: ""
   adminEmail: ""
   adminPassword: ""

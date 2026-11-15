@@ -28,5 +28,11 @@ spec:
           value: "http://home-os-api:{{ .Values.api.port }}"
         - name: NEXT_PUBLIC_API_URL
           value: ""
+        - name: PUBLIC_URL
+          value: {{ include "home-os.publicUrl" . | quote }}
+        - name: DEX_ISSUER
+          value: {{ include "home-os.dexIssuer" . | quote }}
+        - name: DEX_UI_REDIRECT_URI
+          value: {{ include "home-os.uiRedirectURI" . | quote }}
         resources:
           {{- toYaml .Values.ui.resources | nindent 10 }}

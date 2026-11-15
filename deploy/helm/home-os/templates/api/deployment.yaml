@@ -50,7 +50,7 @@ spec:
         - name: DEMO_MODE
           value: {{ .Values.api.demoMode | default "false" | quote }}
         - name: PUBLIC_URL
-          value: "{{ .Values.api.publicUrl }}"
+          value: {{ include "home-os.apiPublicUrl" . | quote }}
         - name: ALLOW_REGISTRATION
           value: "{{ .Values.api.allowRegistration }}"
         - name: SMTP_HOST
@@ -68,7 +68,7 @@ spec:
         - name: DEX_JWKS_URL
           value: "http://home-os-envoy.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.envoy.port }}/dex/keys"
         - name: DEX_ISSUER
-          value: "http://localhost:8000/dex"
+          value: {{ include "home-os.dexIssuer" . | quote }}
         - name: ADMIN_EMAIL
           valueFrom:
             secretKeyRef:

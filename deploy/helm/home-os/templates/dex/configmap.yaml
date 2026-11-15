@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Values.namespace }}
 data:
   config.yaml: |
-    issuer: http://localhost:{{ .Values.envoy.port }}/dex
+    issuer: {{ include "home-os.dexIssuer" . }}
     
     storage:
       type: postgres
@@ -37,12 +37,14 @@ data:
     - id: home-os-ui
       name: Home OS UI
       redirectURIs:
-      - {{ .Values.dex.uiRedirectURI }}
+      - {{ include "home-os.uiRedirectURI" . | quote }}
       public: true
     - id: home-os-mcp
       name: Home OS MCP
       public: true
       redirectURIs:
-      - http://127.0.0.1:19876/mcp/oauth/callback
+      {{- range .Values.dex.mcpRedirectURIs }}
+      - {{ tpl . $ | quote }}
+      {{- end }}
     
     enablePasswordDB: true
