@@ -2,20 +2,33 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/asynkron/protoactor-go/actor"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/api/pkg/smtp"
 	"home-os/worker/internal/config"
+	"home-os/worker/internal/fileprocessor"
+	"home-os/worker/internal/files"
+	"home-os/worker/internal/search"
+	"home-os/worker/internal/tika"
 )
+
+// shutdownTimeout bounds how long main waits for the background jobs to
+// return after SIGINT/SIGTERM. Both jobs watch ctx, and in-flight Tika and
+// DB calls are bound to the same ctx, so they normally stop within
+// milliseconds; the bound only matters if something ignores cancellation.
+// It sits below Kubernetes' default 30s terminationGracePeriodSeconds so the
+// pool is closed and the process exits before SIGKILL.
+const shutdownTimeout = 20 * time.Second
 
 func main() {
 	cfg, err := config.Load()
@@ -32,9 +45,6 @@ func main() {
 	}
 	defer pool.Close()
 
-	actorSys := actor.NewActorSystem()
-	_ = actorSys // will be used when actors are registered in future tasks
-
 	// SMTP client is optional — if SMTP_HOST is empty, no email is sent
 	var smtpClient *smtp.Client
 	if cfg.SMTPHost != "" {
@@ -50,15 +60,62 @@ func main() {
 		slog.Info("SMTP_HOST not set; notification emails disabled")
 	}
 
+	// File OCR processor: Tika extraction + Typesense `files` indexing.
+	// InitCollection never fails hard (it logs and returns nil when
+	// Typesense is unreachable), so a search outage never stops OCR.
+	searchClient := search.NewClient(cfg.TypesenseHost, cfg.TypesensePort, cfg.TypesenseAPIKey)
+	if err := searchClient.InitCollection(ctx); err != nil {
+		slog.Warn("typesense files collection init failed; indexing may fail until it exists", "error", err)
+	}
+	processor := fileprocessor.New(
+		files.NewRepo(pool),
+		tika.NewClient(tika.WithBaseURL(cfg.TikaURL)),
+		fileprocessor.WithInterval(cfg.FileProcessorPollInterval),
+		fileprocessor.WithSearchClient(searchClient),
+	)
+	slog.Info("file processor configured", "tika_url", cfg.TikaURL, "interval", cfg.FileProcessorPollInterval)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		runNotificationLoop(ctx, pool, smtpClient, cfg.PollInterval)
+	}()
+	go func() {
+		defer wg.Done()
+		if err := processor.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("file processor exited", "error", err)
+		}
+	}()
+
+	<-ctx.Done()
+	slog.Info("worker shutting down")
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		slog.Info("worker stopped")
+	case <-time.After(shutdownTimeout):
+		slog.Warn("worker jobs did not stop in time; exiting anyway", "timeout", shutdownTimeout)
+	}
+}
+
+// runNotificationLoop polls for due bills / maintenance tasks every interval
+// and inserts notifications (plus best-effort emails) until ctx is cancelled.
+func runNotificationLoop(ctx context.Context, pool *pgxpool.Pool, smtpClient *smtp.Client, interval time.Duration) {
 	log.Println("worker started, polling outbox...")
 
-	ticker := time.NewTicker(cfg.PollInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("worker shutting down")
+			log.Println("notification loop stopped")
 			return
 		case <-ticker.C:
 			if err := generateNotifications(ctx, pool, smtpClient); err != nil {
