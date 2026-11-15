@@ -18,6 +18,8 @@ type hit struct {
 	Title        string `json:"title"`
 	Score        int    `json:"score"`
 	Start        string `json:"start"`
+	LocalDate    string `json:"local_date"`
+	Weekday      string `json:"weekday"`
 	CalendarName string `json:"calendar_name"`
 }
 
@@ -148,7 +150,7 @@ func TestSearchEvents(t *testing.T) {
 		if len(hits) != 1 {
 			t.Fatalf("want 1 event hit, got %+v", r)
 		}
-		want := hit{ID: soccer, Title: "Emma Soccer Practice", Score: 2, Start: "2026-11-18T17:00:00Z", CalendarName: "Kids"}
+		want := hit{ID: soccer, Title: "Emma Soccer Practice", Score: 2, Start: "2026-11-18T17:00:00Z", LocalDate: "2026-11-18", Weekday: "Wednesday", CalendarName: "Kids"}
 		if hits[0] != want {
 			t.Fatalf("got %+v, want %+v", hits[0], want)
 		}
@@ -188,4 +190,81 @@ func TestSearchEventsAlongsideOtherEntities(t *testing.T) {
 	if r.Total != 2 {
 		t.Fatalf("total = %d, want 2", r.Total)
 	}
+}
+
+func TestSearchEventsHouseholdLocalDay(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, h := testutil.SeedHousehold(t, pool)
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE households SET timezone = 'America/New_York' WHERE id = $1`, h.HouseholdID,
+	); err != nil {
+		t.Fatalf("set timezone: %v", err)
+	}
+	cal := seedCalendar(t, pool, h.HouseholdID, "Family")
+	// 23:30 New York on Wednesday 11/18 is 04:30Z on Thursday 11/19.
+	late := seedEvent(t, pool, cal, `{"title":"Late call","start":"2026-11-19T04:30:00Z","end":"2026-11-19T05:00:00Z","all_day":false}`)
+	// All-day events are dated by the date as written, not shifted to 11/17.
+	allDay := seedEvent(t, pool, cal, `{"title":"Teacher workday","start":"2026-11-18T00:00:00Z","end":"2026-11-19T00:00:00Z","all_day":true}`)
+	// A note with no event fields: non-event hits keep no start/local_date/weekday.
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'household', $1, 'Late call notes', 'agenda')`, h.HouseholdID,
+	); err != nil {
+		t.Fatalf("insert note: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		query string
+		want  hit
+	}{
+		{"timed event in household time", "late call", hit{ID: late, Title: "Late call", Score: 2, Start: "2026-11-18T23:30:00-05:00", LocalDate: "2026-11-18", Weekday: "Wednesday", CalendarName: "Family"}},
+		{"all-day event dated as written", "teacher", hit{ID: allDay, Title: "Teacher workday", Score: 2, Start: "2026-11-18T00:00:00-05:00", LocalDate: "2026-11-18", Weekday: "Wednesday", CalendarName: "Family"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := eventHits(runSearch(t, ctx, pool, tc.query))
+			if len(hits) != 1 {
+				t.Fatalf("want 1 event hit, got %+v", hits)
+			}
+			if hits[0] != tc.want {
+				t.Fatalf("got %+v, want %+v", hits[0], tc.want)
+			}
+		})
+	}
+
+	t.Run("non-event hits carry no event day fields", func(t *testing.T) {
+		_, _, handler := NewSearchTool(pool)
+		var req mcp.CallToolRequest
+		req.Params.Arguments = map[string]any{"query": "late call"}
+		res, err := handler(ctx, req)
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		var raw struct {
+			Results []struct {
+				EntityType string           `json:"entity_type"`
+				Results    []map[string]any `json:"results"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal([]byte(res.Content[0].(mcp.TextContent).Text), &raw); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		found := false
+		for _, g := range raw.Results {
+			if g.EntityType != "note" {
+				continue
+			}
+			found = true
+			for _, r := range g.Results {
+				for _, k := range []string{"start", "local_date", "weekday", "calendar_name"} {
+					if _, ok := r[k]; ok {
+						t.Fatalf("note hit has %q: %v", k, r)
+					}
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("no note group in %+v", raw)
+		}
+	})
 }

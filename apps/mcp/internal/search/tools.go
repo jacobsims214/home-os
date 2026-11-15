@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/calendar"
 	"home-os/mcp/internal/server"
 )
 
@@ -47,7 +48,7 @@ var specs = []searchSpec{
 // grouped by entity_type with relevance scores.
 func NewSearchTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("search",
-		mcp.WithDescription("Search across all entities (assets, vehicles, pets, vendors, properties, bills, notes, secrets, files, calendar events) and return results grouped by entity type with relevance scores. Event hits also carry start and calendar_name."),
+		mcp.WithDescription("Search across all entities (assets, vehicles, pets, vendors, properties, bills, notes, secrets, files, calendar events) and return results grouped by entity type with relevance scores. Event hits also carry start (in the household timezone), local_date (YYYY-MM-DD), weekday and calendar_name."),
 		mcp.WithString("query",
 			mcp.Description("Search query string"),
 			mcp.Required(),
@@ -74,6 +75,8 @@ func NewSearchTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Conte
 			Title        string `json:"title"`
 			Score        int    `json:"score"`
 			Start        string `json:"start,omitempty"`
+			LocalDate    string `json:"local_date,omitempty"`
+			Weekday      string `json:"weekday,omitempty"`
 			CalendarName string `json:"calendar_name,omitempty"`
 		}
 
@@ -124,9 +127,13 @@ func NewSearchTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Conte
 			return nil, err
 		}
 		if len(events) > 0 {
+			loc := calendar.LoadHouseholdLocation(ctx, pool, claims.HouseholdID)
 			hits := make([]searchHit, 0, len(events))
 			for _, e := range events {
-				hits = append(hits, searchHit{ID: e.ID, Title: e.Title, Score: 2, Start: e.Start, CalendarName: e.CalendarName})
+				// Same rules as list_events: timed starts in household time,
+				// all-day events dated by the date as written.
+				start, localDate, weekday := calendar.LocalDay(e.Start, e.End, e.AllDay, loc)
+				hits = append(hits, searchHit{ID: e.ID, Title: e.Title, Score: 2, Start: start, LocalDate: localDate, Weekday: weekday, CalendarName: e.CalendarName})
 			}
 			groups = append(groups, "event")
 			results["event"] = hits
@@ -170,6 +177,8 @@ type eventHit struct {
 	ID           string
 	Title        string
 	Start        string
+	End          string
+	AllDay       bool
 	CalendarName string
 }
 
@@ -179,6 +188,8 @@ type eventFields struct {
 	Description string `json:"description"`
 	Location    string `json:"location"`
 	Start       string `json:"start"`
+	End         string `json:"end"`
+	AllDay      bool   `json:"all_day"`
 }
 
 // searchEvents returns the household's calendar events whose title,
@@ -229,7 +240,7 @@ func searchEvents(ctx context.Context, pool *pgxpool.Pool, householdID any, quer
 			!strings.Contains(strings.ToLower(f.Location), needle) {
 			continue
 		}
-		hits = append(hits, eventHit{ID: id, Title: f.Title, Start: f.Start, CalendarName: calendarName})
+		hits = append(hits, eventHit{ID: id, Title: f.Title, Start: f.Start, End: f.End, AllDay: f.AllDay, CalendarName: calendarName})
 		if len(hits) == eventLimit {
 			break
 		}

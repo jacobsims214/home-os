@@ -722,6 +722,35 @@ func setLocalDay(ev *Event, loc *time.Location) {
 	ev.Weekday = local.Weekday().String()
 }
 
+// LoadHouseholdLocation returns the household's configured timezone, or UTC
+// when it is empty, "UTC", invalid or unreadable. Exported for other event
+// surfaces (search) so they resolve the zone exactly as the calendar tools.
+func LoadHouseholdLocation(ctx context.Context, pool *pgxpool.Pool, householdID string) *time.Location {
+	return loadHouseholdLocation(ctx, pool, householdID)
+}
+
+// LocalDay places a stored event start in the household timezone, using the
+// same rules as the calendar tools: an all-day event is dated by the date as
+// written in start and returned as local midnight of its first day; a timed
+// event's instant is formatted in loc (RFC 3339 with loc's offset).
+// localDate (YYYY-MM-DD) and weekday ("Wednesday") are the household-local
+// day of that start. An unparseable start comes back unchanged with empty
+// localDate and weekday.
+func LocalDay(start, end string, allDay bool, loc *time.Location) (localStart, localDate, weekday string) {
+	ev := &Event{Start: start, End: end, AllDay: allDay}
+	localizeAllDay(ev, loc)
+	setLocalDay(ev, loc)
+	if ev.LocalDate == "" {
+		return start, "", ""
+	}
+	if !allDay {
+		if t, err := time.Parse(time.RFC3339, ev.Start); err == nil {
+			ev.Start = t.In(loc).Format(time.RFC3339)
+		}
+	}
+	return ev.Start, ev.LocalDate, ev.Weekday
+}
+
 // startsBefore orders RFC 3339 start times by instant. Stored times mix
 // offsets (timed events in UTC, all-day events as local midnights), so a
 // string comparison is wrong; unparseable values fall back to it.
