@@ -1372,3 +1372,77 @@ func TestEventLocalDay(t *testing.T) {
 		}
 	})
 }
+
+// TestDailyBriefingBills checks the briefing's Bills Due section follows the
+// bill tools' rule (bill.BillDue): due_day clamps to the month's last day,
+// and paid_date hides a bill only when it pays that due date.
+func TestDailyBriefingBills(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	setHouseholdTimezone(t, pool, hh.HouseholdID, "America/New_York")
+	_, briefing := NewGetDailyBriefingTool(pool)
+
+	for _, b := range []struct {
+		name   string
+		dueDay *int
+		paid   *string
+	}{
+		{"Rent", intPtr(31), nil},                // clamps to Nov 30
+		{"Water", intPtr(30), ptr("2026-10-30")}, // paid last cycle
+		{"Power", intPtr(30), ptr("2026-11-30")}, // paid for this due date
+		{"Phone", intPtr(28), ptr("2026-11-01")}, // paid late (Oct 28 + 4 days), Nov 28 due
+		{"Gym", intPtr(15), nil},                 // due another day
+		{"Misc", nil, nil},                       // no due_day
+	} {
+		if _, err := pool.Exec(context.Background(),
+			`INSERT INTO bills (household_id, name, amount, due_day, category, paid_date) VALUES ($1, $2, 10, $3, 'utilities', $4::date)`,
+			hh.HouseholdID, b.name, b.dueDay, b.paid,
+		); err != nil {
+			t.Fatalf("insert bill %s: %v", b.name, err)
+		}
+	}
+
+	billsSection := func(t *testing.T, date string) string {
+		t.Helper()
+		text, isErr := callTool(t, briefing, ctx, map[string]any{"date": date})
+		if isErr {
+			t.Fatalf("get_daily_briefing %s: %s", date, text)
+		}
+		_, section, ok := strings.Cut(text, "## 💰 Bills Due")
+		if !ok {
+			t.Fatalf("no Bills Due section:\n%s", text)
+		}
+		return section
+	}
+
+	for _, tt := range []struct {
+		date      string
+		want, not []string
+	}{
+		{"2026-11-30", []string{"**Rent** — $10.00 [utilities]", "**Water**"}, []string{"Power", "Phone", "Gym", "Misc"}},
+		{"2026-11-29", nil, []string{"Rent", "Water", "Power"}},
+		{"2026-11-28", []string{"**Phone**"}, []string{"Rent"}},
+		{"2026-11-15", []string{"**Gym**"}, []string{"Rent", "Phone"}},
+		{"2026-12-31", []string{"**Rent**"}, []string{"Water"}},
+		{"2026-12-30", []string{"**Water**", "**Power**"}, nil},
+	} {
+		t.Run(tt.date, func(t *testing.T) {
+			section := billsSection(t, tt.date)
+			for _, w := range tt.want {
+				if !strings.Contains(section, w) {
+					t.Errorf("missing %q:\n%s", w, section)
+				}
+			}
+			for _, n := range tt.not {
+				if strings.Contains(section, n) {
+					t.Errorf("unexpected %q:\n%s", n, section)
+				}
+			}
+			if len(tt.want) == 0 && !strings.Contains(section, "No bills due today.") {
+				t.Errorf("want no bills:\n%s", section)
+			}
+		})
+	}
+}
+
+func intPtr(i int) *int { return &i }

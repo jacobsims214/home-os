@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/bill"
 	"home-os/mcp/internal/server"
 )
 
@@ -1719,51 +1720,70 @@ func NewGetDailyBriefingTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Con
 
 		// ── Bills Due ──
 		briefing.WriteString("## 💰 Bills Due\n\n")
-		dueDay := date.Day()
-		// Use COALESCE for entity_type to handle NULL values
-		billRows, billErr := pool.Query(ctx,
-			`SELECT name, COALESCE(amount, 0), category
-			 FROM bills
-			 WHERE household_id = $1 AND due_day = $2 AND paid_date IS NULL
-			 ORDER BY name`,
-			claims.HouseholdID, dueDay,
-		)
+		bills, billErr := billsDueOn(ctx, pool, claims.HouseholdID, date)
 		if billErr != nil {
 			slog.Error("get_daily_briefing: query bills error", "error", billErr)
-		}
-
-		billCount := 0
-		if billRows != nil {
-			defer billRows.Close()
-			for billRows.Next() {
-				billCount++
-				var name, category string
-				var amount float64
-				if err := billRows.Scan(&name, &amount, &category); err != nil {
-					slog.Error("get_daily_briefing: scan bill error", "error", err)
-					continue
-				}
-				catInfo := ""
-				if category != "" {
-					catInfo = fmt.Sprintf(" [%s]", category)
-				}
-				briefing.WriteString(fmt.Sprintf("- **%s** — $%.2f%s\n", name, amount, catInfo))
-			}
-			if err := billRows.Err(); err != nil {
-				slog.Error("get_daily_briefing: iterate bills error", "error", err)
-			}
-		}
-
-		if billErr != nil {
 			briefing.WriteString("⚠️ Could not load bills (database error) — do not assume no bills are due.\n")
-		} else if billCount == 0 {
+		} else if len(bills) == 0 {
 			briefing.WriteString("No bills due today.\n")
+		} else {
+			for _, b := range bills {
+				catInfo := ""
+				if b.category != "" {
+					catInfo = fmt.Sprintf(" [%s]", b.category)
+				}
+				briefing.WriteString(fmt.Sprintf("- **%s** — $%.2f%s\n", b.name, b.amount, catInfo))
+			}
 		}
 
 		return mcp.NewToolResultText(briefing.String()), nil
 	}
 
 	return tool, handler
+}
+
+// briefingBill is a bill listed in the daily briefing.
+type briefingBill struct {
+	name, category string
+	amount         float64
+}
+
+// billsDueOn returns the household's bills whose due date is date (a local
+// calendar day) and that are not yet paid for that due date, by name.
+//
+// It applies bill.BillDue, the rule list_bills and get_upcoming_bills use,
+// so the briefing agrees with them: due_day is clamped to the month (31 is
+// due Nov 30) and paid_date only hides the bill when it covers this due date
+// (a payment for last month's bill does not). As of the briefing date, the
+// first unpaid due date on or after it is the briefing date exactly when the
+// bill is due that day and unpaid.
+func billsDueOn(ctx context.Context, pool *pgxpool.Pool, householdID string, date time.Time) ([]briefingBill, error) {
+	y, m, d := date.Date()
+	day := time.Date(y, m, d, 0, 0, 0, 0, time.UTC) // bill dates are midnight UTC
+	rows, err := pool.Query(ctx,
+		`SELECT name, COALESCE(amount, 0), COALESCE(category, ''), due_day, paid_date
+		 FROM bills
+		 WHERE household_id = $1 AND due_day BETWEEN 1 AND 31
+		 ORDER BY name`,
+		householdID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []briefingBill
+	for rows.Next() {
+		var b briefingBill
+		var dueDay int
+		var paidDate *time.Time
+		if err := rows.Scan(&b.name, &b.amount, &b.category, &dueDay, &paidDate); err != nil {
+			return nil, fmt.Errorf("scan bill: %w", err)
+		}
+		if bill.BillDue(day, dueDay, paidDate).Next.Equal(day) {
+			out = append(out, b)
+		}
+	}
+	return out, rows.Err()
 }
 
 // ─────────────────────────────────────────────
