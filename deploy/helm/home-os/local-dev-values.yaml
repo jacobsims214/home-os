@@ -83,8 +83,7 @@ dex:
   image: dex
   port: 5556
   grpcPort: 5557
-  # Matches the value currently provisioned in the dev postgres.
-  dbPassword: "wCGVeROLHi1br16yJ5QjRloXH815VrFEbkinBnw1CSygf3DJEtKsGJJjFYFlZsy4"
+  # Dex reads its DB password from home-os-db-secret (secrets.dbPassword below).
 
 database:
   mode: managed
