@@ -34,6 +34,7 @@ import (
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/note"
 	"home-os/api/internal/notification"
+	"home-os/api/internal/people"
 	"home-os/api/internal/pet"
 	"home-os/api/internal/property"
 	"home-os/api/internal/search"
@@ -345,6 +346,10 @@ func main() {
 
 		// Agent tokens: each member creates, lists and revokes their own.
 		agenttoken.NewHandler(agenttoken.NewRepo(pool)).RegisterRoutes(r)
+
+		// People and preferences (Stage 2, #4463). #4489 may consolidate the
+		// Stage 2 route wiring.
+		people.NewHandler(people.NewRepo(pool)).RegisterRoutes(r)
 	})
 
 	// Start the HTTP server.
