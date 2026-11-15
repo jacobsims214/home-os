@@ -24,6 +24,7 @@ import (
 
 	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/config"
+	"home-os/mcp/internal/metadata"
 )
 
 // claimsCtxKey is an unexported type used for context keys to prevent
@@ -157,41 +158,18 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/health", healthHandler)
 	r.Get("/mcp/health", healthHandler)
 
-	// OAuth 2.0 Protected Resource Metadata (RFC 9728) — tells MCP clients like
-	// opencode where to authenticate via OAuth 2.0 Device Authorization Grant.
-	// We serve at both the bare path and the /mcp-prefixed path because Envoy
-	// routes /.well-known/oauth-protected-resource directly to the MCP cluster,
-	// and also routes /mcp/* through with the full /mcp prefix intact.
-	//
-	// NOTE: We use a custom handler instead of the SDK's
-	// NewProtectedResourceMetadataHandler because opencode needs the `client_id`
-	// field to discover the pre-registered OAuth client ID. Dex does not support
-	// dynamic client registration (RFC 7591), so opencode must know the client ID
-	// in advance. The SDK's ProtectedResourceMetadataConfig struct does not include
-	// a ClientID field, so we emit the JSON directly.
-	wellKnownHandler := func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"resource":                 s.cfg.PublicBaseURL + "/mcp",
-			"authorization_servers":    []string{s.cfg.PublicBaseURL + "/dex"},
-			"client_id":                "home-os-mcp",
-			"scopes_supported":         []string{"openid", "email", "profile"},
-			"bearer_methods_supported": []string{"header"},
-			"resource_name":            "Home OS MCP",
-		})
+	// OAuth 2.0 Protected Resource Metadata (RFC 9728): tells MCP clients the
+	// configured resource URI (MCP_RESOURCE_URL) and authorization server
+	// (DEX_ISSUER). Served at /.well-known/oauth-protected-resource and the
+	// path-qualified /.well-known/oauth-protected-resource/mcp (mcp-go's
+	// ProtectedResourceMetadataPath), plus the legacy /mcp-prefixed path. The
+	// metadata server (Envoy's route for /.well-known/oauth-protected-resource)
+	// serves the identical document.
+	prm := metadata.ProtectedResourceHandler(s.cfg)
+	for _, p := range metadata.ProtectedResourcePaths(s.cfg) {
+		r.Handle(p, prm)
 	}
-	wellKnownOptionsHandler := func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.WriteHeader(http.StatusNoContent)
-	}
-	r.Get("/.well-known/oauth-protected-resource", wellKnownHandler)
-	r.Options("/.well-known/oauth-protected-resource", wellKnownOptionsHandler)
-	r.Get("/mcp/.well-known/oauth-protected-resource", wellKnownHandler)
-	r.Options("/mcp/.well-known/oauth-protected-resource", wellKnownOptionsHandler)
+	r.Handle("/mcp"+server.WellKnownProtectedResourcePath, prm)
 
 	// Streamable HTTP endpoint: stateless, so every POST carries its own
 	// identity and no session affinity is needed.
@@ -250,12 +228,22 @@ func postOnly(next http.Handler) http.Handler {
 // requires (DNS-rebinding protection) and answers 403 when it is not allowed.
 // Requests without an Origin header (CLI clients, moltis, opencode, server to
 // server) pass: only browsers send Origin. A browser Origin passes when it is
-// the origin of PUBLIC_BASE_URL, or a loopback origin (local tools such as the
-// MCP inspector; a remote page cannot claim a loopback origin).
+// one of MCP_ALLOWED_ORIGINS (default: the origin of PUBLIC_BASE_URL), or a
+// loopback origin (local tools such as the MCP inspector; a remote page cannot
+// claim a loopback origin).
 func (s *Server) OriginMiddleware() func(http.Handler) http.Handler {
-	allowed := ""
-	if u, err := url.Parse(s.cfg.PublicBaseURL); err == nil && u.Scheme != "" && u.Host != "" {
-		allowed = strings.ToLower(u.Scheme + "://" + u.Host)
+	allowed := map[string]bool{}
+	for _, o := range s.cfg.AllowedOrigins {
+		if n := normalizeOrigin(o); n != "" {
+			allowed[n] = true
+		}
+	}
+	if len(allowed) == 0 {
+		// Config built without config.Load (tests): fall back to the
+		// PUBLIC_BASE_URL origin, which is also config.Load's default.
+		if n := normalizeOrigin(s.cfg.PublicBaseURL); n != "" {
+			allowed[n] = true
+		}
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -270,15 +258,26 @@ func (s *Server) OriginMiddleware() func(http.Handler) http.Handler {
 	}
 }
 
-// originAllowed reports whether a browser Origin header value may call /mcp.
-func originAllowed(origin, allowed string) bool {
-	u, err := url.Parse(origin)
+// normalizeOrigin returns the lowercase scheme://host[:port] of an http(s)
+// URL, or "" when it has no usable origin.
+func normalizeOrigin(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return false // includes the opaque "null" origin
+		return ""
 	}
-	if allowed != "" && strings.ToLower(u.Scheme+"://"+u.Host) == allowed {
+	return strings.ToLower(u.Scheme + "://" + u.Host)
+}
+
+// originAllowed reports whether a browser Origin header value may call /mcp.
+func originAllowed(origin string, allowed map[string]bool) bool {
+	n := normalizeOrigin(origin)
+	if n == "" {
+		return false // includes the opaque "null" origin and non-http schemes
+	}
+	if allowed[n] {
 		return true
 	}
+	u, _ := url.Parse(n)
 	host := u.Hostname()
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -287,15 +286,35 @@ func originAllowed(origin, allowed string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// AuthMiddleware returns a chi-compatible middleware that validates Dex-issued
-// OIDC Bearer tokens. It extracts the Authorization header, parses the bearer
-// token, verifies it via the Verifier, and injects the resulting *auth.Claims
-// into the request context.
+// AuthMiddleware makes /mcp an OAuth 2.1 resource server. Every request needs
+// an Authorization: Bearer token that the Verifier accepts: Dex signature,
+// issuer (DEX_ISSUER), expiry, and an audience this server accepts
+// (MCP_ACCEPTED_AUDIENCES, MCP_RESOURCE_URL, or a client registered through
+// /register). The token is then resolved to a Home OS member (dex_sub, then
+// email) and the *auth.Claims are put in the request context, from where
+// StreamableHTTPOptions' context func hands them to tool handlers. The token
+// itself is never forwarded anywhere (no token passthrough).
+//
+//   - no or non-Bearer credentials: 401 with
+//     WWW-Authenticate: Bearer resource_metadata="...", scope="..."
+//   - invalid, expired, unsigned, wrong-issuer or wrong-audience token: 401
+//     with the same challenge plus error="invalid_token" (RFC 6750)
+//   - valid token, no household membership: 403
+//   - database failure during the lookup: 500
 //
 // When the verifier is in disabled mode (no issuer URL configured), the middleware
 // passes through with an anonymous local-dev identity. This enables local development
 // without a running Dex instance.
 func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
+	resourceMetadata := metadata.ResourceMetadataURL(s.cfg)
+	scope := strings.Join(metadata.ScopesSupported, " ")
+	challenge := func(w http.ResponseWriter, invalidToken bool) {
+		v := `Bearer resource_metadata="` + resourceMetadata + `", scope="` + scope + `"`
+		if invalidToken {
+			v += `, error="invalid_token", error_description="the access token is invalid, expired or not issued for this server"`
+		}
+		w.Header().Set("WWW-Authenticate", v)
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !s.verifier.Enabled() {
@@ -308,20 +327,17 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+s.cfg.PublicBaseURL+`/.well-known/oauth-protected-resource"`)
-				writeJSONError(w, http.StatusUnauthorized, "missing authorization header")
+			scheme, token, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+			token = strings.TrimSpace(token)
+			if !strings.EqualFold(scheme, "Bearer") || token == "" {
+				// No bearer credentials at all: RFC 6750 section 3.1 says to
+				// send the challenge without an error code.
+				challenge(w, false)
+				writeJSONError(w, http.StatusUnauthorized, "missing bearer token")
 				return
 			}
 
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-				writeJSONError(w, http.StatusUnauthorized, "invalid authorization header format")
-				return
-			}
-
-			claims, err := s.verifier.VerifyTokenAndEnrich(r.Context(), s.pool, parts[1])
+			claims, err := s.verifier.VerifyTokenAndEnrich(r.Context(), s.pool, token)
 			switch {
 			case err == nil:
 			case errors.Is(err, auth.ErrNoMembership):
@@ -334,6 +350,7 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 				return
 			default:
 				slog.Warn("auth middleware: token verification failed", "error", err)
+				challenge(w, true)
 				writeJSONError(w, http.StatusUnauthorized, "invalid or expired token")
 				return
 			}

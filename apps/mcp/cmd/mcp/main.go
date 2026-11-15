@@ -51,7 +51,14 @@ func main() {
 	// Create the OIDC token verifier using Dex's JWKS endpoint.
 	// The JWKS URL is the internal K8s address for key fetching, while the
 	// expected issuer matches the token's "iss" claim (the public URL).
-	verifier, err := auth.NewVerifier(ctx, cfg.DexIssuer, cfg.DexJWKSURL, pool)
+	// Tokens must be issued for this server: aud is one of
+	// MCP_ACCEPTED_AUDIENCES, the canonical resource URI (RFC 8707), or a
+	// client the metadata server registered dynamically (mcp-<uuid>).
+	audiences := append(append([]string{}, cfg.AcceptedAudiences...), cfg.ResourceURL)
+	verifier, err := auth.NewVerifier(ctx, cfg.DexIssuer, cfg.DexJWKSURL, pool,
+		auth.WithAudiences(audiences...),
+		auth.WithAudiencePrefixes(metadata.DynamicClientIDPrefix),
+	)
 	if err != nil {
 		slog.Error("failed to create OIDC verifier", "error", err)
 		os.Exit(1)

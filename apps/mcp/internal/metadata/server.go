@@ -1,12 +1,20 @@
 // Package metadata provides a lightweight HTTP server for health checks and
-// OAuth 2.0 protected resource metadata. It runs on a separate port from the
-// MCP SSE server to avoid route conflicts with the mark3labs/mcp-go SSE handler.
+// the OAuth endpoints MCP clients discover: RFC 9728 protected resource
+// metadata, RFC 8414 authorization server metadata, the /authorize shim and
+// dynamic client registration. It runs on its own port (METADATA_PORT), and
+// Envoy routes /.well-known/oauth-* and /authorize to it, while /mcp itself is
+// served by the MCP server (internal/server, stateless Streamable HTTP).
+//
+// The protected resource metadata is also served by the MCP router; both use
+// ProtectedResourceHandler so the two documents are always identical.
 package metadata
 
 import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -15,15 +23,155 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	dexapi "github.com/dexidp/dex/api"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"home-os/mcp/internal/config"
 )
 
+// DynamicClientIDPrefix starts every client_id the /register endpoint mints
+// in Dex. Dex puts the client_id in the token aud, so the MCP verifier accepts
+// audiences with this prefix: such clients exist only to call this server.
+const DynamicClientIDPrefix = "mcp-"
+
+// PreRegisteredClientID is the static Dex client MCP clients without dynamic
+// registration use (opencode reads it from the client_id metadata field).
+const PreRegisteredClientID = "home-os-mcp"
+
+// ScopesSupported are the scopes MCP clients request from Dex. They are
+// advertised in the protected resource metadata and the 401 challenge.
+var ScopesSupported = []string{"openid", "email", "profile"}
+
+// ResourceURL returns the server's canonical URI (MCP_RESOURCE_URL), falling
+// back to <PUBLIC_BASE_URL>/mcp for configs built without config.Load.
+func ResourceURL(cfg *config.Config) string {
+	if cfg.ResourceURL != "" {
+		return cfg.ResourceURL
+	}
+	return strings.TrimRight(cfg.PublicBaseURL, "/") + "/mcp"
+}
+
+// Issuer returns the OIDC issuer tokens must carry (DEX_ISSUER), which is
+// also the authorization server identifier advertised to clients. It falls
+// back to <PUBLIC_BASE_URL>/dex for configs built without config.Load.
+func Issuer(cfg *config.Config) string {
+	if cfg.DexIssuer != "" {
+		return cfg.DexIssuer
+	}
+	return strings.TrimRight(cfg.PublicBaseURL, "/") + "/dex"
+}
+
+// ProtectedResourceMetadata is the RFC 9728 document: mcp-go's
+// ProtectedResourceMetadataConfig plus client_id, which opencode needs to find
+// the pre-registered client (the mcp-go type has no field for it).
+type ProtectedResourceMetadata struct {
+	mcpserver.ProtectedResourceMetadataConfig
+	ClientID string `json:"client_id,omitempty"`
+}
+
+// NewProtectedResourceMetadata builds the document from the config: the
+// configured resource URI, and the configured issuer as the only
+// authorization server.
+func NewProtectedResourceMetadata(cfg *config.Config) ProtectedResourceMetadata {
+	return ProtectedResourceMetadata{
+		ProtectedResourceMetadataConfig: mcpserver.ProtectedResourceMetadataConfig{
+			Resource:               ResourceURL(cfg),
+			AuthorizationServers:   []string{Issuer(cfg)},
+			ScopesSupported:        ScopesSupported,
+			BearerMethodsSupported: []string{"header"},
+			ResourceName:           "Home OS MCP",
+		},
+		ClientID: PreRegisteredClientID,
+	}
+}
+
+// ProtectedResourcePaths returns the paths the metadata is served at: the
+// bare well-known path and the RFC 9728 path-qualified one for the resource
+// (/.well-known/oauth-protected-resource/mcp for .../mcp), via mcp-go's
+// ProtectedResourceMetadataPath.
+func ProtectedResourcePaths(cfg *config.Config) []string {
+	paths := []string{mcpserver.WellKnownProtectedResourcePath}
+	if p := mcpserver.ProtectedResourceMetadataPath(ResourceURL(cfg)); p != paths[0] {
+		paths = append(paths, p)
+	}
+	return paths
+}
+
+// ResourceMetadataURL is the absolute metadata URL for the resource
+// (RFC 9728 section 3.1: the well-known segment goes between host and path).
+// It is the resource_metadata value of the 401 WWW-Authenticate challenge.
+func ResourceMetadataURL(cfg *config.Config) string {
+	resource := ResourceURL(cfg)
+	u, err := url.Parse(resource)
+	if err != nil || u.Host == "" {
+		return strings.TrimRight(cfg.PublicBaseURL, "/") + mcpserver.WellKnownProtectedResourcePath
+	}
+	return u.Scheme + "://" + u.Host + mcpserver.ProtectedResourceMetadataPath(resource)
+}
+
+// ProtectedResourceHandler serves the RFC 9728 document with the same
+// semantics as mcp-go's NewProtectedResourceMetadataHandler: GET/HEAD return
+// the JSON, OPTIONS is a CORS preflight, anything else is 405; permissive CORS
+// and Cache-Control: no-store.
+func ProtectedResourceHandler(cfg *config.Config) http.Handler {
+	body, err := json.Marshal(NewProtectedResourceMetadata(cfg))
+	if err != nil {
+		panic("metadata: marshal protected resource metadata: " + err.Error()) // only plain types
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		switch r.Method {
+		case http.MethodOptions:
+			w.WriteHeader(http.StatusNoContent)
+			return
+		case http.MethodGet, http.MethodHead:
+		default:
+			w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodHead {
+			_, _ = w.Write(body)
+		}
+	})
+}
+
+// authorizationServerMetadataPaths returns where the RFC 8414 document is
+// served: the bare path (older clients) and the path-inserted form for the
+// issuer (/.well-known/oauth-authorization-server/dex for .../dex), which
+// clients derive from the authorization_servers entry.
+func authorizationServerMetadataPaths(cfg *config.Config) []string {
+	const base = "/.well-known/oauth-authorization-server"
+	paths := []string{base}
+	if u, err := url.Parse(Issuer(cfg)); err == nil {
+		if p := strings.Trim(u.Path, "/"); p != "" {
+			paths = append(paths, path.Join(base, p))
+		}
+	}
+	return paths
+}
+
 // Start creates and starts an HTTP server on the given address that serves
-// health check and OAuth protected resource metadata endpoints.
-// The server runs in a background goroutine. Callers should call Shutdown
-// on the returned *http.Server during graceful shutdown.
+// NewHandler. The server runs in a background goroutine. Callers should call
+// Shutdown on the returned *http.Server during graceful shutdown.
 func Start(addr string, cfg *config.Config) *http.Server {
+	srv := &http.Server{Addr: addr, Handler: NewHandler(cfg)}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("metadata server error", "error", err)
+		}
+	}()
+	return srv
+}
+
+// NewHandler returns the metadata server's routes: health, the /authorize
+// shim, dynamic client registration, and the authorization server and
+// protected resource metadata documents.
+func NewHandler(cfg *config.Config) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health check endpoint — used by Kubernetes liveness/readiness probes.
@@ -97,7 +245,7 @@ func Start(addr string, cfg *config.Config) *http.Server {
 		defer conn.Close()
 
 		dexClient := dexapi.NewDexClient(conn)
-		clientID := "mcp-" + uuid.New().String()
+		clientID := DynamicClientIDPrefix + uuid.New().String()
 
 		_, err = dexClient.CreateClient(r.Context(), &dexapi.CreateClientReq{
 			Client: &dexapi.Client{
@@ -125,51 +273,42 @@ func Start(addr string, cfg *config.Config) *http.Server {
 		})
 	})
 
-	// OAuth 2.0 Authorization Server Metadata (RFC 8414).
-	// Tells OAuth clients (opencode) where the authorization server is.
-	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+	// OAuth 2.0 Authorization Server Metadata (RFC 8414). Tells OAuth clients
+	// (opencode) where the authorization server's endpoints are. The issuer
+	// is the configured DEX_ISSUER (the token iss and the authorization_servers
+	// entry of the protected resource metadata), and the document is also
+	// served at the issuer's path-inserted well-known URL so clients that
+	// follow RFC 8414 section 3.1 find it.
+	asMetadata := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"issuer":                              cfg.PublicBaseURL + "/dex",
-			"authorization_endpoint":              cfg.PublicBaseURL + "/authorize",
-			"token_endpoint":                      cfg.PublicBaseURL + "/dex/token",
-			"jwks_uri":                            cfg.PublicBaseURL + "/dex/keys",
-			"registration_endpoint":               cfg.PublicBaseURL + "/register",
-			"scopes_supported":                    []string{"openid", "email", "profile"},
-			"response_types_supported":            []string{"code"},
-			"code_challenge_methods_supported":    []string{"S256"},
+			"issuer":                                Issuer(cfg),
+			"authorization_endpoint":                cfg.PublicBaseURL + "/authorize",
+			"token_endpoint":                        cfg.PublicBaseURL + "/dex/token",
+			"jwks_uri":                              cfg.PublicBaseURL + "/dex/keys",
+			"registration_endpoint":                 cfg.PublicBaseURL + "/register",
+			"scopes_supported":                      ScopesSupported,
+			"response_types_supported":              []string{"code"},
+			"code_challenge_methods_supported":      []string{"S256"},
 			"token_endpoint_auth_methods_supported": []string{"none"},
-			"grant_types_supported":               []string{"authorization_code", "refresh_token"},
+			"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		})
-	})
+	}
+	for _, p := range authorizationServerMetadataPaths(cfg) {
+		mux.HandleFunc(p, asMetadata)
+	}
 
-	// OAuth 2.0 Protected Resource Metadata (RFC 9728).
-	// Tells MCP clients (opencode, Claude Desktop, etc.) where to authenticate
-	// via OAuth 2.0 Device Authorization Grant.
-	// Served from a separate port to avoid interference from the MCP SSE handler.
-	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"resource":                 cfg.PublicBaseURL + "/mcp",
-			"authorization_servers":    []string{cfg.PublicBaseURL},
-			"client_id":                "home-os-mcp",
-			"scopes_supported":         []string{"openid", "email", "profile"},
-			"bearer_methods_supported": []string{"header"},
-			"resource_name":            "Home OS MCP",
-		})
-	})
+	// OAuth 2.0 Protected Resource Metadata (RFC 9728): the configured
+	// resource and issuer, at the bare and the /mcp path-qualified well-known
+	// paths. Identical to the document the MCP router serves.
+	prm := ProtectedResourceHandler(cfg)
+	for _, p := range ProtectedResourcePaths(cfg) {
+		mux.Handle(p, prm)
+	}
 
-	srv := &http.Server{Addr: addr, Handler: mux}
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("metadata server error", "error", err)
-		}
-	}()
-	return srv
+	return mux
 }
 
 // jsonError writes a JSON error response with the given OAuth error code,

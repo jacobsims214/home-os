@@ -311,3 +311,90 @@ func TestHealthStillServed(t *testing.T) {
 		}
 	}
 }
+
+// TestProtectedResourceMetadata: the RFC 9728 document is served at the bare
+// and the /mcp path-qualified well-known paths (and the legacy /mcp-prefixed
+// one) and lists the configured resource and issuer, not values derived from
+// PUBLIC_BASE_URL.
+func TestProtectedResourceMetadata(t *testing.T) {
+	verifier, err := auth.NewVerifier(context.Background(), "", "", nil)
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	cfg := &config.Config{
+		PublicBaseURL: testPublicBaseURL,
+		ResourceURL:   "https://mcp.example.test/mcp",
+		DexIssuer:     "https://login.example.test/dex",
+	}
+	ts := httptest.NewServer(NewServer(cfg, nil, verifier).Handler())
+	t.Cleanup(ts.Close)
+
+	for _, path := range []string{
+		"/.well-known/oauth-protected-resource",
+		"/.well-known/oauth-protected-resource/mcp",
+		"/mcp/.well-known/oauth-protected-resource",
+	} {
+		t.Run(path, func(t *testing.T) {
+			resp := do(t, http.MethodGet, ts.URL+path, nil, nil)
+			var doc struct {
+				Resource             string   `json:"resource"`
+				AuthorizationServers []string `json:"authorization_servers"`
+				ClientID             string   `json:"client_id"`
+				BearerMethods        []string `json:"bearer_methods_supported"`
+			}
+			decode(t, resp, &doc)
+			if doc.Resource != cfg.ResourceURL {
+				t.Errorf("resource = %q, want %q", doc.Resource, cfg.ResourceURL)
+			}
+			if len(doc.AuthorizationServers) != 1 || doc.AuthorizationServers[0] != cfg.DexIssuer {
+				t.Errorf("authorization_servers = %v, want [%s]", doc.AuthorizationServers, cfg.DexIssuer)
+			}
+			if doc.ClientID != "home-os-mcp" || len(doc.BearerMethods) != 1 || doc.BearerMethods[0] != "header" {
+				t.Errorf("client_id = %q, bearer_methods_supported = %v", doc.ClientID, doc.BearerMethods)
+			}
+			if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+				t.Errorf("Cache-Control = %q", got)
+			}
+		})
+	}
+}
+
+// TestMCPEndpoint_AllowedOrigins: MCP_ALLOWED_ORIGINS replaces the
+// PUBLIC_BASE_URL origin; loopback and no-Origin still pass.
+func TestMCPEndpoint_AllowedOrigins(t *testing.T) {
+	verifier, err := auth.NewVerifier(context.Background(), "", "", nil)
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	cfg := &config.Config{
+		PublicBaseURL:  testPublicBaseURL,
+		AllowedOrigins: []string{"https://app.example.test", "http://tablet.lan:8080"},
+	}
+	ts := httptest.NewServer(NewServer(cfg, nil, verifier).Handler())
+	t.Cleanup(ts.Close)
+
+	tests := []struct {
+		origin string
+		want   int
+	}{
+		{"", http.StatusOK},
+		{"https://app.example.test", http.StatusOK},
+		{"HTTPS://APP.EXAMPLE.TEST", http.StatusOK},
+		{"http://tablet.lan:8080", http.StatusOK},
+		{"http://localhost:6274", http.StatusOK},
+		{testPublicBaseURL, http.StatusForbidden},   // not listed
+		{"http://tablet.lan", http.StatusForbidden}, // port differs
+		{"https://evil.example", http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.origin, func(t *testing.T) {
+			h := jsonHeaders()
+			if tt.origin != "" {
+				h.Set("Origin", tt.origin)
+			}
+			if resp := do(t, http.MethodPost, ts.URL+"/mcp", legacyInitialize(), h); resp.StatusCode != tt.want {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.want)
+			}
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -34,38 +35,120 @@ type Claims struct {
 }
 
 // Verifier validates Dex-issued RS256-signed OIDC tokens via coreos/go-oidc/v3.
+//
+// An enabled verifier checks the signature (against the issuer's JWKS), the
+// issuer, the expiry and the audience. The MCP server is an OAuth resource
+// server, so it must only accept tokens issued for it: the aud claim has to
+// contain one of the configured audiences (WithAudiences) or start with one of
+// the configured prefixes (WithAudiencePrefixes). With neither configured the
+// verifier fails closed and rejects every token.
 type Verifier struct {
-	inner   *oidc.IDTokenVerifier
-	pool    *pgxpool.Pool
-	enabled bool
+	inner       *oidc.IDTokenVerifier
+	pool        *pgxpool.Pool
+	enabled     bool
+	audiences   map[string]struct{}
+	audPrefixes []string
+}
+
+// Option configures a Verifier.
+type Option func(*Verifier)
+
+// WithAudiences accepts tokens whose aud claim contains any of auds exactly.
+// Pass the accepted client IDs (Dex puts the client_id in aud) and the
+// server's canonical resource URI (RFC 8707). Empty values are ignored.
+func WithAudiences(auds ...string) Option {
+	return func(v *Verifier) {
+		for _, a := range auds {
+			if a = strings.TrimSpace(a); a != "" {
+				v.audiences[a] = struct{}{}
+			}
+		}
+	}
+}
+
+// WithAudiencePrefixes accepts tokens whose aud claim contains a value
+// starting with any of prefixes. It exists for clients registered through the
+// metadata server's /register endpoint, whose Dex client IDs (and so token
+// audiences) are minted as "mcp-<uuid>". Empty prefixes are ignored: they
+// would accept every audience.
+func WithAudiencePrefixes(prefixes ...string) Option {
+	return func(v *Verifier) {
+		for _, p := range prefixes {
+			if p = strings.TrimSpace(p); p != "" {
+				v.audPrefixes = append(v.audPrefixes, p)
+			}
+		}
+	}
+}
+
+// ErrInvalidAudience is returned (wrapped) when a token verifies but was not
+// issued for this server. Answer 401 like any other invalid token.
+var ErrInvalidAudience = errors.New("token audience not accepted by this server")
+
+func newVerifier(inner *oidc.IDTokenVerifier, pool *pgxpool.Pool, opts []Option) *Verifier {
+	v := &Verifier{inner: inner, enabled: true, pool: pool, audiences: map[string]struct{}{}}
+	for _, opt := range opts {
+		opt(v)
+	}
+	return v
 }
 
 // NewVerifier creates a new Verifier that validates OIDC ID tokens.
 // If issuerURL is empty, the verifier operates in disabled mode (returns anonymous identity).
 // jwksURL is the full URL to the JWKS endpoint (e.g. "http://dex:5556/dex/keys").
-// The pool is used for JIT provisioning and claims enrichment.
-func NewVerifier(ctx context.Context, issuerURL, jwksURL string, pool *pgxpool.Pool) (*Verifier, error) {
+// The pool is used for claims enrichment. An enabled verifier needs at least
+// one accepted audience or audience prefix; otherwise NewVerifier fails.
+func NewVerifier(ctx context.Context, issuerURL, jwksURL string, pool *pgxpool.Pool, opts ...Option) (*Verifier, error) {
 	if issuerURL == "" {
 		slog.Info("auth disabled mode: no issuer URL configured")
 		return &Verifier{enabled: false}, nil
 	}
 
 	keySet := oidc.NewRemoteKeySet(ctx, jwksURL)
-	inner := oidc.NewVerifier(issuerURL, keySet, &oidc.Config{
-		SkipClientIDCheck: true,
-		SkipIssuerCheck:   false,
-	})
+	// go-oidc can only check a single client ID, so the audience check is
+	// done in Verify against the configured set.
+	inner := oidc.NewVerifier(issuerURL, keySet, &oidc.Config{SkipClientIDCheck: true})
+	v := newVerifier(inner, pool, opts)
+	if len(v.audiences) == 0 && len(v.audPrefixes) == 0 {
+		return nil, errors.New("auth: no accepted token audiences configured")
+	}
 
-	slog.Info("oidc verifier created", "issuer", issuerURL, "jwks_url", jwksURL)
-	return &Verifier{inner: inner, enabled: true, pool: pool}, nil
+	slog.Info("oidc verifier created", "issuer", issuerURL, "jwks_url", jwksURL,
+		"audiences", v.audienceList(), "audience_prefixes", v.audPrefixes)
+	return v, nil
 }
 
 // NewVerifierWithKeySet creates an enabled Verifier that checks signatures
 // against keySet instead of a remote JWKS endpoint. Tests use it with an
 // oidc.StaticKeySet to verify locally signed tokens without a Dex server.
-func NewVerifierWithKeySet(issuerURL string, keySet oidc.KeySet, pool *pgxpool.Pool) *Verifier {
+// Without audience options it rejects every token (fail closed).
+func NewVerifierWithKeySet(issuerURL string, keySet oidc.KeySet, pool *pgxpool.Pool, opts ...Option) *Verifier {
 	inner := oidc.NewVerifier(issuerURL, keySet, &oidc.Config{SkipClientIDCheck: true})
-	return &Verifier{inner: inner, enabled: true, pool: pool}
+	return newVerifier(inner, pool, opts)
+}
+
+// audienceAccepted reports whether any aud value is one this server accepts.
+func (v *Verifier) audienceAccepted(aud []string) bool {
+	for _, a := range aud {
+		if _, ok := v.audiences[a]; ok {
+			return true
+		}
+		for _, p := range v.audPrefixes {
+			if strings.HasPrefix(a, p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (v *Verifier) audienceList() []string {
+	out := make([]string, 0, len(v.audiences))
+	for a := range v.audiences {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Enabled returns whether the verifier is active (true) or in local-dev disabled mode (false).
@@ -73,7 +156,8 @@ func (v *Verifier) Enabled() bool {
 	return v.enabled
 }
 
-// Verify validates the raw OIDC ID token and returns the core Identity.
+// Verify validates the raw OIDC ID token (signature, issuer, expiry and
+// audience) and returns the core Identity.
 // In disabled mode, returns a local-dev anonymous identity.
 func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Identity, error) {
 	if !v.enabled {
@@ -83,6 +167,9 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Identity, erro
 	idToken, err := v.inner.Verify(ctx, rawToken)
 	if err != nil {
 		return nil, fmt.Errorf("verify token: %w", err)
+	}
+	if !v.audienceAccepted(idToken.Audience) {
+		return nil, fmt.Errorf("verify token: %w (aud %v)", ErrInvalidAudience, idToken.Audience)
 	}
 
 	var claims struct {
