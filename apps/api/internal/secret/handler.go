@@ -57,7 +57,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -79,13 +82,15 @@ type searchIndexer interface {
 
 // Handler holds dependencies for secret HTTP handlers.
 type Handler struct {
-	repo   *Repo
-	search searchIndexer
+	repo     *Repo
+	search   searchIndexer
+	agentKey *AgentKey    // nil: "shared with agents" is off (#4446)
+	limiter  *failLimiter // wrong /verify attempts per household
 }
 
 // NewHandler creates a new secret handler.
 func NewHandler(repo *Repo) *Handler {
-	return &Handler{repo: repo}
+	return &Handler{repo: repo, limiter: newFailLimiter()}
 }
 
 // WithSearchClient sets the Typesense client for search indexing.
@@ -173,11 +178,17 @@ type createSecretRequest struct {
 // (re-encrypted blob + updated metadata). A partial update that omits
 // encrypted_data/iv would leave the stored blob stale, so the handler requires
 // all four to be present.
+//
+// A new blob may mean a new value, so a credential shared with agents (#4446)
+// loses its server copy on every PATCH unless the request also carries
+// agent_value (the new plaintext object, owner/family_manager only), which
+// re-seals it in the same UPDATE.
 type updateSecretRequest struct {
-	EncryptedData []byte `json:"encrypted_data"`
-	IV            []byte `json:"iv"`
-	Name          string `json:"name"`
-	SecretType    string `json:"secret_type"`
+	EncryptedData []byte          `json:"encrypted_data"`
+	IV            []byte          `json:"iv"`
+	Name          string          `json:"name"`
+	SecretType    string          `json:"secret_type"`
+	AgentValue    json.RawMessage `json:"agent_value,omitempty"`
 }
 
 // setupKeyRequest is the JSON body for POST /api/v1/secrets/setup. The client
@@ -213,10 +224,28 @@ func clientVerifier(verifier, keyHash []byte) []byte {
 	return keyHash
 }
 
-// writeUnauthorized writes the 401 body /verify uses for "no match".
-func writeUnauthorized(w http.ResponseWriter, msg string) {
-	apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
-		Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: msg},
+// writeInvalidMasterKey writes the body /verify uses for "no match": 422
+// INVALID_MASTER_KEY. Not 401, because the BFF reads any upstream 401 as an
+// expired session and spends a Dex token refresh on it (#4445/#4446).
+func writeInvalidMasterKey(w http.ResponseWriter) {
+	apierr.JSON(w, http.StatusUnprocessableEntity, apierr.ErrorResponse{
+		Error: apierr.ErrorDetail{Code: "INVALID_MASTER_KEY", Message: "invalid master key"},
+	})
+}
+
+// writeTooManyAttempts writes the 429 /verify sends while a household is
+// locked out after too many wrong master passwords.
+func writeTooManyAttempts(w http.ResponseWriter, wait time.Duration) {
+	secs := int(math.Ceil(wait.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	apierr.JSON(w, http.StatusTooManyRequests, apierr.ErrorResponse{
+		Error: apierr.ErrorDetail{
+			Code:    "TOO_MANY_ATTEMPTS",
+			Message: "too many wrong master passwords; try again in " + strconv.Itoa((secs+59)/60) + " minute(s)",
+		},
 	})
 }
 
@@ -445,7 +474,31 @@ func (h *Handler) UpdateSecret(w http.ResponseWriter, r *http.Request) {
 		SecretType:    req.SecretType,
 	}
 
-	updated, err := h.repo.UpdateSecret(r.Context(), hid, id, s)
+	// Agent copy: re-seal the new value when given, otherwise drop it.
+	var agentBlob []byte
+	if len(req.AgentValue) > 0 && string(req.AgentValue) != "null" {
+		if !canShareWithAgents(r) {
+			apierr.Forbidden(w, "only an owner or family manager can share a credential with agents")
+			return
+		}
+		if h.agentKey == nil {
+			writeSharingDisabled(w)
+			return
+		}
+		plain, msg := agentValue(req.AgentValue)
+		if msg != "" {
+			apierr.BadRequest(w, "agent_"+msg)
+			return
+		}
+		agentBlob, err = h.agentKey.Seal(hid, id, plain)
+		clear(plain)
+		if err != nil {
+			apierr.InternalError(w, err)
+			return
+		}
+	}
+
+	updated, err := h.repo.UpdateSecret(r.Context(), hid, id, s, agentBlob, actorUserID(r))
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -609,9 +662,7 @@ func (h *Handler) GetKeyInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	if stored == nil {
 		// No key set up for this household — 404 so the client can redirect
-		// to the setup flow. Distinguish from /verify's 401: here the question
-		// is "does a key exist?" (404 = no), not "does this hash match?"
-		// (401 = no).
+		// to the setup flow. /verify answers 422 for "does not match".
 		apierr.NotFound(w, "master key not set up")
 		return
 	}
@@ -638,7 +689,10 @@ func (h *Handler) GetKeyInfo(w http.ResponseWriter, r *http.Request) {
 //     upgrade is logged (household id only) and the unlock still succeeds; the
 //     next unlock retries it.
 //
-// Returns 200 on a match, 401 if not (or if no key is set up yet).
+// Returns 200 on a match; 422 INVALID_MASTER_KEY on a mismatch (never 401:
+// the BFF treats a 401 as an expired session); 404 if no key is set up; 429
+// TOO_MANY_ATTEMPTS (with Retry-After) after verifyMaxFailures wrong attempts
+// for the household within verifyFailWindow.
 //
 // POST /api/v1/secrets/verify
 func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
@@ -670,15 +724,20 @@ func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if stored == nil {
-		// No key set up for this household + version — not a match. The
-		// client should redirect to the setup flow.
-		writeUnauthorized(w, "master key not set up")
+		// No key set up for this household + version. The client should
+		// go to the setup flow (GET /secrets/key answers the same 404).
+		apierr.NotFound(w, "master key not set up")
+		return
+	}
+	if wait := h.limiter.retryAfter(hid); wait > 0 {
+		writeTooManyAttempts(w, wait)
 		return
 	}
 	// A verifier outside the accepted length can never match a stored one;
 	// reject it before spending an argon2id computation on it.
 	if !validClientVerifier(verifier) {
-		writeUnauthorized(w, "invalid master key")
+		h.limiter.fail(hid)
+		writeInvalidMasterKey(w)
 		return
 	}
 
@@ -690,7 +749,8 @@ func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !ok {
-			writeUnauthorized(w, "invalid master key")
+			h.limiter.fail(hid)
+			writeInvalidMasterKey(w)
 			return
 		}
 		if needsRehash {
@@ -699,16 +759,19 @@ func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
 
 	case len(stored.KeyHash) > 0:
 		if subtle.ConstantTimeCompare(verifier, stored.KeyHash) != 1 {
-			writeUnauthorized(w, "invalid master key")
+			h.limiter.fail(hid)
+			writeInvalidMasterKey(w)
 			return
 		}
 		h.upgradeLegacyKey(r.Context(), stored, verifier)
 
 	default:
 		// A row with neither (only possible after a 051 down) never matches.
-		writeUnauthorized(w, "invalid master key")
+		h.limiter.fail(hid)
+		writeInvalidMasterKey(w)
 		return
 	}
+	h.limiter.reset(hid)
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{

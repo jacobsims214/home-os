@@ -262,6 +262,21 @@ secrets:
   adminEmail: ""
   adminPassword: ""
 
+# Credentials "shared with agents" (#4446). The API seals a shared
+# credential with a per-household key derived from this master key, and the
+# MCP's credential_reveal opens it. Base64 of 32 random bytes
+# (openssl rand -base64 32). Empty everywhere = sharing off (the share endpoint
+# answers 503); zero-knowledge credentials are unaffected either way. Changing
+# or losing the key makes every shared copy unreadable until it is shared
+# again, so generate it once and keep it.
+agentCredentials:
+  # Secret holding the key; empty = home-os.secretsName.
+  existingSecret: ""
+  existingSecretKey: agentCredentialsKey
+  # Plain key, rendered into home-os-secrets (key agentCredentialsKey) only
+  # when neither existingSecret above nor secrets.existingSecret is set.
+  key: ""
+
 smtp:
   host: ""
   port: "587"

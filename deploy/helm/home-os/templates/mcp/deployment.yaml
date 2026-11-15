@@ -36,6 +36,7 @@ spec:
             secretKeyRef:
               name: {{ include "home-os.secretsName" . }}
               key: jwtSecret
+        {{- include "home-os.agentCredentialsEnv" . | nindent 8 }}
         - name: LOG_LEVEL
           value: "info"
         - name: DEX_JWKS_URL

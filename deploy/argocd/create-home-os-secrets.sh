@@ -66,9 +66,23 @@ $KUBECTL -n "$NS" create secret generic home-os-db-secret \
   --dry-run=client -o yaml |
   $KUBECTL apply --server-side --force-conflicts --field-manager=home-os-secrets -f - >/dev/null
 
-for s in home-os-secrets home-os-db-secret; do
+# Agent-credentials master key (#4446): generated once, never printed, and
+# never replaced by later runs, because a new key makes every credential the
+# family shared with agents unreadable until it is shared again. Set
+# HOMEOS_AGENT_CREDENTIALS_KEY (base64 of 32 bytes) to supply your own on the
+# first run instead.
+if ! $KUBECTL -n "$NS" get secret home-os-agent-credentials >/dev/null 2>&1; then
+  key=${HOMEOS_AGENT_CREDENTIALS_KEY:-$(openssl rand -base64 32)}
+  $KUBECTL -n "$NS" create secret generic home-os-agent-credentials \
+    --from-literal=agentCredentialsKey="$key" \
+    --dry-run=client -o yaml |
+    $KUBECTL apply --server-side --field-manager=home-os-secrets -f - >/dev/null
+  unset key
+fi
+
+for s in home-os-secrets home-os-db-secret home-os-agent-credentials; do
   $KUBECTL -n "$NS" annotate secret "$s" --overwrite \
     argocd.argoproj.io/sync-options=Prune=false >/dev/null
 done
 
-echo "home-os-secrets and home-os-db-secret are in namespace $NS."
+echo "home-os-secrets, home-os-db-secret and home-os-agent-credentials are in namespace $NS."

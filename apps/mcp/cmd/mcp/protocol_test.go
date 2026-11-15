@@ -32,6 +32,7 @@ var wantTools = []string{
 	"budget_summary",
 	"calendar_create", "calendar_find", "calendar_find_free_time",
 	"contact_find",
+	"credential_find", "credential_reveal",
 	"document_find", "document_get", "document_upload",
 	"event_create", "event_delete", "event_find", "event_update",
 	"family_overview", "family_update",

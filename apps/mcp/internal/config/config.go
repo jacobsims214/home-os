@@ -63,6 +63,11 @@ type Config struct {
 	TypesenseHost   string
 	TypesensePort   string
 	TypesenseAPIKey string
+	// AgentCredentialsKey is the base64 32-byte master key that opens
+	// credentials shared with agents (AGENT_CREDENTIALS_KEY, from a
+	// Kubernetes Secret, #4446). Empty disables credential_reveal. Never
+	// logged.
+	AgentCredentialsKey string
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -84,6 +89,8 @@ func Load() (*Config, error) {
 		TypesenseHost:   getEnv("TYPESENSE_HOST", ""),
 		TypesensePort:   getEnv("TYPESENSE_PORT", ""),
 		TypesenseAPIKey: os.Getenv("TYPESENSE_API_KEY"),
+
+		AgentCredentialsKey: os.Getenv("AGENT_CREDENTIALS_KEY"),
 	}
 
 	var missing []string

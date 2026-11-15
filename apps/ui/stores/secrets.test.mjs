@@ -98,29 +98,32 @@ test("unlock: GET /bff/secrets/key, then POST /bff/secrets/verify {verifier, key
   assert.equal(useSecretsStore.getState().isUnlocked, true);
 });
 
-test("unlock with a wrong password: 'Incorrect master password.', no /login redirect", async () => {
+test("unlock with a wrong password: 422 -> 'Incorrect master password.', no /login redirect", async () => {
   routes["GET /bff/secrets/key"] = [200, { data: { key_salt: SALT, key_version: 1 } }];
-  routes["POST /bff/secrets/verify"] = [401, { error: { code: "UNAUTHORIZED", message: "invalid master key" } }];
+  routes["POST /bff/secrets/verify"] = [422, { error: { code: "INVALID_MASTER_KEY", message: "invalid master key" } }];
   await assert.rejects(useSecretsStore.getState().unlock("wrong"), /Incorrect master password\./);
   assert.deepEqual(assigned, []);
+  // One /verify, no session re-check: a 422 never costs a token refresh.
+  assert.deepEqual(calls.map((c) => c.path), ["/bff/secrets/key", "/bff/secrets/verify"]);
   assert.equal(useSecretsStore.getState().isUnlocked, false);
   assert.equal(useSecretsStore.getState().cryptoKey, null);
   assert.equal(useSecretsStore.getState().error, "Incorrect master password.");
 });
 
-test("unlock when the session has ended: the session re-check sends the browser to /login", async () => {
-  routes["POST /bff/secrets/verify"] = [401, { error: { code: "UNAUTHORIZED" } }];
-  let keyCalls = 0;
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    if (new URL(url).pathname === "/bff/secrets/key" && keyCalls++ > 0) {
-      routes["GET /bff/secrets/key"] = [401, { error: { code: "UNAUTHORIZED", message: "session expired" } }];
-    }
-    return realFetch(url, init);
-  };
+test("unlock while locked out: 429 -> a wait message, no /login redirect", async () => {
   routes["GET /bff/secrets/key"] = [200, { data: { key_salt: SALT, key_version: 1 } }];
+  routes["POST /bff/secrets/verify"] = [429, { error: { code: "TOO_MANY_ATTEMPTS", message: "too many wrong master passwords" } }];
+  await assert.rejects(useSecretsStore.getState().unlock(PASSWORD), /Too many wrong master passwords/);
+  assert.deepEqual(assigned, []);
+  assert.equal(useSecretsStore.getState().isUnlocked, false);
+});
+
+test("unlock when the session has ended: /verify 401 sends the browser to /login", async () => {
+  routes["GET /bff/secrets/key"] = [200, { data: { key_salt: SALT, key_version: 1 } }];
+  routes["POST /bff/secrets/verify"] = [401, { error: { code: "UNAUTHORIZED", message: "session expired" } }];
   await assert.rejects(useSecretsStore.getState().unlock(PASSWORD), (e) => e.status === 401);
   assert.deepEqual(assigned, ["/login?redirect=%2Fdashboard%2Fsettings"]);
+  assert.equal(useSecretsStore.getState().isUnlocked, false);
 });
 
 test("unlock when not set up: a clear error, no /verify call", async () => {

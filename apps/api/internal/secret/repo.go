@@ -74,12 +74,14 @@ func (r *Repo) CreateSecret(ctx context.Context, householdID uuid.UUID, s *Secre
 		`INSERT INTO secrets (household_id, entity_type, entity_id, encrypted_data, iv, key_version, name, secret_type)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING id, household_id, entity_type, entity_id, encrypted_data, iv, key_version,
-		           name, secret_type, created_at, updated_at`,
+		           name, secret_type, created_at, updated_at,
+		           agent_ciphertext IS NOT NULL, agent_shared_at`,
 		householdID, s.EntityType, s.EntityID, s.EncryptedData, s.IV, s.KeyVersion, s.Name, s.SecretType,
 	).Scan(
 		&created.ID, &created.HouseholdID, &created.EntityType, &created.EntityID,
 		&created.EncryptedData, &created.IV, &created.KeyVersion,
 		&created.Name, &created.SecretType, &created.CreatedAt, &created.UpdatedAt,
+		&created.SharedWithAgents, &created.AgentSharedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create secret: %w", err)
@@ -99,7 +101,8 @@ func (r *Repo) CreateSecret(ctx context.Context, householdID uuid.UUID, s *Secre
 func (r *Repo) GetSecret(ctx context.Context, householdID, id uuid.UUID) (*Secret, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT id, household_id, entity_type, entity_id, encrypted_data, iv, key_version,
-		        name, secret_type, created_at, updated_at
+		        name, secret_type, created_at, updated_at,
+		        agent_ciphertext IS NOT NULL, agent_shared_at
 		 FROM secrets
 		 WHERE id = $1 AND household_id = $2`,
 		id, householdID,
@@ -140,13 +143,15 @@ func (r *Repo) ListSecrets(ctx context.Context, householdID uuid.UUID, entityTyp
 		args  []any
 	)
 	if entityType != "" && entityID != uuid.Nil {
-		query = `SELECT id, household_id, entity_type, entity_id, key_version, name, secret_type, created_at, updated_at
+		query = `SELECT id, household_id, entity_type, entity_id, key_version, name, secret_type, created_at, updated_at,
+		                agent_ciphertext IS NOT NULL, agent_shared_at
 		         FROM secrets
 		         WHERE household_id = $1 AND entity_type = $2 AND entity_id = $3
 		         ORDER BY created_at DESC`
 		args = []any{householdID, entityType, entityID}
 	} else {
-		query = `SELECT id, household_id, entity_type, entity_id, key_version, name, secret_type, created_at, updated_at
+		query = `SELECT id, household_id, entity_type, entity_id, key_version, name, secret_type, created_at, updated_at,
+		                agent_ciphertext IS NOT NULL, agent_shared_at
 		         FROM secrets
 		         WHERE household_id = $1
 		         ORDER BY created_at DESC`
@@ -183,7 +188,13 @@ func (r *Repo) ListSecrets(ctx context.Context, householdID uuid.UUID, entityTyp
 // Returns the fully-populated updated *Secret (including encrypted_data + iv),
 // or (nil, nil) if the secret does not exist or belongs to a different
 // household — same not-found-vs-forbidden contract as GetSecret.
-func (r *Repo) UpdateSecret(ctx context.Context, householdID, id uuid.UUID, s *Secret) (*Secret, error) {
+//
+// Agent sharing (#4446): a new encrypted_data means the value may have
+// changed, so the server-held agent copy is replaced in the same statement.
+// agentBlob nil drops it (the credential is no longer shared, so a stale
+// value never lingers); non-nil stores the freshly sealed value, shared by
+// sharedBy.
+func (r *Repo) UpdateSecret(ctx context.Context, householdID, id uuid.UUID, s *Secret, agentBlob []byte, sharedBy *uuid.UUID) (*Secret, error) {
 	var updated Secret
 	err := r.pool.QueryRow(ctx,
 		`UPDATE secrets
@@ -191,15 +202,20 @@ func (r *Repo) UpdateSecret(ctx context.Context, householdID, id uuid.UUID, s *S
 		     iv = $2,
 		     name = $3,
 		     secret_type = $4,
+		     agent_ciphertext = $7::bytea,
+		     agent_shared_at = CASE WHEN $7::bytea IS NULL THEN NULL ELSE NOW() END,
+		     agent_shared_by = CASE WHEN $7::bytea IS NULL THEN NULL ELSE $8::uuid END,
 		     updated_at = NOW()
 		 WHERE id = $5 AND household_id = $6
 		 RETURNING id, household_id, entity_type, entity_id, encrypted_data, iv, key_version,
-		           name, secret_type, created_at, updated_at`,
-		s.EncryptedData, s.IV, s.Name, s.SecretType, id, householdID,
+		           name, secret_type, created_at, updated_at,
+		           agent_ciphertext IS NOT NULL, agent_shared_at`,
+		s.EncryptedData, s.IV, s.Name, s.SecretType, id, householdID, agentBlob, sharedBy,
 	).Scan(
 		&updated.ID, &updated.HouseholdID, &updated.EntityType, &updated.EntityID,
 		&updated.EncryptedData, &updated.IV, &updated.KeyVersion,
 		&updated.Name, &updated.SecretType, &updated.CreatedAt, &updated.UpdatedAt,
+		&updated.SharedWithAgents, &updated.AgentSharedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -309,4 +325,57 @@ func (r *Repo) ReplaceVerifier(ctx context.Context, householdID, keyID uuid.UUID
 		return false, fmt.Errorf("replace verifier: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// metaColumns is the SecretListItem column list, in struct order.
+const metaColumns = `id, household_id, entity_type, entity_id, key_version, name, secret_type, created_at, updated_at,
+	agent_ciphertext IS NOT NULL, agent_shared_at`
+
+// ShareWithAgents stores the server-sealed agent copy of a secret (#4446).
+// Returns (nil, nil) when the secret does not exist or belongs to another
+// household. Sharing again replaces the copy.
+func (r *Repo) ShareWithAgents(ctx context.Context, householdID, id uuid.UUID, agentBlob []byte, sharedBy *uuid.UUID) (*SecretListItem, error) {
+	return r.collectMeta(ctx, "share secret",
+		`UPDATE secrets
+		    SET agent_ciphertext = $3, agent_shared_at = NOW(), agent_shared_by = $4, updated_at = NOW()
+		  WHERE id = $1 AND household_id = $2
+		 RETURNING `+metaColumns,
+		id, householdID, agentBlob, sharedBy)
+}
+
+// UnshareWithAgents deletes the server-held agent copy immediately. It is a
+// no-op (but still returns the row) for a secret that was not shared.
+// Returns (nil, nil) when the secret does not exist or belongs to another
+// household.
+func (r *Repo) UnshareWithAgents(ctx context.Context, householdID, id uuid.UUID) (*SecretListItem, error) {
+	item, err := r.collectMeta(ctx, "unshare secret",
+		`UPDATE secrets
+		    SET agent_ciphertext = NULL, agent_shared_at = NULL, agent_shared_by = NULL, updated_at = NOW()
+		  WHERE id = $1 AND household_id = $2 AND agent_ciphertext IS NOT NULL
+		 RETURNING `+metaColumns,
+		id, householdID)
+	if err != nil || item != nil {
+		return item, err
+	}
+	// Not shared (or not ours): read it without writing, so an idempotent
+	// unshare logs nothing.
+	return r.collectMeta(ctx, "unshare secret",
+		`SELECT `+metaColumns+` FROM secrets WHERE id = $1 AND household_id = $2`,
+		id, householdID)
+}
+
+func (r *Repo) collectMeta(ctx context.Context, op, sql string, args ...any) (*SecretListItem, error) {
+	rows, err := r.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	defer rows.Close()
+	item, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[SecretListItem])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	return item, nil
 }

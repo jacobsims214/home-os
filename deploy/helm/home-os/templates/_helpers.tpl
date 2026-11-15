@@ -82,6 +82,29 @@ smtpPassword
 {{- end -}}
 {{- end -}}
 
+{{/* Agent-credentials master key (#4446): agentCredentials.existingSecret, else the app secret. */}}
+{{- define "home-os.agentCredentialsSecretName" -}}
+{{- .Values.agentCredentials.existingSecret | default (include "home-os.secretsName" .) -}}
+{{- end -}}
+
+{{- define "home-os.agentCredentialsSecretKey" -}}
+{{- if .Values.agentCredentials.existingSecret -}}
+{{- .Values.agentCredentials.existingSecretKey | default "agentCredentialsKey" -}}
+{{- else -}}
+agentCredentialsKey
+{{- end -}}
+{{- end -}}
+
+{{/* AGENT_CREDENTIALS_KEY env for the api and mcp. Optional: without it sharing is off. */}}
+{{- define "home-os.agentCredentialsEnv" -}}
+- name: AGENT_CREDENTIALS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "home-os.agentCredentialsSecretName" . }}
+      key: {{ include "home-os.agentCredentialsSecretKey" . }}
+      optional: true
+{{- end -}}
+
 {{/*
 Database connection parts, shared by home-os.databaseUrl and Dex's storage
 config. Managed: the chart's CNPG cluster as `app`, no TLS. External:

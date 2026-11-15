@@ -118,15 +118,16 @@ var areas = []area{
 		Title: "t.name || ' (' || p.name || ')'", Doc: "concat_ws(' ', t.name, t.notes)",
 		OpenRef: "t.property_id", Open: "property_find id=%s", Sort: "t.created_at"},
 	// Credentials: only the name and type are searched or returned, never the
-	// secret value (encrypted_data is not read).
+	// secret value (neither encrypted_data nor agent_ciphertext is read).
+	// credential_find says where it lives and whether agents may read it.
 	{Name: "credential", Plural: "credentials", From: "secrets t", Scope: "t.household_id",
 		Title: "t.name", Doc: "concat_ws(' ', t.name, t.secret_type)",
-		OpenRef: "t.name", Open: "Tell the user it is saved in Home OS as %q; agents never see the secret value.", Sort: "t.created_at"},
+		OpenRef: "t.id", Open: "credential_find id=%s (search never shows the secret value)", Sort: "t.created_at"},
 }
 
 // noOpenTool is the types whose open is plain text for the user, not a tool
 // call, so they are left out of the "Open … with …" hints.
-var noOpenTool = map[string]bool{"credential": true, "list": true, "recipe": true}
+var noOpenTool = map[string]bool{"list": true, "recipe": true}
 
 // areaNames is the types[] enum, in result order.
 var areaNames = func() []string {

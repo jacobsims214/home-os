@@ -65,6 +65,8 @@ var wantToolClass = map[string]toolClass{
 	"calendar_find":           classR,
 	"calendar_find_free_time": classR,
 	"contact_find":            classR,
+	"credential_find":         classR,
+	"credential_reveal":       classR,
 	"document_find":           classR,
 	"document_get":            classR,
 	"document_upload":         classC,

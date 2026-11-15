@@ -46,6 +46,7 @@ spec:
             secretKeyRef:
               name: {{ include "home-os.secretsName" . }}
               key: encryptionKey
+        {{- include "home-os.agentCredentialsEnv" . | nindent 8 }}
         - name: LOG_LEVEL
           value: "info"
         - name: DEMO_MODE

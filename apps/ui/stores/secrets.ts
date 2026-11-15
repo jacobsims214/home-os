@@ -13,8 +13,9 @@
  *    to /secrets/setup. The API stores only argon2id(verifier).
  * 2. unlock: GET /secrets/key returns { data: { key_salt, key_version } }, or
  *    404 if not set up. Client derives the key, computes the verifier and
- *    POSTs {verifier, key_version} to /secrets/verify: 200 match / 401 wrong
- *    password. Households set up before migration 051 are upgraded by the API
+ *    POSTs {verifier, key_version} to /secrets/verify: 200 match / 422
+ *    INVALID_MASTER_KEY wrong password / 429 too many wrong attempts (#4446).
+ *    A 401 only ever means the session ended (normal /login redirect). Households set up before migration 051 are upgraded by the API
  *    on this first successful verify; the UI sends the same value either way.
  * 3. lock: clear CryptoKey from memory, set isUnlocked=false.
  *
@@ -193,21 +194,20 @@ export const useSecretsStore = create<SecretsStore>()((set) => ({
       const key = await deriveKey(password, keyInfo.key_salt);
       const verifier = await computeVerifier(key);
 
-      // 3. Verify. 200 = correct password, 401 = wrong password. A 401 here
-      //    is not a lost session, so it must not send the browser to /login.
+      // 3. Verify. 200 = correct password, 422 = wrong password, 429 = the
+      //    household is locked out for a while. A 401 is a lost session and
+      //    takes apiFetch's normal /login redirect.
       try {
         await apiFetch("/api/v1/secrets/verify", {
           method: "POST",
           body: buildVerifyRequest(verifier, keyVersion),
-          redirectOn401: false,
         });
       } catch (err) {
-        if (err instanceof ApiError && err.status === 401) {
-          // The BFF also answers 401 when the session itself has ended. Ask
-          // an idempotent endpoint: if the session is gone, this 401s with
-          // the normal /login redirect; otherwise the password was wrong.
-          await fetchKeyInfo();
+        if (err instanceof ApiError && err.status === 422) {
           throw new Error("Incorrect master password.");
+        }
+        if (err instanceof ApiError && err.status === 429) {
+          throw new Error("Too many wrong master passwords. Wait a few minutes and try again.");
         }
         throw err;
       }

@@ -38,6 +38,10 @@ type Config struct {
 	AdminEmail        string // ADMIN_EMAIL, default ""
 	AdminPassword     string // ADMIN_PASSWORD, default ""
 	AdminName         string // ADMIN_NAME, default "Admin"
+	// AgentCredentialsKey is the base64 32-byte master key that seals
+	// credentials shared with agents (AGENT_CREDENTIALS_KEY, from a
+	// Kubernetes Secret, #4446). Empty disables sharing. Never logged.
+	AgentCredentialsKey string
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -70,6 +74,8 @@ func Load() (*Config, error) {
 		AdminEmail:        os.Getenv("ADMIN_EMAIL"),
 		AdminPassword:     os.Getenv("ADMIN_PASSWORD"),
 		AdminName:         getEnv("ADMIN_NAME", "Admin"),
+
+		AgentCredentialsKey: os.Getenv("AGENT_CREDENTIALS_KEY"),
 	}
 
 	var missing []string

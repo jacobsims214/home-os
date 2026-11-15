@@ -132,7 +132,7 @@ type taskBrief struct {
 type recentChange struct {
 	EntityType string `json:"entity_type" jsonschema_description:"What changed, e.g. bill or event"`
 	EntityID   string `json:"entity_id"`
-	Action     string `json:"action" jsonschema_description:"create, update or delete"`
+	Action     string `json:"action" jsonschema_description:"create, update, delete, or read (an agent read a shared credential)"`
 	Summary    string `json:"summary"`
 	At         string `json:"at" jsonschema_description:"When, RFC 3339 in the family timezone"`
 }

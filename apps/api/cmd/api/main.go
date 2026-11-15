@@ -331,6 +331,14 @@ func main() {
 		// Secret storage (zero-knowledge, encrypted client-side)
 		secretRepo := secret.NewRepo(pool)
 		secretHandler := secret.NewHandler(secretRepo).WithSearchClient(searchClient)
+		// "Shared with agents" (#4446): off unless AGENT_CREDENTIALS_KEY holds
+		// a valid key. A bad key leaves sharing off (503) and is logged
+		// without its value.
+		if agentKey, err := secret.ParseAgentKey(cfg.AgentCredentialsKey); err != nil {
+			slog.Error("secrets: agent credential sharing disabled", "error", err)
+		} else if agentKey != nil {
+			secretHandler.WithAgentKey(agentKey)
+		}
 		r.Post("/api/v1/secrets", secretHandler.CreateSecret)
 		r.Get("/api/v1/secrets", secretHandler.ListSecrets)
 		r.Get("/api/v1/secrets/{id}", secretHandler.GetSecret)
@@ -339,6 +347,8 @@ func main() {
 		r.Post("/api/v1/secrets/setup", secretHandler.SetupKey)
 		r.Post("/api/v1/secrets/verify", secretHandler.VerifyKey)
 		r.Get("/api/v1/secrets/key", secretHandler.GetKeyInfo)
+		r.Put("/api/v1/secrets/{id}/agent-share", secretHandler.ShareWithAgents)
+		r.Delete("/api/v1/secrets/{id}/agent-share", secretHandler.UnshareWithAgents)
 
 		// Link CRUD (polymorphic)
 		linkRepo := link.NewRepo(pool)

@@ -23,7 +23,7 @@ import (
 // hint, an `open` tool, or text a tool description serves.
 //
 // The list_*, recipe_*, guide_*, contact_create/update/delete, person_*,
-// pet_/property_/vehicle_ writes, credential_*, meal_* and activity_find
+// pet_/property_/vehicle_ writes, meal_* and activity_find
 // names are not registered yet. When the ticket that registers one adds it
 // to wantTools (protocol_test.go), hints and `open` maps may name it again:
 // this test then passes for it without any change here.

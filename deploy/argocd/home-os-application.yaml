@@ -87,6 +87,10 @@ spec:
           existingSecret: home-os-db-secret
         secrets:
           existingSecret: home-os-secrets
+        # Created once by create-home-os-secrets.sh (never rotated by it).
+        # Optional in the pods: until it exists, agent sharing is off.
+        agentCredentials:
+          existingSecret: home-os-agent-credentials
   syncPolicy:
     syncOptions:
       - CreateNamespace=true

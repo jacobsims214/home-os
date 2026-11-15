@@ -103,7 +103,7 @@ func TestSecretKey_SetupStoresSaltedVerifier(t *testing.T) {
 	}
 	// Wrong verifier.
 	wrong := sha256.Sum256([]byte("wrong"))
-	if code, _ := call(t, h.VerifyKey, hid, map[string]any{"key_hash": wrong[:], "key_version": 1}); code != http.StatusUnauthorized {
+	if code, _ := call(t, h.VerifyKey, hid, map[string]any{"key_hash": wrong[:], "key_version": 1}); code != http.StatusUnprocessableEntity {
 		t.Fatalf("verify(wrong): %d", code)
 	}
 	// Second setup is a conflict.
@@ -136,7 +136,7 @@ func TestSecretKey_LegacyRowUpgradesOnUnlock(t *testing.T) {
 
 	// A wrong password does not upgrade the row.
 	wrong := sha256.Sum256([]byte("nope"))
-	if code, _ := call(t, h.VerifyKey, hid, map[string]any{"key_hash": wrong[:], "key_version": 1}); code != http.StatusUnauthorized {
+	if code, _ := call(t, h.VerifyKey, hid, map[string]any{"key_hash": wrong[:], "key_version": 1}); code != http.StatusUnprocessableEntity {
 		t.Fatalf("verify(wrong legacy): %d", code)
 	}
 	if row := readKeyRow(t, pool, hid); row.verifier != nil || row.keyHash == nil {
@@ -159,7 +159,7 @@ func TestSecretKey_LegacyRowUpgradesOnUnlock(t *testing.T) {
 	if code, _ := call(t, h.VerifyKey, hid, map[string]any{"key_hash": legacy[:], "key_version": 1}); code != http.StatusOK {
 		t.Fatalf("verify(after upgrade): %d", code)
 	}
-	if code, _ := call(t, h.VerifyKey, hid, map[string]any{"key_hash": wrong[:], "key_version": 1}); code != http.StatusUnauthorized {
+	if code, _ := call(t, h.VerifyKey, hid, map[string]any{"key_hash": wrong[:], "key_version": 1}); code != http.StatusUnprocessableEntity {
 		t.Fatalf("verify(wrong after upgrade): %d", code)
 	}
 

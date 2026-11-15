@@ -352,7 +352,7 @@ func TestSearchAllAreas(t *testing.T) {
 
 	t.Run("credential hits never carry the value", func(t *testing.T) {
 		hit := group(env, "credential").Items[0]
-		if strings.Contains(hit.Snippet, "enc") || !strings.Contains(hit.Open, "never see the secret value") {
+		if strings.Contains(hit.Snippet, "enc") || !strings.Contains(hit.Open, "credential_find id=") || !strings.Contains(hit.Open, "never shows the secret value") {
 			t.Errorf("credential hit = %+v", hit)
 		}
 	})

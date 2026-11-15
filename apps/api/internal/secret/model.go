@@ -1,7 +1,10 @@
 // Package secret manages the native Home OS secrets manager — a zero-knowledge
 // store where the API holds only encrypted blobs and the browser derives the
 // AES-256-GCM key from the user's master password via the Web Crypto API
-// (PBKDF2, 100K iterations). Plaintext never touches the server.
+// (PBKDF2, 100K iterations). Plaintext never touches the server, with one
+// opt-in exception: an owner or family_manager may share a single credential
+// with agents, and the API then keeps a server-sealed copy of it in
+// secrets.agent_ciphertext (agentkey.go, agentshare.go, #4446).
 //
 // The secrets table holds the encrypted payload plus plaintext metadata
 // (name, secret_type) for listing/search. The secret_keys table holds the
@@ -76,6 +79,11 @@ type Secret struct {
 	SecretType    string    `json:"secret_type"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	// SharedWithAgents is true when an owner or family_manager has shared this
+	// credential with the family's agents (#4446): a server-encrypted copy
+	// exists in secrets.agent_ciphertext. That copy is never serialized.
+	SharedWithAgents bool       `json:"shared_with_agents"`
+	AgentSharedAt    *time.Time `json:"agent_shared_at,omitempty"`
 }
 
 // SecretListItem is the metadata-only view of a secret (no encrypted_data/iv).
@@ -90,6 +98,9 @@ type SecretListItem struct {
 	SecretType  string    `json:"secret_type"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// See Secret.SharedWithAgents.
+	SharedWithAgents bool       `json:"shared_with_agents"`
+	AgentSharedAt    *time.Time `json:"agent_shared_at,omitempty"`
 }
 
 // SecretKey represents a row from the secret_keys table — the material used to

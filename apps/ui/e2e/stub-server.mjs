@@ -141,9 +141,11 @@ function secretsRoute(method, resource, sid, body) {
     secretKeys.set(sid, { key_salt: body.key_salt, key_version: body.key_version, verifier, upgraded: false, requests: [log] });
     return [201, { data: { id: `key-${sid}`, household_id: SEED_USER.household_id, key_salt: body.key_salt, key_version: body.key_version, created_at: new Date().toISOString() } }];
   }
-  if (!rec) return [401, { error: { code: "UNAUTHORIZED", message: "master key not set up" } }];
+  // Mirrors the API since #4446: 404 not set up, 422 wrong password (never
+  // 401, which the BFF reads as an expired session).
+  if (!rec) return [404, { error: { code: "NOT_FOUND", message: "master key not set up" } }];
   if (rec.verifier ? verifier !== rec.verifier : verifier !== rec.key_hash) {
-    return [401, { error: { code: "UNAUTHORIZED", message: "invalid master key" } }];
+    return [422, { error: { code: "INVALID_MASTER_KEY", message: "invalid master key" } }];
   }
   if (!rec.verifier) {
     rec.verifier = rec.key_hash; // legacy upgrade (the API stores argon2id of it)

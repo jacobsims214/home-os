@@ -39,8 +39,9 @@ export interface ApiFetchOptions extends Omit<RequestInit, "body"> {
   params?: Record<string, string | number | boolean | undefined>;
   /**
    * Set false when a 401 from this endpoint means something other than "the
-   * session is gone", so it must not send the browser to /login. Used by
-   * POST /secrets/verify, where 401 means "wrong master password". Default true.
+   * session is gone", so it must not send the browser to /login. (POST
+   * /secrets/verify used it until #4446; it now answers 422 for a wrong
+   * master password.) Default true.
    */
   redirectOn401?: boolean;
 }
