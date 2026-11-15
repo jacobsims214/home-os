@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"home-os/api/internal/activity"
 	"home-os/api/internal/admin"
 	"home-os/api/internal/agenttoken"
 	"home-os/api/internal/asset"
@@ -32,7 +33,6 @@ import (
 	"home-os/api/internal/lists"
 	"home-os/api/internal/loan"
 	"home-os/api/internal/maintenance"
-	"home-os/api/internal/meals"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/note"
 	"home-os/api/internal/notification"
@@ -356,8 +356,9 @@ func main() {
 		// Shared lists (grocery, packing, chores, ...) and their items.
 		lists.NewHandler(lists.NewRepo(pool)).RegisterRoutes(r)
 
-		// Recipes, meal plans and meal feedback (Stage 2, #4475).
-		meals.NewHandler(meals.NewRepo(pool)).RegisterRoutes(r)
+		// Family change feed (activity_log, migration 050). Any member reads;
+		// the roles policy (#4689) plugs in via WithReadPolicy.
+		activity.NewHandler(activity.NewRepo(pool)).RegisterRoutes(r)
 	})
 
 	// Start the HTTP server.
