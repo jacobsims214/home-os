@@ -302,7 +302,7 @@ func NewDocumentUploadTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			case pgErr.Code == "23503": // enforce_entity_owner: missing or another family's row
 				return respond.Invalid("about_id",
 					fmt.Sprintf("No %s with id %s was found in this family.", a.Type, a.ID),
-					fmt.Sprintf("Find the right id with %s, or leave about_type and about_id out to file it for the family.", aboutFinder[a.Type]),
+					fmt.Sprintf("Check the %s's id (%s), or leave about_type and about_id out to file it for the family.", a.Type, findIDWith(a.Type)),
 					aboutExample), nil
 			case pgErr.Code == "23514" && pgErr.ConstraintName == "entity_kind_check":
 				return respond.Invalid("about_type",

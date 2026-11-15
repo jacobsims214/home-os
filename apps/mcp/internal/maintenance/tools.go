@@ -348,8 +348,7 @@ func NewMaintenanceCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc
 			summary += " That date has already passed."
 		}
 		return respond.OK(summary, d,
-			fmt.Sprintf("When it's done: maintenance_complete task_id=%s.", d.ID),
-			fmt.Sprintf("For how-to steps: guide_find query=%q.", r.Name)), nil
+			fmt.Sprintf("When it's done: maintenance_complete task_id=%s.", d.ID)), nil
 	}
 	return "maintenance_create", tool, handler
 }

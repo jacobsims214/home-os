@@ -373,7 +373,7 @@ func TestAssetCreate(t *testing.T) {
 		if deref2(d.Category) != "Jewelry" || deref2(d.PurchasePrice) != 1250.5 {
 			t.Errorf("category=%v price=%v", deref2(d.Category), deref2(d.PurchasePrice))
 		}
-		if !strings.HasPrefix(e.Summary, "Added Wedding ring") || len(e.Next) != 3 || !strings.Contains(e.Next[0], "document_upload about_type=asset about_id="+d.ID) {
+		if !strings.HasPrefix(e.Summary, "Added Wedding ring") || len(e.Next) != 2 || !strings.Contains(e.Next[0], "document_upload about_type=asset about_id="+d.ID) {
 			t.Errorf("summary/next = %q %v", e.Summary, e.Next)
 		}
 	})

@@ -88,13 +88,23 @@ var aboutToDB = map[string]string{
 	"maintenance": "maintenance_task",
 }
 
-// aboutFinder names the tool that finds ids for each about_type.
+// aboutFinder names the registered tool that finds ids for each about_type.
+// list, recipe and guide have no registered finder yet; the ticket that
+// registers list_find, recipe_find or guide_find adds it back here.
 var aboutFinder = map[string]string{
 	"person": "person_find", "property": "property_find", "room": "property_find",
 	"asset": "asset_find", "vehicle": "vehicle_find", "pet": "pet_find",
 	"contact": "contact_find", "bill": "bill_find", "loan": "loan_find",
-	"maintenance": "maintenance_find", "event": "event_find", "list": "list_find",
-	"recipe": "recipe_find", "guide": "guide_find",
+	"maintenance": "maintenance_find", "event": "event_find",
+}
+
+// findIDWith says how to get an about_type's id: its finder tool, or the
+// user when no finder is registered yet.
+func findIDWith(t string) string {
+	if tool, ok := aboutFinder[t]; ok {
+		return "find it with " + tool
+	}
+	return "ask the user for it; looking up a " + t + " by name is coming soon"
 }
 
 // aboutOpen names the registered tool that opens one row of an about_type by
@@ -585,13 +595,13 @@ func parseAbout(args map[string]any, requireID bool, example map[string]any) (ab
 			return a, nil
 		}
 		return about{}, respond.Invalid("about_id", fmt.Sprintf("about_type %s needs about_id.", t),
-			fmt.Sprintf("Pass the %s's id as about_id (find it with %s), or leave about_type out for a family document.", t, aboutFinder[t]),
+			fmt.Sprintf("Pass the %s's id as about_id (%s), or leave about_type out for a family document.", t, findIDWith(t)),
 			example)
 	}
 	id, err := uuid.Parse(rawID)
 	if err != nil {
 		return about{}, respond.Invalid("about_id", fmt.Sprintf("about_id %q is not a UUID.", rawID),
-			fmt.Sprintf("Pass the %s's id (a UUID) from %s, not its name.", t, aboutFinder[t]), example)
+			fmt.Sprintf("Pass the %s's id (a UUID), not its name (%s).", t, findIDWith(t)), example)
 	}
 	a.ID = id
 	return a, nil

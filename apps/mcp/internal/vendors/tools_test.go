@@ -234,7 +234,7 @@ func TestContactFind(t *testing.T) {
 	if got := env.contacts(t); len(got) != 0 || env.Summary != "No contacts saved yet." || env.Total == nil || *env.Total != 0 {
 		t.Fatalf("empty: %+v", env)
 	}
-	if len(env.Next) == 0 || !strings.Contains(env.Next[0], "contact_create") {
+	if len(env.Next) == 0 || env.Next[0] != "Adding contacts is coming soon." {
 		t.Errorf("empty next = %v", env.Next)
 	}
 
@@ -318,7 +318,7 @@ func TestContactFind(t *testing.T) {
 	}
 	env = call(t, ctx, find, map[string]any{"trade": "Pest Control"})
 	if env.Summary != "No Pest Control saved." || len(env.Next) == 0 ||
-		env.Next[0] != "No Pest Control saved. Add one with contact_create trades=[pest_control]." {
+		env.Next[0] != "Adding contacts is coming soon." {
 		t.Errorf("empty trade: %q %v", env.Summary, env.Next)
 	}
 

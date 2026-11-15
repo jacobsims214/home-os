@@ -237,7 +237,6 @@ func createNext(d assetData) []string {
 	return []string{
 		fmt.Sprintf("Save its manual or receipt with document_upload about_type=asset about_id=%s.", d.ID),
 		fmt.Sprintf("Plan upkeep with maintenance_create asset_id=%s.", d.ID),
-		fmt.Sprintf("Write a how-to with guide_create about_type=asset about_id=%s.", d.ID),
 	}
 }
 

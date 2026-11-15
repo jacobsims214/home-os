@@ -130,13 +130,23 @@ var aboutToDB = map[string]string{
 	"maintenance": "maintenance_task",
 }
 
-// aboutFinder names the tool that finds ids for each about_type.
+// aboutFinder names the registered tool that finds ids for each about_type.
+// list, recipe and guide have no registered finder yet; the ticket that
+// registers list_find, recipe_find or guide_find adds it back here.
 var aboutFinder = map[string]string{
 	"person": "person_find", "property": "property_find", "room": "property_find",
 	"asset": "asset_find", "vehicle": "vehicle_find", "pet": "pet_find",
 	"contact": "contact_find", "bill": "bill_find", "loan": "loan_find",
-	"maintenance": "maintenance_find", "event": "event_find", "list": "list_find",
-	"recipe": "recipe_find", "guide": "guide_find",
+	"maintenance": "maintenance_find", "event": "event_find",
+}
+
+// findIDWith says how to get an about_type's id: its finder tool, or the
+// user when no finder is registered yet.
+func findIDWith(t string) string {
+	if tool, ok := aboutFinder[t]; ok {
+		return "find it with " + tool
+	}
+	return "ask the user for it; looking up a " + t + " by name is coming soon"
 }
 
 // aboutFromDB maps a stored (entity_type, entity_id) to the catalog's
@@ -201,13 +211,13 @@ func parseAbout(args map[string]any, requireID bool, example map[string]any) (ab
 			return a, nil
 		}
 		return about{}, respond.Invalid("about_id", fmt.Sprintf("about_type %s needs about_id.", t),
-			fmt.Sprintf("Pass the %s's id as about_id (find it with %s), or leave about_type out for a family note.", t, aboutFinder[t]),
+			fmt.Sprintf("Pass the %s's id as about_id (%s), or leave about_type out for a family note.", t, findIDWith(t)),
 			example)
 	}
 	id, err := uuid.Parse(rawID)
 	if err != nil {
 		return about{}, respond.Invalid("about_id", fmt.Sprintf("about_id %q is not a UUID.", rawID),
-			fmt.Sprintf("Pass the %s's id (a UUID) from %s, not its name.", t, aboutFinder[t]), example)
+			fmt.Sprintf("Pass the %s's id (a UUID), not its name (%s).", t, findIDWith(t)), example)
 	}
 	a.ID = id
 	return a, nil
@@ -451,7 +461,7 @@ func looksLikeChecklist(body string) bool {
 // returned with duplicate:true instead of a second row.
 func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("note_create",
-		mcp.WithDescription("Save a note for the family, optionally about a person, house, car, etc. For checklists (grocery, chores, packing) use list_create instead."),
+		mcp.WithDescription("Save a note for the family, optionally about a person, house, car, etc. Checklists (grocery, chores, packing) are coming soon; for now save them as a note."),
 		mcp.WithString("title",
 			mcp.Description("Short title, max 500 characters, e.g. Wi-Fi password"),
 			mcp.Required(),
@@ -560,7 +570,7 @@ func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			case pgErr.Code == "23503": // enforce_entity_owner: missing or another family's row
 				return respond.Invalid("about_id",
 					fmt.Sprintf("No %s with id %s was found in this family.", a.Type, a.ID),
-					fmt.Sprintf("Find the right id with %s, or leave about_type and about_id out to save a family note.", aboutFinder[a.Type]),
+					fmt.Sprintf("Check the %s's id (%s), or leave about_type and about_id out to save a family note.", a.Type, findIDWith(a.Type)),
 					aboutExample), nil
 			case pgErr.Code == "23514" && pgErr.ConstraintName == "entity_kind_check":
 				return respond.Invalid("about_type",
@@ -579,7 +589,7 @@ func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		}
 		next := []string{fmt.Sprintf("Add to it later with note_update note_id=%s append_text=….", n.ID)}
 		if looksLikeChecklist(content) {
-			next = append(next, "This looks like a checklist; consider list_create so items can be checked off.")
+			next = append(next, "This looks like a checklist; checklists you can tick off are coming soon, so it is saved as a note for now.")
 		}
 		return respond.OK(summary, n, next...), nil
 	}

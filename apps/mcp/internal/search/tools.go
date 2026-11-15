@@ -81,14 +81,17 @@ var areas = []area{
 		Title: "COALESCE(NULLIF(btrim(t.title), ''), '(untitled)')", Doc: "concat_ws(' ', t.title, t.body)",
 		OpenRef: "t.id", Open: "note_get note_id=%s", Sort: "t.updated_at"},
 	{Name: "list", Plural: "lists", From: "lists t", Scope: "t.household_id",
-		Title:   "t.name",
-		Doc:     "concat_ws(' ', t.name, (SELECT string_agg(i.text, ' ' ORDER BY i.position) FROM list_items i WHERE i.list_id = t.id))",
-		OpenRef: "t.id", Open: "list_get list_id=%s", Sort: "t.updated_at"},
+		Title: "t.name",
+		Doc:   "concat_ws(' ', t.name, (SELECT string_agg(i.text, ' ' ORDER BY i.position) FROM list_items i WHERE i.list_id = t.id))",
+		// No list tool is registered yet: plain text, like credential, until
+		// list_get is (then restore "list_get list_id=%s" with OpenRef t.id).
+		OpenRef: "t.name", Open: "Tell the user it is their list %q in Home OS; opening lists here is coming soon.", Sort: "t.updated_at"},
 	{Name: "recipe", Plural: "recipes", From: "recipes t", Scope: "t.household_id",
 		Title: "t.title",
 		Doc: "concat_ws(' ', t.title, t.description, array_to_string(t.tags, ' '), " +
 			"(SELECT string_agg(e->>'name', ' ') FROM jsonb_array_elements(t.ingredients) e))",
-		OpenRef: "t.id", Open: "recipe_get recipe_id=%s", Sort: "t.created_at"},
+		// No recipe tool is registered yet: plain text until recipe_get is.
+		OpenRef: "t.title", Open: "Tell the user it is their recipe %q in Home OS; opening recipes here is coming soon.", Sort: "t.created_at"},
 	{Name: "document", Plural: "documents", From: "files t", Scope: "t.household_id",
 		// 048 document metadata: title (falls back to the file name),
 		// category and description are searched before the extracted text.
@@ -120,6 +123,10 @@ var areas = []area{
 		Title: "t.name", Doc: "concat_ws(' ', t.name, t.secret_type)",
 		OpenRef: "t.name", Open: "Tell the user it is saved in Home OS as %q; agents never see the secret value.", Sort: "t.created_at"},
 }
+
+// noOpenTool is the types whose open is plain text for the user, not a tool
+// call, so they are left out of the "Open … with …" hints.
+var noOpenTool = map[string]bool{"credential": true, "list": true, "recipe": true}
 
 // areaNames is the types[] enum, in result order.
 var areaNames = func() []string {
@@ -559,7 +566,7 @@ func nextHints(r searchResult, limit int) []string {
 		if len(next) == 2 {
 			break
 		}
-		if len(g.Items) > 0 && g.Type != "credential" {
+		if len(g.Items) > 0 && !noOpenTool[g.Type] {
 			next = append(next, fmt.Sprintf("Open %q with %s.", g.Items[0].Title, g.Items[0].Open))
 		}
 	}

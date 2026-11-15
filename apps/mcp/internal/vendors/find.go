@@ -170,19 +170,20 @@ func findSummary(in findInput, page []contactData, total int) string {
 }
 
 // findNext is contact_find's next-step hints (catalog "Next": an empty
-// trade search suggests contact_create with that trade).
+// trade search would suggest contact_create with that trade; until contact_create
+// is registered it says adding contacts is coming soon).
 func findNext(in findInput, page []contactData) []string {
 	if len(page) == 0 {
 		switch {
 		case in.trade != "":
 			return []string{
-				fmt.Sprintf("No %s saved. Add one with contact_create trades=[%s].", in.trade, in.tradeNorm),
+				"Adding contacts is coming soon.",
 				fmt.Sprintf("Or search names and notes with contact_find query=%s.", in.trade),
 			}
 		case in.filtered():
-			return []string{"Call contact_find without query to list every contact, or add one with contact_create."}
+			return []string{"Call contact_find without query to list every contact."}
 		default:
-			return []string{"Add a plumber, doctor, vet or other service with contact_create trades=[plumber]."}
+			return []string{"Adding contacts is coming soon."}
 		}
 	}
 	c := page[0]
