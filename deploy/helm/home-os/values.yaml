@@ -27,8 +27,7 @@ api:
   # Override for PUBLIC_URL; empty = global.publicUrl.
   publicUrl: ""
   allowRegistration: "false"
-  adminEmail: ""
-  adminPassword: ""
+  # Admin bootstrap credentials live in secrets.adminEmail / secrets.adminPassword.
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
@@ -97,16 +96,23 @@ dex:
   grpcPort: 5557
   # Dex's Postgres password is never rendered into the ConfigMap: the Deployment
   # reads it from a Secret into DEX_DB_PASSWORD and Dex expands it at startup.
-  # existingSecret: Secret holding the password; empty = the chart's
-  #   home-os-db-secret (the `app` user password from secrets.dbPassword).
-  # existingSecretPasswordKey: key in that Secret; empty = "password".
+  # existingSecret: Secret holding the password; empty = the database Secret
+  #   (database.managed.existingSecret, else the chart's home-os-db-secret).
+  # existingSecretPasswordKey: key in dex.existingSecret; empty = "password".
   # (dex.dbPassword was removed; setting it fails the render.)
   existingSecret: ""
   existingSecretPasswordKey: password
 
+# Workloads get DB_PASSWORD from a Secret (secretKeyRef) and DATABASE_URL is
+# assembled from parts with $(DB_PASSWORD), so no password is rendered into env.
+# The password must be URL-safe (or percent-encoded in the Secret).
 database:
   mode: managed
   managed:
+    # kubernetes.io/basic-auth Secret (keys username=app, password) for the CNPG
+    # `app` owner; also read by every workload. Empty = chart renders
+    # home-os-db-secret from secrets.dbPassword.
+    existingSecret: ""
     instances: 2
     storage: 10Gi
     backup:
@@ -117,17 +123,25 @@ database:
     port: 5432
     database: homeos
     user: homeos
+    sslmode: disable
+    # Plain password, only used when existingSecret is empty (rendered into
+    # home-os-db-secret). Prefer existingSecret.
     password: ""
     existingSecret: ""
+    existingSecretPasswordKey: password
 
 secrets:
+  # Name of a pre-created Secret with keys jwtSecret, calendarSecret,
+  # typesenseApiKey, encryptionKey, adminEmail, adminPassword (and smtpPassword
+  # unless smtp.existingSecret is set). When set, home-os-secrets is not
+  # rendered and the plain values below are ignored.
+  existingSecret: ""
   jwtSecret: ""
   calendarSecret: ""
   typesenseApiKey: ""
   encryptionKey: ""
-  # Password for the 'app' Postgres user. Must match what is provisioned in the
-  # database. For managed mode, the CNPG cluster is bootstrapped with this secret.
-  # WARNING: The original password was committed to git; rotate it as part of this fix.
+  # Password for the 'app' Postgres user (managed mode), rendered into
+  # home-os-db-secret only when database.managed.existingSecret is empty.
   dbPassword: ""
   adminEmail: ""
   adminPassword: ""
@@ -136,7 +150,12 @@ smtp:
   host: ""
   port: "587"
   username: ""
+  # Plain password, stored in home-os-secrets (key smtpPassword) when neither
+  # smtp.existingSecret nor secrets.existingSecret is set.
   password: ""
+  # Secret holding the SMTP password; empty = home-os.secretsName, key smtpPassword.
+  existingSecret: ""
+  existingSecretPasswordKey: password
   from: "noreply@homeos.local"
 
 ingress:

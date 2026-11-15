@@ -14,7 +14,7 @@ spec:
       database: app
       owner: app
       secret:
-        name: home-os-db-secret
+        name: {{ include "home-os.dbSecretName" . }}
   managed:
     roles:
     - name: app

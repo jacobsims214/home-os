@@ -31,8 +31,13 @@ spec:
         - name: DEX_DB_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: {{ .Values.dex.existingSecret | default "home-os-db-secret" }}
+              {{- if .Values.dex.existingSecret }}
+              name: {{ .Values.dex.existingSecret }}
               key: {{ .Values.dex.existingSecretPasswordKey | default "password" }}
+              {{- else }}
+              name: {{ include "home-os.dbSecretName" . }}
+              key: {{ include "home-os.dbSecretPasswordKey" . }}
+              {{- end }}
         volumeMounts:
         - name: config
           mountPath: /etc/dex

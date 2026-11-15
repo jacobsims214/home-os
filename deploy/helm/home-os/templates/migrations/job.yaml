@@ -16,5 +16,4 @@ spec:
         image: "{{ .Values.global.imageRegistry }}/migrations:{{ .Values.global.imageTag }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         env:
-        - name: DATABASE_URL
-          value: {{ include "home-os.databaseUrl" . | quote }}
+        {{- include "home-os.databaseEnv" . | nindent 8 }}

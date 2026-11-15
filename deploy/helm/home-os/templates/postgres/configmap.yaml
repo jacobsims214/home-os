@@ -1,9 +1,0 @@
-{{- if eq .Values.database.mode "external" }}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: home-os-database-config
-  namespace: {{ .Values.namespace }}
-data:
-  DATABASE_URL: {{ include "home-os.databaseUrl" . }}
-{{- end }}

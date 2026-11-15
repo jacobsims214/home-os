@@ -28,12 +28,11 @@ spec:
           value: "{{ .Values.mcp.port }}"
         - name: METADATA_PORT
           value: "{{ .Values.mcp.metadataPort }}"
-        - name: DATABASE_URL
-          value: {{ include "home-os.databaseUrl" . | quote }}
+        {{- include "home-os.databaseEnv" . | nindent 8 }}
         - name: JWT_SECRET
           valueFrom:
             secretKeyRef:
-              name: home-os-secrets
+              name: {{ include "home-os.secretsName" . }}
               key: jwtSecret
         - name: LOG_LEVEL
           value: "info"

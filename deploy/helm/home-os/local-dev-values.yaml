@@ -100,7 +100,6 @@ secrets:
   encryptionKey: "local-dev-encryption-key-32-chars"
   # Matches the 'app' user password provisioned in the dev CNPG cluster.
   dbPassword: "wCGVeROLHi1br16yJ5QjRloXH815VrFEbkinBnw1CSygf3DJEtKsGJJjFYFlZsy4"
-  dbPassword: "wCGVeROLHi1br16yJ5QjRloXH815VrFEbkinBnw1CSygf3DJEtKsGJJjFYFlZsy4"
   adminEmail: "admin@homeos.demo"
   adminPassword: "demo1234"
 

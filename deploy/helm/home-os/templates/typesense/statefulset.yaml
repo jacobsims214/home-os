@@ -25,7 +25,7 @@ spec:
         - name: TYPESENSE_API_KEY
           valueFrom:
             secretKeyRef:
-              name: home-os-secrets
+              name: {{ include "home-os.secretsName" . }}
               key: typesenseApiKey
         - name: TYPESENSE_DATA_DIR
           value: /data
