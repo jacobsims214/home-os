@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"home-os/api/internal/agenttoken"
 	"home-os/api/internal/asset"
 	"home-os/api/internal/auth"
 	"home-os/api/internal/bill"
@@ -319,6 +320,9 @@ func main() {
 		// Invite routes (accept is registered above, outside this group).
 		r.Post("/api/v1/invites", inviteHandler.CreateInvite)
 		r.Get("/api/v1/invites", inviteHandler.ListInvites)
+
+		// Agent tokens: each member creates, lists and revokes their own.
+		agenttoken.NewHandler(agenttoken.NewRepo(pool)).RegisterRoutes(r)
 
 		// Admin routes (require owner role — enforced in handler).
 		r.Post("/api/v1/admin/users", authHandler.AdminCreateUser)
