@@ -5,9 +5,9 @@
 //
 // The secrets table holds the encrypted payload plus plaintext metadata
 // (name, secret_type) for listing/search. The secret_keys table holds the
-// master-password verification material (key_hash + key_salt, both BYTEA) so
-// the /unlock endpoint can confirm a derived key without ever storing the key
-// itself. Key rotation is supported via key_version on both tables.
+// master-password verification material (an argon2id verifier, or the legacy
+// key_hash until the row upgrades, plus key_salt) so /verify can confirm a
+// derived key without ever storing the key itself. Key rotation is supported via key_version on both tables.
 //
 // BYTEA columns (encrypted_data, iv, key_hash, key_salt) are modeled as []byte
 // in Go. encoding/json marshals []byte as a standard base64 string by default,
@@ -94,9 +94,17 @@ type SecretListItem struct {
 
 // SecretKey represents a row from the secret_keys table — the material used to
 // verify a user's master password / derived key without ever storing the key
-// itself. KeyHash is a verifier (e.g. HMAC or hash of a known plaintext under
-// the derived key) and KeySalt is the per-household PBKDF2 salt. Both are
-// BYTEA and surface as base64 strings in JSON for the browser.
+// itself. KeySalt is the per-household PBKDF2 salt the browser needs to
+// re-derive the key, and surfaces as base64 in JSON.
+//
+// Since migration 051 (#4440) a row holds exactly one of:
+//   - Verifier: an argon2id PHC string over the client-sent verifier (salted
+//     per row, slow). Every new setup and every upgraded row.
+//   - KeyHash: the LEGACY unsalted SHA-256 of the derived key. Cleared and
+//     replaced by Verifier on the household's next successful unlock.
+//
+// Neither is ever serialized: both carry json:"-" so no response can leak
+// verifier material, even if a handler returns the whole struct.
 //
 // key_version ties a verifier to a specific key version so rotation can be
 // staged: a new row is inserted with the next version, then secrets are
@@ -104,7 +112,8 @@ type SecretListItem struct {
 type SecretKey struct {
 	ID          uuid.UUID `json:"id"`
 	HouseholdID uuid.UUID `json:"household_id"`
-	KeyHash     []byte    `json:"key_hash"` // base64 on the wire; verifier for the derived key
+	KeyHash     []byte    `json:"-"`        // legacy (pre-051) verifier; nil once upgraded
+	Verifier    *string   `json:"-"`        // argon2id PHC string; nil on legacy rows
 	KeySalt     []byte    `json:"key_salt"` // base64 on the wire; PBKDF2 salt
 	KeyVersion  int       `json:"key_version"`
 	CreatedAt   time.Time `json:"created_at"`

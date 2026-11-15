@@ -15,10 +15,13 @@
 // list endpoint can show human-readable labels without decryption.
 //
 // Master-password verification: the browser derives a key from the user's master
-// password (PBKDF2 + per-household salt), hashes it, and sends the hash. The
-// API stores key_hash (not the key) and compares hashes on verify — this lets
-// the API confirm the user entered the correct master password without ever
-// holding the encryption key itself.
+// password (PBKDF2 + per-household salt) and sends a verifier computed from it
+// (today SHA-256 of the raw key). Since migration 051 (#4440) the API stores
+// only argon2id(verifier, random per-row salt) and checks it in constant time
+// on /verify, so the database never holds a value that could be replayed or
+// cheaply guessed against. Rows set up before 051 still hold the legacy
+// key_hash; they upgrade to an argon2id verifier on their next successful
+// unlock. See verifier.go.
 //
 // The handler depends on the Repo defined in repo.go (task #1284). The Repo
 // method signatures the handlers call:
@@ -39,11 +42,13 @@
 //	    found or cross-tenant.
 //	DeleteSecret(ctx, householdID, id uuid.UUID) error
 //	    Removes the secrets row. Returns pgx.ErrNoRows if absent or cross-tenant.
-//	SetupKey(ctx, householdID uuid.UUID, keyHash, keySalt []byte, keyVersion int) (*SecretKey, error)
-//	    Inserts a secret_keys row. Returns the created SecretKey.
+//	SetupKey(ctx, householdID uuid.UUID, verifier string, keySalt []byte, keyVersion int) (*SecretKey, error)
+//	    Inserts a secret_keys row with an argon2id verifier. Returns the created SecretKey.
 //	GetKey(ctx, householdID uuid.UUID, keyVersion int) (*SecretKey, error)
-//	    Returns the key_hash + key_salt for verification. Returns (nil, nil) if
-//	    no key exists for the given household + version.
+//	    Returns the verifier (or legacy key_hash) + key_salt. Returns (nil, nil)
+//	    if no key exists for the given household + version.
+//	UpgradeLegacyKey / ReplaceVerifier
+//	    Compare-and-swap writes used by /verify to upgrade or rehash a row.
 package secret
 
 import (
@@ -57,6 +62,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
@@ -175,20 +181,43 @@ type updateSecretRequest struct {
 }
 
 // setupKeyRequest is the JSON body for POST /api/v1/secrets/setup. The client
-// derives a key from the master password (PBKDF2 + salt), hashes it, and sends
-// the hash + salt + version. The API stores these for later verification.
+// derives a key from the master password (PBKDF2 + salt), computes a verifier
+// from it, and sends verifier + salt + version. The API stores only an
+// argon2id hash of the verifier.
+//
+// Verifier (base64) is the preferred field. KeyHash is the pre-051 name for
+// the same value, still accepted so the current UI keeps working; when both
+// are sent, Verifier wins.
 type setupKeyRequest struct {
-	KeyHash    []byte `json:"key_hash"`
+	Verifier   []byte `json:"verifier"`
+	KeyHash    []byte `json:"key_hash"` // deprecated alias of Verifier
 	KeySalt    []byte `json:"key_salt"`
 	KeyVersion int    `json:"key_version"`
 }
 
 // verifyKeyRequest is the JSON body for POST /api/v1/secrets/verify. The client
-// re-derives the key from the entered master password, hashes it, and sends the
-// hash. The API compares it to the stored key_hash.
+// re-derives the key from the entered master password, computes the same
+// verifier, and sends it. Same Verifier / KeyHash aliasing as setup.
 type verifyKeyRequest struct {
-	KeyHash    []byte `json:"key_hash"`
+	Verifier   []byte `json:"verifier"`
+	KeyHash    []byte `json:"key_hash"` // deprecated alias of Verifier
 	KeyVersion int    `json:"key_version"`
+}
+
+// clientVerifier returns the verifier a request carries, preferring the new
+// field name over the deprecated key_hash alias.
+func clientVerifier(verifier, keyHash []byte) []byte {
+	if len(verifier) > 0 {
+		return verifier
+	}
+	return keyHash
+}
+
+// writeUnauthorized writes the 401 body /verify uses for "no match".
+func writeUnauthorized(w http.ResponseWriter, msg string) {
+	apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
+		Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: msg},
+	})
 }
 
 // householdID extracts the household UUID from the JWT claims in the request
@@ -472,12 +501,14 @@ func (h *Handler) DeleteSecret(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// SetupKey stores the master-password key hash + salt for first-time setup.
+// SetupKey stores the master-password verifier + salt for first-time setup.
 // This is only allowed if no key exists yet for the given household + key
-// version — calling setup twice returns 409 Conflict. The key_hash is a hash
-// of the PBKDF2-derived encryption key (not the key itself), used by VerifyKey
-// to confirm the user entered the correct master password without the API ever
-// holding the encryption key.
+// version — calling setup twice returns 409 Conflict. The client-sent verifier
+// is derived from the PBKDF2 key (not the key itself); the API stores only
+// argon2id(verifier) with a random salt, never the verifier as sent.
+//
+// The response carries id, household_id, key_salt, key_version and
+// created_at; never the verifier or its hash.
 //
 // POST /api/v1/secrets/setup
 func (h *Handler) SetupKey(w http.ResponseWriter, r *http.Request) {
@@ -493,8 +524,13 @@ func (h *Handler) SetupKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.KeyHash) == 0 {
-		apierr.BadRequest(w, "key_hash is required")
+	verifier := clientVerifier(req.Verifier, req.KeyHash)
+	if len(verifier) == 0 {
+		apierr.BadRequest(w, "verifier is required")
+		return
+	}
+	if !validClientVerifier(verifier) {
+		apierr.BadRequest(w, "verifier must be 16 to 128 bytes")
 		return
 	}
 	if len(req.KeySalt) == 0 {
@@ -520,8 +556,20 @@ func (h *Handler) SetupKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := h.repo.SetupKey(r.Context(), hid, req.KeyHash, req.KeySalt, req.KeyVersion)
+	encoded, err := hashVerifier(r.Context(), verifier)
 	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+
+	created, err := h.repo.SetupKey(r.Context(), hid, encoded, req.KeySalt, req.KeyVersion)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// Lost a race with a concurrent setup for the same version.
+			apierr.Conflict(w, "master key already set up for this version")
+			return
+		}
 		apierr.InternalError(w, err)
 		return
 	}
@@ -537,9 +585,8 @@ func (h *Handler) SetupKey(w http.ResponseWriter, r *http.Request) {
 // server-side because it is per-household and must be stable across sessions.
 //
 // This endpoint deliberately returns ONLY { key_salt, key_version } — never the
-// key_hash. The hash is a verifier used only by /verify for constant-time
-// comparison; exposing it to the client would let an attacker attempt offline
-// hash comparisons. Returns 404 if no master key has been set up yet for this
+// stored verifier (or legacy key_hash). Those are used only by /verify;
+// exposing them would let an attacker attempt offline guesses. Returns 404 if no master key has been set up yet for this
 // household (the client should redirect to the setup flow).
 //
 // GET /api/v1/secrets/key
@@ -577,15 +624,21 @@ func (h *Handler) GetKeyInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// VerifyKey checks whether the provided key_hash matches the stored key_hash
-// for the given household + key version. The client re-derives the key from
-// the entered master password (PBKDF2 + stored salt), hashes it, and sends the
-// hash. The API compares the hashes — a match means the user entered the
-// correct master password.
+// VerifyKey checks the client-sent verifier against the household's stored
+// verifier for the given key version. The client re-derives the key from the
+// entered master password (PBKDF2 + stored salt) and sends the verifier
+// computed from it.
 //
-// Returns 200 if the hashes match, 401 if they don't (or if no key is set up
-// yet). A constant-time comparison is used as defense-in-depth even though the
-// compared values are hashes, not raw secrets.
+//   - Upgraded / new rows: argon2id(verifier, stored salt) is compared with the
+//     stored hash in constant time. A match on a row with outdated cost
+//     parameters is rehashed (best effort).
+//   - Legacy rows (set up before migration 051): the verifier is compared with
+//     key_hash in constant time; on a match the row is upgraded to an argon2id
+//     verifier and key_hash is cleared, in one compare-and-swap UPDATE. A failed
+//     upgrade is logged (household id only) and the unlock still succeeds; the
+//     next unlock retries it.
+//
+// Returns 200 on a match, 401 if not (or if no key is set up yet).
 //
 // POST /api/v1/secrets/verify
 func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
@@ -601,8 +654,9 @@ func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.KeyHash) == 0 {
-		apierr.BadRequest(w, "key_hash is required")
+	verifier := clientVerifier(req.Verifier, req.KeyHash)
+	if len(verifier) == 0 {
+		apierr.BadRequest(w, "verifier is required")
 		return
 	}
 	if req.KeyVersion == 0 {
@@ -616,29 +670,43 @@ func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if stored == nil {
-		// No key set up for this household + version — not a match. Return
-		// 401 per the spec ("Return 200 if match, 401 if not"). The client
-		// should redirect to the setup flow.
-		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
-			Error: apierr.ErrorDetail{
-				Code:    "UNAUTHORIZED",
-				Message: "master key not set up",
-			},
-		})
+		// No key set up for this household + version — not a match. The
+		// client should redirect to the setup flow.
+		writeUnauthorized(w, "master key not set up")
+		return
+	}
+	// A verifier outside the accepted length can never match a stored one;
+	// reject it before spending an argon2id computation on it.
+	if !validClientVerifier(verifier) {
+		writeUnauthorized(w, "invalid master key")
 		return
 	}
 
-	// Constant-time comparison as defense-in-depth. The compared values are
-	// hashes of derived keys, not raw keys, so timing leakage would only
-	// reveal hash bytes — but ConstantTimeCompare is a one-liner with no
-	// downside.
-	if subtle.ConstantTimeCompare(req.KeyHash, stored.KeyHash) != 1 {
-		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
-			Error: apierr.ErrorDetail{
-				Code:    "UNAUTHORIZED",
-				Message: "invalid master key",
-			},
-		})
+	switch {
+	case stored.Verifier != nil:
+		ok, needsRehash, err := checkVerifier(r.Context(), *stored.Verifier, verifier)
+		if err != nil {
+			apierr.InternalError(w, err)
+			return
+		}
+		if !ok {
+			writeUnauthorized(w, "invalid master key")
+			return
+		}
+		if needsRehash {
+			h.rehashVerifier(r.Context(), stored, verifier)
+		}
+
+	case len(stored.KeyHash) > 0:
+		if subtle.ConstantTimeCompare(verifier, stored.KeyHash) != 1 {
+			writeUnauthorized(w, "invalid master key")
+			return
+		}
+		h.upgradeLegacyKey(r.Context(), stored, verifier)
+
+	default:
+		// A row with neither (only possible after a 051 down) never matches.
+		writeUnauthorized(w, "invalid master key")
 		return
 	}
 
@@ -647,4 +715,31 @@ func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
 			"verified": true,
 		},
 	})
+}
+
+// upgradeLegacyKey replaces a verified legacy key_hash with an argon2id
+// verifier. Best effort: errors are logged without any key material.
+func (h *Handler) upgradeLegacyKey(ctx context.Context, stored *SecretKey, verifier []byte) {
+	encoded, err := hashVerifier(ctx, verifier)
+	if err != nil {
+		slog.Warn("secret: legacy key upgrade: hash failed", "household_id", stored.HouseholdID, "error", err)
+		return
+	}
+	if _, err := h.repo.UpgradeLegacyKey(ctx, stored.HouseholdID, stored.ID, stored.KeyHash, encoded); err != nil {
+		slog.Warn("secret: legacy key upgrade failed", "household_id", stored.HouseholdID, "error", err)
+		return
+	}
+}
+
+// rehashVerifier rewrites a verified argon2id verifier with the current cost
+// parameters. Best effort, logged without key material.
+func (h *Handler) rehashVerifier(ctx context.Context, stored *SecretKey, verifier []byte) {
+	encoded, err := hashVerifier(ctx, verifier)
+	if err != nil {
+		slog.Warn("secret: verifier rehash: hash failed", "household_id", stored.HouseholdID, "error", err)
+		return
+	}
+	if _, err := h.repo.ReplaceVerifier(ctx, stored.HouseholdID, stored.ID, *stored.Verifier, encoded); err != nil {
+		slog.Warn("secret: verifier rehash failed", "household_id", stored.HouseholdID, "error", err)
+	}
 }

@@ -2,35 +2,36 @@
 //
 // Design notes (mirrors apps/api/internal/file/repo.go):
 //
-//  - Every method takes householdID and filters by it. A missing row and a
-//    cross-tenant row are indistinguishable: Get/GetKey return (nil, nil) and
-//    Delete/Update return pgx.ErrNoRows so callers can translate both to 404
-//    without leaking cross-tenant existence. This is the same tenant-isolation
-//    contract used by file/repo.go and note/repo.go.
+//   - Every method takes householdID and filters by it. A missing row and a
+//     cross-tenant row are indistinguishable: Get/GetKey return (nil, nil) and
+//     Delete/Update return pgx.ErrNoRows so callers can translate both to 404
+//     without leaking cross-tenant existence. This is the same tenant-isolation
+//     contract used by file/repo.go and note/repo.go.
 //
-//  - ListSecrets selects METADATA ONLY — id, name, secret_type, entity_type,
-//    entity_id, created_at, updated_at. The encrypted_data column is never
-//    selected by ListSecrets so the listing endpoint stays cheap and never
-//    exposes ciphertext over the wire. GetSecret is the only method that
-//    returns encrypted_data + iv, and only for a single id that the caller
-//    has already chosen to decrypt client-side.
+//   - ListSecrets selects METADATA ONLY — id, name, secret_type, entity_type,
+//     entity_id, created_at, updated_at. The encrypted_data column is never
+//     selected by ListSecrets so the listing endpoint stays cheap and never
+//     exposes ciphertext over the wire. GetSecret is the only method that
+//     returns encrypted_data + iv, and only for a single id that the caller
+//     has already chosen to decrypt client-side.
 //
-//  - The polymorphic entity filter (entityType + entityID) uses the same
-//    sentinel convention as file/repo.go: when both are zero (entityType=="" &&
-//    entityID==uuid.Nil) the whole household is listed; otherwise the query is
-//    narrowed to (entity_type, entity_id). Standalone secrets are family-level,
-//    stored as ('household', household_id) (domain model v2), and surface in the
-//    household-wide listing.
+//   - The polymorphic entity filter (entityType + entityID) uses the same
+//     sentinel convention as file/repo.go: when both are zero (entityType=="" &&
+//     entityID==uuid.Nil) the whole household is listed; otherwise the query is
+//     narrowed to (entity_type, entity_id). Standalone secrets are family-level,
+//     stored as ('household', household_id) (domain model v2), and surface in the
+//     household-wide listing.
 //
-//  - The repo never touches plaintext. encrypted_data/iv arrive already
-//    encrypted from the client (Web Crypto API, AES-256-GCM) and are stored /
-//    returned as opaque BYTEA. key_hash/key_salt for the master-password
-//    verification key are likewise opaque bytes.
+//   - The repo never touches plaintext. encrypted_data/iv arrive already
+//     encrypted from the client (Web Crypto API, AES-256-GCM) and are stored /
+//     returned as opaque BYTEA. key_salt is opaque bytes; the master-password
+//     verifier is an argon2id PHC string computed by the handler (051).
 //
-//  - Secret and SecretKey types are defined in model.go (same package). The
-//    binary fields (EncryptedData, IV, KeyHash, KeySalt) are []byte which
-//    encoding/json marshals as base64 automatically — matching the file
-//    package's FileBlob.Data pattern.
+//   - Secret and SecretKey types are defined in model.go (same package). The
+//     binary fields (EncryptedData, IV, KeySalt) are []byte which
+//     encoding/json marshals as base64 automatically (KeyHash/Verifier are
+//     never serialized) — matching the file
+//     package's FileBlob.Data pattern.
 package secret
 
 import (
@@ -228,23 +229,24 @@ func (r *Repo) DeleteSecret(ctx context.Context, householdID, id uuid.UUID) erro
 }
 
 // SetupKey inserts a new master-password verification key for a household.
-// keyHash is a hash of the PBKDF2-derived key (used to verify the user entered
-// the right master password without storing the key itself), keySalt is the
-// salt fed to PBKDF2, and keyVersion namespaces this key for rotation. The
-// (household_id, key_version) pair is unique per the migration, so a duplicate
-// setup for the same version will fail with a unique-violation that the caller
-// can translate to 409.
+// verifier is the argon2id PHC string the handler computed over the
+// client-sent verifier (see verifier.go); the legacy key_hash column stays
+// NULL. keySalt is the salt fed to PBKDF2 in the browser, and keyVersion
+// namespaces this key for rotation. The (household_id, key_version) pair is
+// unique per migration 026, so a duplicate setup for the same version fails
+// with a unique-violation.
 //
-// Returns the persisted *SecretKey (with DB-generated id + created_at).
-func (r *Repo) SetupKey(ctx context.Context, householdID uuid.UUID, keyHash, keySalt []byte, keyVersion int) (*SecretKey, error) {
+// Returns the persisted *SecretKey (with DB-generated id + created_at). The
+// verifier is not read back.
+func (r *Repo) SetupKey(ctx context.Context, householdID uuid.UUID, verifier string, keySalt []byte, keyVersion int) (*SecretKey, error) {
 	var created SecretKey
 	err := r.pool.QueryRow(ctx,
-		`INSERT INTO secret_keys (household_id, key_hash, key_salt, key_version)
+		`INSERT INTO secret_keys (household_id, verifier, key_salt, key_version)
 		 VALUES ($1, $2, $3, $4)
-		 RETURNING id, household_id, key_hash, key_salt, key_version, created_at`,
-		householdID, keyHash, keySalt, keyVersion,
+		 RETURNING id, household_id, key_salt, key_version, created_at`,
+		householdID, verifier, keySalt, keyVersion,
 	).Scan(
-		&created.ID, &created.HouseholdID, &created.KeyHash, &created.KeySalt,
+		&created.ID, &created.HouseholdID, &created.KeySalt,
 		&created.KeyVersion, &created.CreatedAt,
 	)
 	if err != nil {
@@ -253,33 +255,58 @@ func (r *Repo) SetupKey(ctx context.Context, householdID uuid.UUID, keyHash, key
 	return &created, nil
 }
 
-// GetKey retrieves the master-password verification key (key_hash + key_salt)
-// for a household + key_version. The client uses key_salt to re-derive the
-// PBKDF2 key from the entered master password, then compares the derived
-// key's hash against key_hash to confirm the password is correct before
-// attempting decryption.
+// GetKey retrieves the master-password verification row for a household +
+// key_version: the argon2id Verifier (or, for a row that has not unlocked
+// since migration 051, the legacy KeyHash) and the PBKDF2 KeySalt.
 //
 // Returns (nil, nil) when no key exists for the household + version — callers
 // translate that to "secrets not yet set up" (the UI prompts for SetupKey).
 // Same not-found-vs-forbidden indistinguishability as the secret CRUD methods.
 func (r *Repo) GetKey(ctx context.Context, householdID uuid.UUID, keyVersion int) (*SecretKey, error) {
-	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, key_hash, key_salt, key_version, created_at
+	var k SecretKey
+	err := r.pool.QueryRow(ctx,
+		`SELECT id, household_id, key_hash, verifier, key_salt, key_version, created_at
 		 FROM secret_keys
 		 WHERE household_id = $1 AND key_version = $2`,
 		householdID, keyVersion,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get key: %w", err)
-	}
-	defer rows.Close()
-
-	k, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[SecretKey])
+	).Scan(&k.ID, &k.HouseholdID, &k.KeyHash, &k.Verifier, &k.KeySalt, &k.KeyVersion, &k.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("get key: collect: %w", err)
+		return nil, fmt.Errorf("get key: %w", err)
 	}
-	return k, nil
+	return &k, nil
+}
+
+// UpgradeLegacyKey replaces a legacy key_hash with an argon2id verifier in one
+// UPDATE (migration 051's CHECK requires exactly one of the two). It is a
+// compare-and-swap on the legacy hash the caller just verified, so concurrent
+// unlocks upgrade the row once and a row that changed meanwhile is left alone.
+// Returns false when no row matched (already upgraded or gone).
+func (r *Repo) UpgradeLegacyKey(ctx context.Context, householdID, keyID uuid.UUID, legacyHash []byte, verifier string) (bool, error) {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE secret_keys
+		    SET verifier = $4, key_hash = NULL
+		  WHERE id = $1 AND household_id = $2 AND key_hash = $3 AND verifier IS NULL`,
+		keyID, householdID, legacyHash, verifier,
+	)
+	if err != nil {
+		return false, fmt.Errorf("upgrade key: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ReplaceVerifier swaps a stored argon2id verifier for a new one (a rehash
+// with current cost parameters). Compare-and-swap on the old string.
+func (r *Repo) ReplaceVerifier(ctx context.Context, householdID, keyID uuid.UUID, oldVerifier, newVerifier string) (bool, error) {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE secret_keys SET verifier = $4
+		  WHERE id = $1 AND household_id = $2 AND verifier = $3`,
+		keyID, householdID, oldVerifier, newVerifier,
+	)
+	if err != nil {
+		return false, fmt.Errorf("replace verifier: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
