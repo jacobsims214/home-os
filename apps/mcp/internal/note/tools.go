@@ -130,13 +130,13 @@ var aboutToDB = map[string]string{
 }
 
 // aboutFinder names the registered tool that finds ids for each about_type.
-// list, recipe and guide have no registered finder yet; the ticket that
-// registers list_find, recipe_find or guide_find adds it back here.
+// recipe and guide have no registered finder yet; the ticket that registers
+// recipe_find or guide_find adds it back here.
 var aboutFinder = map[string]string{
 	"person": "person_find", "property": "property_find", "room": "property_find",
 	"asset": "asset_find", "vehicle": "vehicle_find", "pet": "pet_find",
 	"contact": "contact_find", "bill": "bill_find", "loan": "loan_find",
-	"maintenance": "maintenance_find", "event": "event_find",
+	"maintenance": "maintenance_find", "event": "event_find", "list": "list_find",
 }
 
 // findIDWith says how to get an about_type's id: its finder tool, or the
@@ -444,7 +444,7 @@ func looksLikeChecklist(body string) bool {
 // returned with duplicate:true instead of a second row.
 func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("note_create",
-		mcp.WithDescription("Save a note for the family, optionally about a person, house, car, etc. Checklists (grocery, chores, packing) are coming soon; for now save them as a note."),
+		mcp.WithDescription("Save a note for the family, optionally about a person, house, car, etc. For checklists (grocery, chores, packing) use list_create instead."),
 		mcp.WithString("title",
 			mcp.Description("Short title, max 500 characters, e.g. Wi-Fi password"),
 			mcp.Required(),
@@ -572,7 +572,7 @@ func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		}
 		next := []string{fmt.Sprintf("Add to it later with note_update note_id=%s append_text=….", n.ID)}
 		if looksLikeChecklist(content) {
-			next = append(next, "This looks like a checklist; checklists you can tick off are coming soon, so it is saved as a note for now.")
+			next = append(next, "This looks like a checklist; consider list_create so items can be checked off.")
 		}
 		return respond.OK(summary, n, next...), nil
 	}

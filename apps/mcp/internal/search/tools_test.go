@@ -330,7 +330,7 @@ func TestSearchAllAreas(t *testing.T) {
 			"bill":     "bill_find id=" + mine["bill"],
 			"contact":  "contact_find id=" + mine["contact"],
 			"document": "document_get document_id=" + mine["document"],
-			"list":     `Tell the user it is their list "Zephyr list" in Home OS; opening lists here is coming soon.`,
+			"list":     "list_get list_id=" + mine["list"],
 		}
 		for typ, want := range wantOpen {
 			if got := group(env, typ).Items[0].Open; got != want {

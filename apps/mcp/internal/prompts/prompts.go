@@ -193,3 +193,35 @@ func HandleFindDocument(_ context.Context, req mcp.GetPromptRequest) (*mcp.GetPr
 2. Pick the best match and call document_get with its document_id. If the answer isn't in the text, call document_get again with text_offset = the next page.
 3. Answer in one or two sentences and name the document you used. If nothing matches, say so and suggest note_find.`, question)), nil
 }
+
+// NewTripPackingPrompt creates the "trip-packing" prompt: start a packing
+// list from a template with list_create, add extras with list_add_items,
+// and tick things off with list_check_items.
+func NewTripPackingPrompt() mcp.Prompt {
+	return mcp.NewPrompt("trip-packing",
+		mcp.WithPromptDescription("Start a packing list for a trip from a template, then tick things off as they're packed"),
+		mcp.WithArgument("trip",
+			mcp.ArgumentDescription("Name for the trip's list, e.g. Beach trip"),
+			mcp.RequiredArgument(),
+		),
+		mcp.WithArgument("template",
+			mcp.ArgumentDescription("Template to copy, e.g. Beach trip packing (default: ask)"),
+		),
+	)
+}
+
+// HandleTripPacking handles the trip-packing prompt request.
+func HandleTripPacking(_ context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+	trip := arg(req, "trip", "")
+	pick := `Call list_find with kind="packing" and templates_only=true, show the user the template names, and ask which one fits (or none).`
+	if t := arg(req, "template", ""); t != "" {
+		pick = fmt.Sprintf(`Use the template %q (call list_find with kind="packing" and templates_only=true if you need to check its name).`, t)
+	}
+	return userPrompt("Trip packing", fmt.Sprintf(`Make a packing list for %q.
+
+1. %s
+2. Call list_create with name=%q, kind="packing" and from_template_id set to the template's name or id. Leave from_template_id out if there is none.
+3. Ask what else to bring, then call list_add_items once with list_id=%q and all the extras as items.
+4. As things are packed, call list_check_items with list_id=%q and texts=[...] (the item words, e.g. ["sunscreen"]). Read the "left" line back to the user.
+5. After the trip, offer to archive it with list_update archived=true.`, trip, pick, trip, trip, trip)), nil
+}

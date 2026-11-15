@@ -81,11 +81,9 @@ var areas = []area{
 		Title: "COALESCE(NULLIF(btrim(t.title), ''), '(untitled)')", Doc: "concat_ws(' ', t.title, t.body)",
 		OpenRef: "t.id", Open: "note_get note_id=%s", Sort: "t.updated_at"},
 	{Name: "list", Plural: "lists", From: "lists t", Scope: "t.household_id",
-		Title: "t.name",
-		Doc:   "concat_ws(' ', t.name, (SELECT string_agg(i.text, ' ' ORDER BY i.position) FROM list_items i WHERE i.list_id = t.id))",
-		// No list tool is registered yet: plain text, like credential, until
-		// list_get is (then restore "list_get list_id=%s" with OpenRef t.id).
-		OpenRef: "t.name", Open: "Tell the user it is their list %q in Home OS; opening lists here is coming soon.", Sort: "t.updated_at"},
+		Title:   "t.name",
+		Doc:     "concat_ws(' ', t.name, (SELECT string_agg(i.text, ' ' ORDER BY i.position) FROM list_items i WHERE i.list_id = t.id))",
+		OpenRef: "t.id", Open: "list_get list_id=%s", Sort: "t.updated_at"},
 	{Name: "recipe", Plural: "recipes", From: "recipes t", Scope: "t.household_id",
 		Title: "t.title",
 		Doc: "concat_ws(' ', t.title, t.description, array_to_string(t.tags, ' '), " +
@@ -127,7 +125,7 @@ var areas = []area{
 
 // noOpenTool is the types whose open is plain text for the user, not a tool
 // call, so they are left out of the "Open … with …" hints.
-var noOpenTool = map[string]bool{"list": true, "recipe": true}
+var noOpenTool = map[string]bool{"recipe": true}
 
 // areaNames is the types[] enum, in result order.
 var areaNames = func() []string {

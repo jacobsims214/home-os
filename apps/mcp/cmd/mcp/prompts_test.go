@@ -159,7 +159,7 @@ func TestPromptsNameOnlyRegisteredTools(t *testing.T) {
 	params := paramNames(t, srv)
 
 	texts := promptText(t, srv)
-	wantPrompts := []string{"check-bills", "daily-briefing", "find-document", "home-upkeep", "plan-week", "schedule-event"}
+	wantPrompts := []string{"check-bills", "daily-briefing", "find-document", "home-upkeep", "plan-week", "schedule-event", "trip-packing"}
 	var got []string
 	for name := range texts {
 		got = append(got, name)
@@ -177,6 +177,7 @@ func TestPromptsNameOnlyRegisteredTools(t *testing.T) {
 		"plan-week":      {"agenda_get", "calendar_find_free_time", "event_create"},
 		"home-upkeep":    {"maintenance_find", "maintenance_complete"},
 		"find-document":  {"document_find", "document_get"},
+		"trip-packing":   {"list_find", "list_create", "list_add_items", "list_check_items"},
 	}
 
 	for name, text := range texts {

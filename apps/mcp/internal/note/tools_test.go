@@ -435,7 +435,7 @@ func TestNoteCreate(t *testing.T) {
 
 	t.Run("checklist-like content gets a checklist hint", func(t *testing.T) {
 		env := create.mustOK(t, ctx, map[string]any{"title": "Groceries", "content": "milk\neggs\nbread"})
-		if len(env.Next) < 2 || !strings.Contains(env.Next[1], "checklists you can tick off are coming soon") {
+		if len(env.Next) < 2 || !strings.Contains(env.Next[1], "consider list_create so items can be checked off") {
 			t.Errorf("next: %v", env.Next)
 		}
 		env = create.mustOK(t, ctx, map[string]any{"title": "Story", "content": "One line only."})

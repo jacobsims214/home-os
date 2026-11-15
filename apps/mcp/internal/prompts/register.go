@@ -13,4 +13,5 @@ func Register(srv *server.Server, deps server.Deps) {
 	srv.RegisterPrompt("plan-week", NewPlanWeekPrompt(), HandlePlanWeek)
 	srv.RegisterPrompt("home-upkeep", NewHomeUpkeepPrompt(), HandleHomeUpkeep)
 	srv.RegisterPrompt("find-document", NewFindDocumentPrompt(), HandleFindDocument)
+	srv.RegisterPrompt("trip-packing", NewTripPackingPrompt(), HandleTripPacking)
 }

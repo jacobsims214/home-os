@@ -26,6 +26,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,10 +44,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/mcp/internal/config"
+	"home-os/mcp/internal/credential"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/testutil"
 )
@@ -94,6 +98,8 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 		{"calendar_find", static(map[string]any{})},
 		{"calendar_find_free_time", static(map[string]any{"from": day(1), "to": day(7), "duration_minutes": 120})},
 		{"contact_find", static(map[string]any{"trade": "plumbing"})},
+		{"credential_find", static(map[string]any{"query": "wi-fi"})},
+		{"credential_reveal", static(map[string]any{"credential_id": f.Credential})},
 		{"document_find", static(map[string]any{"query": "insurance"})},
 		{"document_get", static(map[string]any{"document_id": f.Document})},
 		{"document_upload", func(i int) map[string]any {
@@ -111,6 +117,24 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 		}},
 		{"family_overview", static(map[string]any{})},
 		{"family_update", func(i int) map[string]any { return map[string]any{"name": fmt.Sprintf("The Bench Family %d", i)} }},
+		{"list_add_items", func(i int) map[string]any {
+			return map[string]any{"list_id": "grocery", "items": []any{map[string]any{"text": fmt.Sprintf("Bench item %d", i)}, "milk"}}
+		}},
+		{"list_check_items", func(i int) map[string]any {
+			return map[string]any{"list_id": f.List, "texts": []string{fmt.Sprintf("Grocery item %d", 1+i%40)}, "checked": i%2 == 0}
+		}},
+		{"list_create", func(i int) map[string]any {
+			return map[string]any{"name": fmt.Sprintf("Bench list %d", i), "kind": "todo"}
+		}},
+		{"list_find", static(map[string]any{"kind": "grocery"})},
+		{"list_get", static(map[string]any{"list_id": "Grocery", "checked": "open"})},
+		{"list_remove_items", func(i int) map[string]any {
+			return map[string]any{"list_id": f.List, "item_ids": []string{pick(f.DisposableListItems, i)}}
+		}},
+		{"list_update", func(i int) map[string]any {
+			return map[string]any{"list_id": f.List, "kind": []string{"grocery", "shopping"}[i%2]}
+		}},
+		{"list_update_item", func(i int) map[string]any { return map[string]any{"item_id": f.ListItem, "quantity": 1 + i} }},
 		{"loan_create", func(i int) map[string]any {
 			return map[string]any{"name": fmt.Sprintf("Bench loan %d", i), "original_amount": 1000, "remaining_balance": 500}
 		}},
@@ -172,11 +196,13 @@ func TestMCPLatency(t *testing.T) {
 		t.Fatalf("analyze: %v", err)
 	}
 	fx := loadFixtures(t, pool, hh.HouseholdID)
+	agentKey, secretLen := seedSharedCredential(t, pool, hh.HouseholdID, &fx)
 	for name, ids := range map[string][]string{
 		"disposable assets": fx.DisposableAssets, "disposable bills": fx.DisposableBills,
 		"disposable loans": fx.DisposableLoans, "disposable tasks": fx.DisposableTasks,
 		"disposable notes": fx.DisposableNotes, "disposable events": fx.DisposableEvents,
-		"payable bills": fx.PayableBills, "pending tasks": fx.PendingTasks, "unread notifications": fx.UnreadNotifications,
+		"disposable list items": fx.DisposableListItems,
+		"payable bills":         fx.PayableBills, "pending tasks": fx.PendingTasks, "unread notifications": fx.UnreadNotifications,
 	} {
 		if len(ids) < calls {
 			t.Fatalf("seed has %d %s, need %d (lower BENCH_N)", len(ids), name, calls)
@@ -197,11 +223,12 @@ func TestMCPLatency(t *testing.T) {
 	t.Cleanup(traced.Close)
 
 	cfg := &config.Config{
-		PublicBaseURL:     "https://mcp.test",
-		ResourceURL:       "https://mcp.test/mcp",
-		DexIssuer:         testutil.TestIssuer,
-		AcceptedAudiences: []string{testutil.TestAudience},
-		AllowedOrigins:    []string{"https://mcp.test"},
+		PublicBaseURL:       "https://mcp.test",
+		ResourceURL:         "https://mcp.test/mcp",
+		DexIssuer:           testutil.TestIssuer,
+		AcceptedAudiences:   []string{testutil.TestAudience},
+		AllowedOrigins:      []string{"https://mcp.test"},
+		AgentCredentialsKey: agentKey,
 	}
 	iss := testutil.NewTokenIssuer(t)
 	srv := server.NewServer(cfg, traced, iss.Verifier(traced))
@@ -250,6 +277,7 @@ func TestMCPLatency(t *testing.T) {
 	for _, bc := range cases {
 		c.callTool(bc.tool, bc.args(0))
 	}
+	checkReveal(t, c, fx.Credential, secretLen)
 	var rows []row
 	for _, bc := range cases {
 		var took []time.Duration
@@ -608,4 +636,61 @@ func (c *benchClient) callTool(name string, args map[string]any) string {
 		c.t.Fatalf("%s(%v) returned a tool error: %s", name, args, text.String())
 	}
 	return text.String()
+}
+
+// seedSharedCredential adds one credential the family shared with agents,
+// sealed with a fresh random agent key, so credential_reveal has something
+// to open. It returns the key (base64, for config) and the length of the
+// random password; the plaintext itself is never logged or returned.
+func seedSharedCredential(t testing.TB, pool *pgxpool.Pool, hh uuid.UUID, fx *benchFixtures) (string, int) {
+	t.Helper()
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	keyB64 := base64.StdEncoding.EncodeToString(raw)
+	key, err := credential.ParseAgentKey(keyB64)
+	if err != nil {
+		t.Fatalf("agent key: %v", err)
+	}
+	pw := make([]byte, 18)
+	if _, err := rand.Read(pw); err != nil {
+		t.Fatal(err)
+	}
+	password := base64.RawURLEncoding.EncodeToString(pw)
+	ctx := context.Background()
+	var sid uuid.UUID
+	if err := pool.QueryRow(ctx, `INSERT INTO secrets (household_id, entity_type, entity_id, encrypted_data, iv, name, secret_type)
+		VALUES ($1, 'household', $1, '\x656e637279707465642d62792d62726f77736572', '\x313233343536373839303132', 'Bench Wi-Fi', 'login')
+		RETURNING id`, hh).Scan(&sid); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+	plain, _ := json.Marshal(map[string]string{"username": "bench", "password": password})
+	blob, err := key.Seal(hh, sid, plain)
+	if err != nil {
+		t.Fatalf("seal credential: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE secrets SET agent_ciphertext = $2, agent_shared_at = now() WHERE id = $1`, sid, blob); err != nil {
+		t.Fatalf("share credential: %v", err)
+	}
+	fx.Credential = sid.String()
+	return keyB64, len(password)
+}
+
+// checkReveal proves credential_reveal really opened the shared copy: the
+// password it returns has the seeded length. Only the length is compared.
+func checkReveal(t *testing.T, c *benchClient, id string, wantLen int) {
+	t.Helper()
+	var env struct {
+		Data struct {
+			Value map[string]any `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(c.callTool("credential_reveal", map[string]any{"credential_id": id})), &env); err != nil {
+		t.Fatalf("credential_reveal result is not JSON")
+	}
+	pw, _ := env.Data.Value["password"].(string)
+	if len(pw) != wantLen {
+		t.Fatalf("credential_reveal returned a password of length %d, want %d", len(pw), wantLen)
+	}
 }
