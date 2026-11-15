@@ -52,6 +52,12 @@ func registerAll(srv *server.Server, cfg *config.Config, pool *pgxpool.Pool) {
 	srv.RegisterTool(noteListName, noteListTool, noteListHandler)
 	noteCreateName, noteCreateTool, noteCreateHandler := note.NewCreateNoteTool(pool)
 	srv.RegisterTool(noteCreateName, noteCreateTool, noteCreateHandler)
+	noteGetName, noteGetTool, noteGetHandler := note.NewNoteGetTool(pool)
+	srv.RegisterTool(noteGetName, noteGetTool, noteGetHandler)
+	noteUpdateName, noteUpdateTool, noteUpdateHandler := note.NewNoteUpdateTool(pool)
+	srv.RegisterTool(noteUpdateName, noteUpdateTool, noteUpdateHandler)
+	noteDeleteName, noteDeleteTool, noteDeleteHandler := note.NewNoteDeleteTool(pool)
+	srv.RegisterTool(noteDeleteName, noteDeleteTool, noteDeleteHandler)
 
 	// Register search tool.
 	searchName, searchTool, searchHandler := search.NewSearchTool(pool)
