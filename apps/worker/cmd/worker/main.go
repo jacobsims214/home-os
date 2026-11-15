@@ -118,7 +118,7 @@ func runNotificationLoop(ctx context.Context, pool *pgxpool.Pool, smtpClient *sm
 			log.Println("notification loop stopped")
 			return
 		case <-ticker.C:
-			if err := generateNotifications(ctx, pool, smtpClient); err != nil {
+			if err := generateNotifications(ctx, pool, smtpClient, time.Now()); err != nil {
 				log.Printf("failed to generate notifications: %v", err)
 			}
 			log.Println("polling outbox...")
@@ -135,68 +135,114 @@ type notif struct {
 	Body        string
 }
 
-func generateNotifications(ctx context.Context, pool *pgxpool.Pool, smtpClient *smtp.Client) error {
-	var allNotifs []notif
+// billDueWindowDays and maintenanceDueWindowDays are how far ahead (in whole
+// days, inclusive of today) a bill or maintenance task triggers a notification.
+const (
+	billDueWindowDays        = 3
+	maintenanceDueWindowDays = 7
+)
 
-	// Bills due within 3 days
-	rows, err := pool.Query(ctx, `
-		INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
-		SELECT b.household_id, 'bill_due', b.name || ' due soon',
-		       'Payment of $' || b.amount || ' due on day ' || b.due_day,
-		       'bill', b.id::text
-		FROM bills b
-		WHERE NOT EXISTS (
-			SELECT 1 FROM notifications n
-			WHERE n.entity_id = b.id::text AND n.type = 'bill_due'
-			AND n.created_at > NOW() - INTERVAL '24 hours'
-		)
-		AND b.due_day BETWEEN EXTRACT(DAY FROM NOW())::int AND EXTRACT(DAY FROM NOW() + INTERVAL '3 days')::int
-		RETURNING id, household_id, type, title, body
-	`)
-	if err != nil {
-		return fmt.Errorf("bill notifications: %w", err)
-	}
-	billNotifs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[notif])
-	rows.Close()
-	if err != nil {
-		return fmt.Errorf("bill notifications collect: %w", err)
-	}
-	allNotifs = append(allNotifs, billNotifs...)
+// billDueSQL inserts a bill_due notification for every bill whose next due
+// date falls within [today, today + $2 days].
+//
+// bills.due_day is a day of the month (1-31), so the next due date can be in
+// this month or the next one: on Nov 29 a bill due on the 1st is due Dec 1.
+// For both months the day is clamped to the month's length, so due_day 31 is
+// due Feb 28 (or 29), and Apr 30. Comparing day numbers directly breaks every
+// time the window wraps a month end.
+//
+// notifications.entity_id is UUID, so bill ids are inserted and compared as
+// UUIDs (casting them to text fails with "operator does not exist: uuid = text").
+// The NOT EXISTS keeps one bill_due per bill per 24 hours.
+const billDueSQL = `
+	INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
+	SELECT b.household_id, 'bill_due', b.name || ' due soon',
+	       CASE WHEN b.amount IS NULL THEN 'Payment due on ' ELSE 'Payment of $' || b.amount || ' due on ' END
+	           || to_char(nd.due_date, 'Mon FMDD'),
+	       'bill', b.id
+	FROM bills b
+	CROSS JOIN LATERAL (
+		SELECT MIN(o.due_date) AS due_date
+		FROM (
+			SELECT (ms.month_start
+			        + (LEAST(b.due_day, EXTRACT(DAY FROM ms.month_start + INTERVAL '1 month' - INTERVAL '1 day')::int) - 1)
+			          * INTERVAL '1 day')::date AS due_date
+			FROM (
+				SELECT date_trunc('month', $1::date) + m * INTERVAL '1 month' AS month_start
+				FROM generate_series(0, 1) AS m
+			) ms
+		) o
+		WHERE o.due_date BETWEEN $1::date AND $1::date + $2::int
+	) nd
+	WHERE b.due_day BETWEEN 1 AND 31
+	AND nd.due_date IS NOT NULL
+	AND NOT EXISTS (
+		SELECT 1 FROM notifications n
+		WHERE n.entity_id = b.id AND n.type = 'bill_due'
+		AND n.created_at > NOW() - INTERVAL '24 hours'
+	)
+	RETURNING id, household_id, type, title, body
+`
 
-	// Maintenance tasks due within 7 days
-	rows, err = pool.Query(ctx, `
-		INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
-		SELECT mt.household_id, 'maintenance_due', mt.name || ' due soon',
-		       COALESCE(mt.description, ''),
-		       'maintenance_task', mt.id::text
-		FROM maintenance_tasks mt
-		WHERE mt.status = 'pending'
-		AND mt.due_date BETWEEN NOW() AND NOW() + INTERVAL '7 days'
-		AND NOT EXISTS (
-			SELECT 1 FROM notifications n
-			WHERE n.entity_id = mt.id::text AND n.type = 'maintenance_due'
-			AND n.created_at > NOW() - INTERVAL '24 hours'
-		)
-		RETURNING id, household_id, type, title, body
-	`)
-	if err != nil {
-		return fmt.Errorf("maintenance notifications: %w", err)
-	}
-	maintNotifs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[notif])
-	rows.Close()
-	if err != nil {
-		return fmt.Errorf("maintenance notifications collect: %w", err)
-	}
-	allNotifs = append(allNotifs, maintNotifs...)
+// maintenanceDueSQL inserts a maintenance_due notification for every pending
+// task whose due_date falls within [today, today + $2 days]. due_date is a
+// DATE, so the window is in dates: comparing it with NOW() would skip tasks
+// due today (midnight is earlier than NOW()).
+const maintenanceDueSQL = `
+	INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
+	SELECT mt.household_id, 'maintenance_due', mt.name || ' due soon',
+	       COALESCE(mt.description, ''),
+	       'maintenance_task', mt.id
+	FROM maintenance_tasks mt
+	WHERE mt.status = 'pending'
+	AND mt.due_date BETWEEN $1::date AND $1::date + $2::int
+	AND NOT EXISTS (
+		SELECT 1 FROM notifications n
+		WHERE n.entity_id = mt.id AND n.type = 'maintenance_due'
+		AND n.created_at > NOW() - INTERVAL '24 hours'
+	)
+	RETURNING id, household_id, type, title, body
+`
 
-	if len(allNotifs) == 0 {
+// generateNotifications inserts due-soon notifications for bills and
+// maintenance tasks as of the calendar day of now, then emails them.
+func generateNotifications(ctx context.Context, pool *pgxpool.Pool, smtpClient *smtp.Client, now time.Time) error {
+	notifs, err := insertDueNotifications(ctx, pool, now)
+	if err != nil {
+		return err
+	}
+	if len(notifs) == 0 {
 		return nil
 	}
 
 	// Best-effort email delivery — never block on send failures.
-	sendNotificationEmails(ctx, pool, smtpClient, allNotifs)
-
+	sendNotificationEmails(ctx, pool, smtpClient, notifs)
 	return nil
+}
+
+// insertDueNotifications runs the bill and maintenance queries for the
+// calendar day of now (in now's location) and returns the inserted rows.
+func insertDueNotifications(ctx context.Context, pool *pgxpool.Pool, now time.Time) ([]notif, error) {
+	today := now.Format(time.DateOnly)
+
+	rows, err := pool.Query(ctx, billDueSQL, today, billDueWindowDays)
+	if err != nil {
+		return nil, fmt.Errorf("bill notifications: %w", err)
+	}
+	allNotifs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[notif])
+	if err != nil {
+		return nil, fmt.Errorf("bill notifications: %w", err)
+	}
+
+	rows, err = pool.Query(ctx, maintenanceDueSQL, today, maintenanceDueWindowDays)
+	if err != nil {
+		return nil, fmt.Errorf("maintenance notifications: %w", err)
+	}
+	maintNotifs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[notif])
+	if err != nil {
+		return nil, fmt.Errorf("maintenance notifications: %w", err)
+	}
+	return append(allNotifs, maintNotifs...), nil
 }
 
 // sendNotificationEmails sends HTML email notifications to all household members.
