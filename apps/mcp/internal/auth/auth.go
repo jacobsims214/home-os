@@ -316,11 +316,11 @@ func ResolveMember(ctx context.Context, db DB, sub, email string) (*ResolvedMemb
 			return nil, ErrNoMembership
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%w: user by email: %v", ErrMemberLookup, err)
+			return nil, fmt.Errorf("%w: user by email: %w", ErrMemberLookup, err)
 		}
 		backfillSub(ctx, db, userID, sub, storedSub)
 	default:
-		return nil, fmt.Errorf("%w: user by dex_sub: %v", ErrMemberLookup, err)
+		return nil, fmt.Errorf("%w: user by dex_sub: %w", ErrMemberLookup, err)
 	}
 
 	m := ResolvedMember{UserID: userID}
@@ -334,7 +334,7 @@ func ResolveMember(ctx context.Context, db DB, sub, email string) (*ResolvedMemb
 		return nil, ErrNoMembership
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: membership: %v", ErrMemberLookup, err)
+		return nil, fmt.Errorf("%w: membership: %w", ErrMemberLookup, err)
 	}
 	return &m, nil
 }

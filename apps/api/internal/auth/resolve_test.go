@@ -145,6 +145,23 @@ func TestPGMemberResolver_Resolve(t *testing.T) {
 	})
 }
 
+// TestPGMemberResolver_Resolve_CancelledContext checks that both the sentinel
+// and the underlying cause stay reachable through errors.Is. The pool is lazy
+// (no connection is made), so this runs without TEST_DATABASE_URL.
+func TestPGMemberResolver_Resolve_CancelledContext(t *testing.T) {
+	pool, err := pgxpool.New(context.Background(), "postgres://u:p@127.0.0.1:1/none?connect_timeout=1")
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = NewMemberResolver(pool).Resolve(ctx, "CiQsub", "x@example.com")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrMemberLookup)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
 func upper(s string) string {
 	b := []byte(s)
 	for i, c := range b {

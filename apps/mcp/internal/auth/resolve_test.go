@@ -161,6 +161,21 @@ func TestResolveMember_DBError(t *testing.T) {
 	}
 }
 
+// TestResolveMember_CancelledContext checks that both the sentinel and the
+// underlying cause stay reachable through errors.Is.
+func TestResolveMember_CancelledContext(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := auth.ResolveMember(ctx, pool, "sub", "x@test.local")
+	if !errors.Is(err, auth.ErrMemberLookup) {
+		t.Fatalf("err = %v, want ErrMemberLookup", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled in the chain", err)
+	}
+}
+
 func TestVerifyTokenAndEnrich(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx := context.Background()
