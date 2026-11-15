@@ -1,19 +1,60 @@
 // Package config loads application configuration from environment variables.
 // All config values are read once at startup and passed to components.
-// Missing required variables cause startup to fail with a clear error message.
+// Missing or invalid variables cause startup to fail with a clear error message.
+//
+// Environment variables:
+//
+//	DATABASE_URL            (required) Postgres connection string.
+//	PORT                    MCP listen port. Default 8082.
+//	METADATA_PORT           OAuth metadata listen port. Default 8083.
+//	PUBLIC_BASE_URL         Public origin of Home OS as browsers and OAuth clients
+//	                        see it (scheme://host[:port], no path). Default
+//	                        http://localhost:8000. A trailing slash is trimmed.
+//	MCP_RESOURCE_URL        Canonical URI of this MCP server (RFC 8707 resource,
+//	                        RFC 9728 "resource"). Default <PUBLIC_BASE_URL>/mcp.
+//	MCP_ACCEPTED_AUDIENCES  Comma-separated token audiences the server accepts.
+//	                        Dex sets aud to the OAuth client_id, so the default is
+//	                        home-os-ui,home-os-mcp.
+//	DEX_ISSUER              OIDC issuer; must equal the token iss claim. Default
+//	                        <PUBLIC_BASE_URL>/dex.
+//	DEX_JWKS_URL            JWKS endpoint used to verify token signatures. Default
+//	                        the in-cluster Envoy /dex/keys route.
+//	MCP_ALLOWED_ORIGINS     Comma-separated browser Origins allowed to call /mcp
+//	                        (scheme://host[:port]). Default the origin of
+//	                        PUBLIC_BASE_URL. Requests without Origin and loopback
+//	                        origins are handled by the transport middleware.
+//	DEX_GRPC_ADDR           Dex gRPC API address. Default home-os-dex:5557.
+//	LOG_LEVEL               Default info.
+//	TYPESENSE_HOST, TYPESENSE_PORT, TYPESENSE_API_KEY  Optional search backend.
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
 
+// DefaultAcceptedAudiences are the Dex client IDs whose tokens the MCP accepts.
+// Dex puts the client_id in the aud claim.
+var DefaultAcceptedAudiences = []string{"home-os-ui", "home-os-mcp"}
+
 // Config holds all environment-driven configuration for the MCP server.
 type Config struct {
-	Port            string
-	MetadataPort    string
-	PublicBaseURL   string
+	Port         string
+	MetadataPort string
+	// PublicBaseURL is the public origin (scheme://host[:port]) without a
+	// trailing slash.
+	PublicBaseURL string
+	// ResourceURL is this server's canonical URI, advertised as the RFC 9728
+	// resource and matched against the RFC 8707 resource parameter.
+	ResourceURL string
+	// AcceptedAudiences lists the aud values a token may carry.
+	AcceptedAudiences []string
+	// AllowedOrigins lists the browser origins (scheme://host[:port],
+	// lowercase) allowed to call /mcp.
+	AllowedOrigins  []string
 	DatabaseURL     string
 	DexJWKSURL      string
 	DexIssuer       string
@@ -25,15 +66,19 @@ type Config struct {
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
-// Returns an error if DATABASE_URL is missing or empty.
+// Every problem found is reported in one error so a misconfigured deployment
+// can be fixed in a single pass.
 func Load() (*Config, error) {
+	publicBaseURL := strings.TrimRight(getEnv("PUBLIC_BASE_URL", "http://localhost:8000"), "/")
+
 	cfg := &Config{
 		Port:            getEnv("PORT", "8082"),
 		MetadataPort:    getEnv("METADATA_PORT", "8083"),
-		PublicBaseURL:   getEnv("PUBLIC_BASE_URL", "http://localhost:8000"),
+		PublicBaseURL:   publicBaseURL,
+		ResourceURL:     getEnv("MCP_RESOURCE_URL", publicBaseURL+"/mcp"),
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
 		DexJWKSURL:      getEnv("DEX_JWKS_URL", "http://home-os-envoy.home-os.svc.cluster.local:8000/dex/keys"),
-		DexIssuer:       getEnv("DEX_ISSUER", "http://localhost:8000/dex"),
+		DexIssuer:       getEnv("DEX_ISSUER", publicBaseURL+"/dex"),
 		DexGRPCAddr:     getEnv("DEX_GRPC_ADDR", "home-os-dex:5557"),
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
 		TypesenseHost:   getEnv("TYPESENSE_HOST", ""),
@@ -45,11 +90,101 @@ func Load() (*Config, error) {
 	if cfg.DatabaseURL == "" {
 		missing = append(missing, "DATABASE_URL")
 	}
+
+	var errs []error
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("config: missing required environment variables: %s", strings.Join(missing, ", "))
+		errs = append(errs, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", ")))
 	}
 
+	if err := validateOrigin("PUBLIC_BASE_URL", cfg.PublicBaseURL); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateHTTPURL("MCP_RESOURCE_URL", cfg.ResourceURL); err != nil {
+		errs = append(errs, err)
+	} else if u, _ := url.Parse(cfg.ResourceURL); u.Fragment != "" {
+		errs = append(errs, fmt.Errorf("MCP_RESOURCE_URL %q must not contain a fragment", cfg.ResourceURL))
+	}
+	if err := validateHTTPURL("DEX_ISSUER", cfg.DexIssuer); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateHTTPURL("DEX_JWKS_URL", cfg.DexJWKSURL); err != nil {
+		errs = append(errs, err)
+	}
+
+	if v, ok := os.LookupEnv("MCP_ACCEPTED_AUDIENCES"); ok && strings.TrimSpace(v) != "" {
+		cfg.AcceptedAudiences = splitList(v)
+		if len(cfg.AcceptedAudiences) == 0 {
+			errs = append(errs, fmt.Errorf("MCP_ACCEPTED_AUDIENCES %q has no audiences", v))
+		}
+	} else {
+		cfg.AcceptedAudiences = append([]string(nil), DefaultAcceptedAudiences...)
+	}
+
+	if v, ok := os.LookupEnv("MCP_ALLOWED_ORIGINS"); ok && strings.TrimSpace(v) != "" {
+		origins := splitList(v)
+		if len(origins) == 0 {
+			errs = append(errs, fmt.Errorf("MCP_ALLOWED_ORIGINS %q has no origins", v))
+		}
+		for _, o := range origins {
+			o = strings.TrimRight(o, "/")
+			if err := validateOrigin("MCP_ALLOWED_ORIGINS", o); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			cfg.AllowedOrigins = append(cfg.AllowedOrigins, strings.ToLower(o))
+		}
+	} else if validateOrigin("PUBLIC_BASE_URL", cfg.PublicBaseURL) == nil {
+		cfg.AllowedOrigins = []string{strings.ToLower(cfg.PublicBaseURL)}
+	}
+
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("config: %w", errors.Join(errs...))
+	}
 	return cfg, nil
+}
+
+// validateHTTPURL checks that v is an absolute http or https URL with a host.
+func validateHTTPURL(name, v string) error {
+	u, err := url.Parse(v)
+	if err != nil {
+		return fmt.Errorf("%s %q is not a valid URL: %v", name, v, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%s %q must be an absolute http or https URL", name, v)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%s %q has no host", name, v)
+	}
+	return nil
+}
+
+// validateOrigin checks that v is an origin: an http(s) URL with a host and
+// no path, query or fragment.
+func validateOrigin(name, v string) error {
+	if err := validateHTTPURL(name, v); err != nil {
+		return err
+	}
+	u, _ := url.Parse(v)
+	if u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("%s %q must be an origin (scheme://host[:port]) with no path, query or credentials", name, v)
+	}
+	return nil
+}
+
+// splitList splits a comma-separated value, trimming spaces and dropping
+// empty entries and duplicates.
+func splitList(v string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range strings.Split(v, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // getEnv returns the value of the environment variable if set, otherwise returns fallback.
