@@ -35,7 +35,7 @@ func TestLegacyInitializeClient(t *testing.T) {
 		t.Fatal("SeedHousehold context carries no claims")
 	}
 	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'property', gen_random_uuid(), 'Legacy client note', 'hello')`,
+		`INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'household', $1, 'Legacy client note', 'hello')`,
 		hh.HouseholdID,
 	); err != nil {
 		t.Fatalf("insert note: %v", err)
@@ -144,7 +144,7 @@ func TestModernStatelessClient(t *testing.T) {
 		t.Fatal("SeedHousehold context carries no claims")
 	}
 	if _, err := pool.Exec(context.Background(),
-		`INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'property', gen_random_uuid(), 'Modern client note', 'hello')`,
+		`INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'household', $1, 'Modern client note', 'hello')`,
 		hh.HouseholdID,
 	); err != nil {
 		t.Fatalf("insert note: %v", err)

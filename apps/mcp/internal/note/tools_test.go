@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/server"
@@ -22,7 +23,7 @@ func TestListNotes_Smoke(t *testing.T) {
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	_, other := testutil.SeedHousehold(t, pool)
 
-	propertyID := uuid.New()
+	propertyID := seedRow(t, pool, "properties", hh.HouseholdID)
 	insert := func(householdID uuid.UUID, entityType string, entityID uuid.UUID, title, body string) {
 		t.Helper()
 		if _, err := pool.Exec(context.Background(),
@@ -33,8 +34,10 @@ func TestListNotes_Smoke(t *testing.T) {
 		}
 	}
 	insert(hh.HouseholdID, "property", propertyID, "Roof", "Replace shingles in spring")
-	insert(hh.HouseholdID, "vehicle", uuid.New(), "Oil", "Change oil at 5k miles")
-	insert(other.HouseholdID, "property", propertyID, "Not mine", "Belongs to another household")
+	insert(hh.HouseholdID, "vehicle", seedRow(t, pool, "vehicles", hh.HouseholdID), "Oil", "Change oil at 5k miles")
+	// Notes may only point at their own family's rows (migration 038), so the
+	// other household's note is about its own property.
+	insert(other.HouseholdID, "property", seedRow(t, pool, "properties", other.HouseholdID), "Not mine", "Belongs to another household")
 
 	_, _, handler := NewListNotesTool(pool)
 
@@ -157,7 +160,7 @@ func TestCreateNote_RecordsAuthor(t *testing.T) {
 	_, _, list := NewListNotesTool(pool)
 
 	longBody := strings.Repeat("x", 150)
-	vehicleID := uuid.New()
+	vehicleID := seedRow(t, pool, "vehicles", hh.HouseholdID)
 
 	tests := []struct {
 		name           string
@@ -375,7 +378,7 @@ func TestNoteGet(t *testing.T) {
 	var mine authoredNote
 	callJSON(t, ctx, create, map[string]any{"title": "Wi-Fi setup", "content": longBody}, &mine)
 
-	vehicleID := uuid.New()
+	vehicleID := seedRow(t, pool, "vehicles", hh.HouseholdID)
 	var linked authoredNote
 	callJSON(t, ctx, create, map[string]any{
 		"title": "Tires", "content": "Rotate every 6k miles", "entity_type": "vehicle", "entity_id": vehicleID.String(),
@@ -1008,4 +1011,26 @@ func TestNoteDelete(t *testing.T) {
 	if ids := listed(t, otherCtx); !ids[theirs] {
 		t.Error("other household's note vanished from its list_notes")
 	}
+}
+
+// seedRow inserts a minimal properties or vehicles row for householdID and
+// returns its id. Notes must be about a row of their own family (038).
+func seedRow(t *testing.T, pool interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, table string, householdID uuid.UUID) uuid.UUID {
+	t.Helper()
+	var sql string
+	switch table {
+	case "properties":
+		sql = `INSERT INTO properties (household_id, name) VALUES ($1, 'Test property') RETURNING id`
+	case "vehicles":
+		sql = `INSERT INTO vehicles (household_id, make) VALUES ($1, 'Test') RETURNING id`
+	default:
+		t.Fatalf("seedRow: unsupported table %q", table)
+	}
+	var id uuid.UUID
+	if err := pool.QueryRow(context.Background(), sql, householdID).Scan(&id); err != nil {
+		t.Fatalf("seed %s: %v", table, err)
+	}
+	return id
 }

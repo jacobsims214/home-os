@@ -131,7 +131,10 @@ func TestNoteRoutes_GetAndUpdateByID(t *testing.T) {
 	token, userID, hhID := member(t, pool, key)
 	otherToken, _, _ := member(t, pool, key)
 
-	entityID := uuid.NewString()
+	// Notes must be about a row of the caller's own family (migration 038).
+	var entityID string
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`INSERT INTO properties (household_id, name) VALUES ($1, 'Note test property') RETURNING id::text`, hhID).Scan(&entityID))
 	title := "Water heater"
 	rec, created := call(t, h, http.MethodPost, "/api/v1/notes", token, map[string]any{
 		"entity_type": "property", "entity_id": entityID, "title": title, "body": "Flushed in March.",

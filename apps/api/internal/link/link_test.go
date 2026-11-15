@@ -92,28 +92,54 @@ type testFixtures struct {
 	EntityID    uuid.UUID // reusable entity ID for link tests
 }
 
-// setupFixtures creates the minimal data needed for link tests within a transaction.
-// The caller must rollback the transaction when done to keep the DB clean.
+// setupFixtures creates a household and, via seedEntityRows, one row of every
+// linkable entity type sharing the id EntityID. The rows are committed through
+// the pool (not a transaction): since migration 038, document_links may only
+// point at an existing row of the same household, and the repo writes through
+// the pool, so it must see them. Deleting the household on cleanup cascades to
+// the entities and their links.
 //
 // Note: the `documents` table was dropped by migration 024. Earlier versions
 // of this helper inserted a row into `documents` and stored its UUID on
-// testFixtures.DocumentID, but no test ever read that field — it was dead
-// code. It has been removed along with the table.
-func setupFixtures(ctx context.Context, t *testing.T, tx pgx.Tx) testFixtures {
+// testFixtures.DocumentID, but no test ever read that field. It has been
+// removed along with the table.
+func setupFixtures(ctx context.Context, t *testing.T, pool *pgxpool.Pool) testFixtures {
 	t.Helper()
 
-	// Create a household
 	var householdID uuid.UUID
-	err := tx.QueryRow(ctx,
+	err := pool.QueryRow(ctx,
 		`INSERT INTO households (name) VALUES ('Test Household for Links')
 		 RETURNING id`,
 	).Scan(&householdID)
 	require.NoError(t, err, "create household")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM households WHERE id = $1`, householdID)
+	})
 
 	return testFixtures{
 		HouseholdID: householdID,
-		EntityID:    uuid.New(),
+		EntityID:    seedEntityRows(ctx, t, pool, householdID),
 	}
+}
+
+// seedEntityRows inserts one row into each table behind entityTypes, all with
+// the same new id, so (entity_type, id) resolves for every entity type.
+func seedEntityRows(ctx context.Context, t *testing.T, pool *pgxpool.Pool, householdID uuid.UUID) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	for _, q := range []string{
+		`INSERT INTO properties (id, household_id, name) VALUES ($1, $2, 'Link test property')`,
+		`INSERT INTO assets (id, household_id, name) VALUES ($1, $2, 'Link test asset')`,
+		`INSERT INTO vehicles (id, household_id, make) VALUES ($1, $2, 'Link test')`,
+		`INSERT INTO pets (id, household_id, name) VALUES ($1, $2, 'Link test pet')`,
+		`INSERT INTO vendors (id, household_id, name) VALUES ($1, $2, 'Link test vendor')`,
+		`INSERT INTO bills (id, household_id, name) VALUES ($1, $2, 'Link test bill')`,
+		`INSERT INTO maintenance_tasks (id, household_id, name) VALUES ($1, $2, 'Link test task')`,
+	} {
+		_, err := pool.Exec(ctx, q, id, householdID)
+		require.NoError(t, err, "seed entity row: %s", q)
+	}
+	return id
 }
 
 func TestCreateLink_AllEntityTypes(t *testing.T) {
@@ -127,7 +153,7 @@ func TestCreateLink_AllEntityTypes(t *testing.T) {
 			require.NoError(t, err)
 			defer tx.Rollback(ctx) //nolint:errcheck
 
-			fixtures := setupFixtures(ctx, t, tx)
+			fixtures := setupFixtures(ctx, t, pool)
 			repo := NewRepo(pool)
 
 			for _, lt := range linkTypes {
@@ -167,7 +193,7 @@ func TestCreateLink_Duplicate(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	fixtures := setupFixtures(ctx, t, tx)
+	fixtures := setupFixtures(ctx, t, pool)
 	repo := NewRepo(pool)
 
 	link := &Link{
@@ -198,7 +224,7 @@ func TestGetLinks_ByEntity(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	fixtures := setupFixtures(ctx, t, tx)
+	fixtures := setupFixtures(ctx, t, pool)
 	repo := NewRepo(pool)
 
 	// Create one link of each type for the same entity.
@@ -241,10 +267,10 @@ func TestGetLinks_FiltersByEntityType(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	fixtures := setupFixtures(ctx, t, tx)
+	fixtures := setupFixtures(ctx, t, pool)
 	repo := NewRepo(pool)
 
-	otherEntityID := uuid.New()
+	otherEntityID := seedEntityRows(ctx, t, pool, fixtures.HouseholdID)
 
 	// Create links for two different entities.
 	_, err = repo.CreateLink(ctx, &Link{
@@ -285,7 +311,7 @@ func TestGetLinks_NoResults(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	fixtures := setupFixtures(ctx, t, tx)
+	fixtures := setupFixtures(ctx, t, pool)
 	repo := NewRepo(pool)
 
 	links, err := repo.GetLinks(ctx, "asset", fixtures.EntityID)
@@ -300,7 +326,7 @@ func TestDeleteLink(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	fixtures := setupFixtures(ctx, t, tx)
+	fixtures := setupFixtures(ctx, t, pool)
 	repo := NewRepo(pool)
 
 	created, err := repo.CreateLink(ctx, &Link{
@@ -329,7 +355,7 @@ func TestDeleteLink_Nonexistent(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	_ = setupFixtures(ctx, t, tx)
+	_ = setupFixtures(ctx, t, pool)
 	repo := NewRepo(pool)
 
 	// Deleting a nonexistent link should return an error.
@@ -345,7 +371,7 @@ func TestGetLink_ByID(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	fixtures := setupFixtures(ctx, t, tx)
+	fixtures := setupFixtures(ctx, t, pool)
 	repo := NewRepo(pool)
 
 	created, err := repo.CreateLink(ctx, &Link{
@@ -377,7 +403,7 @@ func TestGetLink_NotFound(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	_ = setupFixtures(ctx, t, tx)
+	_ = setupFixtures(ctx, t, pool)
 	repo := NewRepo(pool)
 
 	got, err := repo.GetLink(ctx, uuid.New())
@@ -392,7 +418,7 @@ func TestCreateLink_WithNilURL(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	fixtures := setupFixtures(ctx, t, tx)
+	fixtures := setupFixtures(ctx, t, pool)
 	repo := NewRepo(pool)
 
 	link := &Link{
@@ -423,7 +449,7 @@ func TestLinkRoundtrip_AllFields(t *testing.T) {
 	require.NoError(t, err)
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	fixtures := setupFixtures(ctx, t, tx)
+	fixtures := setupFixtures(ctx, t, pool)
 	repo := NewRepo(pool)
 
 	url := "https://example.com/items/42"
