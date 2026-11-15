@@ -474,8 +474,8 @@ func TestNoteCreate(t *testing.T) {
 			args:    map[string]any{"title": "x", "content": "y", "about_type": "pet", "about_id": "00000000-0000-0000-0000-000000000001"},
 			wantMsg: "No pet with id 00000000-0000-0000-0000-000000000001 was found in this family."},
 		{name: "a kind the DB does not know yet is refused", ctx: ctx, wantField: "about_type",
-			args:    map[string]any{"title": "x", "content": "y", "about_type": "recipe", "about_id": uuid.NewString()},
-			wantMsg: "Notes about a recipe can't be saved yet."},
+			args:    map[string]any{"title": "x", "content": "y", "about_type": "guide", "about_id": uuid.NewString()},
+			wantMsg: "Notes about a guide can't be saved yet."},
 		{name: "about_type without about_id", ctx: ctx, wantField: "about_id",
 			args: map[string]any{"title": "x", "content": "y", "about_type": "vehicle"}, wantMsg: "about_type vehicle needs about_id."},
 		{name: "about_id without about_type", ctx: ctx, wantField: "about_type",
@@ -568,7 +568,7 @@ func TestNoteFind(t *testing.T) {
 		{"family notes", map[string]any{"about_type": "family"}, []uuid.UUID{wifi}},
 		{"query matches title or body, any case", map[string]any{"query": "wifi"}, []uuid.UUID{wifi}},
 		{"query with a filter", map[string]any{"query": "sam", "about_type": "contact"}, []uuid.UUID{plumber}},
-		{"kind the DB does not know matches nothing", map[string]any{"about_type": "recipe"}, nil},
+		{"kind the DB does not know matches nothing", map[string]any{"about_type": "guide"}, nil},
 		{"empty strings are not filters", map[string]any{"query": "", "about_type": "", "about_id": "", "cursor": ""}, []uuid.UUID{wifi, plumber, oil, roof}},
 	}
 	for _, tc := range tests {

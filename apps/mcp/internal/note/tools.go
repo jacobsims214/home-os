@@ -347,7 +347,7 @@ func NewNoteFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 		}
 
 		// entity_type is compared as text: a kind the DB does not know yet
-		// (e.g. recipe) simply matches nothing instead of failing the cast.
+		// (e.g. guide) simply matches nothing instead of failing the cast.
 		rows, err := pool.Query(ctx,
 			`SELECT `+noteColumns+`, COUNT(*) OVER ()
 			 FROM notes n`+noteJoins+`
