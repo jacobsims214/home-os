@@ -61,7 +61,6 @@ home-os/
 | Typesense | 8109 | Full-text search |
 | Tika | 9998 | OCR / text extraction |
 | Caddy | 80/443 | Reverse proxy (dev) |
-| MinIO | 9002 | Legacy (no longer used by app) |
 
 ## Development
 

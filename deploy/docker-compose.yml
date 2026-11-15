@@ -27,6 +27,9 @@ services:
       POSTGRES_PASSWORD: homeos
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Runs only when the data volume is first created: makes the `app` role
+      # that migrations GRANT to (032_loans, 034_agent_tokens).
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U homeos -d homeos"]
       interval: 5s
@@ -50,25 +53,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
-
-  minio:
-    image: minio/minio
-    restart: unless-stopped
-    ports:
-      - "9002:9000"
-      - "9003:9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    volumes:
-      - minio_data:/data
-    command: server /data --console-address ":9001"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
 
   # ──────────────────────────────────────────────────────────────
   # Caddy — Reverse proxy with automatic SSL
@@ -175,10 +159,6 @@ services:
       TYPESENSE_HOST: typesense
       TYPESENSE_PORT: "8108"
       TYPESENSE_API_KEY: homeos-dev-key
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-      MINIO_USE_SSL: "false"
       ENCRYPTION_KEY: homeos-dev-enc-key-32-chars-xxxxx
       LOG_LEVEL: debug
       DEMO_MODE: "true"
@@ -259,7 +239,9 @@ services:
     working_dir: /app
     environment:
       NODE_ENV: development
-      API_URL: http://api:8080
+      # The BFF (apps/ui/app/bff/[...path]/route.ts) proxies /bff/* here.
+      # Its default, http://home-os-api:8080, is the Kubernetes service name.
+      API_INTERNAL_URL: http://api:8080
       # OIDC (apps/ui/lib/auth/dex-config.ts). The redirect URI must match the
       # home-os-ui client in deploy/dex/config.yaml exactly.
       PUBLIC_URL: https://localhost:8443
@@ -273,7 +255,6 @@ services:
 volumes:
   postgres_data:
   typesense_data:
-  minio_data:
   caddy_data:
   caddy_config:
   dex_data:
