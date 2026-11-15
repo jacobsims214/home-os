@@ -1,12 +1,14 @@
 package caldav
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"home-os/calendar/internal/auth"
 	"home-os/calendar/internal/db"
@@ -100,26 +102,16 @@ func HandleGET(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 		return
 	}
 
-	// Parse the stored JSON into a CalEvent.
-	ev := &ical.CalEvent{}
-	if err := json.Unmarshal([]byte(obj.ICALData), ev); err != nil {
-		logging.Logger.Error("caldav: unmarshal event",
+	// Serve the client's own VCALENDAR when we have it, otherwise generate
+	// one from the stored JSON. See renderObjectICal.
+	icalText, err := renderObjectICal(obj)
+	if err != nil {
+		logging.Logger.Error("caldav: render event",
 			slog.String("event_uid", eventUID),
 			slog.String("error", err.Error()))
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	ev.UID = obj.UID
-	// Source DTSTAMP/LAST-MODIFIED from the DB updated_at so the same stored
-	// event produces identical values on every GET. Without this, ev.DTStamp
-	// is zero and generateEventBody falls back to time.Now(), which changes
-	// on every request and forces Apple Calendar to re-sync every event every
-	// poll. ev.UpdatedAt is also typically zero for API-written events
-	// because the API doesn't populate it before marshaling.
-	ev.DTStamp = obj.UpdatedAt
-
-	// Generate iCalendar text.
-	icalText := ical.GenerateEvent(ev)
 
 	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
 	// RFC 7232 requires ETags to be quoted strings. Quote consistently with
@@ -404,7 +396,12 @@ func HandlePUT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 	// check at the DB layer), upserted will be nil and we return 404 rather
 	// than leaking that the calendar exists. The transaction is rolled back in
 	// that case.
-	upserted, err := repo.UpsertCalendarObjectWithCTag(ctx, householdID, cal.ID, eventUID, string(jsonData), etag)
+	//
+	// The body is also kept verbatim in ical_raw (with its RRULE in rrule) so
+	// GET/REPORT can hand it back losslessly: the JSON keeps only the fields
+	// the API and MCP tools use and drops RRULE, EXDATE, VALARM and the rest.
+	icalRaw, rrule := rawForStorage(body)
+	upserted, err := repo.UpsertCalendarObjectWithCTag(ctx, householdID, cal.ID, eventUID, string(jsonData), etag, icalRaw, rrule)
 	if err != nil {
 		logging.Logger.Error("caldav: upsert object + ctag (tx)",
 			slog.String("calendar_uid", calUID),
@@ -491,4 +488,114 @@ func HandleDELETE(w http.ResponseWriter, r *http.Request, repo *db.Repo, path st
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// renderObjectICal returns the iCalendar text CalDAV serves for a stored
+// object, for GET and every REPORT.
+//
+// When the object carries the VCALENDAR a client PUT (ical_raw) and that text
+// still describes the event in ical_data, it is returned byte for byte, so
+// RRULE, EXDATE, VALARM, attendees and any X- properties survive the round
+// trip. Otherwise the text is generated from the JSON, as it was before
+// ical_raw existed. That covers:
+//   - rows with NULL ical_raw (written before migration 036, or by the API
+//     and MCP tools, which only write ical_data);
+//   - rows whose ical_raw is stale: the API and MCP tools update ical_data
+//     without touching ical_raw, so after such an edit the raw text no longer
+//     matches and serving it would undo the edit on every CalDAV client.
+//
+// Staleness is detected by parsing ical_raw with the same parser PUT used to
+// build ical_data and comparing the fields ical_data holds (see
+// rawMatchesEvent). A fresh PUT therefore always matches.
+func renderObjectICal(obj *db.CalendarObject) (string, error) {
+	ev := &ical.CalEvent{}
+	if err := json.Unmarshal([]byte(obj.ICALData), ev); err != nil {
+		return "", fmt.Errorf("unmarshal event: %w", err)
+	}
+	if obj.ICALRaw != nil && *obj.ICALRaw != "" && rawMatchesEvent(*obj.ICALRaw, ev) {
+		return *obj.ICALRaw, nil
+	}
+	ev.UID = obj.UID
+	// Source DTSTAMP/LAST-MODIFIED from the DB updated_at so the same stored
+	// event produces identical values on every GET. Without this, ev.DTStamp
+	// is zero and generateEventBody falls back to time.Now(), which changes
+	// on every request and forces Apple Calendar to re-sync every event every
+	// poll. ev.UpdatedAt is also typically zero for API-written events
+	// because the API doesn't populate it before marshaling.
+	ev.DTStamp = obj.UpdatedAt
+	return ical.GenerateEvent(ev), nil
+}
+
+// rawMatchesEvent reports whether raw, parsed the way PUT parses a body,
+// yields the same event fields as ev (the stored JSON). Only the fields
+// ical_data carries and the generated iCalendar emits are compared; SEQUENCE
+// is left out because PUT bumps it in the JSON while the raw text keeps the
+// client's own value.
+func rawMatchesEvent(raw string, ev *ical.CalEvent) bool {
+	parsed, err := ical.ParseEvent(raw)
+	if err != nil {
+		return false
+	}
+	return parsed.Title == ev.Title &&
+		parsed.Description == ev.Description &&
+		parsed.Location == ev.Location &&
+		parsed.AllDay == ev.AllDay &&
+		parsed.Start.Equal(ev.Start) &&
+		parsed.End.Equal(ev.End)
+}
+
+// rawForStorage returns the PUT body to keep in ical_raw and the RRULE value
+// to keep in rrule. Either is nil when there is nothing to store. A body that
+// is not valid UTF-8 or contains a NUL byte is not kept (Postgres TEXT
+// rejects both, and failing the PUT would be worse than falling back to the
+// generated iCalendar for that event).
+func rawForStorage(body []byte) (icalRaw *string, rrule *string) {
+	if len(body) == 0 || !utf8.Valid(body) || bytes.IndexByte(body, 0) >= 0 {
+		return nil, nil
+	}
+	raw := string(body)
+	if r := extractRRULE(raw); r != "" {
+		rrule = &r
+	}
+	return &raw, rrule
+}
+
+// extractRRULE returns the value of the first RRULE property inside a VEVENT
+// of an iCalendar text, after unfolding continuation lines (RFC 5545 §3.1).
+// Property names are case-insensitive. Returns "" when there is none.
+func extractRRULE(icalText string) string {
+	var unfolded []string
+	for _, line := range strings.Split(strings.ReplaceAll(icalText, "\r\n", "\n"), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) && len(unfolded) > 0 {
+			unfolded[len(unfolded)-1] += line[1:]
+			continue
+		}
+		unfolded = append(unfolded, line)
+	}
+
+	inEvent := false
+	for _, line := range unfolded {
+		upper := strings.ToUpper(line)
+		switch {
+		case strings.HasPrefix(upper, "BEGIN:VEVENT"):
+			inEvent = true
+			continue
+		case strings.HasPrefix(upper, "END:VEVENT"):
+			inEvent = false
+			continue
+		}
+		if !inEvent {
+			continue
+		}
+		if !strings.HasPrefix(upper, "RRULE:") && !strings.HasPrefix(upper, "RRULE;") {
+			continue
+		}
+		// RRULE takes no quoted parameters, so the first colon ends the
+		// name/params part.
+		if i := strings.IndexByte(line, ':'); i >= 0 {
+			return strings.TrimSpace(line[i+1:])
+		}
+	}
+	return ""
 }

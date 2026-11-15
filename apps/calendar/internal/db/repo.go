@@ -107,6 +107,14 @@ type CalendarObject struct {
 	EntityID   *string   `json:"entity_id,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+	// ICALRaw is the complete VCALENDAR text as received by CalDAV PUT
+	// (migration 036). NULL for rows written before 036, and for rows written
+	// by JSON-only writers (the API and MCP tools), which do not know about
+	// it. When set and still in step with ICALData, CalDAV serves it verbatim
+	// so RRULE, EXDATE, VALARM and other properties survive the round trip.
+	ICALRaw *string `json:"ical_raw,omitempty"`
+	// RRule is the event's RRULE value, extracted from ICALRaw at PUT time.
+	RRule *string `json:"rrule,omitempty"`
 }
 
 // CalendarChangeAction is the type of mutation recorded against a calendar
@@ -233,7 +241,7 @@ func (r *Repo) GetCalendarByCalDAVUID(ctx context.Context, householdID string, u
 // owned by a different household, the join yields no rows.
 func (r *Repo) ListCalendarObjects(ctx context.Context, householdID string, calendarID string) ([]CalendarObject, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at
+		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at, o.ical_raw, o.rrule
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND c.household_id = $2
@@ -247,7 +255,7 @@ func (r *Repo) ListCalendarObjects(ctx context.Context, householdID string, cale
 	var objects []CalendarObject
 	for rows.Next() {
 		var o CalendarObject
-		if err := rows.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule); err != nil {
 			return nil, fmt.Errorf("db: scan calendar object: %w", err)
 		}
 		objects = append(objects, o)
@@ -265,14 +273,14 @@ func (r *Repo) ListCalendarObjects(ctx context.Context, householdID string, cale
 // household.
 func (r *Repo) GetCalendarObjectByUID(ctx context.Context, householdID string, calendarID string, uid string) (*CalendarObject, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at
+		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at, o.ical_raw, o.rrule
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND o.uid = $2 AND c.household_id = $3
 	`, calendarID, uid, householdID)
 
 	var o CalendarObject
-	err := row.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt)
+	err := row.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -298,7 +306,7 @@ func (r *Repo) GetCalendarObjectByUID(ctx context.Context, householdID string, c
 // a pgx.Tx, or call the high-level UpsertCalendarObjectWithCTag wrapper which
 // performs the upsert + CTag bump atomically.
 func (r *Repo) UpsertCalendarObject(ctx context.Context, householdID string, calendarID string, uid string, icalData string, etag string) (*CalendarObject, error) {
-	return upsertCalendarObjectQ(ctx, r.pool, householdID, calendarID, uid, icalData, etag)
+	return upsertCalendarObjectQ(ctx, r.pool, householdID, calendarID, uid, icalData, etag, nil, nil)
 }
 
 // UpsertCalendarObjectTx inserts or updates a calendar object within the given
@@ -310,28 +318,32 @@ func (r *Repo) UpsertCalendarObject(ctx context.Context, householdID string, cal
 // variant; if the calendar is not owned by the household the function returns
 // nil, nil (and the caller should rollback and return 404).
 func (r *Repo) UpsertCalendarObjectTx(ctx context.Context, tx pgx.Tx, householdID string, calendarID string, uid string, icalData string, etag string) (*CalendarObject, error) {
-	return upsertCalendarObjectQ(ctx, tx, householdID, calendarID, uid, icalData, etag)
+	return upsertCalendarObjectQ(ctx, tx, householdID, calendarID, uid, icalData, etag, nil, nil)
 }
 
 // upsertCalendarObjectQ is the single implementation of the upsert SQL shared
 // by the pool and tx variants. The querier may be either *pgxpool.Pool or pgx.Tx.
 // Returns (nil, nil) when the calendar is not owned by the household — callers
 // must handle this (rollback the tx and return 404).
-func upsertCalendarObjectQ(ctx context.Context, q querier, householdID string, calendarID string, uid string, icalData string, etag string) (*CalendarObject, error) {
+//
+// icalRaw and rrule are written as given on both insert and update, so a nil
+// value clears them: a writer that only has the JSON must not leave a stale
+// raw VCALENDAR behind for CalDAV to serve.
+func upsertCalendarObjectQ(ctx context.Context, q querier, householdID string, calendarID string, uid string, icalData string, etag string, icalRaw *string, rrule *string) (*CalendarObject, error) {
 	row := q.QueryRow(ctx, `
 		WITH owned AS (
 			SELECT id FROM calendars WHERE id = $1 AND household_id = $5
 		)
-		INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag)
-		SELECT $1, $2, $3, $4 FROM owned
+		INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, ical_raw, rrule)
+		SELECT $1, $2, $3, $4, $6, $7 FROM owned
 		ON CONFLICT (calendar_id, uid)
-		DO UPDATE SET ical_data = $3, etag = $4, updated_at = NOW()
+		DO UPDATE SET ical_data = $3, etag = $4, ical_raw = $6, rrule = $7, updated_at = NOW()
 		WHERE EXISTS (SELECT 1 FROM owned)
-		RETURNING id, calendar_id, uid, ical_data, etag, entity_type, entity_id, created_at, updated_at
-	`, calendarID, uid, icalData, etag, householdID)
+		RETURNING id, calendar_id, uid, ical_data, etag, entity_type, entity_id, created_at, updated_at, ical_raw, rrule
+	`, calendarID, uid, icalData, etag, householdID, icalRaw, rrule)
 
 	var o CalendarObject
-	err := row.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt)
+	err := row.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -436,7 +448,10 @@ func incrementCalendarCTagQ(ctx context.Context, q querier, calendarID string) e
 //
 // If the calendar is not owned by the given household, returns (nil, nil) and
 // the transaction is rolled back — callers should treat this as 404.
-func (r *Repo) UpsertCalendarObjectWithCTag(ctx context.Context, householdID string, calendarID string, uid string, icalData string, etag string) (*CalendarObject, error) {
+//
+// icalRaw is the VCALENDAR text exactly as the client sent it and rrule the
+// event's RRULE value; either may be nil (nil clears the stored value).
+func (r *Repo) UpsertCalendarObjectWithCTag(ctx context.Context, householdID string, calendarID string, uid string, icalData string, etag string, icalRaw *string, rrule *string) (*CalendarObject, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("db: begin tx (upsert+ctag): %w", err)
@@ -458,7 +473,7 @@ func (r *Repo) UpsertCalendarObjectWithCTag(ctx context.Context, householdID str
 		return nil, fmt.Errorf("db: check existing object: %w", err)
 	}
 
-	obj, err := upsertCalendarObjectQ(ctx, tx, householdID, calendarID, uid, icalData, etag)
+	obj, err := upsertCalendarObjectQ(ctx, tx, householdID, calendarID, uid, icalData, etag, icalRaw, rrule)
 	if err != nil {
 		return nil, err
 	}
@@ -621,7 +636,7 @@ func (r *Repo) UpdateCalendarProps(ctx context.Context, householdID string, cale
 // acceptable. The household check is enforced via an INNER JOIN with calendars.
 func (r *Repo) ListCalendarObjectsInRange(ctx context.Context, householdID string, calendarID string) ([]CalendarObject, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at
+		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at, o.ical_raw, o.rrule
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND c.household_id = $2
@@ -635,7 +650,7 @@ func (r *Repo) ListCalendarObjectsInRange(ctx context.Context, householdID strin
 	var objects []CalendarObject
 	for rows.Next() {
 		var o CalendarObject
-		if err := rows.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule); err != nil {
 			return nil, fmt.Errorf("db: scan calendar object: %w", err)
 		}
 		objects = append(objects, o)

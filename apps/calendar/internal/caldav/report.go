@@ -242,7 +242,7 @@ func writeSyncInitialResponses(ctx context.Context, buf *strings.Builder, repo *
 	}
 	for i := range objects {
 		obj := &objects[i]
-		icalText, err := generateICalText(obj)
+		icalText, err := renderObjectICal(obj)
 		if err != nil {
 			logging.Logger.Warn("caldav: sync-collection: skip malformed event",
 				slog.String("event_uid", obj.UID),
@@ -326,7 +326,7 @@ func writeSyncIncrementalResponses(ctx context.Context, buf *strings.Builder, re
 				slog.String("action", string(ch.Action)))
 			continue
 		}
-		icalText, err := generateICalText(&obj)
+		icalText, err := renderObjectICal(&obj)
 		if err != nil {
 			logging.Logger.Warn("caldav: sync-collection: skip malformed event",
 				slog.String("event_uid", obj.UID),
@@ -349,22 +349,6 @@ func writeSyncIncrementalResponses(ctx context.Context, buf *strings.Builder, re
 		slog.Int64("since_rev", sinceRev),
 		slog.Int("responses", emittedCount))
 	return nil
-}
-
-// generateICalText unmarshals a stored calendar object's JSON ical_data into
-// a CalEvent and regenerates the iCalendar text representation. The UID is
-// set from the DB column because it is not stored inside the JSON.
-// DTStamp/LAST-MODIFIED are sourced from the DB updated_at so re-generation
-// is deterministic across REPORT responses (see HandleGET for the full
-// rationale).
-func generateICalText(obj *db.CalendarObject) (string, error) {
-	ev := &ical.CalEvent{}
-	if err := json.Unmarshal([]byte(obj.ICALData), ev); err != nil {
-		return "", fmt.Errorf("unmarshal event: %w", err)
-	}
-	ev.UID = obj.UID
-	ev.DTStamp = obj.UpdatedAt
-	return ical.GenerateEvent(ev), nil
 }
 
 // writeSyncTombstone writes a D:response entry for a deleted resource per
@@ -488,20 +472,14 @@ func handleCalendarQuery(w http.ResponseWriter, r *http.Request, repo *db.Repo, 
 	writeXMLHeader(buf)
 
 	for _, obj := range filtered {
-		// Unmarshal the stored JSON to a CalEvent so we can generate iCalendar text.
-		ev := &ical.CalEvent{}
-		if err := json.Unmarshal([]byte(obj.ICALData), ev); err != nil {
+		// Raw client VCALENDAR when present, else generated from the JSON.
+		icalText, err := renderObjectICal(&obj)
+		if err != nil {
 			logging.Logger.Warn("caldav: unmarshal event for report",
 				slog.String("event_uid", obj.UID),
 				slog.String("error", err.Error()))
 			continue
 		}
-		// Set UID from the DB column (not stored in JSON)
-		ev.UID = obj.UID
-		// Source DTSTAMP/LAST-MODIFIED from the DB updated_at for stable
-		// re-generation. See HandleGET for the full rationale.
-		ev.DTStamp = obj.UpdatedAt
-		icalText := ical.GenerateEvent(ev)
 
 		writeReportResponse(buf, cal.CalDAVUID, obj.UID, obj.ETag, icalText)
 	}
@@ -575,15 +553,10 @@ func handleCalendarMultiget(w http.ResponseWriter, r *http.Request, repo *db.Rep
 			continue
 		}
 
-		ev := &ical.CalEvent{}
-		if err := json.Unmarshal([]byte(obj.ICALData), ev); err != nil {
+		icalText, err := renderObjectICal(obj)
+		if err != nil {
 			continue
 		}
-		ev.UID = obj.UID
-		// Source DTSTAMP/LAST-MODIFIED from the DB updated_at for stable
-		// re-generation. See HandleGET for the full rationale.
-		ev.DTStamp = obj.UpdatedAt
-		icalText := ical.GenerateEvent(ev)
 		writeReportResponse(buf, cal.CalDAVUID, obj.UID, obj.ETag, icalText)
 	}
 
@@ -606,7 +579,10 @@ func writeReportResponse(w io.Writer, calUID, eventUID, etag, icalText string) {
 	fmt.Fprintf(w, "        <D:getetag>\"%s\"</D:getetag>\n", xmlEscape(etag))
 	fmt.Fprint(w, "        <C:calendar-data>")
 	fmt.Fprint(w, "<![CDATA[")
-	fmt.Fprint(w, icalText)
+	// A "]]>" inside the text would end the CDATA section early. Client
+	// VCALENDARs are now served verbatim (ical_raw), so split any occurrence
+	// across two CDATA sections.
+	fmt.Fprint(w, strings.ReplaceAll(icalText, "]]>", "]]]]><![CDATA[>"))
 	fmt.Fprint(w, "]]>")
 	fmt.Fprint(w, "</C:calendar-data>\n")
 	fmt.Fprint(w, "      </D:prop>\n")
