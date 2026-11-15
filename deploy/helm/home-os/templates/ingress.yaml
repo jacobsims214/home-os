@@ -13,7 +13,7 @@ metadata:
 spec:
   ingressClassName: {{ .Values.ingress.className | default "traefik" }}
   rules:
-  - host: {{ .Values.ingress.host }}
+  - host: {{ include "home-os.ingressHost" . }}
     http:
       paths:
       - backend:
@@ -26,7 +26,7 @@ spec:
   {{- if .Values.ingress.tlsEnabled }}
   tls:
   - hosts:
-    - {{ .Values.ingress.host }}
+    - {{ include "home-os.ingressHost" . }}
     secretName: {{ .Values.ingress.tlsSecret }}
   {{- end }}
 {{- end }}

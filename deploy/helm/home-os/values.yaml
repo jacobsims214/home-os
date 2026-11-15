@@ -10,8 +10,12 @@ global:
   # (scheme://host[:port], no trailing slash), e.g. https://homeos.example.com.
   # Drives the Dex issuer (<publicUrl>/dex), the home-os-ui redirect URI, the
   # MCP protected-resource URL (<publicUrl>/mcp) and the API/UI/MCP env.
-  # Empty = http://localhost:<envoy.port> for local docker-desktop.
+  # Required: empty, localhost or the Argo placeholder fails the render
+  # (templates/_helpers.tpl, home-os.publicUrl) unless allowLocalPublicUrl.
   publicUrl: ""
+  # Local docker-desktop only: allow an empty/localhost publicUrl (empty =
+  # http://localhost:<envoy.port>). Never set this on a real deployment.
+  allowLocalPublicUrl: false
 
 namespace: home-os
 
@@ -210,7 +214,8 @@ smtp:
 ingress:
   enabled: false
   className: traefik
-  host: homeos.simstech.cloud
+  # Empty = the host of global.publicUrl.
+  host: ""
   tlsEnabled: true
   tlsSecret: simstech-wildcard-tls
   annotations: {}

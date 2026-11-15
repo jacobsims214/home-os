@@ -124,14 +124,39 @@ postgres://{{ include "home-os.dbUser" . }}:$(DB_PASSWORD)@{{ include "home-os.d
 
 {{/*
 Public origin users and OAuth clients reach Home OS at (scheme://host[:port],
-no trailing slash). Set global.publicUrl for a real hostname; empty falls back
-to the local docker-desktop Envoy origin http://localhost:<envoy.port>.
+no trailing slash). global.publicUrl is the single source for the Dex issuer,
+the home-os-ui redirect URI, the UI/API/MCP public URLs, the MCP resource URL
+and the default ingress host.
+
+Guard (#4675): Dex is always deployed, and a localhost issuer breaks login for
+every real browser, so the render fails when publicUrl is
+  - the Argo manifest's placeholder (HOMEOS_PRIVATE_HOSTNAME...), always; or
+  - empty, localhost, 127.x or [::1], unless global.allowLocalPublicUrl=true
+    (local docker-desktop only: local-dev-values.yaml sets it).
+Empty + allowLocalPublicUrl = http://localhost:<envoy.port>.
 */}}
 {{- define "home-os.publicUrl" -}}
-{{- if .Values.global.publicUrl -}}
-{{- trimSuffix "/" .Values.global.publicUrl -}}
+{{- $url := trimSuffix "/" (.Values.global.publicUrl | default "") -}}
+{{- if contains "HOMEOS_PRIVATE_HOSTNAME" $url -}}
+{{- fail (printf "global.publicUrl is still the placeholder %q. Set it to the private Home OS hostname (chosen in #4389, applied by #4357) before syncing." $url) -}}
+{{- end -}}
+{{- $local := or (not $url) (regexMatch "^https?://(localhost|127\\.[0-9.]+|\\[::1\\])(:[0-9]+)?(/.*)?$" $url) -}}
+{{- if and $local (not .Values.global.allowLocalPublicUrl) -}}
+{{- fail (printf "global.publicUrl is %q: Dex would issue tokens for a localhost issuer and login would break. Set global.publicUrl to the real https origin, or set global.allowLocalPublicUrl=true for local docker-desktop only." (default "<empty>" $url)) -}}
+{{- end -}}
+{{- if $url -}}
+{{- $url -}}
 {{- else -}}
 http://localhost:{{ .Values.envoy.port }}
+{{- end -}}
+{{- end -}}
+
+{{/* Ingress host: ingress.host override, else the hostname of global.publicUrl. */}}
+{{- define "home-os.ingressHost" -}}
+{{- if .Values.ingress.host -}}
+{{- .Values.ingress.host -}}
+{{- else -}}
+{{- (urlParse (include "home-os.publicUrl" .)).hostname -}}
 {{- end -}}
 {{- end -}}
 

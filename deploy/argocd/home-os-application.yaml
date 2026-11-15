@@ -32,24 +32,26 @@ spec:
     targetRevision: feat/family-hub
     path: deploy/helm/home-os
     helm:
-      parameters:
-        - name: dex.uiRedirectURI
-          value: https://homeos.simstech.cloud/api/auth/callback
       valuesObject:
         namespace: home-os
         global:
           imageRegistry: ghcr.io/jacobsims214/home-os
           imageTag: latest
           imagePullPolicy: Always
+          # PLACEHOLDER: #4357 must replace this with the private hostname
+          # Jacob picks in #4389. publicUrl alone drives the Dex issuer
+          # (<publicUrl>/dex), the UI redirect URI (<publicUrl>/api/auth/callback),
+          # the UI/API/MCP public URLs, the MCP resource URL and the ingress
+          # host. The chart refuses to render while this is the placeholder,
+          # empty or localhost.
+          publicUrl: https://HOMEOS_PRIVATE_HOSTNAME_SET_IN_4389
         api:
           allowRegistration: "false"
-          publicUrl: https://homeos.simstech.cloud
         mcp:
           replicas: 0
         ingress:
           enabled: true
           className: traefik
-          host: homeos.simstech.cloud
           tlsEnabled: true
           tlsSecret: simstech-wildcard-tls
           annotations: {}
