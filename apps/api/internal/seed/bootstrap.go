@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
@@ -28,6 +29,14 @@ func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config,
 
 	if exists {
 		slog.Info("bootstrap: admin user already exists", "email", cfg.AdminEmail)
+		// The bootstrap admin is always the instance admin (idempotent; also
+		// upgrades admins created before migration 037).
+		if _, err := pool.Exec(ctx,
+			`UPDATE users SET is_instance_admin = true WHERE email = $1 AND NOT is_instance_admin`,
+			cfg.AdminEmail,
+		); err != nil {
+			return fmt.Errorf("flag admin as instance admin: %w", err)
+		}
 		// Backfill default calendars for households the admin owns (idempotent).
 		if err := ensureOwnedHouseholdCalendars(ctx, pool, cfg.AdminEmail); err != nil {
 			return err
@@ -59,7 +68,7 @@ func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config,
 	}
 
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING id`,
+		`INSERT INTO users (email, name, password_hash, is_instance_admin) VALUES ($1, $2, $3, true) RETURNING id`,
 		cfg.AdminEmail, cfg.AdminName, string(hash),
 	).Scan(&userID); err != nil {
 		return fmt.Errorf("create admin user: %w", err)
@@ -85,7 +94,7 @@ func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config,
 	}
 	slog.Info("bootstrap: created owner membership")
 
-	if err := ensureDefaultCalendars(ctx, pool, householdID); err != nil {
+	if err := EnsureDefaultCalendars(ctx, pool, householdID); err != nil {
 		return err
 	}
 
@@ -116,13 +125,20 @@ var defaultCalendars = []struct {
 	{"Maintenance", "maintenance", "#F59E0B"},
 }
 
-// ensureDefaultCalendars creates the Family, Bills and Maintenance calendars
+// Execer is satisfied by *pgxpool.Pool, *pgx.Conn and pgx.Tx, so
+// EnsureDefaultCalendars can run inside a caller's transaction.
+type Execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// EnsureDefaultCalendars creates the Family, Bills and Maintenance calendars
 // for a household. It is idempotent: a calendar is only inserted when the
-// household has no calendar of that type yet.
-func ensureDefaultCalendars(ctx context.Context, pool *pgxpool.Pool, householdID string) error {
+// household has no calendar of that type yet. Used by admin bootstrap and by
+// household creation.
+func EnsureDefaultCalendars(ctx context.Context, db Execer, householdID string) error {
 	created := 0
 	for _, c := range defaultCalendars {
-		tag, err := pool.Exec(ctx,
+		tag, err := db.Exec(ctx,
 			`INSERT INTO calendars (household_id, name, type, color, caldav_uid)
 			 SELECT $1, $2, $3::calendar_type, $4, gen_random_uuid()::text
 			 WHERE NOT EXISTS (
@@ -136,7 +152,7 @@ func ensureDefaultCalendars(ctx context.Context, pool *pgxpool.Pool, householdID
 		created += int(tag.RowsAffected())
 	}
 	if created > 0 {
-		slog.Info("bootstrap: created default calendars", "household_id", householdID, "count", created)
+		slog.Info("created default calendars", "household_id", householdID, "count", created)
 	}
 	return nil
 }
@@ -165,7 +181,7 @@ func ensureOwnedHouseholdCalendars(ctx context.Context, pool *pgxpool.Pool, emai
 		return fmt.Errorf("list admin households: %w", err)
 	}
 	for _, id := range ids {
-		if err := ensureDefaultCalendars(ctx, pool, id); err != nil {
+		if err := EnsureDefaultCalendars(ctx, pool, id); err != nil {
 			return err
 		}
 	}
