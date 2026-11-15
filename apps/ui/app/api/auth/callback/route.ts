@@ -2,10 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 
 const COOKIE_NAME = "home-os-token";
 const COOKIE_MAX_AGE = 60 * 60 * 24;
+// Set by app/api/auth/login/route.ts as "<state>.<code_verifier>".
+const PKCE_COOKIE = "home-os-pkce";
+const PKCE_COOKIE_PATH = "/api/auth";
+
+// Redirect and always drop the one-time PKCE cookie.
+function redirectClearingPkce(url: URL): NextResponse {
+  const response = NextResponse.redirect(url);
+  response.cookies.set(PKCE_COOKIE, "", { path: PKCE_COOKIE_PATH, maxAge: 0 });
+  return response;
+}
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
+  const state = searchParams.get("state");
 
   // Build the public origin from Host headers (what the browser sees)
   // This MUST match the redirect_uri sent in the initial auth request
@@ -14,7 +25,20 @@ export async function GET(request: NextRequest) {
   const publicOrigin = `${proto}://${host}`;
 
   if (!code) {
-    return NextResponse.redirect(new URL("/login?error=no_code", publicOrigin));
+    return redirectClearingPkce(new URL("/login?error=no_code", publicOrigin));
+  }
+
+  // PKCE: the verifier must come from the httpOnly cookie set when this login
+  // started, and the state must match. Without it we never call Dex.
+  const pkce = request.cookies.get(PKCE_COOKIE)?.value ?? "";
+  const sep = pkce.indexOf(".");
+  const expectedState = sep > 0 ? pkce.slice(0, sep) : "";
+  const codeVerifier = sep > 0 ? pkce.slice(sep + 1) : "";
+  if (!codeVerifier) {
+    return redirectClearingPkce(new URL("/login?error=missing_verifier", publicOrigin));
+  }
+  if (!state || state !== expectedState) {
+    return redirectClearingPkce(new URL("/login?error=state_mismatch", publicOrigin));
   }
 
   try {
@@ -29,24 +53,25 @@ export async function GET(request: NextRequest) {
         code,
         redirect_uri: redirectUri,
         client_id: "home-os-ui",
+        code_verifier: codeVerifier,
       }),
     });
 
     if (!tokenResponse.ok) {
       const errorText = await tokenResponse.text();
       console.error("Token exchange failed:", errorText);
-      return NextResponse.redirect(new URL("/login?error=token_exchange_failed", publicOrigin));
+      return redirectClearingPkce(new URL("/login?error=token_exchange_failed", publicOrigin));
     }
 
     const tokens = await tokenResponse.json();
     const idToken = tokens.id_token;
 
     if (!idToken) {
-      return NextResponse.redirect(new URL("/login?error=no_id_token", publicOrigin));
+      return redirectClearingPkce(new URL("/login?error=no_id_token", publicOrigin));
     }
 
     // Store the token in an httpOnly cookie (for server-side/BFF reads)
-    const response = NextResponse.redirect(new URL("/dashboard", publicOrigin));
+    const response = redirectClearingPkce(new URL("/dashboard", publicOrigin));
     response.cookies.set(COOKIE_NAME, idToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -66,6 +91,6 @@ export async function GET(request: NextRequest) {
     return response;
   } catch (error) {
     console.error("Callback error:", error);
-    return NextResponse.redirect(new URL("/login?error=callback_error", publicOrigin));
+    return redirectClearingPkce(new URL("/login?error=callback_error", publicOrigin));
   }
 }
