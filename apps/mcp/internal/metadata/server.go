@@ -11,6 +11,8 @@ package metadata
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -224,16 +226,11 @@ func NewHandler(cfg *config.Config) http.Handler {
 			return
 		}
 
-		// Validate redirect URIs (loopback or custom scheme only)
-		for _, uri := range req.RedirectURIs {
-			lower := strings.ToLower(uri)
-			if !strings.HasPrefix(lower, "http://127.0.0.1") &&
-				!strings.HasPrefix(lower, "http://localhost") &&
-				!strings.HasPrefix(lower, "http://[::1]") &&
-				!strings.Contains(uri, "://") {
-				jsonError(w, "invalid_redirect_uri", "only loopback HTTP and custom schemes allowed", http.StatusBadRequest)
-				return
-			}
+		// Validate redirect URIs before anything reaches Dex: loopback HTTP or
+		// a reverse-DNS private-use scheme only (see ValidateRedirectURIs).
+		if err := ValidateRedirectURIs(req.RedirectURIs); err != nil {
+			jsonError(w, "invalid_redirect_uri", err.Error(), http.StatusBadRequest)
+			return
 		}
 
 		// Connect to Dex gRPC and create client
@@ -309,6 +306,86 @@ func NewHandler(cfg *config.Config) http.Handler {
 	}
 
 	return mux
+}
+
+// MaxRedirectURIs caps how many redirect URIs one registration may carry.
+const MaxRedirectURIs = 10
+
+// forbiddenSchemes are never accepted as private-use redirect schemes, even
+// if they somehow pass the reverse-DNS check.
+var forbiddenSchemes = map[string]bool{
+	"http": true, "https": true, "javascript": true, "data": true,
+	"file": true, "vbscript": true,
+}
+
+// ValidateRedirectURIs enforces the dynamic client registration redirect
+// policy. Dex skips its approval screen and every registered client is a
+// public "mcp-" client the MCP verifier accepts, so an authorization code
+// must only ever be delivered to the user's own device. Allowed:
+//
+//   - http with a host of exactly 127.0.0.1, ::1 or localhost, any port and
+//     path (RFC 8252 section 7.3 loopback redirects), and
+//   - a private-use URI scheme in reverse-DNS form, i.e. one containing a
+//     "." such as com.example.app:/cb (RFC 8252 section 7.1). Only the app
+//     that claimed the scheme on the device can receive it.
+//
+// Everything else is rejected: https and any other http host (a code sent
+// to a web server is a code an attacker can collect), look-alike hosts such
+// as localhost.evil.example, userinfo, fragments, relative URIs, dangerous
+// schemes, and lists that are empty or longer than MaxRedirectURIs.
+func ValidateRedirectURIs(uris []string) error {
+	if len(uris) == 0 {
+		return errors.New("at least one redirect_uri is required")
+	}
+	if len(uris) > MaxRedirectURIs {
+		return fmt.Errorf("at most %d redirect_uris are allowed", MaxRedirectURIs)
+	}
+	for _, raw := range uris {
+		if err := validateRedirectURI(raw); err != nil {
+			return fmt.Errorf("redirect_uri %q: %w", raw, err)
+		}
+	}
+	return nil
+}
+
+func validateRedirectURI(raw string) error {
+	if raw == "" {
+		return errors.New("must not be empty")
+	}
+	// A "#" anywhere means a fragment (even an empty one, which url.Parse
+	// does not report); RFC 6749 section 3.1.2 forbids them.
+	if strings.Contains(raw, "#") {
+		return errors.New("must not contain a fragment")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("is not a valid URI")
+	}
+	if u.Scheme == "" {
+		return errors.New("must be an absolute URI")
+	}
+	if u.User != nil {
+		return errors.New("must not contain userinfo")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch {
+	case scheme == "http":
+		if u.Opaque != "" || !isLoopbackHost(u.Hostname()) {
+			return errors.New("http is only allowed for 127.0.0.1, [::1] or localhost")
+		}
+		return nil
+	case forbiddenSchemes[scheme]:
+		return fmt.Errorf("scheme %q is not allowed", scheme)
+	case !strings.Contains(scheme, "."):
+		return errors.New("custom schemes must be reverse-DNS private-use schemes (e.g. com.example.app)")
+	}
+	return nil
+}
+
+// isLoopbackHost reports whether host (url.URL.Hostname, so brackets are
+// already stripped) is exactly a loopback name, never a prefix match.
+func isLoopbackHost(host string) bool {
+	return host == "127.0.0.1" || host == "::1" || strings.EqualFold(host, "localhost")
 }
 
 // jsonError writes a JSON error response with the given OAuth error code,
