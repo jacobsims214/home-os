@@ -29,7 +29,8 @@ const (
 )
 
 // createdBill is the create_bill response: the inserted row plus its next
-// due date, computed from due_day against the database's CURRENT_DATE.
+// due date, computed by billDue from due_day against today in the
+// household's timezone (householdToday), the same rule list_bills uses.
 type createdBill struct {
 	ID           uuid.UUID  `json:"id"`
 	Name         string     `json:"name"`
@@ -139,20 +140,24 @@ func NewCreateBillTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			}
 		}
 
+		today, err := householdToday(ctx, tx, claims.HouseholdID)
+		if err != nil {
+			return nil, fmt.Errorf("create bill: %w", err)
+		}
+
 		var b createdBill
-		var today time.Time
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO bills (household_id, name, amount, due_day, category, is_autopay,
 			                    vendor_id, entity_type, entity_id, payment_url, notes)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			 RETURNING id, name, amount, due_day, category, is_autopay,
 			           vendor_id, entity_type, entity_id, payment_url, notes,
-			           created_at, CURRENT_DATE`,
+			           created_at`,
 			claims.HouseholdID, in.name, in.amount, in.dueDay, in.category, in.isAutopay,
 			in.vendorID, in.entityType, in.entityID, in.paymentURL, in.notes,
 		).Scan(&b.ID, &b.Name, &b.Amount, &b.DueDay, &b.Category, &b.IsAutopay,
 			&b.VendorID, &b.EntityType, &b.EntityID, &b.PaymentURL, &b.Notes,
-			&b.CreatedAt, &today); err != nil {
+			&b.CreatedAt); err != nil {
 			return nil, fmt.Errorf("create bill: insert: %w", err)
 		}
 
@@ -173,9 +178,10 @@ func NewCreateBillTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return nil, fmt.Errorf("create bill: commit: %w", err)
 		}
 
-		next := nextDueDate(today, b.DueDay)
-		b.NextDueDate = next.Format("2006-01-02")
-		b.DaysUntilDue = int(next.Sub(today).Hours() / 24)
+		// A new bill has no paid_date, so this is the plain next due date.
+		due := BillDue(today, b.DueDay, nil)
+		b.NextDueDate = due.Next.Format(time.DateOnly)
+		b.DaysUntilDue = due.DaysUntil
 
 		result, err := json.Marshal(b)
 		if err != nil {
@@ -188,9 +194,11 @@ func NewCreateBillTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 }
 
 // updatedBill is the bill_update response: the stored row after the update
-// plus its next due date. amount and due_day are nullable because bills
-// created through the API may lack them; next_due_date and days_until_due
-// are null when the bill has no due_day.
+// plus where it stands, computed exactly as list_bills does (billDue against
+// household-local today, honouring paid_date). amount and due_day are
+// nullable because bills created through the API may lack them;
+// next_due_date and days_until_due are null, and status omitted, when the
+// bill has no due_day.
 type updatedBill struct {
 	ID           uuid.UUID  `json:"id"`
 	Name         string     `json:"name"`
@@ -207,6 +215,9 @@ type updatedBill struct {
 	UpdatedAt    time.Time  `json:"updated_at"`
 	NextDueDate  *string    `json:"next_due_date"`
 	DaysUntilDue *int       `json:"days_until_due"`
+	Status       string     `json:"status,omitempty"`
+	PaidDate     *string    `json:"paid_date"`
+	PaidForDue   *string    `json:"paid_for_due_date"`
 }
 
 // billUpdate is the validated bill_update arguments: the bill to change and
@@ -317,18 +328,23 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		}
 		sets = append(sets, "updated_at = NOW()")
 
+		today, err := householdToday(ctx, tx, claims.HouseholdID)
+		if err != nil {
+			return nil, fmt.Errorf("update bill: %w", err)
+		}
+
 		var b updatedBill
-		var today time.Time
+		var paidDate *time.Time
 		err = tx.QueryRow(ctx,
 			`UPDATE bills SET `+strings.Join(sets, ", ")+`
 			 WHERE id = $1 AND household_id = $2
 			 RETURNING id, name, amount, due_day, category, COALESCE(is_autopay, false),
 			           vendor_id, entity_type, entity_id, payment_url, notes,
-			           created_at, updated_at, CURRENT_DATE`,
+			           created_at, updated_at, paid_date`,
 			args...,
 		).Scan(&b.ID, &b.Name, &b.Amount, &b.DueDay, &b.Category, &b.IsAutopay,
 			&b.VendorID, &b.EntityType, &b.EntityID, &b.PaymentURL, &b.Notes,
-			&b.CreatedAt, &b.UpdatedAt, &today)
+			&b.CreatedAt, &b.UpdatedAt, &paidDate)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return mcp.NewToolResultError("bill not found"), nil
 		}
@@ -352,12 +368,20 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return nil, fmt.Errorf("update bill: commit: %w", err)
 		}
 
+		if paidDate != nil {
+			s := paidDate.Format(time.DateOnly)
+			b.PaidDate = &s
+		}
 		// Bills created through the API may have no due_day.
 		if b.DueDay != nil && *b.DueDay >= 1 && *b.DueDay <= 31 {
-			next := nextDueDate(today, *b.DueDay)
-			date := next.Format("2006-01-02")
-			days := int(next.Sub(today).Hours() / 24)
-			b.NextDueDate, b.DaysUntilDue = &date, &days
+			due := BillDue(today, *b.DueDay, paidDate)
+			date := due.Next.Format(time.DateOnly)
+			days := due.DaysUntil
+			b.NextDueDate, b.DaysUntilDue, b.Status = &date, &days, due.Status
+			if due.PaidFor != nil {
+				s := due.PaidFor.Format(time.DateOnly)
+				b.PaidForDue = &s
+			}
 		}
 
 		result, err := json.Marshal(b)
@@ -698,6 +722,37 @@ func parseBillPayInput(args map[string]any) (billPayInput, error) {
 		in.amount = &amount
 	}
 	return in, nil
+}
+
+// Due is where a monthly bill stands on a given day, as every bill tool
+// (list_bills, get_upcoming_bills, create_bill, bill_update) reports it.
+type Due struct {
+	// Next is the next due date that still needs paying (midnight UTC).
+	Next time.Time
+	// DaysUntil is the whole days from today to Next.
+	DaysUntil int
+	// Status is "paid" when paid_date covers the current due date (so Next
+	// is the one after it), otherwise "due".
+	Status string
+	// PaidFor is the due date paid_date covers, nil when never paid.
+	PaidFor *time.Time
+}
+
+// BillDue is the single rule for when a bill is due: billDue (due_day
+// clamped to the month, paid_date moving the bill to the following due date)
+// as of today, which should come from HouseholdToday. Exported so other
+// packages (e.g. the daily briefing) give the same answer as the bill tools.
+func BillDue(today time.Time, dueDay int, paidDate *time.Time) Due {
+	info := billDue(today, dueDay, paidDate)
+	return Due{Next: info.next, DaysUntil: daysBetween(today, info.next), Status: info.status, PaidFor: info.paidFor}
+}
+
+// HouseholdToday is householdToday for other packages: today's date in the
+// household's timezone as midnight UTC.
+func HouseholdToday(ctx context.Context, q interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}, householdID string) (time.Time, error) {
+	return householdToday(ctx, q, householdID)
 }
 
 // householdToday returns today's date in the household's timezone, as

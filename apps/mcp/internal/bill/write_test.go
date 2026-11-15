@@ -1262,3 +1262,143 @@ func TestBillPay_Validation(t *testing.T) {
 		t.Errorf("bill.updated events = %d, want 0", n)
 	}
 }
+
+// ── write tools agree with list_bills (#4627) ────────────────────────────
+
+// householdTodayIn returns today in tz as midnight UTC, like householdToday.
+func householdTodayIn(t *testing.T, tz string) time.Time {
+	t.Helper()
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		t.Fatalf("load zone %s: %v", tz, err)
+	}
+	y, m, d := time.Now().In(loc).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+}
+
+// listedBill returns the list_bills entry for id.
+func listedBill(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id string) billResult {
+	t.Helper()
+	_, _, list := NewListBillsTool(pool)
+	_, text := callTool(t, ctx, list, "list_bills", nil)
+	b := findBill(decodeBills(t, text), id)
+	if b == nil {
+		t.Fatalf("list_bills missing bill %s: %s", id, text)
+	}
+	if b.NextDueDate == nil || b.DaysUntilDue == nil {
+		t.Fatalf("list_bills bill %s has no due fields: %s", id, text)
+	}
+	return *b
+}
+
+// TestBillUpdate_PaidBillMatchesListBills pays a bill due today and then
+// changes its amount: bill_update must report next month's due date, as
+// list_bills does, not the due date that was just paid.
+func TestBillUpdate_PaidBillMatchesListBills(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	const tz = "Pacific/Kiritimati"
+	setHouseholdTZ(t, pool, hh.HouseholdID, tz)
+	today := householdTodayIn(t, tz)
+
+	_, _, create := NewCreateBillTool(pool)
+	res, text := callTool(t, ctx, create, "create_bill", map[string]any{
+		"name": "Electric", "amount": 80.0, "due_day": float64(today.Day()),
+	})
+	if res.IsError {
+		t.Fatalf("create_bill returned tool error: %s", text)
+	}
+	var created createdBill
+	if err := json.Unmarshal([]byte(text), &created); err != nil {
+		t.Fatalf("decode %q: %v", text, err)
+	}
+	if created.NextDueDate != today.Format(time.DateOnly) || created.DaysUntilDue != 0 {
+		t.Fatalf("create_bill next=%s days=%d, want %s 0", created.NextDueDate, created.DaysUntilDue, today.Format(time.DateOnly))
+	}
+	id := created.ID.String()
+
+	_, _, pay := NewBillPayTool(pool)
+	payBill(t, ctx, pay, map[string]any{"bill_id": id})
+
+	_, _, update := NewBillUpdateTool(pool)
+	res, text = callTool(t, ctx, update, "bill_update", map[string]any{"bill_id": id, "amount": 95.25})
+	if res.IsError {
+		t.Fatalf("bill_update returned tool error: %s", text)
+	}
+	got := decodeUpdated(t, text)
+	want := listedBill(t, ctx, pool, id)
+
+	wantNext := dueDateInMonth(today.Year(), today.Month()+1, today.Day()).Format(time.DateOnly)
+	if *want.NextDueDate != wantNext {
+		t.Fatalf("list_bills next_due_date = %s, want next month %s", *want.NextDueDate, wantNext)
+	}
+	if got.NextDueDate == nil || got.DaysUntilDue == nil {
+		t.Fatalf("bill_update has no due fields: %s", text)
+	}
+	if *got.NextDueDate != *want.NextDueDate || *got.DaysUntilDue != *want.DaysUntilDue {
+		t.Errorf("bill_update next=%s days=%d, list_bills next=%s days=%d",
+			*got.NextDueDate, *got.DaysUntilDue, *want.NextDueDate, *want.DaysUntilDue)
+	}
+	if got.Status != want.Status || got.Status != statusPaid {
+		t.Errorf("bill_update status=%q, list_bills status=%q, want %q", got.Status, want.Status, statusPaid)
+	}
+	if strOrNil(got.PaidDate) != strOrNil(want.PaidDate) || strOrNil(got.PaidForDue) != strOrNil(want.PaidForDueDate) {
+		t.Errorf("bill_update paid_date=%s paid_for=%s, list_bills paid_date=%s paid_for=%s",
+			strOrNil(got.PaidDate), strOrNil(got.PaidForDue), strOrNil(want.PaidDate), strOrNil(want.PaidForDueDate))
+	}
+	if got.Amount == nil || *got.Amount != 95.25 {
+		t.Errorf("bill_update amount = %v, want 95.25", got.Amount)
+	}
+}
+
+// TestCreateBill_FarTimezoneMatchesListBills creates bills in households far
+// from UTC: create_bill's next_due_date and days_until_due must equal
+// list_bills', which use the household's local today.
+func TestCreateBill_FarTimezoneMatchesListBills(t *testing.T) {
+	pool := testutil.NewPool(t)
+	_, _, create := NewCreateBillTool(pool)
+
+	for _, tz := range []string{"Pacific/Kiritimati", "Pacific/Pago_Pago"} {
+		t.Run(tz, func(t *testing.T) {
+			ctx, hh := testutil.SeedHousehold(t, pool)
+			setHouseholdTZ(t, pool, hh.HouseholdID, tz)
+			today := householdTodayIn(t, tz)
+
+			// Due on the household's today: a UTC-clock answer would be
+			// today (0 days) or next month, depending on the hour.
+			res, text := callTool(t, ctx, create, "create_bill", map[string]any{
+				"name": "Water", "amount": 40.0, "due_day": float64(today.Day()),
+			})
+			if res.IsError {
+				t.Fatalf("create_bill returned tool error: %s", text)
+			}
+			var got createdBill
+			if err := json.Unmarshal([]byte(text), &got); err != nil {
+				t.Fatalf("decode %q: %v", text, err)
+			}
+			want := listedBill(t, ctx, pool, got.ID.String())
+			if got.NextDueDate != *want.NextDueDate || got.DaysUntilDue != *want.DaysUntilDue {
+				t.Errorf("create_bill next=%s days=%d, list_bills next=%s days=%d",
+					got.NextDueDate, got.DaysUntilDue, *want.NextDueDate, *want.DaysUntilDue)
+			}
+			if got.NextDueDate != today.Format(time.DateOnly) {
+				t.Errorf("create_bill next_due_date = %s, want household today %s", got.NextDueDate, today.Format(time.DateOnly))
+			}
+		})
+	}
+}
+
+// TestBillDueExported checks the exported BillDue matches billDue.
+func TestBillDueExported(t *testing.T) {
+	today := mustDate(t, "2026-11-15")
+	paid := mustDate(t, "2026-11-15")
+	got := BillDue(today, 15, &paid)
+	if got.Next.Format(time.DateOnly) != "2026-12-15" || got.DaysUntil != 30 || got.Status != statusPaid ||
+		got.PaidFor == nil || got.PaidFor.Format(time.DateOnly) != "2026-11-15" {
+		t.Errorf("BillDue paid = %+v", got)
+	}
+	got = BillDue(today, 31, nil)
+	if got.Next.Format(time.DateOnly) != "2026-11-30" || got.DaysUntil != 15 || got.Status != statusDue || got.PaidFor != nil {
+		t.Errorf("BillDue unpaid = %+v", got)
+	}
+}
