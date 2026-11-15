@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"home-os/api/internal/middleware"
+	"home-os/api/internal/subject"
 	"home-os/api/pkg/apierr"
 )
 
@@ -27,9 +28,8 @@ func NewHandler(repo *Repo) *Handler {
 // All fields use *string so that null in JSON maps to NULL in the DB,
 // and numeric values are carried as strings to avoid float precision loss.
 type createLoanRequest struct {
+	subject.Fields
 	Name             *string `json:"name"`
-	EntityType       *string `json:"entity_type"`
-	EntityID         *string `json:"entity_id"`
 	Lender           *string `json:"lender"`
 	OriginalAmount   *string `json:"original_amount"`
 	InterestRate     *string `json:"interest_rate"`
@@ -41,9 +41,8 @@ type createLoanRequest struct {
 }
 
 type updateLoanRequest struct {
+	subject.Fields
 	Name             *string `json:"name"`
-	EntityType       *string `json:"entity_type"`
-	EntityID         *string `json:"entity_id"`
 	Lender           *string `json:"lender"`
 	OriginalAmount   *string `json:"original_amount"`
 	InterestRate     *string `json:"interest_rate"`
@@ -58,8 +57,13 @@ type loanResponse struct {
 	ID               string  `json:"id"`
 	HouseholdID      string  `json:"household_id"`
 	Name             string  `json:"name"`
-	EntityType       *string `json:"entity_type"`
-	EntityID         *string `json:"entity_id"`
+	PropertyID       *string `json:"property_id"`
+	VehicleID        *string `json:"vehicle_id"`
+	AssetID          *string `json:"asset_id"`
+	// Deprecated: derived from the typed subject for pre-v2 clients.
+	EntityType *string `json:"entity_type"`
+	// Deprecated: derived from the typed subject for pre-v2 clients.
+	EntityID *string `json:"entity_id"`
 	Lender           *string `json:"lender"`
 	OriginalAmount   *string `json:"original_amount"`
 	InterestRate     *string `json:"interest_rate"`
@@ -78,7 +82,9 @@ func toLoanResponse(l *Loan) loanResponse {
 		ID:               l.ID.String(),
 		HouseholdID:      l.HouseholdID.String(),
 		Name:             l.Name,
-		EntityType:       l.EntityType,
+		PropertyID:       subject.String(l.PropertyID),
+		VehicleID:        subject.String(l.VehicleID),
+		AssetID:          subject.String(l.AssetID),
 		Lender:           l.Lender,
 		OriginalAmount:   l.OriginalAmount,
 		InterestRate:     l.InterestRate,
@@ -90,10 +96,7 @@ func toLoanResponse(l *Loan) loanResponse {
 		CreatedAt:        l.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:        l.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	}
-	if l.EntityID != nil {
-		s := l.EntityID.String()
-		r.EntityID = &s
-	}
+	r.EntityType, r.EntityID = l.Subject.Legacy()
 	return r
 }
 
@@ -105,16 +108,26 @@ func toLoanResponses(loans []*Loan) []loanResponse {
 	return out
 }
 
-// parseUUIDPtr parses a string pointer into a *uuid.UUID.
-func parseUUIDPtr(s *string) *uuid.UUID {
-	if s == nil || *s == "" {
-		return nil
+// parseFilter reads ?entity_type= (kept for pre-v2 clients; also accepts
+// "household"), ?property_id= and ?vehicle_id=.
+func parseFilter(r *http.Request) (Filter, string) {
+	q := r.URL.Query()
+	f := Filter{Kind: q.Get("entity_type")}
+	switch f.Kind {
+	case "", "property", "vehicle", "asset", "household":
+	default:
+		return f, "entity_type must be property, vehicle, asset or household"
 	}
-	id, err := uuid.Parse(*s)
-	if err != nil {
-		return nil
+	for name, dst := range map[string]**uuid.UUID{"property_id": &f.PropertyID, "vehicle_id": &f.VehicleID} {
+		if v := q.Get(name); v != "" {
+			id, err := uuid.Parse(v)
+			if err != nil {
+				return f, "invalid " + name
+			}
+			*dst = &id
+		}
 	}
-	return &id
+	return f, ""
 }
 
 // --- handlers ---
@@ -134,12 +147,13 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var entityType *string
-	if et := r.URL.Query().Get("entity_type"); et != "" {
-		entityType = &et
+	filter, msg := parseFilter(r)
+	if msg != "" {
+		apierr.BadRequest(w, msg)
+		return
 	}
 
-	loans, err := h.repo.List(r.Context(), householdID, entityType)
+	loans, err := h.repo.List(r.Context(), householdID, filter)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -177,8 +191,6 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	l := &Loan{
 		Name:             *req.Name,
-		EntityType:       req.EntityType,
-		EntityID:         parseUUIDPtr(req.EntityID),
 		Lender:           req.Lender,
 		OriginalAmount:   req.OriginalAmount,
 		InterestRate:     req.InterestRate,
@@ -189,9 +201,14 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		Notes:            req.Notes,
 	}
 
+	if err := req.Fields.Apply(&l.Subject); err != nil {
+		apierr.BadRequest(w, err.Error())
+		return
+	}
+
 	created, err := h.repo.Create(r.Context(), householdID, l)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 
@@ -268,8 +285,6 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 
 	l := &Loan{
 		Name:             *req.Name,
-		EntityType:       req.EntityType,
-		EntityID:         parseUUIDPtr(req.EntityID),
 		Lender:           req.Lender,
 		OriginalAmount:   req.OriginalAmount,
 		InterestRate:     req.InterestRate,
@@ -280,9 +295,15 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		Notes:            req.Notes,
 	}
 
+	// PUT replaces the whole loan, subject included.
+	if err := req.Fields.Apply(&l.Subject); err != nil {
+		apierr.BadRequest(w, err.Error())
+		return
+	}
+
 	updated, err := h.repo.Update(r.Context(), loanID, householdID, l)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 	if updated == nil {

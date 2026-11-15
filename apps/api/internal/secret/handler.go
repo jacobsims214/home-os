@@ -110,7 +110,7 @@ func (h *Handler) indexSecret(ctx context.Context, s *Secret) {
 	// the secret's own ID with entity_type "secret" (non-clickable).
 	indexPathType := "secret"
 	indexPathID := s.ID.String()
-	if s.EntityType != "" && s.EntityID != uuid.Nil {
+	if s.EntityType != "" && s.EntityType != EntityTypeHousehold && s.EntityID != uuid.Nil {
 		indexPathType = s.EntityType
 		indexPathID = s.EntityID.String()
 	}
@@ -241,9 +241,16 @@ func (h *Handler) CreateSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Entity association is optional (standalone secrets have no entity). But
-	// if entity_type is provided, entity_id must also be provided and must be a
-	// valid UUID — a dangling entity_type with no ID is a caller bug.
+	// Entity association is optional: a secret with no entity belongs to the
+	// family, stored as ('household', hid). If another entity_type is given,
+	// entity_id must also be given and be a valid UUID — a dangling
+	// entity_type with no ID is a caller bug.
+	if req.EntityType == "" && req.EntityID == "" {
+		req.EntityType = EntityTypeHousehold
+	}
+	if req.EntityType == EntityTypeHousehold && req.EntityID == "" {
+		req.EntityID = hid.String()
+	}
 	var entityID uuid.UUID
 	if req.EntityType != "" {
 		if req.EntityID == "" {
@@ -268,9 +275,10 @@ func (h *Handler) CreateSecret(w http.ResponseWriter, r *http.Request) {
 		SecretType:    req.SecretType,
 	}
 
+	// The owner trigger rejects another family's entity (→ 404).
 	created, err := h.repo.CreateSecret(r.Context(), hid, s)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 
@@ -298,6 +306,9 @@ func (h *Handler) ListSecrets(w http.ResponseWriter, r *http.Request) {
 	entityType := r.URL.Query().Get("entity_type")
 	entityIDStr := r.URL.Query().Get("entity_id")
 	var entityID uuid.UUID
+	if entityType == EntityTypeHousehold && entityIDStr == "" {
+		entityIDStr = hid.String()
+	}
 	if entityType != "" {
 		if entityIDStr == "" {
 			apierr.BadRequest(w, "entity_id is required when entity_type is provided")
@@ -314,7 +325,7 @@ func (h *Handler) ListSecrets(w http.ResponseWriter, r *http.Request) {
 
 	secrets, err := h.repo.ListSecrets(r.Context(), hid, entityType, entityID)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 

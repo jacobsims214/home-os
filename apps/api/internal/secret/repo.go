@@ -18,8 +18,8 @@
 //  - The polymorphic entity filter (entityType + entityID) uses the same
 //    sentinel convention as file/repo.go: when both are zero (entityType=="" &&
 //    entityID==uuid.Nil) the whole household is listed; otherwise the query is
-//    narrowed to (entity_type, entity_id). Standalone secrets (no entity) are
-//    stored with entity_type="" and entity_id=uuid.Nil and surface in the
+//    narrowed to (entity_type, entity_id). Standalone secrets are family-level,
+//    stored as ('household', household_id) (domain model v2), and surface in the
 //    household-wide listing.
 //
 //  - The repo never touches plaintext. encrypted_data/iv arrive already
@@ -60,11 +60,14 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 //
 // The caller must supply a *Secret whose EncryptedData, IV, KeyVersion, Name,
 // and SecretType are already set (encryption happens client-side — the repo
-// never sees plaintext). EntityType/EntityID may be zero values for a
-// standalone secret. householdID is passed separately and overrides any value
-// on the struct so a handler can never accidentally write into another
-// household.
+// never sees plaintext). Zero EntityType/EntityID mean a standalone secret,
+// which is stored family-level as ('household', householdID). householdID is
+// passed separately and overrides any value on the struct so a handler can
+// never accidentally write into another household.
 func (r *Repo) CreateSecret(ctx context.Context, householdID uuid.UUID, s *Secret) (*Secret, error) {
+	if s.EntityType == "" && s.EntityID == uuid.Nil {
+		s.EntityType, s.EntityID = EntityTypeHousehold, householdID
+	}
 	var created Secret
 	err := r.pool.QueryRow(ctx,
 		`INSERT INTO secrets (household_id, entity_type, entity_id, encrypted_data, iv, key_version, name, secret_type)

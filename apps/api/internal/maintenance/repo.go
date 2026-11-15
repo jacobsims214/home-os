@@ -8,6 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/api/internal/subject"
 )
 
 // Repo provides read/write access to the maintenance_schedules and
@@ -22,7 +24,9 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 }
 
 // ListTasks returns all maintenance tasks for a household, optionally filtered by
-// status and/or property_id. Results are ordered by due_date ascending (nulls last)
+// status and/or property_id. The property filter includes tasks about that
+// property's assets, because the database derives property_id from asset_id
+// (migration 038). Results are ordered by due_date ascending (nulls last)
 // followed by created_at.
 func (r *Repo) ListTasks(ctx context.Context, householdID uuid.UUID, status *TaskStatus, propertyID *uuid.UUID) ([]*Task, error) {
 	var clauses []string
@@ -113,8 +117,11 @@ func (r *Repo) CreateTask(ctx context.Context, t *Task) (*Task, error) {
 }
 
 // UpdateTask updates fields on an existing maintenance task identified by id.
-// Only non-nil fields in the provided task are applied. Returns the updated record.
-func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, updates *Task) (*Task, error) {
+// Only non-nil fields in the provided task are applied. When subj is non-nil
+// all three subject columns are written from it (NULLs included), so a task
+// can move from a property to a vehicle without ever holding both.
+// Returns the updated record.
+func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, updates *Task, subj *subject.Subject) (*Task, error) {
 	var sets []string
 	args := []any{id}
 	argIdx := 2
@@ -164,20 +171,10 @@ func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, updates *Task) (*Ta
 		args = append(args, *updates.ScheduleID)
 		argIdx++
 	}
-	if updates.PropertyID != nil {
-		sets = append(sets, fmt.Sprintf("property_id = $%d", argIdx))
-		args = append(args, *updates.PropertyID)
-		argIdx++
-	}
-	if updates.AssetID != nil {
-		sets = append(sets, fmt.Sprintf("asset_id = $%d", argIdx))
-		args = append(args, *updates.AssetID)
-		argIdx++
-	}
-	if updates.VehicleID != nil {
-		sets = append(sets, fmt.Sprintf("vehicle_id = $%d", argIdx))
-		args = append(args, *updates.VehicleID)
-		argIdx++
+	if subj != nil {
+		sets = append(sets, fmt.Sprintf("property_id = $%d, asset_id = $%d, vehicle_id = $%d", argIdx, argIdx+1, argIdx+2))
+		args = append(args, subj.PropertyID, subj.AssetID, subj.VehicleID)
+		argIdx += 3
 	}
 
 	if len(sets) == 0 {

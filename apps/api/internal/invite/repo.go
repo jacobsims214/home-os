@@ -28,7 +28,7 @@ func (r *Repo) Create(ctx context.Context, householdID, email, token, role strin
 	rows, err := r.pool.Query(ctx,
 		`INSERT INTO invitations (household_id, email, token, role, invited_by, expires_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING id, household_id, email, token, role, invited_by, expires_at, accepted_at, created_at`,
+		 RETURNING id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at`,
 		householdID, email, token, role, invitedByID, expiresAt,
 	)
 	if err != nil {
@@ -46,7 +46,7 @@ func (r *Repo) Create(ctx context.Context, householdID, email, token, role strin
 // ListByHousehold returns all pending invitations for a household.
 func (r *Repo) ListByHousehold(ctx context.Context, householdID string) ([]Invitation, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, email, token, role, invited_by, expires_at, accepted_at, created_at
+		`SELECT id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at
 		 FROM invitations
 		 WHERE household_id = $1
 		 ORDER BY created_at`,
@@ -71,7 +71,7 @@ func (r *Repo) ListByHousehold(ctx context.Context, householdID string) ([]Invit
 // GetByToken returns an invitation by its token.
 func (r *Repo) GetByToken(ctx context.Context, token string) (*Invitation, error) {
 	row := r.pool.QueryRow(ctx,
-		`SELECT id, household_id, email, token, role, invited_by, expires_at, accepted_at, created_at
+		`SELECT id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at
 		 FROM invitations
 		 WHERE token = $1`,
 		token,
@@ -133,7 +133,7 @@ type AcceptResult struct {
 func lockPendingInvitation(ctx context.Context, tx pgx.Tx, token string, now time.Time) (*Invitation, error) {
 	inv := &Invitation{}
 	err := tx.QueryRow(ctx,
-		`SELECT id, household_id, email, token, role, invited_by, expires_at, accepted_at, created_at
+		`SELECT id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at
 		 FROM invitations
 		 WHERE token = $1
 		 FOR UPDATE`,

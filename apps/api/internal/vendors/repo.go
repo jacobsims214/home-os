@@ -24,7 +24,7 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 // List returns all vendors for the given household.
 func (r *Repo) List(ctx context.Context, householdID uuid.UUID) ([]*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, property_id, name, specialty, phone, email, website, notes, created_at, updated_at
+		`SELECT id, household_id, name, specialty, phone, email, website, notes, created_at, updated_at
 		 FROM vendors WHERE household_id = $1 ORDER BY created_at DESC`,
 		householdID,
 	)
@@ -44,7 +44,7 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID) ([]*Vendor, erro
 // Returns nil if not found.
 func (r *Repo) Get(ctx context.Context, householdID, id uuid.UUID) (*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, property_id, name, specialty, phone, email, website, notes, created_at, updated_at
+		`SELECT id, household_id, name, specialty, phone, email, website, notes, created_at, updated_at
 		 FROM vendors WHERE id = $1 AND household_id = $2`,
 		id, householdID,
 	)
@@ -66,10 +66,10 @@ func (r *Repo) Get(ctx context.Context, householdID, id uuid.UUID) (*Vendor, err
 // Create inserts a new vendor for the given household.
 func (r *Repo) Create(ctx context.Context, householdID uuid.UUID, v *Vendor) (*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
-		`INSERT INTO vendors (household_id, property_id, name, specialty, phone, email, website, notes)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id, household_id, property_id, name, specialty, phone, email, website, notes, created_at, updated_at`,
-		householdID, v.PropertyID, v.Name, v.Specialty, v.Phone, v.Email, v.Website, v.Notes,
+		`INSERT INTO vendors (household_id, name, specialty, phone, email, website, notes)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 RETURNING id, household_id, name, specialty, phone, email, website, notes, created_at, updated_at`,
+		householdID, v.Name, v.Specialty, v.Phone, v.Email, v.Website, v.Notes,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create vendor: %w", err)
@@ -88,11 +88,11 @@ func (r *Repo) Create(ctx context.Context, householdID uuid.UUID, v *Vendor) (*V
 func (r *Repo) Update(ctx context.Context, householdID, id uuid.UUID, v *Vendor) (*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
 		`UPDATE vendors
-		 SET property_id = $1, name = $2, specialty = $3, phone = $4, email = $5, website = $6, notes = $7,
+		 SET name = $1, specialty = $2, phone = $3, email = $4, website = $5, notes = $6,
 		     updated_at = NOW()
-		 WHERE id = $8 AND household_id = $9
-		 RETURNING id, household_id, property_id, name, specialty, phone, email, website, notes, created_at, updated_at`,
-		v.PropertyID, v.Name, v.Specialty, v.Phone, v.Email, v.Website, v.Notes,
+		 WHERE id = $7 AND household_id = $8
+		 RETURNING id, household_id, name, specialty, phone, email, website, notes, created_at, updated_at`,
+		v.Name, v.Specialty, v.Phone, v.Email, v.Website, v.Notes,
 		id, householdID,
 	)
 	if err != nil {

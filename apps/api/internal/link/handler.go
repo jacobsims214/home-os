@@ -87,6 +87,14 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "link_type is required")
 		return
 	}
+	if !LinkTypes[req.LinkType] {
+		apierr.BadRequest(w, "link_type must be file, secret or url")
+		return
+	}
+	if req.LinkType == "url" && (req.URL == nil || strings.TrimSpace(*req.URL) == "") {
+		apierr.BadRequest(w, "url is required for a url link")
+		return
+	}
 	if req.LinkID == "" {
 		apierr.BadRequest(w, "link_id is required")
 		return
@@ -120,17 +128,20 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	link := &Link{
-		EntityType: req.EntityType,
-		EntityID:   entityID,
-		LinkType:   req.LinkType,
-		LinkID:     req.LinkID,
-		Title:      req.Title,
-		URL:        req.URL,
+		EntityType:  req.EntityType,
+		EntityID:    entityID,
+		LinkType:    req.LinkType,
+		LinkID:      req.LinkID,
+		Title:       req.Title,
+		URL:         req.URL,
+		HouseholdID: householdID,
 	}
 
+	// The owner trigger rejects a file/secret link_id that is not a
+	// same-family row (foreign_key_violation → 404).
 	created, err := h.repo.CreateLink(r.Context(), link)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 

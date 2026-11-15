@@ -145,7 +145,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		notes, err := h.repo.ListByEntity(r.Context(), hid, entityType, entityID)
 		if err != nil {
-			apierr.InternalError(w, err)
+			apierr.DB(w, err)
 			return
 		}
 		apierr.JSON(w, http.StatusOK, map[string]any{"data": toNoteResponses(notes)})
@@ -208,6 +208,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A family-level note is about the family itself: ('household', <its id>).
+	if req.EntityType == "household" && req.EntityID == "" {
+		req.EntityID = hid.String()
+	}
 	if req.EntityType == "" {
 		apierr.BadRequest(w, "entity_type is required")
 		return
@@ -244,9 +248,11 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		AuthorID:    authorID,
 	}
 
+	// The owner trigger (migration 038) rejects an entity that is missing or
+	// belongs to another family; apierr.DB turns that into a 404.
 	created, err := h.repo.Create(r.Context(), n)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 

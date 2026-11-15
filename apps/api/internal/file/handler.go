@@ -100,14 +100,17 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// With no entity the file belongs to the family: ('household', hid).
 	entityType := r.FormValue("entity_type")
 	entityIDStr := r.FormValue("entity_id")
+	if entityType == "" && entityIDStr == "" {
+		entityType = EntityTypeHousehold
+	}
+	if entityType == EntityTypeHousehold && entityIDStr == "" {
+		entityIDStr = hid.String()
+	}
 	if entityType == "" {
 		apierr.BadRequest(w, "entity_type is required")
-		return
-	}
-	if entityIDStr == "" {
-		apierr.BadRequest(w, "entity_id is required")
 		return
 	}
 	entityID, err := uuid.Parse(entityIDStr)
@@ -151,7 +154,7 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 
 	created, err := h.repo.CreateFile(r.Context(), hid, rec, data)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 
@@ -175,6 +178,9 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	entityType := r.URL.Query().Get("entity_type")
 	entityIDStr := r.URL.Query().Get("entity_id")
 	var entityID uuid.UUID
+	if entityType == EntityTypeHousehold && entityIDStr == "" {
+		entityIDStr = hid.String()
+	}
 	if entityType != "" {
 		if entityIDStr == "" {
 			apierr.BadRequest(w, "entity_id is required when entity_type is provided")
@@ -191,7 +197,7 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 
 	files, err := h.repo.ListFiles(r.Context(), hid, entityType, entityID)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 

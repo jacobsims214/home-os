@@ -77,6 +77,11 @@ func (r *Repo) CreateFile(ctx context.Context, householdID uuid.UUID, f *File, d
 		return nil, fmt.Errorf("create file: insert blob: %w", err)
 	}
 
+	// A file with no entity belongs to the family (domain model v2).
+	if f.EntityType == "" && f.EntityID == uuid.Nil {
+		f.EntityType, f.EntityID = EntityTypeHousehold, householdID
+	}
+
 	// Insert the metadata row referencing the blob we just created.
 	var created File
 	err = tx.QueryRow(ctx,

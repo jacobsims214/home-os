@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -32,17 +31,10 @@ var entityTypes = []string{
 // link_type was once a first-class integration type may still exist in the
 // database.
 var linkTypes = []string{
-	"external",
+	"url",
 }
 
-var (
-	prepareOnce sync.Once
-)
-
 // testDB returns a connection pool. Skips the test if TEST_DATABASE_URL is not set.
-// Prepares the schema once: the repo's CreateLink INSERT does not include document_id,
-// but the original DDL has document_id NOT NULL. We make it nullable so CreateLink works.
-// This is done once per test run since DDL auto-commits in PostgreSQL.
 func testDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
@@ -57,31 +49,6 @@ func testDB(t *testing.T) *pgxpool.Pool {
 	pool, err := pgxpool.New(context.Background(), dsn)
 	require.NoError(t, err, "connect to test database")
 	t.Cleanup(pool.Close)
-
-	// Run schema preparation once per test run.
-	prepareOnce.Do(func() {
-		ctx := context.Background()
-		conn, err := pool.Acquire(ctx)
-		if err != nil {
-			t.Fatalf("acquire connection for schema prep: %v", err)
-		}
-		defer conn.Release()
-
-		// Make document_id nullable so the repo's CreateLink (which omits document_id)
-		// can succeed. Migration 019 added link_type/link_id/title/url columns but
-		// the original document_id remained NOT NULL without a default — the repo
-		// INSERT (which omits document_id) would fail against the pure migration
-		// schema. The repo was written assuming document_id should be optional for
-		// the unified link types that are not tied to a documents row. A follow-up
-		// migration (020) should formalize this by running:
-		// ALTER TABLE document_links ALTER COLUMN document_id DROP NOT NULL;
-		_, err = conn.Exec(ctx,
-			`ALTER TABLE document_links ALTER COLUMN document_id DROP NOT NULL`,
-		)
-		if err != nil {
-			t.Fatalf("alter document_links.document_id drop not null: %v", err)
-		}
-	})
 
 	return pool
 }
@@ -160,12 +127,13 @@ func TestCreateLink_AllEntityTypes(t *testing.T) {
 				lt := lt
 				t.Run(lt, func(t *testing.T) {
 					link := &Link{
-						EntityType: et,
-						EntityID:   fixtures.EntityID,
-						LinkType:   lt,
-						LinkID:     fmt.Sprintf("%s-%s-doc-1", et, lt),
-						Title:      fmt.Sprintf("Test %s link for %s", lt, et),
-						URL:        strPtr(fmt.Sprintf("https://example.com/%s/%s", lt, et)),
+						EntityType:  et,
+						EntityID:    fixtures.EntityID,
+						HouseholdID: fixtures.HouseholdID,
+						LinkType:    lt,
+						LinkID:      fmt.Sprintf("%s-%s-doc-1", et, lt),
+						Title:       fmt.Sprintf("Test %s link for %s", lt, et),
+						URL:         strPtr(fmt.Sprintf("https://example.com/%s/%s", lt, et)),
 					}
 
 					created, err := repo.CreateLink(ctx, link)
@@ -197,11 +165,12 @@ func TestCreateLink_Duplicate(t *testing.T) {
 	repo := NewRepo(pool)
 
 	link := &Link{
-		EntityType: "asset",
-		EntityID:   fixtures.EntityID,
-		LinkType:   "external",
-		LinkID:     "dup-doc-1",
-		Title:      "Original",
+		EntityType:  "asset",
+		EntityID:    fixtures.EntityID,
+		HouseholdID: fixtures.HouseholdID,
+		LinkType:    "url",
+		LinkID:      "dup-doc-1",
+		Title:       "Original",
 	}
 
 	// First creation should succeed.
@@ -230,11 +199,12 @@ func TestGetLinks_ByEntity(t *testing.T) {
 	// Create one link of each type for the same entity.
 	for _, lt := range linkTypes {
 		_, err := repo.CreateLink(ctx, &Link{
-			EntityType: "asset",
-			EntityID:   fixtures.EntityID,
-			LinkType:   lt,
-			LinkID:     fmt.Sprintf("list-test-%s", lt),
-			Title:      fmt.Sprintf("Link %s", lt),
+			EntityType:  "asset",
+			EntityID:    fixtures.EntityID,
+			HouseholdID: fixtures.HouseholdID,
+			LinkType:    lt,
+			LinkID:      fmt.Sprintf("list-test-%s", lt),
+			Title:       fmt.Sprintf("Link %s", lt),
 		})
 		require.NoError(t, err)
 	}
@@ -274,20 +244,22 @@ func TestGetLinks_FiltersByEntityType(t *testing.T) {
 
 	// Create links for two different entities.
 	_, err = repo.CreateLink(ctx, &Link{
-		EntityType: "asset",
-		EntityID:   fixtures.EntityID,
-		LinkType:   "external",
-		LinkID:     "doc-1",
-		Title:      "Asset link",
+		EntityType:  "asset",
+		EntityID:    fixtures.EntityID,
+		HouseholdID: fixtures.HouseholdID,
+		LinkType:    "url",
+		LinkID:      "doc-1",
+		Title:       "Asset link",
 	})
 	require.NoError(t, err)
 
 	_, err = repo.CreateLink(ctx, &Link{
-		EntityType: "asset",
-		EntityID:   otherEntityID,
-		LinkType:   "external",
-		LinkID:     "doc-2",
-		Title:      "Other entity link",
+		EntityType:  "asset",
+		EntityID:    otherEntityID,
+		HouseholdID: fixtures.HouseholdID,
+		LinkType:    "url",
+		LinkID:      "doc-2",
+		Title:       "Other entity link",
 	})
 	require.NoError(t, err)
 
@@ -330,11 +302,12 @@ func TestDeleteLink(t *testing.T) {
 	repo := NewRepo(pool)
 
 	created, err := repo.CreateLink(ctx, &Link{
-		EntityType: "asset",
-		EntityID:   fixtures.EntityID,
-		LinkType:   "external",
-		LinkID:     "delete-me",
-		Title:      "To be deleted",
+		EntityType:  "asset",
+		EntityID:    fixtures.EntityID,
+		HouseholdID: fixtures.HouseholdID,
+		LinkType:    "url",
+		LinkID:      "delete-me",
+		Title:       "To be deleted",
 	})
 	require.NoError(t, err)
 
@@ -375,12 +348,13 @@ func TestGetLink_ByID(t *testing.T) {
 	repo := NewRepo(pool)
 
 	created, err := repo.CreateLink(ctx, &Link{
-		EntityType: "vehicle",
-		EntityID:   fixtures.EntityID,
-		LinkType:   "external",
-		LinkID:     "vw-item-1",
-		Title:      "Insurance reference",
-		URL:        strPtr("https://example.com/vw-item-1"),
+		EntityType:  "vehicle",
+		EntityID:    fixtures.EntityID,
+		HouseholdID: fixtures.HouseholdID,
+		LinkType:    "url",
+		LinkID:      "vw-item-1",
+		Title:       "Insurance reference",
+		URL:         strPtr("https://example.com/vw-item-1"),
 	})
 	require.NoError(t, err)
 
@@ -389,7 +363,7 @@ func TestGetLink_ByID(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, created.ID, got.ID)
 	assert.Equal(t, "vehicle", got.EntityType)
-	assert.Equal(t, "external", got.LinkType)
+	assert.Equal(t, "url", got.LinkType)
 	assert.Equal(t, "vw-item-1", got.LinkID)
 	assert.Equal(t, "Insurance reference", got.Title)
 	require.NotNil(t, got.URL)
@@ -422,12 +396,13 @@ func TestCreateLink_WithNilURL(t *testing.T) {
 	repo := NewRepo(pool)
 
 	link := &Link{
-		EntityType: "bill",
-		EntityID:   fixtures.EntityID,
-		LinkType:   "external",
-		LinkID:     "receipt-2024-01.pdf",
-		Title:      "January receipt",
-		URL:        nil,
+		EntityType:  "bill",
+		EntityID:    fixtures.EntityID,
+		HouseholdID: fixtures.HouseholdID,
+		LinkType:    "url",
+		LinkID:      "receipt-2024-01.pdf",
+		Title:       "January receipt",
+		URL:         nil,
 	}
 
 	created, err := repo.CreateLink(ctx, link)
@@ -454,12 +429,13 @@ func TestLinkRoundtrip_AllFields(t *testing.T) {
 
 	url := "https://example.com/items/42"
 	link := &Link{
-		EntityType: "property",
-		EntityID:   fixtures.EntityID,
-		LinkType:   "external",
-		LinkID:     "42",
-		Title:      "Property deed",
-		URL:        &url,
+		EntityType:  "property",
+		EntityID:    fixtures.EntityID,
+		HouseholdID: fixtures.HouseholdID,
+		LinkType:    "url",
+		LinkID:      "42",
+		Title:       "Property deed",
+		URL:         &url,
 	}
 
 	created, err := repo.CreateLink(ctx, link)
@@ -473,7 +449,7 @@ func TestLinkRoundtrip_AllFields(t *testing.T) {
 	assert.Equal(t, created.ID, fetched.ID)
 	assert.Equal(t, "property", fetched.EntityType)
 	assert.Equal(t, fixtures.EntityID, fetched.EntityID)
-	assert.Equal(t, "external", fetched.LinkType)
+	assert.Equal(t, "url", fetched.LinkType)
 	assert.Equal(t, "42", fetched.LinkID)
 	assert.Equal(t, "Property deed", fetched.Title)
 	require.NotNil(t, fetched.URL)

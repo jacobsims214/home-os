@@ -1,13 +1,15 @@
 // Package loan manages financial loan/liability records.
-// Loans are household-scoped and can be polymorphically associated with any
-// entity (property, vehicle, asset) via entity_type + entity_id, or be
-// household-level (no entity link).
+// Loans always belong to the family and may optionally be about one
+// property, vehicle or asset (typed subject FKs, domain model v2); with no
+// subject they are family-level.
 package loan
 
 import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"home-os/api/internal/subject"
 )
 
 // Loan represents a financial loan from the loans table.
@@ -18,8 +20,8 @@ type Loan struct {
 	ID               uuid.UUID
 	HouseholdID      uuid.UUID
 	Name             string
-	EntityType       *string
-	EntityID         *uuid.UUID
+	// Subject columns are scanned by position: property_id, vehicle_id, asset_id.
+	subject.Subject
 	Lender           *string
 	OriginalAmount   *string
 	InterestRate     *string

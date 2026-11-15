@@ -46,7 +46,6 @@ func (h *Handler) indexVendor(ctx context.Context, v *Vendor) {
 		Title: v.Name, Body: body,
 		CreatedAt: v.CreatedAt.Unix(), UpdatedAt: v.UpdatedAt.Unix(),
 	}
-	if v.PropertyID != nil { pid := v.PropertyID.String(); doc.PropertyID = &pid }
 	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
 		slog.Warn("vendor: failed to index", "id", v.ID, "error", err)
 	}
@@ -63,7 +62,6 @@ func (h *Handler) deleteVendorIndex(ctx context.Context, id string) {
 // --- request / response types ---
 
 type createVendorRequest struct {
-	PropertyID *string `json:"property_id"`
 	Name       string  `json:"name"`
 	Specialty  *string `json:"specialty"`
 	Phone      *string `json:"phone"`
@@ -73,7 +71,6 @@ type createVendorRequest struct {
 }
 
 type updateVendorRequest struct {
-	PropertyID *string `json:"property_id"`
 	Name       string  `json:"name"`
 	Specialty  *string `json:"specialty"`
 	Phone      *string `json:"phone"`
@@ -85,7 +82,6 @@ type updateVendorRequest struct {
 type vendorResponse struct {
 	ID          string  `json:"id"`
 	HouseholdID string  `json:"household_id"`
-	PropertyID  *string `json:"property_id,omitempty"`
 	Name        string  `json:"name"`
 	Specialty   *string `json:"specialty,omitempty"`
 	Phone       *string `json:"phone,omitempty"`
@@ -97,16 +93,9 @@ type vendorResponse struct {
 }
 
 func toVendorResponse(v *Vendor) vendorResponse {
-	var propertyID *string
-	if v.PropertyID != nil {
-		s := v.PropertyID.String()
-		propertyID = &s
-	}
-
 	return vendorResponse{
 		ID:          v.ID.String(),
 		HouseholdID: v.HouseholdID.String(),
-		PropertyID:  propertyID,
 		Name:        v.Name,
 		Specialty:   v.Specialty,
 		Phone:       v.Phone,
@@ -205,18 +194,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var propertyID *uuid.UUID
-	if req.PropertyID != nil && *req.PropertyID != "" {
-		pid, err := uuid.Parse(*req.PropertyID)
-		if err != nil {
-			apierr.BadRequest(w, "invalid property_id")
-			return
-		}
-		propertyID = &pid
-	}
-
 	v := &Vendor{
-		PropertyID: propertyID,
 		Name:       req.Name,
 		Specialty:  req.Specialty,
 		Phone:      req.Phone,
@@ -264,18 +242,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var propertyID *uuid.UUID
-	if req.PropertyID != nil && *req.PropertyID != "" {
-		pid, err := uuid.Parse(*req.PropertyID)
-		if err != nil {
-			apierr.BadRequest(w, "invalid property_id")
-			return
-		}
-		propertyID = &pid
-	}
-
 	v := &Vendor{
-		PropertyID: propertyID,
 		Name:       req.Name,
 		Specialty:  req.Specialty,
 		Phone:      req.Phone,

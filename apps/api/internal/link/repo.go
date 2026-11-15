@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,10 +24,10 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 // CreateLink inserts a new link between an entity and an external resource.
 func (r *Repo) CreateLink(ctx context.Context, link *Link) (*Link, error) {
 	rows, err := r.pool.Query(ctx,
-		`INSERT INTO document_links (entity_type, entity_id, link_type, link_id, title, url)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING id, entity_type, entity_id, link_type, link_id, title, url, created_at`,
-		link.EntityType, link.EntityID, link.LinkType, link.LinkID, link.Title, link.URL,
+		`INSERT INTO document_links (entity_type, entity_id, link_type, link_id, title, url, household_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 RETURNING id, entity_type, entity_id, link_type, link_id, title, url, created_at, household_id`,
+		link.EntityType, link.EntityID, link.LinkType, link.LinkID, link.Title, link.URL, link.HouseholdID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create link: %w", err)
@@ -43,7 +44,7 @@ func (r *Repo) CreateLink(ctx context.Context, link *Link) (*Link, error) {
 // GetLinks returns all links for a given entity, ordered by created_at descending.
 func (r *Repo) GetLinks(ctx context.Context, entityType string, entityID uuid.UUID) ([]*Link, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, entity_type, entity_id, link_type, link_id, title, url, created_at
+		`SELECT id, entity_type, entity_id, link_type, link_id, title, url, created_at, household_id
 		 FROM document_links
 		 WHERE entity_type = $1 AND entity_id = $2
 		 ORDER BY created_at DESC`,
@@ -76,57 +77,41 @@ func (r *Repo) DeleteLink(ctx context.Context, linkID uuid.UUID) error {
 	return nil
 }
 
-// entityTable maps the link API's entity_type values to their backing
-// Postgres table. Every entity that can own a link has a household_id column,
-// which is what makes the ownership check possible. This is an allow-list —
-// any entity_type not in this map is rejected by EntityOwnedByHousehold.
-var entityTable = map[string]string{
-	"asset":            "assets",
-	"property":         "properties",
-	"vehicle":          "vehicles",
-	"pet":              "pets",
-	"vendor":           "vendors",
-	"bill":             "bills",
-	"maintenance_task": "maintenance_tasks",
-}
-
 // ErrUnknownEntityType is returned by EntityOwnedByHousehold when the
-// entity_type string is not one of the supported types in the entityTable map.
+// entity_type string is not a member of the entity_kind domain.
 var ErrUnknownEntityType = errors.New("unknown entity_type")
 
 // EntityOwnedByHousehold reports whether the entity row identified by
-// (entityType, entityID) exists and belongs to the given household.
+// (entityType, entityID) exists and belongs to the given household. It uses
+// the database's entity_household() registry (migration 038), so every kind
+// the ownership triggers know about, 'household' included, is accepted here
+// too, with no list kept in Go.
 //
 // Returns (false, nil) when the entity does not exist or belongs to a
 // different household — callers should treat that as a 404 to avoid leaking
 // the existence of entities the caller does not own (cross-tenant IDOR).
 // Returns (false, ErrUnknownEntityType) when entityType is not recognized.
 // Any other error indicates a database failure.
-//
-// The table name used in the query comes from the static entityTable allow-list
-// (not user input), so it is safe to interpolate into the SQL string. We never
-// pass the table name through a bind parameter because pgx does not support
-// parameterized identifiers.
 func (r *Repo) EntityOwnedByHousehold(ctx context.Context, entityType string, entityID, householdID uuid.UUID) (bool, error) {
-	table, ok := entityTable[entityType]
-	if !ok {
-		return false, ErrUnknownEntityType
-	}
-	var exists bool
+	var owned bool
 	err := r.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM `+table+` WHERE id = $1 AND household_id = $2)`,
-		entityID, householdID,
-	).Scan(&exists)
+		`SELECT entity_household($1::text::entity_kind, $2) IS NOT DISTINCT FROM $3::uuid`,
+		entityType, entityID, householdID,
+	).Scan(&owned)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23514" {
+			return false, ErrUnknownEntityType
+		}
 		return false, fmt.Errorf("entity ownership check (%s): %w", entityType, err)
 	}
-	return exists, nil
+	return owned, nil
 }
 
 // GetLink returns a single link by ID.
 func (r *Repo) GetLink(ctx context.Context, linkID uuid.UUID) (*Link, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, entity_type, entity_id, link_type, link_id, title, url, created_at
+		`SELECT id, entity_type, entity_id, link_type, link_id, title, url, created_at, household_id
 		 FROM document_links
 		 WHERE id = $1`,
 		linkID,

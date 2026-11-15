@@ -13,6 +13,7 @@ import (
 	"home-os/api/internal/calendar"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/subject"
 	"home-os/api/pkg/apierr"
 )
 
@@ -114,9 +115,7 @@ type createTaskRequest struct {
 	Description *string `json:"description,omitempty"`
 	DueDate     *string `json:"due_date,omitempty"` // RFC3339 date
 	ScheduleID  *string `json:"schedule_id,omitempty"`
-	PropertyID  *string `json:"property_id,omitempty"`
-	AssetID     *string `json:"asset_id,omitempty"`
-	VehicleID    *string `json:"vehicle_id,omitempty"`
+	subject.Fields
 	Cost        *string `json:"cost,omitempty"`
 	VendorID    *string `json:"vendor_id,omitempty"`
 	Notes       *string `json:"notes,omitempty"`
@@ -129,9 +128,7 @@ type updateTaskRequest struct {
 	DueDate     *string `json:"due_date,omitempty"`
 	CompletedAt *string `json:"completed_at,omitempty"`
 	ScheduleID  *string `json:"schedule_id,omitempty"`
-	PropertyID  *string `json:"property_id,omitempty"`
-	AssetID     *string `json:"asset_id,omitempty"`
-	VehicleID    *string `json:"vehicle_id,omitempty"`
+	subject.Fields
 	Cost        *string `json:"cost,omitempty"`
 	VendorID    *string `json:"vendor_id,omitempty"`
 	Notes       *string `json:"notes,omitempty"`
@@ -163,9 +160,7 @@ type createScheduleRequest struct {
 	Description   *string `json:"description,omitempty"`
 	RRule         string  `json:"rrule"`
 	EstimatedCost *string `json:"estimated_cost,omitempty"`
-	PropertyID    *string `json:"property_id,omitempty"`
-	AssetID       *string `json:"asset_id,omitempty"`
-		VehicleID      *string `json:"vehicle_id,omitempty"`
+	subject.Fields
 	VendorID      *string `json:"vendor_id,omitempty"`
 }
 
@@ -174,7 +169,7 @@ type scheduleResponse struct {
 	HouseholdID   string  `json:"household_id"`
 	PropertyID    *string `json:"property_id,omitempty"`
 	AssetID       *string `json:"asset_id,omitempty"`
-		VehicleID      *string `json:"vehicle_id,omitempty"`
+	VehicleID     *string `json:"vehicle_id,omitempty"`
 	Name          string  `json:"name"`
 	Description   *string `json:"description,omitempty"`
 	RRule         string  `json:"rrule"`
@@ -283,6 +278,7 @@ func toScheduleResponse(s *Schedule) scheduleResponse {
 		v := s.AssetID.String()
 		resp.AssetID = &v
 	}
+	resp.VehicleID = subject.String(s.VehicleID)
 	if s.VendorID != nil {
 		v := s.VendorID.String()
 		resp.VendorID = &v
@@ -377,19 +373,9 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "invalid schedule_id")
 		return
 	}
-	propertyID, err := parseUUID(req.PropertyID)
-	if err != nil {
-		apierr.BadRequest(w, "invalid property_id")
-		return
-	}
-	assetID, err := parseUUID(req.AssetID)
-	if err != nil {
-		apierr.BadRequest(w, "invalid asset_id")
-		return
-	}
-	vehicleID, err := parseUUID(req.VehicleID)
-	if err != nil {
-		apierr.BadRequest(w, "invalid vehicle_id")
+	var subj subject.Subject
+	if err := req.Fields.Apply(&subj); err != nil {
+		apierr.BadRequest(w, err.Error())
 		return
 	}
 	vendorID, err := parseUUID(req.VendorID)
@@ -405,9 +391,9 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		Status:      TaskStatusPending,
 		DueDate:     dueDate,
 		ScheduleID:  scheduleID,
-		PropertyID:  propertyID,
-		AssetID:     assetID,
-		VehicleID:   vehicleID,
+		PropertyID:  subj.PropertyID,
+		AssetID:     subj.AssetID,
+		VehicleID:   subj.VehicleID,
 		Cost:        req.Cost,
 		VendorID:    vendorID,
 		Notes:       req.Notes,
@@ -415,7 +401,7 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	created, err := h.repo.CreateTask(r.Context(), task)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 
@@ -531,34 +517,18 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		}
 		updates.ScheduleID = id
 	}
-	if req.PropertyID != nil {
-		id, err := parseUUID(req.PropertyID)
-		if err != nil {
-			apierr.BadRequest(w, "invalid property_id")
+	var subj *subject.Subject
+	if req.Fields != (subject.Fields{}) {
+		subj = &subject.Subject{PropertyID: existing.PropertyID, VehicleID: existing.VehicleID, AssetID: existing.AssetID}
+		if err := req.Fields.Apply(subj); err != nil {
+			apierr.BadRequest(w, err.Error())
 			return
 		}
-		updates.PropertyID = id
-	}
-	if req.AssetID != nil {
-		id, err := parseUUID(req.AssetID)
-		if err != nil {
-			apierr.BadRequest(w, "invalid asset_id")
-			return
-		}
-		updates.AssetID = id
-	}
-	if req.VehicleID != nil {
-		id, err := parseUUID(req.VehicleID)
-		if err != nil {
-			apierr.BadRequest(w, "invalid vehicle_id")
-			return
-		}
-		updates.VehicleID = id
 	}
 
-	updated, err := h.repo.UpdateTask(r.Context(), taskID, updates)
+	updated, err := h.repo.UpdateTask(r.Context(), taskID, updates, subj)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 	if updated == nil {
@@ -697,14 +667,9 @@ func (h *Handler) CreateSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	propertyID, err := parseUUID(req.PropertyID)
-	if err != nil {
-		apierr.BadRequest(w, "invalid property_id")
-		return
-	}
-	assetID, err := parseUUID(req.AssetID)
-	if err != nil {
-		apierr.BadRequest(w, "invalid asset_id")
+	var subj subject.Subject
+	if err := req.Fields.Apply(&subj); err != nil {
+		apierr.BadRequest(w, err.Error())
 		return
 	}
 	vendorID, err := parseUUID(req.VendorID)
@@ -719,14 +684,15 @@ func (h *Handler) CreateSchedule(w http.ResponseWriter, r *http.Request) {
 		Description:   req.Description,
 		RRule:         req.RRule,
 		EstimatedCost: req.EstimatedCost,
-		PropertyID:    propertyID,
-		AssetID:       assetID,
+		PropertyID:    subj.PropertyID,
+		AssetID:       subj.AssetID,
+		VehicleID:     subj.VehicleID,
 		VendorID:      vendorID,
 	}
 
 	created, err := h.repo.CreateSchedule(r.Context(), schedule)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 

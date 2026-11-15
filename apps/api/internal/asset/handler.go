@@ -3,6 +3,7 @@ package asset
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"home-os/api/internal/config"
 	"home-os/api/internal/middleware"
@@ -201,9 +203,12 @@ asset := &Asset{
 		Notes:         req.Notes,
 	}
 
+	// Property is optional (a family-level asset has neither property nor
+	// room). With a room, the database derives property_id from it; another
+	// family's room or property is a foreign_key_violation → 404.
 	created, err := h.repo.Create(r.Context(), asset)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 
@@ -274,9 +279,10 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 // Build partial update — only fields that are present in the request.
+	// An empty property_id or room_id clears it (uuid.Nil marks the clear).
 	updates := &Asset{
-		PropertyID:    parseUUIDPtr(req.PropertyID),
-		RoomID:        parseUUIDPtr(req.RoomID),
+		PropertyID:    parseUUIDOrClear(req.PropertyID),
+		RoomID:        parseUUIDOrClear(req.RoomID),
 		Category:      req.Category,
 		Manufacturer:  req.Manufacturer,
 		Model:         req.Model,
@@ -298,7 +304,11 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := h.repo.Update(r.Context(), assetID, householdID, updates)
 	if err != nil {
-		apierr.InternalError(w, err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			apierr.NotFound(w, "asset not found")
+			return
+		}
+		apierr.DB(w, err)
 		return
 	}
 
@@ -359,6 +369,15 @@ func assetToResponse(a *Asset) assetResponse {
 		CreatedAt:      a.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:      a.UpdatedAt.Format(time.RFC3339),
 	}
+}
+
+// parseUUIDOrClear is parseUUIDPtr for partial updates: an empty string
+// returns a pointer to uuid.Nil, which the repo treats as "set to NULL".
+func parseUUIDOrClear(s *string) *uuid.UUID {
+	if s != nil && *s == "" {
+		return &uuid.Nil
+	}
+	return parseUUIDPtr(s)
 }
 
 func parseUUIDPtr(s *string) *uuid.UUID {

@@ -348,7 +348,7 @@ func (r *Repo) DeleteEvent(ctx context.Context, eventID uuid.UUID) error {
 }
 
 // UpsertMaintenanceEvent creates or updates a calendar event linked to a
-// maintenance task. If a calendar_object with entity_type='maintenance' and
+// maintenance task. If a calendar_object with entity_type='maintenance_task' and
 // entity_id=<taskID> already exists, it's updated; otherwise a new one is
 // created. This is called by the maintenance handler when a task with a
 // due_date is created or updated.
@@ -374,7 +374,7 @@ func (r *Repo) UpsertMaintenanceEvent(ctx context.Context, householdID uuid.UUID
 		Description: description,
 		Start:       startTime,
 		End:         startTime.Add(time.Hour),
-		EntityType:  "maintenance",
+		EntityType:  "maintenance_task",
 		EntityID:    taskID.String(),
 	}
 	icalData, err := marshalEventJSON(ev)
@@ -386,7 +386,7 @@ func (r *Repo) UpsertMaintenanceEvent(ctx context.Context, householdID uuid.UUID
 	// Try to find an existing calendar_object for this maintenance task.
 	var existingID string
 	err = r.pool.QueryRow(ctx,
-		`SELECT id FROM calendar_objects WHERE entity_type = 'maintenance' AND entity_id = $1`,
+		`SELECT id FROM calendar_objects WHERE entity_type = 'maintenance_task' AND entity_id = $1`,
 		taskID,
 	).Scan(&existingID)
 
@@ -418,7 +418,7 @@ func (r *Repo) UpsertMaintenanceEvent(ctx context.Context, householdID uuid.UUID
 
 	_, err = r.pool.Exec(ctx,
 		`INSERT INTO calendar_objects (id, calendar_id, uid, ical_data, etag, event_type, entity_type, entity_id)
-		 VALUES ($1, $2, $3, $4, $5, 'maintenance', 'maintenance', $6)`,
+		 VALUES ($1, $2, $3, $4, $5, 'maintenance', 'maintenance_task', $6)`,
 		ev.ID, calendarID, ev.ID, icalData, etag, taskID,
 	)
 	if err != nil {
@@ -434,7 +434,7 @@ func (r *Repo) UpsertMaintenanceEvent(ctx context.Context, householdID uuid.UUID
 // the reverse direction (calendar delete → maintenance delete).
 func (r *Repo) DeleteMaintenanceEvent(ctx context.Context, taskID uuid.UUID) error {
 	_, err := r.pool.Exec(ctx,
-		`DELETE FROM calendar_objects WHERE entity_type = 'maintenance' AND entity_id = $1`,
+		`DELETE FROM calendar_objects WHERE entity_type = 'maintenance_task' AND entity_id = $1`,
 		taskID,
 	)
 	if err != nil {

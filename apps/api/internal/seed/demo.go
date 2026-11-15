@@ -430,8 +430,8 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 		// 11. Create loans
 		// Mortgage — linked to Main Residence
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO loans (household_id, name, entity_type, entity_id, lender, original_amount, remaining_balance, interest_rate, term_months, monthly_payment, start_date)
-			 VALUES ($1, 'Main Residence Mortgage', 'property', $2, 'Wells Fargo', 295000, 275000, 4.25, 360, 1450, '2018-07-01')`,
+			`INSERT INTO loans (household_id, name, property_id, lender, original_amount, remaining_balance, interest_rate, term_months, monthly_payment, start_date)
+			 VALUES ($1, 'Main Residence Mortgage', $2, 'Wells Fargo', 295000, 275000, 4.25, 360, 1450, '2018-07-01')`,
 			householdID, mainResidenceID,
 		); err != nil {
 			return fmt.Errorf("insert mortgage loan: %w", err)
@@ -443,8 +443,8 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 			return fmt.Errorf("get ford ID: %w", err)
 		}
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO loans (household_id, name, entity_type, entity_id, lender, original_amount, remaining_balance, interest_rate, term_months, monthly_payment, start_date)
-			 VALUES ($1, 'F-150 Financing', 'vehicle', $2, 'Ford Credit', 12000, 8500, 6.99, 60, 350, '2022-01-15')`,
+			`INSERT INTO loans (household_id, name, vehicle_id, lender, original_amount, remaining_balance, interest_rate, term_months, monthly_payment, start_date)
+			 VALUES ($1, 'F-150 Financing', $2, 'Ford Credit', 12000, 8500, 6.99, 60, 350, '2022-01-15')`,
 			householdID, fordID,
 		); err != nil {
 			return fmt.Errorf("insert ford loan: %w", err)

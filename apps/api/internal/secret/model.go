@@ -49,8 +49,11 @@ const (
 	EntityTypeBill        = "bill"
 	EntityTypeNote        = "note"
 	EntityTypeAsset       = "asset"
-	EntityTypeMaintenance = "maintenance"
+	EntityTypeMaintenance = "maintenance_task"
 	EntityTypeVendor      = "vendor"
+	// EntityTypeHousehold marks a family-level secret: entity_id is the
+	// household's own id. It is the default when no entity is given.
+	EntityTypeHousehold = "household"
 )
 
 // Secret represents a row from the secrets table — an encrypted blob plus the

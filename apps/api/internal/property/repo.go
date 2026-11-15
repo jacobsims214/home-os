@@ -169,17 +169,57 @@ func (r *Repo) UpdateProperty(ctx context.Context, propertyID, householdID uuid.
 	return property, nil
 }
 
-// DeleteProperty deletes a property by ID, scoped to the household.
-// Returns false if the property was not found.
-func (r *Repo) DeleteProperty(ctx context.Context, propertyID, householdID uuid.UUID) (bool, error) {
-	tag, err := r.pool.Exec(ctx,
+// CountAssets returns how many assets are located in the property (directly
+// or through one of its rooms). Deleting the property deletes them too: the
+// assets.property_id FK is ON DELETE CASCADE since migration 038. Returns
+// found=false when the property is missing or belongs to another family.
+func (r *Repo) CountAssets(ctx context.Context, propertyID, householdID uuid.UUID) (count int, found bool, err error) {
+	err = r.pool.QueryRow(ctx,
+		`SELECT (SELECT count(*) FROM assets a WHERE a.property_id = p.id AND a.household_id = p.household_id)
+		 FROM properties p WHERE p.id = $1 AND p.household_id = $2`,
+		propertyID, householdID,
+	).Scan(&count)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("count property assets: %w", err)
+	}
+	return count, true, nil
+}
+
+// DeleteProperty deletes a property by ID, scoped to the household, with its
+// rooms and assets (CASCADE). Files and secrets about them are re-homed to the
+// family by the rehome_entity_refs trigger. Returns the number of assets
+// deleted, and found=false if the property was not found.
+func (r *Repo) DeleteProperty(ctx context.Context, propertyID, householdID uuid.UUID) (assets int, found bool, err error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("delete property: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	err = tx.QueryRow(ctx,
+		`SELECT count(*) FROM assets WHERE property_id = $1 AND household_id = $2`,
+		propertyID, householdID,
+	).Scan(&assets)
+	if err != nil {
+		return 0, false, fmt.Errorf("delete property: count assets: %w", err)
+	}
+	tag, err := tx.Exec(ctx,
 		`DELETE FROM properties WHERE id = $1 AND household_id = $2`,
 		propertyID, householdID,
 	)
 	if err != nil {
-		return false, fmt.Errorf("delete property: %w", err)
+		return 0, false, fmt.Errorf("delete property: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	if tag.RowsAffected() == 0 {
+		return 0, false, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, false, fmt.Errorf("delete property: commit: %w", err)
+	}
+	return assets, true, nil
 }
 
 // ListRooms returns all rooms for a property.
@@ -201,13 +241,15 @@ func (r *Repo) ListRooms(ctx context.Context, propertyID uuid.UUID) ([]*Room, er
 	return rooms, nil
 }
 
-// CreateRoom inserts a new room under a property and returns the created record.
-func (r *Repo) CreateRoom(ctx context.Context, propertyID uuid.UUID, name string, floor *int, notes *string) (*Room, error) {
+// CreateRoom inserts a new room under a property and returns the created
+// record. rooms.household_id is written explicitly (domain model v2); the
+// database rejects a property of another family.
+func (r *Repo) CreateRoom(ctx context.Context, householdID, propertyID uuid.UUID, name string, floor *int, notes *string) (*Room, error) {
 	rows, err := r.pool.Query(ctx,
-		`INSERT INTO rooms (property_id, name, floor, notes)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO rooms (household_id, property_id, name, floor, notes)
+		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, property_id, name, floor, notes, created_at`,
-		propertyID, name, floor, notes,
+		householdID, propertyID, name, floor, notes,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create room: %w", err)

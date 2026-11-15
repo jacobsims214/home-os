@@ -80,3 +80,9 @@ func ClaimsFromContext(ctx context.Context) *auth.Claims {
 	}
 	return nil
 }
+
+// WithClaims returns a copy of ctx carrying claims, as RequireAuth would.
+// It exists for tests that call handlers without a token verifier.
+func WithClaims(ctx context.Context, claims *auth.Claims) context.Context {
+	return context.WithValue(ctx, claimsKey, claims)
+}

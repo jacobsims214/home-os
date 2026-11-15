@@ -31,8 +31,8 @@ const (
 
 // EntityType constants enumerate the polymorphic entity kinds that a file can
 // be attached to via files.entity_type + files.entity_id. These mirror the
-// values used by the notes system and other polymorphic modules — keep them
-// in sync with apps/api/internal/seed/demo.go and the note/calendar repos.
+// values of the entity_kind domain (migration 038), which the database
+// enforces; the owner trigger also rejects another family's entity.
 const (
 	EntityTypeProperty    = "property"
 	EntityTypeVehicle     = "vehicle"
@@ -40,8 +40,11 @@ const (
 	EntityTypeBill        = "bill"
 	EntityTypeNote        = "note"
 	EntityTypeAsset       = "asset"
-	EntityTypeMaintenance = "maintenance"
+	EntityTypeMaintenance = "maintenance_task"
 	EntityTypeVendor      = "vendor"
+	// EntityTypeHousehold marks a family-level file: entity_id is the
+	// household's own id. It is the default when no entity is given.
+	EntityTypeHousehold = "household"
 )
 
 // File represents a row from the files table — metadata for a stored blob

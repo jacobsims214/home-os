@@ -7,13 +7,16 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
+
+	"home-os/api/internal/subject"
 )
 
 // Bill represents a recurring bill from the bills table.
 type Bill struct {
-	ID            uuid.UUID
-	HouseholdID   uuid.UUID
-	PropertyID    *uuid.UUID
+	ID          uuid.UUID
+	HouseholdID uuid.UUID
+	// Subject is the optional property, vehicle or asset the bill is about.
+	subject.Subject
 	Name          string
 	Amount        pgtype.Numeric
 	DueDay        *int
@@ -23,8 +26,6 @@ type Bill struct {
 	Notes         *string
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
-	EntityType    *string
-	EntityID      *uuid.UUID
 	PaidDate      *time.Time
 	IsAutopay     *bool
 	AccountNumber *string

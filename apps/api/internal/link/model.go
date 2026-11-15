@@ -1,11 +1,9 @@
-// Package link provides the unified entity-to-resource linking system.
-// Any entity (asset, property, vehicle, pet, vendor, bill, maintenance_task)
-// can have linked resources identified by a free-form link_type string. All
-// links are returned in a single generic "other" bucket in the grouped
-// response — the package does not maintain typed buckets for specific
-// integration types. Legacy integration link rows whose link_type was once a
-// first-class integration type may still exist in the database and are
-// surfaced via the "other" bucket so they remain visible to callers.
+// Package link provides the "also related to" links (document_links table).
+// Any registered entity kind (the entity_kind domain from migration 038,
+// including 'household' for family-level links) can carry links. A link is
+// one of LinkTypes: a same-family file or secret (link_id is its UUID), or an
+// external url. All links are returned in a single "other" bucket in the
+// grouped response.
 package link
 
 import (
@@ -25,4 +23,9 @@ type Link struct {
 	Title      string    `json:"title"`
 	URL        *string   `json:"url,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
+	// HouseholdID is the owning family. It is the last column scanned.
+	HouseholdID uuid.UUID `json:"-"`
 }
+
+// LinkTypes are the accepted link_type values (domain model v2).
+var LinkTypes = map[string]bool{"file": true, "secret": true, "url": true}

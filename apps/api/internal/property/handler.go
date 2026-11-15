@@ -3,6 +3,7 @@ package property
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -354,7 +355,13 @@ func (h *Handler) UpdateProperty(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// DeleteProperty handles DELETE /api/v1/properties/{id}.
+// DeleteProperty handles DELETE /api/v1/properties/{id}?confirm=true.
+//
+// A property carries its rooms and assets with it (domain model v2), so the
+// delete must be confirmed. Without confirm=true nothing is deleted and the
+// response is 409 CONFIRM_REQUIRED with asset_count, the number of assets
+// that would go with it, for the confirm prompt. With confirm=true the
+// property is deleted and the response is 200 with the asset_count deleted.
 func (h *Handler) DeleteProperty(w http.ResponseWriter, r *http.Request) {
 	hhID := householdID(w, r)
 	if hhID == uuid.Nil {
@@ -367,19 +374,41 @@ func (h *Handler) DeleteProperty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deleted, err := h.repo.DeleteProperty(r.Context(), propertyID, hhID)
+	if r.URL.Query().Get("confirm") != "true" {
+		count, found, err := h.repo.CountAssets(r.Context(), propertyID, hhID)
+		if err != nil {
+			apierr.InternalError(w, err)
+			return
+		}
+		if !found {
+			apierr.NotFound(w, "property not found")
+			return
+		}
+		apierr.JSON(w, http.StatusConflict, map[string]any{
+			"error": apierr.ErrorDetail{
+				Code:    "CONFIRM_REQUIRED",
+				Message: fmt.Sprintf("deleting this property also deletes its rooms and %d asset(s); repeat with ?confirm=true", count),
+			},
+			"asset_count": count,
+		})
+		return
+	}
+
+	count, found, err := h.repo.DeleteProperty(r.Context(), propertyID, hhID)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
-	if !deleted {
+	if !found {
 		apierr.NotFound(w, "property not found")
 		return
 	}
 
 	h.deletePropertyIndex(r.Context(), propertyID.String())
 
-	w.WriteHeader(http.StatusNoContent)
+	apierr.JSON(w, http.StatusOK, map[string]any{
+		"data": map[string]any{"deleted": true, "asset_count": count},
+	})
 }
 
 // --- room handlers ---
@@ -459,9 +488,9 @@ func (h *Handler) CreateRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	room, err := h.repo.CreateRoom(r.Context(), propertyID, *req.Name, req.Floor, req.Notes)
+	room, err := h.repo.CreateRoom(r.Context(), hhID, propertyID, *req.Name, req.Floor, req.Notes)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 

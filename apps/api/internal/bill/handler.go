@@ -11,6 +11,7 @@ import (
 
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/subject"
 	"home-os/api/pkg/apierr"
 )
 
@@ -62,7 +63,7 @@ func (h *Handler) deleteBillIndex(ctx context.Context, id string) {
 // --- request / response types ---
 
 type createBillRequest struct {
-	PropertyID    *string `json:"property_id,omitempty"`
+	subject.Fields
 	Name          string  `json:"name"`
 	Amount        *string `json:"amount,omitempty"`
 	DueDay        *int    `json:"due_day,omitempty"`
@@ -70,15 +71,13 @@ type createBillRequest struct {
 	VendorID      *string `json:"vendor_id,omitempty"`
 	Rrule         *string `json:"rrule,omitempty"`
 	Notes         *string `json:"notes,omitempty"`
-	EntityType    *string `json:"entity_type,omitempty"`
-	EntityID      *string `json:"entity_id,omitempty"`
 	IsAutopay     *bool   `json:"is_autopay,omitempty"`
 	AccountNumber *string `json:"account_number,omitempty"`
 	PaymentURL    *string `json:"payment_url,omitempty"`
 }
 
 type updateBillRequest struct {
-	PropertyID    *string `json:"property_id,omitempty"`
+	subject.Fields
 	Name          *string `json:"name,omitempty"`
 	Amount        *string `json:"amount,omitempty"`
 	DueDay        *int    `json:"due_day,omitempty"`
@@ -86,8 +85,6 @@ type updateBillRequest struct {
 	VendorID      *string `json:"vendor_id,omitempty"`
 	Rrule         *string `json:"rrule,omitempty"`
 	Notes         *string `json:"notes,omitempty"`
-	EntityType    *string `json:"entity_type,omitempty"`
-	EntityID      *string `json:"entity_id,omitempty"`
 	IsAutopay     *bool   `json:"is_autopay,omitempty"`
 	AccountNumber *string `json:"account_number,omitempty"`
 	PaymentURL    *string `json:"payment_url,omitempty"`
@@ -97,6 +94,8 @@ type billResponse struct {
 	ID            string  `json:"id"`
 	HouseholdID   string  `json:"household_id"`
 	PropertyID    *string `json:"property_id,omitempty"`
+	VehicleID     *string `json:"vehicle_id,omitempty"`
+	AssetID       *string `json:"asset_id,omitempty"`
 	Name          string  `json:"name"`
 	Amount        *string `json:"amount,omitempty"`
 	DueDay        *int    `json:"due_day,omitempty"`
@@ -104,7 +103,9 @@ type billResponse struct {
 	VendorID      *string `json:"vendor_id,omitempty"`
 	Rrule         *string `json:"rrule,omitempty"`
 	Notes         *string `json:"notes,omitempty"`
+	// Deprecated: derived from the typed subject for pre-v2 clients.
 	EntityType    *string `json:"entity_type,omitempty"`
+	// Deprecated: derived from the typed subject for pre-v2 clients.
 	EntityID      *string `json:"entity_id,omitempty"`
 	IsAutopay     *bool   `json:"is_autopay,omitempty"`
 	AccountNumber *string `json:"account_number,omitempty"`
@@ -123,7 +124,9 @@ func toResponse(b *Bill) billResponse {
 		Category:      b.Category,
 		Rrule:         b.Rrule,
 		Notes:         b.Notes,
-		EntityType:    b.EntityType,
+		PropertyID:    subject.String(b.PropertyID),
+		VehicleID:     subject.String(b.VehicleID),
+		AssetID:       subject.String(b.AssetID),
 		IsAutopay:     b.IsAutopay,
 		AccountNumber: b.AccountNumber,
 		PaymentURL:    b.PaymentURL,
@@ -131,17 +134,10 @@ func toResponse(b *Bill) billResponse {
 		UpdatedAt:     b.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
 
-	if b.PropertyID != nil {
-		s := b.PropertyID.String()
-		resp.PropertyID = &s
-	}
+	resp.EntityType, resp.EntityID = b.Subject.Legacy()
 	if b.VendorID != nil {
 		s := b.VendorID.String()
 		resp.VendorID = &s
-	}
-	if b.EntityID != nil {
-		s := b.EntityID.String()
-		resp.EntityID = &s
 	}
 	if b.Amount.Valid {
 		s := b.Amount.Int.String()
@@ -244,19 +240,14 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		Category:      req.Category,
 		Rrule:         req.Rrule,
 		Notes:         req.Notes,
-		EntityType:    req.EntityType,
 		IsAutopay:     req.IsAutopay,
 		AccountNumber: req.AccountNumber,
 		PaymentURL:    req.PaymentURL,
 	}
 
-	if req.PropertyID != nil {
-		pid, err := uuid.Parse(*req.PropertyID)
-		if err != nil {
-			apierr.BadRequest(w, "invalid property_id")
-			return
-		}
-		b.PropertyID = &pid
+	if err := req.Fields.Apply(&b.Subject); err != nil {
+		apierr.BadRequest(w, err.Error())
+		return
 	}
 	if req.VendorID != nil {
 		vid, err := uuid.Parse(*req.VendorID)
@@ -272,18 +263,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.EntityID != nil {
-		eid, err := uuid.Parse(*req.EntityID)
-		if err != nil {
-			apierr.BadRequest(w, "invalid entity_id")
-			return
-		}
-		b.EntityID = &eid
-	}
 
 	created, err := h.repo.Create(r.Context(), b)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 
@@ -339,17 +322,9 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.Notes != nil {
 		existing.Notes = req.Notes
 	}
-	if req.PropertyID != nil {
-		if *req.PropertyID == "" {
-			existing.PropertyID = nil
-		} else {
-			pid, err := uuid.Parse(*req.PropertyID)
-			if err != nil {
-				apierr.BadRequest(w, "invalid property_id")
-				return
-			}
-			existing.PropertyID = &pid
-		}
+	if err := req.Fields.Apply(&existing.Subject); err != nil {
+		apierr.BadRequest(w, err.Error())
+		return
 	}
 	if req.VendorID != nil {
 		if *req.VendorID == "" {
@@ -373,21 +348,6 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if req.EntityType != nil {
-		existing.EntityType = req.EntityType
-	}
-	if req.EntityID != nil {
-		if *req.EntityID == "" {
-			existing.EntityID = nil
-		} else {
-			eid, err := uuid.Parse(*req.EntityID)
-			if err != nil {
-				apierr.BadRequest(w, "invalid entity_id")
-				return
-			}
-			existing.EntityID = &eid
-		}
-	}
 	if req.IsAutopay != nil {
 		existing.IsAutopay = req.IsAutopay
 	}
@@ -400,7 +360,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := h.repo.Update(r.Context(), existing)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 	if updated == nil {
