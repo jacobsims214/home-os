@@ -25,6 +25,20 @@
  *                          An authorized POST/PUT/PATCH/DELETE is recorded in
  *                          apiWrites ("METHOD /path?query name", #4646) and
  *                          a POST answers 201 with its JSON body echoed back.
+ *   GET/POST /api/v1/secrets/{key,setup,verify}
+ *                          Master-key endpoints (#4445), per sign-in session:
+ *                          each /e2e/login starts a session (sid claim, kept
+ *                          across refreshes), so parallel tests don't share a
+ *                          vault. Same statuses as the Go handler: /key 404 if
+ *                          not set up; /setup 400 without a 16-128 byte
+ *                          verifier, 409 if set up; /verify 400 without one,
+ *                          401 on mismatch. A legacy row (seeded key_hash) is
+ *                          upgraded on its first successful /verify. The stub
+ *                          keeps the verifier as is; the API stores argon2id.
+ *   POST /e2e/secrets/seed {sid, key_salt, key_hash}
+ *                          Seed a pre-051 (legacy) master key for a session.
+ *   GET  /e2e/secrets?sid= {set_up, legacy, upgraded, requests}: what the
+ *                          secrets endpoints received (field names only).
  *   GET  /healthz          200 (Playwright webServer readiness probe)
  *
  * Plain node, no dependencies. Never use outside tests: the signing key is
@@ -45,14 +59,17 @@ const SEED_USER = {
 };
 
 const key = randomBytes(32);
-const refreshTokens = new Set();
+// refresh token -> session id (sid). A sid lives for the whole sign-in.
+const refreshTokens = new Map();
+// sid -> { key_salt, key_version, verifier?, key_hash?, upgraded, requests[] }
+const secretKeys = new Map();
 const stats = { dexRefreshes: 0, apiRequests: 0, apiUnauthorized: 0, codeExchanges: 0, lastRedirectUri: null, apiWrites: [] };
 // The only authorization code the stub redeems (tests hand it to the callback).
 const E2E_CODE = "e2e-code";
 
 const b64url = (v) => Buffer.from(v).toString("base64url");
 
-function mintJwt() {
+function mintJwt(sid) {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const payload = b64url(
@@ -63,6 +80,7 @@ function mintJwt() {
       email: SEED_USER.email,
       name: SEED_USER.name,
       household_id: SEED_USER.household_id,
+      sid,
       iat: now,
       exp: now + TOKEN_TTL_S,
     }),
@@ -82,10 +100,57 @@ function validJwt(jwt) {
   }
 }
 
-function issueTokens() {
+function jwtClaims(jwt) {
+  try {
+    return JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString("utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function issueTokens(sid = `s-${randomBytes(8).toString("hex")}`) {
   const refresh = `e2e-r-${randomBytes(12).toString("hex")}`;
-  refreshTokens.add(refresh);
-  return { access_token: "unused", token_type: "bearer", id_token: mintJwt(), refresh_token: refresh, expires_in: TOKEN_TTL_S };
+  refreshTokens.set(refresh, sid);
+  return { access_token: "unused", token_type: "bearer", id_token: mintJwt(sid), refresh_token: refresh, expires_in: TOKEN_TTL_S };
+}
+
+/** Byte length of a base64 string, or 0 if it isn't one. */
+function b64Len(v) {
+  if (typeof v !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(v)) return 0;
+  return Buffer.from(v, "base64").length;
+}
+
+/** /api/v1/secrets/{key,setup,verify}; null for any other secrets path. */
+function secretsRoute(method, resource, sid, body) {
+  const rec = secretKeys.get(sid);
+  if (method === "GET" && resource === "secrets/key") {
+    if (!rec) return [404, { error: { code: "NOT_FOUND", message: "master key not set up" } }];
+    return [200, { data: { key_salt: rec.key_salt, key_version: rec.key_version } }];
+  }
+  if (method !== "POST" || (resource !== "secrets/setup" && resource !== "secrets/verify")) return null;
+  const verifier = body.verifier || body.key_hash;
+  const log = { endpoint: resource, fields: Object.keys(body).sort() };
+  if (rec) rec.requests.push(log);
+  if (!verifier) return [400, { error: { code: "BAD_REQUEST", message: "verifier is required" } }];
+  if (!body.key_version) return [400, { error: { code: "BAD_REQUEST", message: "key_version is required" } }];
+  if (resource === "secrets/setup") {
+    const n = b64Len(verifier);
+    if (n < 16 || n > 128) return [400, { error: { code: "BAD_REQUEST", message: "verifier must be 16 to 128 bytes" } }];
+    if (!body.key_salt) return [400, { error: { code: "BAD_REQUEST", message: "key_salt is required" } }];
+    if (rec) return [409, { error: { code: "CONFLICT", message: "master key already set up for this version" } }];
+    secretKeys.set(sid, { key_salt: body.key_salt, key_version: body.key_version, verifier, upgraded: false, requests: [log] });
+    return [201, { data: { id: `key-${sid}`, household_id: SEED_USER.household_id, key_salt: body.key_salt, key_version: body.key_version, created_at: new Date().toISOString() } }];
+  }
+  if (!rec) return [401, { error: { code: "UNAUTHORIZED", message: "master key not set up" } }];
+  if (rec.verifier ? verifier !== rec.verifier : verifier !== rec.key_hash) {
+    return [401, { error: { code: "UNAUTHORIZED", message: "invalid master key" } }];
+  }
+  if (!rec.verifier) {
+    rec.verifier = rec.key_hash; // legacy upgrade (the API stores argon2id of it)
+    rec.key_hash = undefined;
+    rec.upgraded = true;
+  }
+  return [200, { data: { verified: true } }];
 }
 
 // Realistic-length content so phone overflow checks see something wider than
@@ -122,6 +187,16 @@ const server = createServer(async (req, res) => {
 
   if (path === "/healthz") return send(res, 200, { ok: true });
   if (path === "/e2e/stats") return send(res, 200, stats);
+  if (path === "/e2e/secrets" && req.method === "GET") {
+    const rec = secretKeys.get(url.searchParams.get("sid") ?? "");
+    return send(res, 200, { set_up: !!rec, legacy: !!rec?.key_hash, upgraded: !!rec?.upgraded, requests: rec?.requests ?? [] });
+  }
+  if (path === "/e2e/secrets/seed" && req.method === "POST") {
+    const { sid, key_salt, key_hash } = JSON.parse((await readBody(req)) || "{}");
+    if (!sid || !key_salt || !key_hash) return send(res, 400, { error: "sid, key_salt and key_hash are required" });
+    secretKeys.set(sid, { key_salt, key_version: 1, key_hash, upgraded: false, requests: [] });
+    return send(res, 201, { ok: true });
+  }
 
   if (path === "/e2e/login" && req.method === "POST") {
     let email = "";
@@ -149,8 +224,9 @@ const server = createServer(async (req, res) => {
       return send(res, 400, { error: "invalid_request" });
     }
     stats.dexRefreshes += 1;
+    const sid = refreshTokens.get(old);
     refreshTokens.delete(old); // rotation: a refresh token is single-use
-    return send(res, 200, issueTokens());
+    return send(res, 200, issueTokens(sid));
   }
 
   if (path.startsWith("/api/v1/")) {
@@ -161,17 +237,25 @@ const server = createServer(async (req, res) => {
       return send(res, 401, { error: { code: "UNAUTHORIZED", message: "invalid token" } });
     }
     const resource = path.slice("/api/v1/".length).replace(/\/+$/, "");
+    let body = {};
     if (req.method !== "GET" && req.method !== "HEAD") {
-      let body = {};
       try {
         body = JSON.parse((await readBody(req)) || "{}");
       } catch {
         /* not JSON */
       }
+    }
+    if (resource.startsWith("secrets/")) {
+      const out = secretsRoute(req.method, resource, jwtClaims(auth.slice(7)).sid ?? "", body);
+      if (out) return send(res, out[0], out[1]);
+    }
+    if (req.method !== "GET" && req.method !== "HEAD") {
       stats.apiWrites.push(`${req.method} ${path}${url.search}${body.name ? ` ${body.name}` : ""}`);
       if (req.method === "POST") return send(res, 201, { data: { id: `e2e-${stats.apiWrites.length}`, ...body } });
     }
     if (resource === "auth/me" || resource === "users/me") return send(res, 200, { data: SEED_USER });
+    const property = SEED.properties.find((p) => resource === `properties/${p.id}`);
+    if (property) return send(res, 200, { data: property });
     return send(res, 200, { data: SEED[resource] ?? [] });
   }
 

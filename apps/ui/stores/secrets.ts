@@ -2,36 +2,100 @@
  * Secrets Zustand store — manages the in-memory encryption key lifecycle.
  *
  * The derived CryptoKey is held ONLY in memory. It is never persisted to
- * localStorage, sessionStorage, or cookies. On page refresh or logout the
- * key is lost and the user must re-enter their master password.
+ * localStorage, sessionStorage, or cookies (this store deliberately does not
+ * use zustand's `persist`). The master password and the verifier are local
+ * variables of setup()/unlock() and are never put in state. On page refresh
+ * or logout the key is lost and the user must re-enter their master password.
  *
- * Zero-knowledge flow (see architecture/secrets-manager-research.md):
- * 1. setup: client generates salt, derives PBKDF2 key, hashes key, sends
- *    {key_hash, key_salt, key_version} to API. API stores them. Client keeps
- *    the CryptoKey in memory.
- * 2. unlock: client asks API for the stored key_salt (GET /key — API
- *    returns { data: { key_salt, key_version } } if a key exists, 404 if not
- *    set up). Client derives key, hashes it, POSTs /verify with the hash. API
- *    compares hashes → 200 match / 401 wrong password.
+ * Zero-knowledge flow (KB architecture/secrets-management.md):
+ * 1. setup: client generates salt, derives the PBKDF2 key, computes the
+ *    verifier (computeVerifier) and POSTs {verifier, key_salt, key_version}
+ *    to /secrets/setup. The API stores only argon2id(verifier).
+ * 2. unlock: GET /secrets/key returns { data: { key_salt, key_version } }, or
+ *    404 if not set up. Client derives the key, computes the verifier and
+ *    POSTs {verifier, key_version} to /secrets/verify: 200 match / 401 wrong
+ *    password. Households set up before migration 051 are upgraded by the API
+ *    on this first successful verify; the UI sends the same value either way.
  * 3. lock: clear CryptoKey from memory, set isUnlocked=false.
+ *
+ * All calls go through apiFetch, i.e. the same-origin BFF (/bff/secrets/...).
  */
 
 import { create } from "zustand";
 import { apiFetch, ApiError } from "@/lib/api";
-import {
-  deriveKey,
-  generateSalt,
-  hashKey,
-} from "@/lib/crypto";
+import { computeVerifier, deriveKey, generateSalt } from "@/lib/crypto";
 
 /** Default key version — bump when rotating keys. */
-const DEFAULT_KEY_VERSION = 1;
+export const DEFAULT_KEY_VERSION = 1;
 
 /** Response body for GET /api/v1/secrets/key (wrapped in { data: ... }). */
-interface KeyInfoResponse {
+export interface KeyInfoResponse {
   /** base64-encoded PBKDF2 salt. */
   key_salt: string;
   key_version: number;
+}
+
+/** Body of POST /api/v1/secrets/setup. Never contains the key or password. */
+export interface SetupKeyRequest {
+  verifier: string;
+  key_salt: string;
+  key_version: number;
+}
+
+/** Body of POST /api/v1/secrets/verify. Never contains the key or password. */
+export interface VerifyKeyRequest {
+  verifier: string;
+  key_version: number;
+}
+
+/**
+ * Build the /secrets/setup body. Sends `verifier` (the API still accepts the
+ * pre-051 name `key_hash` as an alias, but we no longer send it).
+ */
+export function buildSetupRequest(
+  verifier: string,
+  keySalt: string,
+  keyVersion: number = DEFAULT_KEY_VERSION,
+): SetupKeyRequest {
+  return { verifier, key_salt: keySalt, key_version: keyVersion };
+}
+
+/** Build the /secrets/verify body. */
+export function buildVerifyRequest(
+  verifier: string,
+  keyVersion: number = DEFAULT_KEY_VERSION,
+): VerifyKeyRequest {
+  return { verifier, key_version: keyVersion };
+}
+
+/**
+ * GET /api/v1/secrets/key. Returns the stored salt and version, or null when
+ * the household has no master password yet (404). Other errors are thrown.
+ */
+export async function fetchKeyInfo(): Promise<KeyInfoResponse | null> {
+  try {
+    const res = await apiFetch<{ data: KeyInfoResponse }>("/api/v1/secrets/key", {
+      method: "GET",
+    });
+    return res.data;
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+/**
+ * Does the household still need to set up a master password? True only on a
+ * 404 from GET /secrets/key. Any other failure (network, 5xx) returns false so
+ * the caller shows the unlock flow, whose own error handling surfaces it,
+ * rather than offering a setup that would overwrite nothing and fail.
+ */
+export async function probeNeedsSetup(): Promise<boolean> {
+  try {
+    return (await fetchKeyInfo()) === null;
+  } catch {
+    return false;
+  }
 }
 
 interface SecretsState {
@@ -50,16 +114,16 @@ interface SecretsState {
 interface SecretsActions {
   /**
    * First-time master password setup.
-   * Generates a fresh salt, derives the key, hashes it, and POSTs
-   * {key_hash, key_salt, key_version} to /api/v1/secrets/setup.
-   * Only succeeds if no key exists yet for this household.
+   * Generates a fresh salt, derives the key, computes the verifier and POSTs
+   * {verifier, key_salt, key_version} to /api/v1/secrets/setup.
+   * Only succeeds if no key exists yet for this household (409 otherwise).
    */
   setup: (password: string) => Promise<void>;
   /**
    * Unlock an already-set-up secrets vault.
-   * Fetches the stored salt, derives the key, verifies the hash against
-   * the API. On 200, loads the CryptoKey. On 401, throws a wrong-password
-   * error. On 404, throws a not-set-up error.
+   * Fetches the stored salt, derives the key, sends the verifier to /verify.
+   * On 200, loads the CryptoKey. On 401, throws a wrong-password error. If
+   * no key is set up, throws a not-set-up error.
    */
   unlock: (password: string) => Promise<void>;
   /** Clear the CryptoKey from memory and lock the vault. */
@@ -78,6 +142,8 @@ interface SecretsActions {
 
 export type SecretsStore = SecretsState & SecretsActions;
 
+const NOT_SET_UP = "Secrets have not been set up. Set a master password first.";
+
 export const useSecretsStore = create<SecretsStore>()((set) => ({
   isUnlocked: false,
   cryptoKey: null,
@@ -90,15 +156,11 @@ export const useSecretsStore = create<SecretsStore>()((set) => ({
     try {
       const salt = generateSalt();
       const key = await deriveKey(password, salt);
-      const hash = await hashKey(key);
+      const verifier = await computeVerifier(key);
 
       await apiFetch("/api/v1/secrets/setup", {
         method: "POST",
-        body: {
-          key_hash: hash,
-          key_salt: salt,
-          key_version: DEFAULT_KEY_VERSION,
-        },
+        body: buildSetupRequest(verifier, salt, DEFAULT_KEY_VERSION),
       });
 
       set({
@@ -119,46 +181,32 @@ export const useSecretsStore = create<SecretsStore>()((set) => ({
   unlock: async (password: string) => {
     set({ isProcessing: true, error: null });
     try {
-      // 1. Retrieve stored salt via GET /key. API returns
-      //    { data: { key_salt, key_version } } when a key exists,
-      //    404 when no key has been set up yet.
-      let keyInfo: KeyInfoResponse;
-      try {
-        const res = await apiFetch<{ data: KeyInfoResponse }>(
-          "/api/v1/secrets/key",
-          { method: "GET" },
-        );
-        keyInfo = res.data;
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 404) {
-          throw new Error(
-            "Secrets have not been set up. Set a master password first.",
-          );
-        }
-        throw err;
-      }
-
-      const salt = keyInfo.key_salt;
-      if (!salt) {
+      // 1. Retrieve the stored salt (null = no key set up yet).
+      const keyInfo = await fetchKeyInfo();
+      if (!keyInfo) throw new Error(NOT_SET_UP);
+      if (!keyInfo.key_salt) {
         throw new Error("Server did not return a key salt.");
       }
+      const keyVersion = keyInfo.key_version || DEFAULT_KEY_VERSION;
 
       // 2. Derive the key locally from the password + stored salt.
-      const key = await deriveKey(password, salt);
-      const hash = await hashKey(key);
+      const key = await deriveKey(password, keyInfo.key_salt);
+      const verifier = await computeVerifier(key);
 
-      // 3. Verify the hash against the API. 200 = correct password,
-      //    401 = wrong password.
+      // 3. Verify. 200 = correct password, 401 = wrong password. A 401 here
+      //    is not a lost session, so it must not send the browser to /login.
       try {
         await apiFetch("/api/v1/secrets/verify", {
           method: "POST",
-          body: {
-            key_hash: hash,
-            key_version: DEFAULT_KEY_VERSION,
-          },
+          body: buildVerifyRequest(verifier, keyVersion),
+          redirectOn401: false,
         });
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
+          // The BFF also answers 401 when the session itself has ended. Ask
+          // an idempotent endpoint: if the session is gone, this 401s with
+          // the normal /login redirect; otherwise the password was wrong.
+          await fetchKeyInfo();
           throw new Error("Incorrect master password.");
         }
         throw err;
@@ -166,7 +214,7 @@ export const useSecretsStore = create<SecretsStore>()((set) => ({
 
       set({
         cryptoKey: key,
-        keyVersion: DEFAULT_KEY_VERSION,
+        keyVersion,
         isUnlocked: true,
         isProcessing: false,
       });

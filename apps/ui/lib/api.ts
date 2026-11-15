@@ -37,6 +37,12 @@ export interface ApiFetchOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
   /** Search params to append to the URL. */
   params?: Record<string, string | number | boolean | undefined>;
+  /**
+   * Set false when a 401 from this endpoint means something other than "the
+   * session is gone", so it must not send the browser to /login. Used by
+   * POST /secrets/verify, where 401 means "wrong master password". Default true.
+   */
+  redirectOn401?: boolean;
 }
 
 const API_PREFIX = "/api/v1";
@@ -110,7 +116,7 @@ export async function apiFetch<T = unknown>(
   path: string,
   options: ApiFetchOptions = {},
 ): Promise<T> {
-  const { body, params, headers: initHeaders, ...init } = options;
+  const { body, params, headers: initHeaders, redirectOn401 = true, ...init } = options;
 
   // Build URL
   const origin =
@@ -154,7 +160,7 @@ export async function apiFetch<T = unknown>(
       // response may not be JSON
     }
     // Public pre-login paths go to /api/v1, not /bff, and may 401 legitimately.
-    if (response.status === 401 && isBffPath(url.pathname)) redirectToLogin();
+    if (response.status === 401 && redirectOn401 && isBffPath(url.pathname)) redirectToLogin();
     throw new ApiError(
       response.status,
       `API ${response.status}: ${response.statusText}`,

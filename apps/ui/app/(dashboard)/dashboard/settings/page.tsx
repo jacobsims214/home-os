@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
-import { useSecretsStore } from "@/stores/secrets";
+import { fetchKeyInfo, useSecretsStore } from "@/stores/secrets";
 import { Card, Switch, TextInput, Badge, Button, Group, Text, Stack, Alert, Paper, Anchor, Box } from "@mantine/core";
 import { IconCheck, IconX, IconCopy, IconInfoCircle, IconLock, IconLockOpen } from "@tabler/icons-react";
 import Modal from "@/components/ui/Modal";
@@ -603,20 +603,15 @@ function SecretsStatus() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
 
-  // Check if secrets key exists
+  // Is a master password set up? fetchKeyInfo returns null only on a 404 from
+  // GET /secrets/key; other errors leave keyInfo undefined, and we show the
+  // unlock flow (whose errors surface) rather than offer a setup that fails.
   const { data: keyInfo, refetch } = useQuery({
     queryKey: ["secrets", "key-info"],
-    queryFn: async () => {
-      try {
-        const resp = await apiFetch<{ data: { key_salt: string; key_version: number } | null }>("/api/v1/secrets/key");
-        return resp.data;
-      } catch {
-        return null;
-      }
-    },
+    queryFn: fetchKeyInfo,
   });
 
-  const hasKey = keyInfo != null;
+  const hasKey = keyInfo !== null;
 
   const handleOpen = () => {
     setLocalError(null);
@@ -645,17 +640,19 @@ function SecretsStatus() {
         setLocalError("Master password must be at least 8 characters");
         return;
       }
-      await setup(password);
-    } else {
-      await unlock(password);
+    }
+    try {
+      if (mode === "setup") await setup(password);
+      else await unlock(password);
+    } catch {
+      // The store has set `error`, which the modal shows.
+      return;
     }
 
-    if (!useSecretsStore.getState().error) {
-      setShowPrompt(false);
-      setPassword("");
-      setConfirmPassword("");
-      refetch();
-    }
+    setShowPrompt(false);
+    setPassword("");
+    setConfirmPassword("");
+    refetch();
   };
 
   if (isUnlocked) {
