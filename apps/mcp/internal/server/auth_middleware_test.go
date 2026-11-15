@@ -478,3 +478,93 @@ func TestRequireWriteScope_Backstop(t *testing.T) {
 		t.Fatalf("response %s lacks the read-only message", out)
 	}
 }
+
+// TestAuth_DeactivatedUser drives the production router with tokens issued
+// while the user was active, then deactivates the user (users.active=false)
+// without touching the tokens. Deactivation is immediate because the flag is
+// read on every request:
+//   - Dex JWT: 403, no WWW-Authenticate, clear message (the not-a-member
+//     treatment: signing in again cannot fix it).
+//   - hos_ agent token: 401 with the bad-JWT challenge (#4405: every agent
+//     token refusal, including an owner who left the household, is the same
+//     401).
+//
+// Neither reaches the tool, and reactivating the user restores both.
+func TestAuth_DeactivatedUser(t *testing.T) {
+	pool := testutil.NewPool(t)
+	_, h := testutil.SeedHousehold(t, pool)
+	iss := testutil.NewTokenIssuer(t)
+
+	s := server.NewServer(testConfig(), pool, iss.Verifier(pool))
+	calls := 0
+	s.RegisterTool("whoami", mcp.NewTool("whoami",
+		mcp.WithDescription("Return the caller's claims."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+	), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		calls++
+		b, _ := json.Marshal(server.ClaimsFromContext(ctx))
+		return mcp.NewToolResultText(string(b)), nil
+	})
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	jwt := iss.Token("sub-owner", h.Email)
+	agentTok, _ := seedAgentToken(t, pool, h, []string{"read"}, nil)
+	call := func(t *testing.T, token string) (*http.Response, []byte) {
+		t.Helper()
+		return rpcPost(t, ts.URL, token, mcp.MethodToolsCall, "whoami",
+			map[string]any{"name": "whoami", "arguments": map[string]any{}})
+	}
+	setActive := func(t *testing.T, active bool) {
+		t.Helper()
+		if _, err := pool.Exec(context.Background(), `UPDATE users SET active = $1 WHERE id = $2`, active, h.UserID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for name, tok := range map[string]string{"jwt": jwt, "agent token": agentTok} {
+		if resp, body := call(t, tok); resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s while active: status = %d: %s", name, resp.StatusCode, body)
+		}
+	}
+
+	setActive(t, false)
+	before := calls
+
+	t.Run("jwt gets 403", func(t *testing.T) {
+		resp, body := call(t, jwt)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403: %s", resp.StatusCode, body)
+		}
+		if c := resp.Header.Get("WWW-Authenticate"); c != "" {
+			t.Errorf("403 carries WWW-Authenticate %q; re-authenticating cannot reactivate an account", c)
+		}
+		if !strings.Contains(string(body), "deactivated") {
+			t.Errorf("body %s does not say the account is deactivated", body)
+		}
+	})
+	t.Run("agent token gets 401", func(t *testing.T) {
+		resp, body := call(t, agentTok)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401: %s", resp.StatusCode, body)
+		}
+		c := resp.Header.Get("WWW-Authenticate")
+		if !strings.Contains(c, wantResourceMetadata) || !strings.Contains(c, `error="invalid_token"`) {
+			t.Fatalf("WWW-Authenticate = %q, want the bad-JWT challenge", c)
+		}
+		if !strings.Contains(string(body), "invalid or expired token") {
+			t.Fatalf("body %s differs from the bad-JWT 401", body)
+		}
+	})
+	if calls != before {
+		t.Fatalf("tool ran %d time(s) for a deactivated user", calls-before)
+	}
+
+	setActive(t, true)
+	for name, tok := range map[string]string{"jwt": jwt, "agent token": agentTok} {
+		if resp, body := call(t, tok); resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s after reactivation: status = %d: %s", name, resp.StatusCode, body)
+		}
+	}
+}

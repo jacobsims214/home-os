@@ -208,3 +208,79 @@ func TestVerifyTokenAndEnrich(t *testing.T) {
 		t.Fatalf("bad signature: err = %v", err)
 	}
 }
+
+func setActive(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID, active bool) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `UPDATE users SET active = $1 WHERE id = $2`, active, userID); err != nil {
+		t.Fatalf("set active: %v", err)
+	}
+}
+
+// TestResolveMember_Deactivated: users.active=false is refused with
+// ErrUserDeactivated on both lookup paths, before any dex_sub backfill or
+// membership lookup, and the flag is read per call (reactivation works at
+// once).
+func TestResolveMember_Deactivated(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx := context.Background()
+	t0 := time.Now().Add(-time.Hour)
+
+	t.Run("by dex_sub", func(t *testing.T) {
+		uid := seedUser(t, pool, "gone-sub@test.local", "sub-gone")
+		seedMembership(t, pool, uid, "owner", t0)
+		setActive(t, pool, uid, false)
+
+		_, err := auth.ResolveMember(ctx, pool, "sub-gone", "gone-sub@test.local")
+		if !errors.Is(err, auth.ErrUserDeactivated) {
+			t.Fatalf("err = %v, want ErrUserDeactivated", err)
+		}
+		if errors.Is(err, auth.ErrNoMembership) || errors.Is(err, auth.ErrMemberLookup) {
+			t.Fatalf("err = %v also matches another sentinel", err)
+		}
+
+		setActive(t, pool, uid, true)
+		if m, err := auth.ResolveMember(ctx, pool, "sub-gone", ""); err != nil || m.UserID != uid.String() {
+			t.Fatalf("after reactivation: %+v, %v", m, err)
+		}
+	})
+
+	t.Run("by email does not backfill dex_sub", func(t *testing.T) {
+		uid := seedUser(t, pool, "gone-mail@test.local", "")
+		seedMembership(t, pool, uid, "family_member", t0)
+		setActive(t, pool, uid, false)
+
+		_, err := auth.ResolveMember(ctx, pool, "sub-gone-mail", "GONE-mail@test.local")
+		if !errors.Is(err, auth.ErrUserDeactivated) {
+			t.Fatalf("err = %v, want ErrUserDeactivated", err)
+		}
+		if got := dexSubOf(t, pool, uid); got != nil {
+			t.Fatalf("dex_sub = %q, want NULL: a deactivated user must not be adopted", *got)
+		}
+	})
+
+	t.Run("deactivated without membership", func(t *testing.T) {
+		uid := seedUser(t, pool, "gone-lonely@test.local", "sub-gone-lonely")
+		setActive(t, pool, uid, false)
+
+		_, err := auth.ResolveMember(ctx, pool, "sub-gone-lonely", "")
+		if !errors.Is(err, auth.ErrUserDeactivated) {
+			t.Fatalf("err = %v, want ErrUserDeactivated", err)
+		}
+	})
+
+	t.Run("VerifyTokenAndEnrich", func(t *testing.T) {
+		iss := testutil.NewTokenIssuer(t)
+		v := iss.Verifier(pool)
+		uid := seedUser(t, pool, "gone-jwt@test.local", "sub-gone-jwt")
+		seedMembership(t, pool, uid, "owner", t0)
+		token := iss.Token("sub-gone-jwt", "gone-jwt@test.local")
+
+		if _, err := v.VerifyTokenAndEnrich(ctx, pool, token); err != nil {
+			t.Fatalf("active: %v", err)
+		}
+		setActive(t, pool, uid, false)
+		if _, err := v.VerifyTokenAndEnrich(ctx, pool, token); !errors.Is(err, auth.ErrUserDeactivated) {
+			t.Fatalf("same token after deactivation: err = %v, want ErrUserDeactivated", err)
+		}
+	})
+}

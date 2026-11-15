@@ -379,7 +379,11 @@ func originAllowed(origin string, allowed map[string]bool) bool {
 //
 // A bearer starting with "hos_" is a per-member agent token (auth.
 // VerifyAgentToken): it is never parsed as a JWT, and an unknown, revoked,
-// expired or deactivated-user token gets the same 401 as a bad JWT. A token
+// expired or deactivated-user token gets the same 401 as a bad JWT (#4405:
+// agent-token refusals are deliberately indistinguishable, and a token whose
+// owner left its household is also 401). A Dex JWT whose user is deactivated
+// (auth.ErrUserDeactivated) gets 403 with no challenge, like a JWT whose user
+// is not a household member. A token
 // without the write scope may only call tools annotated readOnlyHint=true;
 // a tools/call for any other tool is answered 403 with a clear message
 // before it reaches the transport.
@@ -425,6 +429,13 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 			case errors.Is(err, auth.ErrNoMembership):
 				slog.Warn("auth middleware: token valid but no household membership", "error", err)
 				writeJSONError(w, http.StatusForbidden, "authenticated, but this account is not a member of any household")
+				return
+			case errors.Is(err, auth.ErrUserDeactivated):
+				// Same treatment as a missing membership: 403 with no
+				// challenge, since signing in again cannot reactivate the
+				// account. users.active is read on every request.
+				slog.Warn("auth middleware: token valid but user is deactivated", "error", err)
+				writeJSONError(w, http.StatusForbidden, "authenticated, but this account has been deactivated")
 				return
 			case errors.Is(err, auth.ErrMemberLookup):
 				slog.Error("auth middleware: membership lookup failed", "error", err)

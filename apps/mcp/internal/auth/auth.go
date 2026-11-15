@@ -255,6 +255,8 @@ func (v *Verifier) VerifyToken(ctx context.Context, rawToken string) (*Claims, e
 // VerifyAgentToken and never parsed as a JWT. Errors:
 //   - ErrNoMembership: token is valid but the identity is not a household
 //     member. Answer 403 Forbidden.
+//   - ErrUserDeactivated: token is valid but the Home OS user is deactivated
+//     (users.active = false). Answer 403 Forbidden, like ErrNoMembership.
 //   - ErrMemberLookup: database failure. Answer 500.
 //   - anything else (including ErrInvalidAgentToken): the token itself is
 //     invalid. Answer 401.
@@ -285,8 +287,8 @@ func (v *Verifier) VerifyTokenAndEnrich(ctx context.Context, pool *pgxpool.Pool,
 
 // EnrichClaims resolves claims.Subject / claims.Email to a Home OS member (see
 // ResolveMember) and sets claims.UserID, HouseholdID and Role. On error the
-// claims are left untouched and the error wraps ErrNoMembership or
-// ErrMemberLookup.
+// claims are left untouched and the error is (or wraps) ErrNoMembership,
+// ErrUserDeactivated or ErrMemberLookup.
 func EnrichClaims(ctx context.Context, db DB, claims *Claims) error {
 	m, err := ResolveMember(ctx, db, claims.Subject, claims.Email)
 	if err != nil {
@@ -304,6 +306,15 @@ func EnrichClaims(ctx context.Context, db DB, claims *Claims) error {
 // map to a Home OS user with at least one household membership. The caller is
 // authenticated but not a member: answer 403 Forbidden.
 var ErrNoMembership = errors.New("no household membership for this identity")
+
+// ErrUserDeactivated is returned when a token verifies and maps to a Home OS
+// user whose users.active is false (migration 037). It mirrors the REST API's
+// auth.ErrUserDeactivated. The caller is authenticated but may not use the
+// MCP: answer 403 Forbidden with no WWW-Authenticate challenge, exactly as for
+// ErrNoMembership (signing in again cannot reactivate the account). The flag
+// is read on every request, so deactivation takes effect immediately, even
+// for tokens issued before it.
+var ErrUserDeactivated = errors.New("user account is deactivated")
 
 // ErrMemberLookup wraps database failures while resolving the membership.
 // Answer 500 rather than treating it as a bad token.
@@ -334,6 +345,10 @@ type ResolvedMember struct {
 //     request takes path 1. A user already carrying a different dex_sub is not
 //     overwritten (logged) but still resolves, as in the API.
 //
+// A matched user with users.active = false fails with ErrUserDeactivated on
+// either path, before any dex_sub backfill or membership lookup (as in the
+// API).
+//
 // Users in several households resolve deterministically to their OLDEST
 // membership (memberships.created_at, then memberships.id).
 func ResolveMember(ctx context.Context, db DB, sub, email string) (*ResolvedMember, error) {
@@ -343,7 +358,8 @@ func ResolveMember(ctx context.Context, db DB, sub, email string) (*ResolvedMemb
 
 	var userID string
 	var storedSub *string
-	err := db.QueryRow(ctx, `SELECT id::text FROM users WHERE dex_sub = $1`, sub).Scan(&userID)
+	var active bool
+	err := db.QueryRow(ctx, `SELECT id::text, active FROM users WHERE dex_sub = $1`, sub).Scan(&userID, &active)
 	switch {
 	case err == nil:
 	case errors.Is(err, pgx.ErrNoRows):
@@ -352,17 +368,23 @@ func ResolveMember(ctx context.Context, db DB, sub, email string) (*ResolvedMemb
 			return nil, ErrNoMembership
 		}
 		err = db.QueryRow(ctx,
-			`SELECT id::text, dex_sub FROM users WHERE lower(email) = lower($1)`, email,
-		).Scan(&userID, &storedSub)
+			`SELECT id::text, dex_sub, active FROM users WHERE lower(email) = lower($1)`, email,
+		).Scan(&userID, &storedSub, &active)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNoMembership
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%w: user by email: %w", ErrMemberLookup, err)
 		}
+		if !active {
+			return nil, ErrUserDeactivated
+		}
 		backfillSub(ctx, db, userID, sub, storedSub)
 	default:
 		return nil, fmt.Errorf("%w: user by dex_sub: %w", ErrMemberLookup, err)
+	}
+	if !active {
+		return nil, ErrUserDeactivated
 	}
 
 	m := ResolvedMember{UserID: userID}
