@@ -93,3 +93,6 @@ docker-compose.override.yml
 coverage/
 tmp/
 *.log
+
+# --- MCP latency benchmark report (make -C apps/mcp bench) ---
+apps/mcp/bench-report.md
