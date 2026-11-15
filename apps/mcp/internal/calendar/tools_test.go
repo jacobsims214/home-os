@@ -294,3 +294,259 @@ func TestResolveUpdatedTimes(t *testing.T) {
 		})
 	}
 }
+
+func mustLoc(t *testing.T, name string) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		t.Fatalf("load %s: %v", name, err)
+	}
+	return loc
+}
+
+func setHouseholdTimezone(t *testing.T, pool *pgxpool.Pool, householdID uuid.UUID, tz string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `UPDATE households SET timezone = $1 WHERE id = $2`, tz, householdID); err != nil {
+		t.Fatalf("set timezone: %v", err)
+	}
+}
+
+func TestFreeSlots(t *testing.T) {
+	ny := mustLoc(t, "America/New_York")
+	day := time.Date(2026, 11, 16, 0, 0, 0, 0, ny)
+	ws := time.Date(2026, 11, 16, 8, 0, 0, 0, ny)
+	we := time.Date(2026, 11, 16, 20, 0, 0, 0, ny)
+	// Events are stored in UTC (since #4329): 17:30-18:30 EST is 22:30-23:30Z.
+	evening := timeInterval{start: mustTime(t, "2026-11-16T22:30:00Z"), end: mustTime(t, "2026-11-16T23:30:00Z")}
+
+	tests := []struct {
+		name     string
+		busy     []timeInterval
+		duration time.Duration
+		want     []AvailableSlot
+	}{
+		{
+			name:     "no events gives the whole window",
+			duration: 30 * time.Minute,
+			want:     []AvailableSlot{{Date: "2026-11-16", Start: "2026-11-16T08:00:00-05:00", End: "2026-11-16T20:00:00-05:00"}},
+		},
+		{
+			name:     "UTC-stored evening event is excluded and slots use the local offset",
+			busy:     []timeInterval{evening},
+			duration: 30 * time.Minute,
+			want: []AvailableSlot{
+				{Date: "2026-11-16", Start: "2026-11-16T08:00:00-05:00", End: "2026-11-16T17:30:00-05:00"},
+				{Date: "2026-11-16", Start: "2026-11-16T18:30:00-05:00", End: "2026-11-16T20:00:00-05:00"},
+			},
+		},
+		{
+			name: "overlapping and out-of-window events merge; short gaps dropped",
+			busy: []timeInterval{
+				{start: mustTime(t, "2026-11-16T12:00:00Z"), end: mustTime(t, "2026-11-16T14:00:00Z")}, // 07:00-09:00 local
+				{start: mustTime(t, "2026-11-16T14:20:00Z"), end: mustTime(t, "2026-11-16T16:00:00Z")}, // 09:20-11:00
+				{start: mustTime(t, "2026-11-16T15:00:00Z"), end: mustTime(t, "2026-11-16T17:00:00Z")}, // 10:00-12:00
+				{start: mustTime(t, "2026-11-17T02:00:00Z"), end: mustTime(t, "2026-11-17T03:00:00Z")}, // 21:00-22:00, outside
+			},
+			duration: 30 * time.Minute,
+			want:     []AvailableSlot{{Date: "2026-11-16", Start: "2026-11-16T12:00:00-05:00", End: "2026-11-16T20:00:00-05:00"}},
+		},
+		{
+			name:     "fully booked window has no slots",
+			busy:     []timeInterval{{start: ws.Add(-time.Hour), end: we.Add(time.Hour)}},
+			duration: 30 * time.Minute,
+			want:     []AvailableSlot{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := freeSlots(tt.busy, ws, we, tt.duration, day.Format("2006-01-02"), ny)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d slots %+v, want %+v", len(got), got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("slot %d = %+v, want %+v", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestDaysInRangeDST(t *testing.T) {
+	ny := mustLoc(t, "America/New_York")
+	tests := []struct {
+		name      string
+		first     time.Time
+		last      time.Time
+		wantDays  []string
+		wantHours []float64 // length of each local day
+	}{
+		{
+			name:      "spring forward day is 23 hours",
+			first:     time.Date(2026, 3, 7, 0, 0, 0, 0, ny),
+			last:      time.Date(2026, 3, 9, 0, 0, 0, 0, ny),
+			wantDays:  []string{"2026-03-07", "2026-03-08", "2026-03-09"},
+			wantHours: []float64{24, 23, 24},
+		},
+		{
+			name:      "fall back day is 25 hours",
+			first:     time.Date(2026, 10, 31, 0, 0, 0, 0, ny),
+			last:      time.Date(2026, 11, 2, 0, 0, 0, 0, ny),
+			wantDays:  []string{"2026-10-31", "2026-11-01", "2026-11-02"},
+			wantHours: []float64{24, 25, 24},
+		},
+		{
+			name:  "end before start is empty",
+			first: time.Date(2026, 11, 2, 0, 0, 0, 0, ny),
+			last:  time.Date(2026, 11, 1, 0, 0, 0, 0, ny),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			days := daysInRange(tt.first, tt.last, ny)
+			if len(days) != len(tt.wantDays) {
+				t.Fatalf("got %d days, want %d", len(days), len(tt.wantDays))
+			}
+			for i, d := range days {
+				if got := d.Format("2006-01-02"); got != tt.wantDays[i] {
+					t.Errorf("day %d = %s, want %s", i, got, tt.wantDays[i])
+				}
+				next := time.Date(d.Year(), d.Month(), d.Day()+1, 0, 0, 0, 0, ny)
+				if h := next.Sub(d).Hours(); h != tt.wantHours[i] {
+					t.Errorf("day %s is %v hours, want %v", tt.wantDays[i], h, tt.wantHours[i])
+				}
+			}
+		})
+	}
+}
+
+func TestSlotHours(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      map[string]any
+		wantStart int
+		wantEnd   int
+		wantErr   bool
+	}{
+		{name: "defaults", args: map[string]any{}, wantStart: 8, wantEnd: 20},
+		{name: "custom", args: map[string]any{"start_hour": 6.0, "end_hour": 22.0}, wantStart: 6, wantEnd: 22},
+		{name: "full day", args: map[string]any{"start_hour": 0.0, "end_hour": 24.0}, wantStart: 0, wantEnd: 24},
+		{name: "end not after start", args: map[string]any{"start_hour": 10.0, "end_hour": 10.0}, wantErr: true},
+		{name: "start out of range", args: map[string]any{"start_hour": 24.0}, wantErr: true},
+		{name: "end out of range", args: map[string]any{"end_hour": 25.0}, wantErr: true},
+		{name: "fractional hour", args: map[string]any{"start_hour": 8.5}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, e, err := slotHours(tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && (s != tt.wantStart || e != tt.wantEnd) {
+				t.Errorf("got %d-%d, want %d-%d", s, e, tt.wantStart, tt.wantEnd)
+			}
+		})
+	}
+}
+
+// TestFindAvailableSlots runs find_available_slots against a real, migrated Postgres.
+func TestFindAvailableSlots(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	setHouseholdTimezone(t, pool, hh.HouseholdID, "America/New_York")
+	calendarID := seedCalendar(t, pool, hh.HouseholdID)
+
+	// 17:30-18:30 EST on 2026-11-17, stored in UTC like every event since #4329.
+	seedEvent(t, pool, calendarID, uuid.NewString(),
+		`{"title":"Soccer practice","start":"2026-11-17T22:30:00Z","end":"2026-11-17T23:30:00Z"}`)
+	// 23:15-23:45 EST on the 25-hour fall-back day 2026-11-01. midnight+24h
+	// would end at 23:00 local and miss it.
+	seedEvent(t, pool, calendarID, uuid.NewString(),
+		`{"title":"Late call","start":"2026-11-02T04:15:00Z","end":"2026-11-02T04:45:00Z"}`)
+
+	_, handler := NewFindAvailableSlotsTool(pool)
+
+	decode := func(t *testing.T, args map[string]any) []AvailableSlot {
+		t.Helper()
+		text, isErr := callTool(t, handler, ctx, args)
+		if isErr {
+			t.Fatalf("tool error: %s", text)
+		}
+		var slots []AvailableSlot
+		if err := json.Unmarshal([]byte(text), &slots); err != nil {
+			t.Fatalf("decode %q: %v", text, err)
+		}
+		return slots
+	}
+
+	tests := []struct {
+		name string
+		args map[string]any
+		want []AvailableSlot
+	}{
+		{
+			name: "local evening event is excluded from default 8-20 window",
+			args: map[string]any{"date": "2026-11-17", "duration_minutes": 30.0},
+			want: []AvailableSlot{
+				{Date: "2026-11-17", Start: "2026-11-17T08:00:00-05:00", End: "2026-11-17T17:30:00-05:00"},
+				{Date: "2026-11-17", Start: "2026-11-17T18:30:00-05:00", End: "2026-11-17T20:00:00-05:00"},
+			},
+		},
+		{
+			name: "range returns slots per day with custom hours in one call",
+			args: map[string]any{"date": "2026-11-16", "end_date": "2026-11-18", "duration_minutes": 60.0, "start_hour": 16.0, "end_hour": 19.0},
+			want: []AvailableSlot{
+				{Date: "2026-11-16", Start: "2026-11-16T16:00:00-05:00", End: "2026-11-16T19:00:00-05:00"},
+				{Date: "2026-11-17", Start: "2026-11-17T16:00:00-05:00", End: "2026-11-17T17:30:00-05:00"},
+				{Date: "2026-11-18", Start: "2026-11-18T16:00:00-05:00", End: "2026-11-18T19:00:00-05:00"},
+			},
+		},
+		{
+			name: "fall-back day covers all 25 hours and sees the late event",
+			args: map[string]any{"date": "2026-11-01", "duration_minutes": 30.0, "start_hour": 0.0, "end_hour": 24.0},
+			want: []AvailableSlot{
+				{Date: "2026-11-01", Start: "2026-11-01T00:00:00-04:00", End: "2026-11-01T23:15:00-05:00"},
+			},
+		},
+		{
+			name: "range across DST keeps each day's own offset",
+			args: map[string]any{"date": "2026-10-31", "end_date": "2026-11-01", "duration_minutes": 30.0, "start_hour": 9.0, "end_hour": 10.0},
+			want: []AvailableSlot{
+				{Date: "2026-10-31", Start: "2026-10-31T09:00:00-04:00", End: "2026-10-31T10:00:00-04:00"},
+				{Date: "2026-11-01", Start: "2026-11-01T09:00:00-05:00", End: "2026-11-01T10:00:00-05:00"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decode(t, tt.args)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %+v, want %+v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("slot %d = %+v, want %+v", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+
+	errTests := []struct {
+		name    string
+		args    map[string]any
+		wantMsg string
+	}{
+		{"end_date before date", map[string]any{"date": "2026-11-17", "end_date": "2026-11-16", "duration_minutes": 30.0}, "must not be before"},
+		{"range too long", map[string]any{"date": "2026-01-01", "end_date": "2026-03-01", "duration_minutes": 30.0}, "at most 31"},
+		{"bad hours", map[string]any{"date": "2026-11-17", "duration_minutes": 30.0, "start_hour": 20.0, "end_hour": 8.0}, "end_hour must be after"},
+		{"bad end_date", map[string]any{"date": "2026-11-17", "end_date": "11/18", "duration_minutes": 30.0}, "invalid end_date"},
+	}
+	for _, tt := range errTests {
+		t.Run(tt.name, func(t *testing.T) {
+			text, isErr := callTool(t, handler, ctx, tt.args)
+			if !isErr || !strings.Contains(text, tt.wantMsg) {
+				t.Errorf("got isErr=%v %q, want error containing %q", isErr, text, tt.wantMsg)
+			}
+		})
+	}
+}

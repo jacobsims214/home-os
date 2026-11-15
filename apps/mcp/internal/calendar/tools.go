@@ -59,7 +59,10 @@ type eventJSON struct {
 }
 
 // AvailableSlot represents a free time slot returned by find_available_slots.
+// Date is the local calendar day (YYYY-MM-DD) the slot falls on; Start and
+// End are RFC 3339 in the household's offset.
 type AvailableSlot struct {
+	Date  string `json:"date"`
 	Start string `json:"start"`
 	End   string `json:"end"`
 }
@@ -1002,11 +1005,18 @@ func NewDeleteEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 // ─────────────────────────────────────────────
 
 // NewFindAvailableSlotsTool creates the find_available_slots tool and its handler.
+//
+// Every day's window and query bounds are built with time.Date in the
+// household's timezone, so a DST day is 23 or 25 hours long, and every
+// returned time carries the household's offset.
 func NewFindAvailableSlotsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("find_available_slots",
-		mcp.WithDescription("Find available time slots on a given date. Default available hours are 8am-8pm. Checks events across specified calendars."),
-		mcp.WithString("date", mcp.Description("Date to check (YYYY-MM-DD)"), mcp.Required()),
+		mcp.WithDescription("Find available time slots on a date or an inclusive date range, in the household's timezone. Available hours default to 8am-8pm local (start_hour/end_hour override them). Checks events across the specified calendars. Returns [{date, start, end}] with RFC 3339 times in the household's offset, ordered by start."),
+		mcp.WithString("date", mcp.Description("First (or only) date to check (YYYY-MM-DD)"), mcp.Required()),
 		mcp.WithNumber("duration_minutes", mcp.Description("Minimum slot duration in minutes"), mcp.Required()),
+		mcp.WithString("end_date", mcp.Description(fmt.Sprintf("Optional last date of the range, inclusive (YYYY-MM-DD). Defaults to date. At most %d days.", maxSlotRangeDays))),
+		mcp.WithNumber("start_hour", mcp.Description(fmt.Sprintf("Optional local hour the available window opens, 0-23 (default %d)", defaultSlotStartHour))),
+		mcp.WithNumber("end_hour", mcp.Description(fmt.Sprintf("Optional local hour the available window closes, 1-24, after start_hour (default %d)", defaultSlotEndHour))),
 		mcp.WithArray("calendar_ids", mcp.Description("Optional list of calendar IDs to check (checks all calendars if omitted)")),
 	)
 
@@ -1023,111 +1033,65 @@ func NewFindAvailableSlotsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.C
 		if dateStr == "" {
 			return mcp.NewToolResultError("date is required (YYYY-MM-DD)"), nil
 		}
-
-		date, err := parseDate(dateStr, loc)
+		firstDay, err := parseDate(dateStr, loc)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid date format (use YYYY-MM-DD): %v", err)), nil
+		}
+
+		lastDay := firstDay
+		if endDateStr := getStringArg(args, "end_date"); endDateStr != "" {
+			lastDay, err = parseDate(endDateStr, loc)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid end_date format (use YYYY-MM-DD): %v", err)), nil
+			}
+		}
+		days := daysInRange(firstDay, lastDay, loc)
+		if len(days) == 0 {
+			return mcp.NewToolResultError("end_date must not be before date"), nil
+		}
+		if len(days) > maxSlotRangeDays {
+			return mcp.NewToolResultError(fmt.Sprintf("date range is %d days; at most %d are allowed", len(days), maxSlotRangeDays)), nil
 		}
 
 		durationMin := getFloat64Arg(args, "duration_minutes", 30)
 		if durationMin <= 0 {
 			return mcp.NewToolResultError("duration_minutes must be positive"), nil
 		}
-		duration := time.Duration(durationMin) * time.Minute
+		duration := time.Duration(durationMin * float64(time.Minute))
+
+		startHour, endHour, err := slotHours(args)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 
 		calendarIDs := getStringSliceArg(args, "calendar_ids")
 
-		// Define the available window: 8am to 8pm in the household's timezone
-		dayStart := time.Date(date.Year(), date.Month(), date.Day(), 8, 0, 0, 0, loc)
-		dayEnd := time.Date(date.Year(), date.Month(), date.Day(), 20, 0, 0, 0, loc)
-
-		// Query events for the day (from midnight to midnight in household timezone)
-		queryStart := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, loc)
-		queryEnd := queryStart.Add(24 * time.Hour)
+		// Query from local midnight of the first day to local midnight after
+		// the last day. time.Date normalises day+1, so DST days are covered
+		// exactly (no midnight+24h drift).
+		queryStart := days[0]
+		last := days[len(days)-1]
+		queryEnd := time.Date(last.Year(), last.Month(), last.Day()+1, 0, 0, 0, 0, loc)
 
 		events, err := queryEvents(ctx, pool, claims.HouseholdID, calendarIDs, queryStart, queryEnd)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("query events: %v", err)), nil
 		}
 
-		// Filter events that overlap the day and collect busy intervals
-		type busyInterval struct {
-			start time.Time
-			end   time.Time
-		}
-		busy := make([]busyInterval, 0)
-
+		busy := make([]timeInterval, 0, len(events))
 		for _, ev := range events {
 			evStart, evEnd, err := parseEventTime(ev)
-			if err != nil {
+			if err != nil || !evEnd.After(evStart) {
 				continue
 			}
-			// Clip event to the day window
-			if evStart.Before(dayStart) {
-				evStart = dayStart
-			}
-			if evEnd.After(dayEnd) {
-				evEnd = dayEnd
-			}
-			// Skip if completely outside the day window
-			if !evStart.Before(dayEnd) || !evEnd.After(dayStart) {
-				continue
-			}
-			busy = append(busy, busyInterval{start: evStart, end: evEnd})
+			busy = append(busy, timeInterval{start: evStart, end: evEnd})
 		}
 
-		// Sort busy intervals by start time
-		sort.Slice(busy, func(i, j int) bool {
-			return busy[i].start.Before(busy[j].start)
-		})
-
-		// Merge overlapping busy intervals
-		merged := make([]busyInterval, 0)
-		for _, b := range busy {
-			if len(merged) == 0 {
-				merged = append(merged, b)
-				continue
-			}
-			last := &merged[len(merged)-1]
-			if b.start.Before(last.end) || b.start.Equal(last.end) {
-				// Overlapping or adjacent: extend last interval
-				if b.end.After(last.end) {
-					last.end = b.end
-				}
-			} else {
-				merged = append(merged, b)
-			}
-		}
-
-		// Find gaps between merged busy intervals within the day window
 		slots := make([]AvailableSlot, 0)
-		cursor := dayStart
-
-		for _, b := range merged {
-			// Gap from cursor to start of busy interval
-			if b.start.After(cursor) {
-				gapEnd := b.start
-				if gapEnd.Sub(cursor) >= duration {
-					slots = append(slots, AvailableSlot{
-						Start: cursor.Format(time.RFC3339),
-						End:   gapEnd.Format(time.RFC3339),
-					})
-				}
-			}
-			// Move cursor past this busy interval
-			if b.end.After(cursor) {
-				cursor = b.end
-			}
-		}
-
-		// Gap from cursor to end of day
-		if dayEnd.After(cursor) {
-			if dayEnd.Sub(cursor) >= duration {
-				slots = append(slots, AvailableSlot{
-					Start: cursor.Format(time.RFC3339),
-					End:   dayEnd.Format(time.RFC3339),
-				})
-			}
+		for _, day := range days {
+			windowStart := time.Date(day.Year(), day.Month(), day.Day(), startHour, 0, 0, 0, loc)
+			windowEnd := time.Date(day.Year(), day.Month(), day.Day(), endHour, 0, 0, 0, loc)
+			slots = append(slots, freeSlots(busy, windowStart, windowEnd, duration, day.Format("2006-01-02"), loc)...)
 		}
 
 		data, err := json.Marshal(slots)
@@ -1138,6 +1102,99 @@ func NewFindAvailableSlotsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.C
 	}
 
 	return tool, handler
+}
+
+const (
+	defaultSlotStartHour = 8
+	defaultSlotEndHour   = 20
+	maxSlotRangeDays     = 31
+)
+
+// timeInterval is a half-open [start, end) busy interval.
+type timeInterval struct {
+	start time.Time
+	end   time.Time
+}
+
+// slotHours reads and validates the optional start_hour/end_hour args.
+func slotHours(args map[string]any) (int, int, error) {
+	startF := getFloat64Arg(args, "start_hour", defaultSlotStartHour)
+	endF := getFloat64Arg(args, "end_hour", defaultSlotEndHour)
+	if startF != float64(int(startF)) || endF != float64(int(endF)) {
+		return 0, 0, fmt.Errorf("start_hour and end_hour must be whole hours")
+	}
+	start, end := int(startF), int(endF)
+	if start < 0 || start > 23 {
+		return 0, 0, fmt.Errorf("start_hour must be between 0 and 23")
+	}
+	if end < 1 || end > 24 {
+		return 0, 0, fmt.Errorf("end_hour must be between 1 and 24")
+	}
+	if end <= start {
+		return 0, 0, fmt.Errorf("end_hour must be after start_hour")
+	}
+	return start, end, nil
+}
+
+// daysInRange returns local midnight of every calendar day from first to
+// last inclusive (both already at local midnight in loc). It steps by
+// calendar day via time.Date, never by 24h, so DST transitions don't skip
+// or repeat a day. Returns nil when last is before first.
+func daysInRange(first, last time.Time, loc *time.Location) []time.Time {
+	var days []time.Time
+	for d := first; !d.After(last); d = time.Date(d.Year(), d.Month(), d.Day()+1, 0, 0, 0, 0, loc) {
+		days = append(days, d)
+		if len(days) > maxSlotRangeDays {
+			break // caller rejects; stop early on huge ranges
+		}
+	}
+	return days
+}
+
+// freeSlots returns the gaps of at least duration inside [windowStart,
+// windowEnd) that no busy interval covers. Every time is formatted in loc,
+// so slot offsets are consistent whatever offset the events were stored in.
+func freeSlots(busy []timeInterval, windowStart, windowEnd time.Time, duration time.Duration, date string, loc *time.Location) []AvailableSlot {
+	clipped := make([]timeInterval, 0, len(busy))
+	for _, b := range busy {
+		s, e := b.start, b.end
+		if s.Before(windowStart) {
+			s = windowStart
+		}
+		if e.After(windowEnd) {
+			e = windowEnd
+		}
+		if !s.Before(e) {
+			continue // outside the window
+		}
+		clipped = append(clipped, timeInterval{start: s, end: e})
+	}
+	sort.Slice(clipped, func(i, j int) bool { return clipped[i].start.Before(clipped[j].start) })
+
+	slots := make([]AvailableSlot, 0)
+	emit := func(from, to time.Time) {
+		if to.Sub(from) >= duration {
+			slots = append(slots, AvailableSlot{
+				Date:  date,
+				Start: from.In(loc).Format(time.RFC3339),
+				End:   to.In(loc).Format(time.RFC3339),
+			})
+		}
+	}
+
+	cursor := windowStart
+	for _, b := range clipped {
+		if b.start.After(cursor) {
+			emit(cursor, b.start)
+		}
+		if b.end.After(cursor) {
+			cursor = b.end
+		}
+	}
+	if windowEnd.After(cursor) {
+		emit(cursor, windowEnd)
+	}
+	return slots
 }
 
 // ─────────────────────────────────────────────
