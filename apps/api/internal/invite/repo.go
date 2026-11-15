@@ -395,3 +395,21 @@ func (r *Repo) GetHouseholdName(ctx context.Context, householdID string) (string
 	}
 	return name, nil
 }
+
+// MemberRole returns userID's current role in householdID, read from
+// memberships, or "" if the user is not a member there. The invite handlers
+// authorize against this rather than trusting the role in the claims alone.
+func (r *Repo) MemberRole(ctx context.Context, householdID string, userID uuid.UUID) (string, error) {
+	var role string
+	err := r.pool.QueryRow(ctx,
+		`SELECT role::text FROM memberships WHERE household_id = $1 AND user_id = $2`,
+		householdID, userID,
+	).Scan(&role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("member role: %w", err)
+	}
+	return role, nil
+}

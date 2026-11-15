@@ -1,10 +1,12 @@
 package invite_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -298,4 +300,177 @@ func TestAcceptInvite_DeactivatedUserWithDexTokenRefused(t *testing.T) {
 	require.NoError(t, f.pool.QueryRow(ctx,
 		`SELECT count(*) FROM memberships WHERE user_id = $1`, userID).Scan(&n))
 	assert.Equal(t, 0, n)
+}
+
+// --- #4683: only owners and family managers manage invitations ---
+
+var allRoles = []string{"owner", "family_manager", "family_member", "viewer", "housesitter", "vendor"}
+
+// doHH is do() with an optional X-Household-ID header.
+func doHH(h http.Handler, method, path, token, householdID string, body any) *httptest.ResponseRecorder {
+	var buf bytes.Buffer
+	if body != nil {
+		_ = json.NewEncoder(&buf).Encode(body)
+	}
+	req := httptest.NewRequest(method, path, &buf)
+	req.Header.Set("Authorization", "Bearer "+token)
+	if householdID != "" {
+		req.Header.Set(auth.HouseholdHeader, householdID)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// addMember creates a user with role in household hhID and returns its Dex
+// token and users.id.
+func (f *fixture) addMember(t *testing.T, hhID, role string) (token, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	email := role + "-" + uuid.NewString()[:8] + "@example.com"
+	sub := "CiQ" + uuid.NewString()
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`INSERT INTO users (email, name, password_hash, dex_sub) VALUES ($1, 'M', 'x', $2) RETURNING id::text`,
+		email, sub).Scan(&userID))
+	_, err := f.pool.Exec(ctx,
+		`INSERT INTO memberships (household_id, user_id, role) VALUES ($1, $2, $3)`, hhID, userID, role)
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = f.pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, userID) })
+	return f.s.token(t, sub, email), userID
+}
+
+func (f *fixture) invitationCount(t *testing.T, email string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM invitations WHERE lower(email) = lower($1)`, email).Scan(&n))
+	return n
+}
+
+func TestInvites_OnlyManagersInviteAndNeverAboveTheirRole(t *testing.T) {
+	f := setup(t)
+	f.withDex(t)
+
+	// want[inviter][invited] is the expected POST status.
+	want := map[string]map[string]int{}
+	for _, inviter := range allRoles {
+		want[inviter] = map[string]int{}
+		for _, invited := range allRoles {
+			switch {
+			case inviter == "owner":
+				want[inviter][invited] = http.StatusCreated
+			case inviter == "family_manager" && invited != "owner":
+				want[inviter][invited] = http.StatusCreated
+			default:
+				want[inviter][invited] = http.StatusForbidden
+			}
+		}
+	}
+
+	for _, inviter := range allRoles {
+		tok, _ := f.addMember(t, f.hhID, inviter)
+		for _, invited := range allRoles {
+			t.Run(inviter+" invites "+invited, func(t *testing.T) {
+				email := "inv-" + uuid.NewString()[:8] + "@example.com"
+				rec := do(f.h, http.MethodPost, "/api/v1/invites", tok, map[string]string{"email": email, "role": invited})
+				require.Equal(t, want[inviter][invited], rec.Code, rec.Body.String())
+				if rec.Code == http.StatusForbidden {
+					assert.Equal(t, "FORBIDDEN", errCode(t, rec))
+					assert.Zero(t, f.invitationCount(t, email), "a refused invite is not stored")
+				} else {
+					assert.Equal(t, 1, f.invitationCount(t, email))
+				}
+			})
+		}
+		t.Run(inviter+" lists invites", func(t *testing.T) {
+			rec := do(f.h, http.MethodGet, "/api/v1/invites", tok, nil)
+			if auth.CanManageMembers(inviter) {
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			} else {
+				require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), "accept_url", "no link leaks to a non-manager")
+			}
+		})
+	}
+
+	t.Run("default role is family_member and a family_member cannot use it", func(t *testing.T) {
+		tok, _ := f.addMember(t, f.hhID, "family_member")
+		rec := do(f.h, http.MethodPost, "/api/v1/invites", tok, map[string]string{"email": "d-" + uuid.NewString()[:8] + "@example.com"})
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	})
+}
+
+// The inviter's role is the one in the household the request resolved to: an
+// owner of A who is a family_member of B cannot invite into B.
+func TestInvites_RoleIsPerHousehold(t *testing.T) {
+	f := setup(t)
+	f.withDex(t)
+	ctx := context.Background()
+
+	tok, uid := f.addMember(t, f.hhID, "family_member") // B = f.hhID
+	var hhA string
+	require.NoError(t, f.pool.QueryRow(ctx, `INSERT INTO households (name) VALUES ('A') RETURNING id::text`).Scan(&hhA))
+	t.Cleanup(func() { _, _ = f.pool.Exec(context.Background(), `DELETE FROM households WHERE id = $1`, hhA) })
+	_, err := f.pool.Exec(ctx, `INSERT INTO memberships (household_id, user_id, role, created_at)
+		VALUES ($1, $2, 'owner', NOW() - interval '30 days')`, hhA, uid) // A is also the oldest (default)
+	require.NoError(t, err)
+
+	cases := []struct {
+		name, hh, role string
+		want           int
+	}{
+		{"B as family_member: owner invite", f.hhID, "owner", http.StatusForbidden},
+		{"B as family_member: viewer invite", f.hhID, "viewer", http.StatusForbidden},
+		{"A as owner: owner invite", hhA, "owner", http.StatusCreated},
+		{"no header resolves to A (oldest)", "", "family_member", http.StatusCreated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doHH(f.h, http.MethodPost, "/api/v1/invites", tok, tc.hh,
+				map[string]string{"email": "hh-" + uuid.NewString()[:8] + "@example.com", "role": tc.role})
+			assert.Equal(t, tc.want, rec.Code, rec.Body.String())
+		})
+	}
+	t.Run("listing B as family_member is 403", func(t *testing.T) {
+		rec := doHH(f.h, http.MethodGet, "/api/v1/invites", tok, f.hhID, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	})
+	var inB int
+	require.NoError(t, f.pool.QueryRow(ctx, `SELECT count(*) FROM invitations WHERE household_id = $1`, f.hhID).Scan(&inB))
+	assert.Zero(t, inB, "nothing was invited into B")
+}
+
+// The #4434 wave-check exploit: a family_member mints an owner invite, then an
+// unauthenticated signup turns it into an owner account. Now it stops at step 1,
+// and an invite a manager did create still grants only its own role.
+func TestInvites_WaveCheckExploitFails(t *testing.T) {
+	f := setup(t)
+	f.withDex(t)
+	ctx := context.Background()
+	bob, _ := f.addMember(t, f.hhID, "family_member")
+	evil := "evil-" + uuid.NewString()[:8] + "@wave.test"
+	f.cleanupUser(t, evil)
+
+	rec := do(f.h, http.MethodPost, "/api/v1/invites", bob, map[string]string{"email": evil, "role": "owner"})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "accept_url")
+	assert.Zero(t, f.invitationCount(t, evil))
+
+	// A family_manager's family_member invite signs up as family_member, not more.
+	mgr, _ := f.addMember(t, f.hhID, "family_manager")
+	rec = do(f.h, http.MethodPost, "/api/v1/invites", mgr, map[string]string{"email": evil, "role": "family_member"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var tok string
+	require.NoError(t, f.pool.QueryRow(ctx, `SELECT token FROM invitations WHERE email = $1`, evil).Scan(&tok))
+	rec = do(f.h, http.MethodPost, "/api/v1/invites/accept", "", map[string]string{"token": tok, "name": "Evil", "password": "correct-horse"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var role string
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`SELECT m.role::text FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = $1 AND m.household_id = $2`,
+		evil, f.hhID).Scan(&role))
+	assert.Equal(t, "family_member", role)
+
+	// The invite is single-use.
+	rec = do(f.h, http.MethodPost, "/api/v1/invites/accept", "", map[string]string{"token": tok, "name": "Evil", "password": "correct-horse"})
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 }

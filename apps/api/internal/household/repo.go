@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/invite"
 	"home-os/api/internal/seed"
 )
@@ -147,28 +148,119 @@ func (r *Repo) ListMembers(ctx context.Context, householdID uuid.UUID) ([]Member
 	return members, nil
 }
 
-// UpdateMemberRole updates a member's role in a household.
-func (r *Repo) UpdateMemberRole(ctx context.Context, householdID, userID uuid.UUID, role string) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE memberships SET role = $3 WHERE household_id = $1 AND user_id = $2`,
-		householdID, userID, role,
-	)
+// Errors returned by ChangeMemberRole and RemoveMember.
+var (
+	// ErrNotManager: the actor is not an owner or family_manager of the
+	// household, or is a family_manager acting on an owner or granting owner.
+	ErrNotManager = errors.New("not allowed to manage this member")
+	// ErrMemberNotFound: the target user is not a member of the household.
+	ErrMemberNotFound = errors.New("member not found")
+	// ErrLastOwner: the change would leave the household with no owner.
+	ErrLastOwner = errors.New("household must keep at least one owner")
+	// ErrInvalidRole: the role is not a membership_role value.
+	ErrInvalidRole = errors.New("invalid role")
+)
+
+// lockMemberRoles locks the household's membership rows and returns the
+// actor's and target's roles ("" for a non-member) and the owner count. The
+// lock serialises concurrent role changes so the last-owner check holds.
+func lockMemberRoles(ctx context.Context, tx pgx.Tx, householdID, actorID, targetID uuid.UUID) (actorRole, targetRole string, owners int, err error) {
+	rows, err := tx.Query(ctx,
+		`SELECT user_id, role::text FROM memberships WHERE household_id = $1 FOR UPDATE`, householdID)
 	if err != nil {
-		return fmt.Errorf("update member role: %w", err)
+		return "", "", 0, fmt.Errorf("lock memberships: %w", err)
 	}
-	return nil
+	defer rows.Close()
+	for rows.Next() {
+		var uid uuid.UUID
+		var role string
+		if err := rows.Scan(&uid, &role); err != nil {
+			return "", "", 0, fmt.Errorf("scan membership: %w", err)
+		}
+		if uid == actorID {
+			actorRole = role
+		}
+		if uid == targetID {
+			targetRole = role
+		}
+		if role == auth.RoleOwner {
+			owners++
+		}
+	}
+	return actorRole, targetRole, owners, rows.Err()
 }
 
-// RemoveMember removes a member from a household.
-func (r *Repo) RemoveMember(ctx context.Context, householdID, userID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx,
-		`DELETE FROM memberships WHERE household_id = $1 AND user_id = $2`,
-		householdID, userID,
-	)
+// ChangeMemberRole sets targetID's role in householdID on behalf of actorID.
+// Authorization is decided inside the transaction from memberships (never
+// from request claims): see auth.CanModifyMember and auth.CanGrantRole. The
+// last owner cannot be demoted.
+func (r *Repo) ChangeMemberRole(ctx context.Context, householdID, actorID, targetID uuid.UUID, role string) error {
+	if !auth.ValidRole(role) {
+		return ErrInvalidRole
+	}
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	actorRole, targetRole, owners, err := lockMemberRoles(ctx, tx, householdID, actorID, targetID)
+	if err != nil {
+		return err
+	}
+	if !auth.CanManageMembers(actorRole) {
+		return ErrNotManager
+	}
+	if targetRole == "" {
+		return ErrMemberNotFound
+	}
+	if !auth.CanModifyMember(actorRole, targetRole) || !auth.CanGrantRole(actorRole, role) {
+		return ErrNotManager
+	}
+	if targetRole == auth.RoleOwner && role != auth.RoleOwner && owners <= 1 {
+		return ErrLastOwner
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE memberships SET role = $3::membership_role WHERE household_id = $1 AND user_id = $2`,
+		householdID, targetID, role,
+	); err != nil {
+		return fmt.Errorf("update member role: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// RemoveMember removes targetID from householdID on behalf of actorID, with
+// the same rules as ChangeMemberRole. The last owner cannot be removed.
+func (r *Repo) RemoveMember(ctx context.Context, householdID, actorID, targetID uuid.UUID) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	actorRole, targetRole, owners, err := lockMemberRoles(ctx, tx, householdID, actorID, targetID)
+	if err != nil {
+		return err
+	}
+	if !auth.CanManageMembers(actorRole) {
+		return ErrNotManager
+	}
+	if targetRole == "" {
+		return ErrMemberNotFound
+	}
+	if !auth.CanModifyMember(actorRole, targetRole) {
+		return ErrNotManager
+	}
+	if targetRole == auth.RoleOwner && owners <= 1 {
+		return ErrLastOwner
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM memberships WHERE household_id = $1 AND user_id = $2`,
+		householdID, targetID,
+	); err != nil {
 		return fmt.Errorf("remove member: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // Errors returned by CreateFamily.

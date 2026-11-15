@@ -251,7 +251,40 @@ func (h *Handler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": members})
 }
 
+// callerUserID parses the caller's users.id from the claims. A caller
+// without one (auth-disabled local dev) cannot manage members: 403.
+func callerUserID(w http.ResponseWriter, claims *auth.Claims) (uuid.UUID, bool) {
+	id, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		apierr.Forbidden(w, "only owners and family managers can manage members")
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
+// writeMemberError maps ChangeMemberRole / RemoveMember errors to responses.
+func writeMemberError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrNotManager):
+		apierr.Forbidden(w, "only owners and family managers can manage members, and only owners can manage owners")
+	case errors.Is(err, ErrMemberNotFound):
+		apierr.NotFound(w, "member not found")
+	case errors.Is(err, ErrLastOwner):
+		apierr.Conflict(w, "the household must keep at least one owner")
+	case errors.Is(err, ErrInvalidRole):
+		apierr.BadRequest(w, "invalid role")
+	default:
+		apierr.InternalError(w, err)
+	}
+}
+
 // UpdateMemberRole PATCH /api/v1/households/me/members/{userId}
+//
+// Only an owner or family_manager of the request's household (X-Household-ID
+// aware) may change roles, judged from memberships inside the transaction. A
+// family_manager may not grant owner or change an owner. The last owner may
+// not be demoted. 403 not allowed; 404 not a member; 409 last owner; 400 bad
+// role.
 func (h *Handler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())
 	if claims == nil {
@@ -279,8 +312,12 @@ func (h *Handler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "role is required")
 		return
 	}
-	if err := h.repo.UpdateMemberRole(r.Context(), hid, userID, req.Role); err != nil {
-		apierr.InternalError(w, err)
+	actorID, ok := callerUserID(w, claims)
+	if !ok {
+		return
+	}
+	if err := h.repo.ChangeMemberRole(r.Context(), hid, actorID, userID, req.Role); err != nil {
+		writeMemberError(w, err)
 		return
 	}
 	members, err := h.repo.ListMembers(r.Context(), hid)
@@ -292,6 +329,8 @@ func (h *Handler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 }
 
 // RemoveMember DELETE /api/v1/households/me/members/{userId}
+//
+// The same rules as UpdateMemberRole; the last owner may not be removed.
 func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())
 	if claims == nil {
@@ -308,8 +347,12 @@ func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "invalid user id")
 		return
 	}
-	if err := h.repo.RemoveMember(r.Context(), hid, userID); err != nil {
-		apierr.InternalError(w, err)
+	actorID, ok := callerUserID(w, claims)
+	if !ok {
+		return
+	}
+	if err := h.repo.RemoveMember(r.Context(), hid, actorID, userID); err != nil {
+		writeMemberError(w, err)
 		return
 	}
 	members, err := h.repo.ListMembers(r.Context(), hid)

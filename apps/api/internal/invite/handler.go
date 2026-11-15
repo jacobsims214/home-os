@@ -70,11 +70,42 @@ func (h *Handler) acceptURL(token string) string {
 	return strings.TrimRight(h.cfg.PublicURL, "/") + "/invites/accept?token=" + url.QueryEscape(token)
 }
 
-// validRoles mirrors the membership_role enum (migration 001). Invitations
-// store role as TEXT, so it is checked here before it is cast on accept.
-var validRoles = map[string]bool{
-	"owner": true, "family_manager": true, "family_member": true,
-	"viewer": true, "housesitter": true, "vendor": true,
+// validRoles reports whether role is a membership_role enum value
+// (migration 001). It is checked before the invitation is stored.
+func validRoles(role string) bool { return auth.ValidRole(role) }
+
+// canInvite reports whether a member with inviterRole may invite someone as
+// invitedRole: only owner and family_manager invite, and a family_manager
+// may not invite an owner (see auth.CanGrantRole).
+func canInvite(inviterRole, invitedRole string) bool {
+	return auth.CanGrantRole(inviterRole, invitedRole)
+}
+
+// callerManagerRole returns the caller's user ID and role in the household
+// the request resolved to (X-Household-ID aware), re-read from memberships.
+// It writes 400/403/500 and returns ok=false unless the caller is an owner or
+// family_manager there.
+func (h *Handler) callerManagerRole(w http.ResponseWriter, r *http.Request, claims *auth.Claims) (uuid.UUID, string, bool) {
+	userID, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		apierr.Forbidden(w, "only owners and family managers can manage invitations")
+		return uuid.Nil, "", false
+	}
+	if _, err := uuid.Parse(claims.HouseholdID); err != nil {
+		apierr.Forbidden(w, "only owners and family managers can manage invitations")
+		return uuid.Nil, "", false
+	}
+	role, err := h.repo.MemberRole(r.Context(), claims.HouseholdID, userID)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return uuid.Nil, "", false
+	}
+	if !auth.CanManageMembers(role) {
+		slog.Warn("invite: refused non-manager", "user_id", userID, "household_id", claims.HouseholdID, "role", role)
+		apierr.Forbidden(w, "only owners and family managers can manage invitations")
+		return uuid.Nil, "", false
+	}
+	return userID, role, true
 }
 
 func (h *Handler) CreateInvite(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +119,10 @@ func (h *Handler) CreateInvite(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 		Role  string `json:"role"`
 	}
+	userID, inviterRole, ok := h.callerManagerRole(w, r, claims)
+	if !ok {
+		return
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		apierr.BadRequest(w, "invalid request body")
 		return
@@ -100,19 +135,20 @@ func (h *Handler) CreateInvite(w http.ResponseWriter, r *http.Request) {
 	if req.Role == "" {
 		req.Role = "family_member"
 	}
-	if !validRoles[req.Role] {
+	if !validRoles(req.Role) {
 		apierr.BadRequest(w, "invalid role")
+		return
+	}
+	if !canInvite(inviterRole, req.Role) {
+		slog.Warn("invite: refused role elevation", "user_id", userID, "household_id", claims.HouseholdID,
+			"inviter_role", inviterRole, "invited_role", req.Role)
+		apierr.Forbidden(w, "you cannot invite someone with a role above your own")
 		return
 	}
 
 	token := uuid.New().String()
 	expiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	userID, err := uuid.Parse(claims.UserID)
-	if err != nil {
-		apierr.BadRequest(w, "invalid user ID")
-		return
-	}
 	inv, err := h.repo.Create(r.Context(), claims.HouseholdID, req.Email, token, req.Role, userID, expiresAt)
 	if err != nil {
 		apierr.InternalError(w, err)
@@ -182,6 +218,11 @@ func (h *Handler) ListInvites(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())
 	if claims == nil {
 		apierr.Unauthorized(w, "not authenticated")
+		return
+	}
+	// The list carries live accept_urls (an owner invite's link would let
+	// anyone holding it sign up as owner), so only managers may read it.
+	if _, _, ok := h.callerManagerRole(w, r, claims); !ok {
 		return
 	}
 
