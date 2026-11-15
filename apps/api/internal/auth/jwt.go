@@ -29,6 +29,22 @@ type Verifier struct {
 	inner     *oidc.IDTokenVerifier
 	enabled   bool
 	audiences []string
+	resolver  MemberResolver
+}
+
+// WithResolver attaches a MemberResolver. When set, VerifyToken maps the Dex
+// identity to the Home OS user (Claims.UserID = users.id), household and role,
+// and fails with ErrNoMembership for verified tokens that are not members.
+func (v *Verifier) WithResolver(r MemberResolver) *Verifier {
+	v.resolver = r
+	return v
+}
+
+// NewVerifierWithKeySet builds an enabled Verifier over a caller-supplied key
+// set (e.g. oidc.StaticKeySet). Intended for tests that sign their own tokens.
+func NewVerifierWithKeySet(issuerURL string, keySet oidc.KeySet, audiences []string) *Verifier {
+	inner := oidc.NewVerifier(issuerURL, keySet, &oidc.Config{SkipClientIDCheck: true})
+	return &Verifier{inner: inner, enabled: true, audiences: audiences}
 }
 
 // NewVerifier creates a new Verifier that validates OIDC ID tokens.
@@ -102,6 +118,12 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Identity, erro
 // VerifyToken parses and validates a Dex-issued OIDC token string.
 // It verifies the RS256 signature using Dex's JWKS, then validates the
 // issuer, audience, and expiration claims.
+//
+// When a MemberResolver is attached (WithResolver), the returned Claims carry
+// the Home OS users.id as UserID plus HouseholdID and Role; a verified token
+// with no membership returns an error wrapping ErrNoMembership, and a database
+// failure one wrapping ErrMemberLookup. Without a resolver, UserID is the raw
+// Dex sub and HouseholdID/Role are empty.
 func (v *Verifier) VerifyToken(ctx context.Context, tokenStr string) (*Claims, error) {
 	if !v.enabled {
 		return &Claims{
@@ -116,11 +138,23 @@ func (v *Verifier) VerifyToken(ctx context.Context, tokenStr string) (*Claims, e
 		return nil, err
 	}
 
-	return &Claims{
+	claims := &Claims{
 		UserID: ident.Subject,
 		Email:  ident.Email,
 		Name:   ident.Name,
-	}, nil
+	}
+	if v.resolver == nil {
+		return claims, nil
+	}
+
+	m, err := v.resolver.Resolve(ctx, ident.Subject, ident.Email)
+	if err != nil {
+		return nil, fmt.Errorf("resolve member (email=%q): %w", ident.Email, err)
+	}
+	claims.UserID = m.UserID
+	claims.HouseholdID = m.HouseholdID
+	claims.Role = m.Role
+	return claims, nil
 }
 
 // Close is a no-op — kept for interface compatibility.

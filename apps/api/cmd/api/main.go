@@ -27,7 +27,7 @@ import (
 	"home-os/api/internal/file"
 	"home-os/api/internal/household"
 	"home-os/api/internal/integration"
-"home-os/api/internal/invite"
+	"home-os/api/internal/invite"
 	"home-os/api/internal/link"
 	"home-os/api/internal/loan"
 	"home-os/api/internal/maintenance"
@@ -106,6 +106,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer oidcVerifier.Close()
+	// Resolve Dex identities to Home OS users/households: users.dex_sub first,
+	// then email (backfilling dex_sub). Oldest membership wins for multi-household users.
+	oidcVerifier.WithResolver(auth.NewMemberResolver(pool))
 
 	// Initialize the search client and create the Typesense collection if needed.
 	searchClient := search.NewClient(cfg)
