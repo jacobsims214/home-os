@@ -79,6 +79,13 @@ calendar:
 worker:
   replicas: 1
   image: worker
+  # Optional email for worker-generated bill_due / maintenance_due
+  # notifications. Off by default: notifications are in-app either way and the
+  # worker logs once at startup that email is disabled. When enabled, uses
+  # smtp.host/port/from/username; if smtp.username is set the password is read
+  # from smtp.existingSecret (or secrets.existingSecret), never from values.
+  smtp:
+    enabled: false
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
