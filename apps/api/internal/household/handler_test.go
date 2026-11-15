@@ -192,6 +192,13 @@ func TestCreate_NewDexUserBecomesOwnerWithDefaultCalendars(t *testing.T) {
 	sort.Strings(types)
 	assert.Equal(t, []string{"bills", "family", "maintenance"}, types)
 
+	// The six starter list templates, created in the same transaction.
+	var templates int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT count(*) FROM lists WHERE household_id = $1 AND is_template`, got.Data.ID,
+	).Scan(&templates))
+	assert.Equal(t, 6, templates)
+
 	// The same token now resolves to the new household through RequireAuth.
 	me := do(h, http.MethodGet, "/api/v1/households/me", tok, nil)
 	require.Equal(t, http.StatusOK, me.Code, me.Body.String())

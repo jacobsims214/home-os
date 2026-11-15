@@ -230,7 +230,8 @@ type SetPasswordFunc func(ctx context.Context, email, userID string) error
 //
 //  1. resolves the family: locks the existing household (FOR SHARE, so it
 //     cannot be deleted under us) or inserts a new one with its default
-//     Family/Bills/Maintenance calendars (seed.EnsureDefaultCalendars);
+//     Family/Bills/Maintenance calendars (seed.EnsureDefaultCalendars) and
+//     starter list templates (seed.EnsureStarterLists);
 //  2. refuses an email that already exists (ErrEmailTaken); it never takes
 //     over an account;
 //  3. inserts the user (dex_sub NULL: the member resolver backfills it by
@@ -262,6 +263,9 @@ func (r *Repo) CreateUser(ctx context.Context, in CreateUserInput, setPassword S
 			return nil, fmt.Errorf("admin create user: insert household: %w", err)
 		}
 		if err := seed.EnsureDefaultCalendars(ctx, tx, res.HouseholdID.String()); err != nil {
+			return nil, fmt.Errorf("admin create user: %w", err)
+		}
+		if err := seed.EnsureStarterLists(ctx, tx, res.HouseholdID.String()); err != nil {
 			return nil, fmt.Errorf("admin create user: %w", err)
 		}
 		res.HouseholdCreated = true

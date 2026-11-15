@@ -99,6 +99,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Give every existing family the starter list templates it lacks
+	// (idempotent; a no-op once all are seeded).
+	// A failure only means templates are missing, so the api still starts.
+	if err := seed.BackfillStarterLists(ctx, pool); err != nil {
+		slog.Warn("failed to backfill starter lists", "error", err)
+	}
+
 	// Create OIDC token verifier using Dex JWKS endpoint.
 	// This validates Dex-issued RS256-signed OIDC tokens on protected routes.
 	// The JWKS URL is the internal K8s address for key fetching, while the

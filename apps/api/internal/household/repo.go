@@ -300,7 +300,8 @@ type CreateFamilyResult struct {
 //  3. refuses deactivated users (ErrUserInactive) and users who already have
 //     a membership unless they are an instance admin (ErrAlreadyMember);
 //  4. inserts the household, the owner membership, and the default
-//     Family/Bills/Maintenance calendars (seed.EnsureDefaultCalendars).
+//     Family/Bills/Maintenance calendars (seed.EnsureDefaultCalendars) and
+//     the starter list templates (seed.EnsureStarterLists).
 //
 // Nothing is written unless every step succeeds. name and timezone must
 // already be validated by the caller.
@@ -358,6 +359,9 @@ func (r *Repo) CreateFamily(ctx context.Context, ident CreatorIdentity, name, ti
 	}
 
 	if err := seed.EnsureDefaultCalendars(ctx, tx, hh.ID.String()); err != nil {
+		return nil, fmt.Errorf("create family: %w", err)
+	}
+	if err := seed.EnsureStarterLists(ctx, tx, hh.ID.String()); err != nil {
 		return nil, fmt.Errorf("create family: %w", err)
 	}
 

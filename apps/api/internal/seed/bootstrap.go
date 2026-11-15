@@ -97,6 +97,9 @@ func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config,
 	if err := EnsureDefaultCalendars(ctx, pool, householdID); err != nil {
 		return err
 	}
+	if err := ensureStarterListsTx(ctx, pool, householdID); err != nil {
+		return err
+	}
 
 	// Sync to Dex
 	if dexClient != nil {
