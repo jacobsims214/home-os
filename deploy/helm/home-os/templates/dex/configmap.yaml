@@ -58,12 +58,20 @@ data:
       {{- end }}
     
     enablePasswordDB: true
-    {{- with .Values.dex.refreshTokenReuseInterval }}
+    {{- if or .Values.dex.idTokenExpiry .Values.dex.refreshTokenReuseInterval }}
 
-    # Refresh tokens rotate on use. Within this window Dex hands the current
-    # token to a request presenting the just-rotated one, so the UI replicas
-    # (whose BFFs single-flight per process only) can refresh concurrently.
     expiry:
+      {{- with .Values.dex.idTokenExpiry }}
+      # id_token lifetime. Dex keeps ONE refresh token per user per client, so a
+      # login on a second browser revokes the first browser's refresh token; the
+      # first browser stays signed in only until its id_token expires (#4649).
+      idTokens: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.dex.refreshTokenReuseInterval }}
+      # Refresh tokens rotate on use. Within this window Dex hands the current
+      # token to a request presenting the just-rotated one, so the UI replicas
+      # (whose BFFs single-flight per process only) can refresh concurrently.
       refreshTokens:
         reuseInterval: {{ . | quote }}
+      {{- end }}
     {{- end }}

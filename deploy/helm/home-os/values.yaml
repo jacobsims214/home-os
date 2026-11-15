@@ -136,6 +136,14 @@ dex:
   # only, so two pods can redeem the same token at once. Empty = Dex default (0,
   # no reuse; the losing pod logs the user out).
   refreshTokenReuseInterval: "10s"
+  # expiry.idTokens: id_token lifetime (Dex default 24h). Dex keeps one refresh
+  # token per user per client and every browser uses the single client
+  # home-os-ui, so signing in on a second device revokes the first device's
+  # refresh token. The first device keeps working until its id_token expires,
+  # then the BFF refresh fails and it is sent to /login once. Longer = fewer
+  # forced re-logins on multi-device users, but a stolen id_token stays valid
+  # longer. Empty = Dex default (24h).
+  idTokenExpiry: "24h"
 
 # Workloads get DB_PASSWORD from a Secret (secretKeyRef) and DATABASE_URL is
 # assembled from parts with $(DB_PASSWORD), so no password is rendered into env.

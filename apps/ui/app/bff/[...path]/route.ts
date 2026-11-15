@@ -18,6 +18,19 @@ import { isSameOrigin } from "@/lib/auth/same-origin";
  * rotates refresh tokens on every use) and retries once. If Dex rejects the
  * refresh token, both cookies are cleared and the client gets 401.
  *
+ * One refresh token per user per client (#4649): Dex keeps a single refresh
+ * token per (user, connector, client) and deletes it when it issues a new one,
+ * and every browser uses the one public client `home-os-ui`. Signing in on a
+ * second device therefore revokes the first device's `home-os-refresh`. The
+ * first device keeps working on its id_token until exp; then Dex answers
+ * `400 invalid_request` ("already been claimed"), which is "rejected" here:
+ * sessionEnded() clears the cookies and returns 401, and lib/api.ts sends the
+ * page to /login once (#4620). With the cookies gone, nothing retries, so it
+ * cannot loop. Dex v2.42.0 has no setting for per-device refresh tokens; the
+ * lever is the id_token lifetime (Helm `dex.idTokenExpiry`, default 24h;
+ * compose deploy/dex/config.yaml `expiry.idTokens`). Never obtain tokens for
+ * `home-os-ui` outside the browser login, or it logs users' browsers out.
+ *
  * CSRF (#4646): every method except GET/HEAD must come from the app's own
  * origin (lib/auth/same-origin.ts: Sec-Fetch-Site and Origin against
  * PUBLIC_URL). Anything else, including a write with neither header (not a

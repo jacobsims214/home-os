@@ -49,9 +49,14 @@ staticPasswords:
     username: admin
     userID: 7d4b1f0e-5c1a-4c3e-9a57-2f1d0c9e6b11
 
-# Refresh tokens rotate on use. Within this window Dex hands the current token
-# to a request presenting the just-rotated one, so concurrent BFF refreshes
-# don't reject each other. Same value as the chart (dex.refreshTokenReuseInterval).
 expiry:
+  # id_token lifetime, same as the chart (dex.idTokenExpiry). Dex keeps one
+  # refresh token per user per client, so a login on a second browser revokes
+  # the first browser's refresh token; the first browser stays signed in only
+  # until its id_token expires, then goes to /login once (#4649).
+  idTokens: "24h"
+  # Refresh tokens rotate on use. Within this window Dex hands the current token
+  # to a request presenting the just-rotated one, so concurrent BFF refreshes
+  # don't reject each other. Same value as the chart (dex.refreshTokenReuseInterval).
   refreshTokens:
     reuseInterval: "10s"
