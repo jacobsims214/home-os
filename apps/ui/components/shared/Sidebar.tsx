@@ -52,9 +52,11 @@ export default function Sidebar() {
     [searchQuery, router],
   );
 
-  const handleLogout = async () => {
-    await useAuthStore.getState().logout();
-    router.push("/login");
+  // The form below does a native POST to /api/auth/logout, which expires the
+  // session cookies and 303s to /login. The full page load also drops the
+  // React Query cache. Here we only clear the persisted profile.
+  const handleLogout = () => {
+    useAuthStore.getState().setUser(null);
   };
 
   const isActive = (href: string) => {
@@ -134,14 +136,11 @@ export default function Sidebar() {
               </Text>
             </div>
           </div>
-          <Button
-            variant="subtle"
-            size="xs"
-            onClick={handleLogout}
-            color="red"
-          >
-            Logout
-          </Button>
+          <form method="post" action="/api/auth/logout" onSubmit={handleLogout}>
+            <Button type="submit" variant="subtle" size="xs" color="red">
+              Logout
+            </Button>
+          </form>
         </div>
         <div className="flex items-center justify-center px-4 py-2 border-t border-gray-200">
           <ActionIcon
