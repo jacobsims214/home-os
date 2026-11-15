@@ -102,7 +102,7 @@ func TestLegacyInitializeClient(t *testing.T) {
 				t.Fatalf("tools/list returned %d tools, %d registered", len(seen), srv.ToolCount())
 			}
 			t.Logf("tools/list over protocol %s returned %d tools", version, len(seen))
-			for _, name := range []string{"ping", "note_find", "note_create", "event_create", "get_financial_summary", "bill_find", "bill_create", "bill_update", "bill_delete", "bill_pay", "note_get", "note_update", "note_delete", "family_update"} {
+			for _, name := range []string{"family_overview", "person_find", "note_find", "note_create", "event_create", "get_financial_summary", "bill_find", "bill_create", "bill_update", "bill_delete", "bill_pay", "note_get", "note_update", "note_delete", "family_update"} {
 				if !seen[name] {
 					t.Errorf("tools/list is missing %q", name)
 				}
@@ -115,10 +115,10 @@ func TestLegacyInitializeClient(t *testing.T) {
 					Text string `json:"text"`
 				} `json:"content"`
 			}
-			var ping callResult
-			c.call("tools/call", map[string]any{"name": "ping", "arguments": map[string]any{}}, &ping)
-			if ping.IsError || len(ping.Content) != 1 || ping.Content[0].Text != `{"pong":true}` {
-				t.Fatalf("ping returned %+v", ping)
+			var overview callResult
+			c.call("tools/call", map[string]any{"name": "family_overview", "arguments": map[string]any{}}, &overview)
+			if overview.IsError || len(overview.Content) != 1 || !strings.Contains(overview.Content[0].Text, `"today":`) {
+				t.Fatalf("family_overview returned %+v", overview)
 			}
 
 			// A DB-backed tool: proves the claims context reaches the handler.
@@ -222,10 +222,10 @@ func TestModernStatelessClient(t *testing.T) {
 			Text string `json:"text"`
 		} `json:"content"`
 	}
-	var ping callResult
-	c.call(string(mcp.MethodToolsCall), map[string]any{"name": "ping", "arguments": map[string]any{}}, &ping)
-	if ping.IsError || len(ping.Content) != 1 || ping.Content[0].Text != `{"pong":true}` {
-		t.Fatalf("ping returned %+v", ping)
+	var overview callResult
+	c.call(string(mcp.MethodToolsCall), map[string]any{"name": "family_overview", "arguments": map[string]any{}}, &overview)
+	if overview.IsError || len(overview.Content) != 1 || !strings.Contains(overview.Content[0].Text, `"today":`) {
+		t.Fatalf("family_overview returned %+v", overview)
 	}
 	var notes callResult
 	c.call(string(mcp.MethodToolsCall), map[string]any{"name": "note_find", "arguments": map[string]any{}}, &notes)

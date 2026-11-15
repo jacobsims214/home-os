@@ -1,11 +1,11 @@
-// Package household provides MCP tools for querying household and membership
-// data. All queries are scoped to the authenticated user's household from the
-// JWT claims.
+// Package household provides the catalog v2 family and person tools:
+// family_overview, family_update and person_find (KB
+// architecture/mcp-tool-catalog.md). All queries are scoped to the
+// authenticated user's household from the JWT claims.
 package household
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,122 +20,13 @@ import (
 	"home-os/mcp/internal/server"
 )
 
-// householdInfo is the response shape for get_household and the data of a
-// family_update result. ID is a string (not uuid.UUID) so the outputSchema
+// householdInfo is the data of a family_update result. ID is a string (not uuid.UUID) so the outputSchema
 // inferred by jsonschema-go matches the UUID string on the wire.
 type householdInfo struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Timezone    string `json:"timezone" jsonschema_description:"IANA timezone, e.g. America/New_York"`
 	MemberCount int    `json:"member_count"`
-}
-
-// memberRow is a single member in the list_members response.
-type memberRow struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Email string `json:"email"`
-	Role  string `json:"role"`
-}
-
-// NewGetHouseholdTool creates the "get_household" tool definition.
-// It takes no parameters and returns the current household's id, name,
-// timezone and member count.
-func NewGetHouseholdTool() mcp.Tool {
-	return mcp.NewTool("get_household",
-		mcp.WithDescription("Get the current household's id, name, timezone (IANA), and member count"),
-	)
-}
-
-// HandleGetHousehold handles the get_household tool call.
-// It queries the households table using the household_id from the JWT claims
-// and counts memberships.
-func HandleGetHousehold(pool *pgxpool.Pool) func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return mcp.NewToolResultError("unauthorized: missing claims"), nil
-		}
-
-		var info householdInfo
-		err := pool.QueryRow(ctx,
-			`SELECT id::text, name, timezone FROM households WHERE id = $1`,
-			claims.HouseholdID,
-		).Scan(&info.ID, &info.Name, &info.Timezone)
-		if err != nil {
-			return nil, fmt.Errorf("get household: %w", err)
-		}
-
-		err = pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM memberships WHERE household_id = $1`,
-			claims.HouseholdID,
-		).Scan(&info.MemberCount)
-		if err != nil {
-			return nil, fmt.Errorf("count members: %w", err)
-		}
-
-		data, err := json.Marshal(info)
-		if err != nil {
-			return nil, fmt.Errorf("marshal household: %w", err)
-		}
-
-		return mcp.NewToolResultText(string(data)), nil
-	}
-}
-
-// NewListMembersTool creates the "list_members" tool definition.
-// It takes no parameters and returns all members of the current household.
-func NewListMembersTool() mcp.Tool {
-	return mcp.NewTool("list_members",
-		mcp.WithDescription("List all members of the current household with their id, name, email, and role"),
-	)
-}
-
-// HandleListMembers handles the list_members tool call.
-// It joins memberships with users to return member details for the
-// authenticated user's household.
-func HandleListMembers(pool *pgxpool.Pool) func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return mcp.NewToolResultError("unauthorized: missing claims"), nil
-		}
-
-		rows, err := pool.Query(ctx,
-			`SELECT u.id, u.name, u.email, m.role
-			 FROM memberships m
-			 JOIN users u ON u.id = m.user_id
-			 WHERE m.household_id = $1
-			 ORDER BY m.created_at`,
-			claims.HouseholdID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("list members: %w", err)
-		}
-		defer rows.Close()
-
-		var members []memberRow
-		for rows.Next() {
-			var m memberRow
-			if err := rows.Scan(&m.ID, &m.Name, &m.Email, &m.Role); err != nil {
-				return nil, fmt.Errorf("scan member: %w", err)
-			}
-			members = append(members, m)
-		}
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("iterate members: %w", err)
-		}
-		if members == nil {
-			members = []memberRow{}
-		}
-
-		data, err := json.Marshal(members)
-		if err != nil {
-			return nil, fmt.Errorf("marshal members: %w", err)
-		}
-
-		return mcp.NewToolResultText(string(data)), nil
-	}
 }
 
 // maxHouseholdNameRunes matches households.name VARCHAR(255).
@@ -251,6 +142,7 @@ func NewFamilyUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context
 			fmt.Sprintf("Updated the family: %s.", strings.Join(changed, ", ")),
 			info,
 			fmt.Sprintf("Dates and weekdays now show in %s.", info.Timezone),
+			"See the family's day with family_overview.",
 		), nil
 	}
 

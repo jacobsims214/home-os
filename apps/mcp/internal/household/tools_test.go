@@ -16,19 +16,34 @@ import (
 	"home-os/mcp/internal/testutil"
 )
 
-type toolHandler = func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
-
-// envelope is the respond wire shape for single-object results.
+// envelope is the respond wire shape; Data is set for single-object
+// results, Items/Total/Truncated/Narrow for lists.
 type envelope struct {
-	OK      bool          `json:"ok"`
-	Summary string        `json:"summary"`
-	Data    householdInfo `json:"data"`
-	Next    []string      `json:"next"`
-	Error   *struct {
+	OK        bool            `json:"ok"`
+	Summary   string          `json:"summary"`
+	Data      json.RawMessage `json:"data"`
+	Items     []personRow     `json:"items"`
+	Total     int             `json:"total"`
+	Truncated bool            `json:"truncated"`
+	Narrow    string          `json:"narrow"`
+	Next      []string        `json:"next"`
+	Error     *struct {
 		Message string `json:"message"`
 		Fix     string `json:"fix"`
 		Field   string `json:"field"`
 	} `json:"error"`
+}
+
+// info decodes Data as a family_update result.
+func (e envelope) info(t *testing.T) householdInfo {
+	t.Helper()
+	var i householdInfo
+	if len(e.Data) > 0 {
+		if err := json.Unmarshal(e.Data, &i); err != nil {
+			t.Fatalf("decode data: %v", err)
+		}
+	}
+	return i
 }
 
 // outputSchema resolves the outputSchema a tool advertises.
@@ -96,18 +111,27 @@ func callEnvelope(t *testing.T, ctx context.Context, h toolHandler, rs *jsonsche
 	return env, res
 }
 
-// getHousehold runs get_household and decodes its plain JSON result.
+// getHousehold reads the family through family_overview and returns it in
+// the family_update result shape.
 func getHousehold(t *testing.T, ctx context.Context, pool *pgxpool.Pool) householdInfo {
 	t.Helper()
-	res, err := HandleGetHousehold(pool)(ctx, mcp.CallToolRequest{})
-	if err != nil {
-		t.Fatalf("get_household: %v", err)
+	ov := overviewOf(t, ctx, pool)
+	return householdInfo{ID: ov.Family.ID, Name: ov.Family.Name, Timezone: ov.Family.Timezone, MemberCount: len(ov.People)}
+}
+
+// overviewOf runs family_overview and decodes its data.
+func overviewOf(t *testing.T, ctx context.Context, pool *pgxpool.Pool) overview {
+	t.Helper()
+	_, tool, h := NewFamilyOverviewTool(pool)
+	env, _ := callEnvelope(t, ctx, h, outputSchema(t, tool), map[string]any{})
+	if !env.OK {
+		t.Fatalf("family_overview failed: %+v", env)
 	}
-	var info householdInfo
-	if err := json.Unmarshal([]byte(res.Content[0].(mcp.TextContent).Text), &info); err != nil {
-		t.Fatalf("decode get_household: %v", err)
+	var ov overview
+	if err := json.Unmarshal(env.Data, &ov); err != nil {
+		t.Fatalf("decode family_overview: %v", err)
 	}
-	return info
+	return ov
 }
 
 // addMember inserts a user with role into hh's household and returns a
@@ -137,22 +161,6 @@ func addMember(t *testing.T, pool *pgxpool.Pool, hh testutil.Household, role str
 	})
 }
 
-func TestGetHousehold_ReturnsTimezone(t *testing.T) {
-	pool := testutil.NewPool(t)
-	ctx, hh := testutil.SeedHousehold(t, pool)
-
-	info := getHousehold(t, ctx, pool)
-	if info.ID != hh.HouseholdID.String() {
-		t.Errorf("id = %s, want %s", info.ID, hh.HouseholdID)
-	}
-	if info.Timezone != "UTC" {
-		t.Errorf("timezone = %q, want default UTC", info.Timezone)
-	}
-	if info.MemberCount != 1 {
-		t.Errorf("member_count = %d, want 1", info.MemberCount)
-	}
-}
-
 func TestFamilyUpdate(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
@@ -177,19 +185,19 @@ func TestFamilyUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("owner sets America/New_York and get_household shows it", func(t *testing.T) {
+	t.Run("owner sets America/New_York and family_overview shows it", func(t *testing.T) {
 		env, _ := callEnvelope(t, ctx, h, rs, map[string]any{"timezone": "America/New_York"})
 		if !env.OK {
 			t.Fatalf("want ok, got %+v", env)
 		}
-		if env.Data.Timezone != "America/New_York" || env.Data.ID != hh.HouseholdID.String() || env.Data.MemberCount != 1 {
-			t.Errorf("data = %+v", env.Data)
+		if env.info(t).Timezone != "America/New_York" || env.info(t).ID != hh.HouseholdID.String() || env.info(t).MemberCount != 1 {
+			t.Errorf("data = %s", env.Data)
 		}
 		if !strings.Contains(env.Summary, "America/New_York") || len(env.Next) == 0 {
 			t.Errorf("summary %q next %v", env.Summary, env.Next)
 		}
 		if got := getHousehold(t, ctx, pool).Timezone; got != "America/New_York" {
-			t.Errorf("get_household timezone = %q, want America/New_York", got)
+			t.Errorf("family_overview timezone = %q, want America/New_York", got)
 		}
 		// Other households are untouched.
 		if got := getHousehold(t, otherCtx, pool); got.Timezone != "UTC" || got.ID != other.HouseholdID.String() {
@@ -199,7 +207,7 @@ func TestFamilyUpdate(t *testing.T) {
 
 	t.Run("name only keeps the timezone", func(t *testing.T) {
 		env, _ := callEnvelope(t, ctx, h, rs, map[string]any{"name": "  The Sims Family  ", "timezone": ""})
-		if !env.OK || env.Data.Name != "The Sims Family" || env.Data.Timezone != "America/New_York" {
+		if !env.OK || env.info(t).Name != "The Sims Family" || env.info(t).Timezone != "America/New_York" {
 			t.Fatalf("got %+v", env)
 		}
 		if strings.Contains(env.Summary, "timezone") {
@@ -210,7 +218,7 @@ func TestFamilyUpdate(t *testing.T) {
 	t.Run("repeat call is idempotent", func(t *testing.T) {
 		for i := 0; i < 2; i++ {
 			env, _ := callEnvelope(t, ctx, h, rs, map[string]any{"timezone": "America/New_York"})
-			if !env.OK || env.Data.Timezone != "America/New_York" || env.Data.Name != "The Sims Family" {
+			if !env.OK || env.info(t).Timezone != "America/New_York" || env.info(t).Name != "The Sims Family" {
 				t.Fatalf("call %d: %+v", i, env)
 			}
 		}
@@ -219,7 +227,7 @@ func TestFamilyUpdate(t *testing.T) {
 	t.Run("family_manager may update", func(t *testing.T) {
 		mctx := addMember(t, pool, hh, "family_manager")
 		env, _ := callEnvelope(t, mctx, h, rs, map[string]any{"timezone": "Europe/London"})
-		if !env.OK || env.Data.Timezone != "Europe/London" || env.Data.MemberCount != 2 {
+		if !env.OK || env.info(t).Timezone != "Europe/London" || env.info(t).MemberCount != 2 {
 			t.Fatalf("got %+v", env)
 		}
 	})
