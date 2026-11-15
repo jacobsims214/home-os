@@ -61,6 +61,136 @@ func callTool(t *testing.T, handler func(context.Context, mcp.CallToolRequest) (
 	return text.Text, res.IsError
 }
 
+func ptr(s string) *string { return &s }
+
+// Raw VCALENDARs as a phone would PUT them over CalDAV (CRLF line endings).
+const (
+	weeklyRaw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:soccer@example.com\r\n" +
+		"DTSTART:20261115T150000Z\r\nDTEND:20261115T160000Z\r\nRRULE:FREQ=WEEKLY;BYDAY=TU\r\n" +
+		"SUMMARY:Game\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	overrideRaw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:soccer@example.com\r\n" +
+		"RECURRENCE-ID;TZID=America/New_York:20261117T100000\r\n" +
+		"DTSTART:20261115T150000Z\r\nDTEND:20261115T160000Z\r\nSUMMARY:Game\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	singleRaw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:game@example.com\r\n" +
+		"DTSTART:20261115T150000Z\r\nDTEND:20261115T160000Z\r\nSUMMARY:Game\r\n" +
+		"DESCRIPTION:bring the RRULE:FREQ=WEEKLY printout\r\n  RRULE:FREQ=DAILY folded text\r\n" +
+		"END:VEVENT\r\nEND:VCALENDAR\r\n"
+)
+
+// setRecurrence sets the migration-036 columns on a seeded event.
+func setRecurrence(t *testing.T, pool *pgxpool.Pool, eventID string, rrule, icalRaw *string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE calendar_objects SET rrule = $1, ical_raw = $2 WHERE id = $3`, rrule, icalRaw, eventID,
+	); err != nil {
+		t.Fatalf("set recurrence: %v", err)
+	}
+}
+
+type storedRow struct {
+	IcalData, Etag, EventType string
+	IcalRaw, Rrule            string
+	UpdatedAt                 time.Time
+}
+
+func readRow(t *testing.T, pool *pgxpool.Pool, eventID string) storedRow {
+	t.Helper()
+	var r storedRow
+	if err := pool.QueryRow(context.Background(),
+		`SELECT ical_data, etag, event_type, COALESCE(ical_raw, ''), COALESCE(rrule, ''), updated_at FROM calendar_objects WHERE id = $1`,
+		eventID,
+	).Scan(&r.IcalData, &r.Etag, &r.EventType, &r.IcalRaw, &r.Rrule, &r.UpdatedAt); err != nil {
+		t.Fatalf("read event row: %v", err)
+	}
+	return r
+}
+
+// TestIsRecurringEvent covers recurrence detection without a database.
+func TestIsRecurringEvent(t *testing.T) {
+	tests := []struct {
+		name    string
+		rrule   *string
+		icalRaw *string
+		want    bool
+	}{
+		{name: "both NULL (pre-036 row)", want: false},
+		{name: "empty rrule, no raw", rrule: ptr("  "), want: false},
+		{name: "rrule set", rrule: ptr("FREQ=DAILY"), want: true},
+		{name: "raw with RRULE", icalRaw: ptr(weeklyRaw), want: true},
+		{name: "raw with RRULE, LF endings", icalRaw: ptr(strings.ReplaceAll(weeklyRaw, "\r\n", "\n")), want: true},
+		{name: "raw with RECURRENCE-ID override", icalRaw: ptr(overrideRaw), want: true},
+		{name: "raw with RDATE", icalRaw: ptr("BEGIN:VEVENT\r\nRDATE:20261120T150000Z\r\nEND:VEVENT\r\n"), want: true},
+		{name: "lower-case property name", icalRaw: ptr("BEGIN:VEVENT\nrrule:FREQ=WEEKLY\nEND:VEVENT\n"), want: true},
+		{name: "single event mentioning RRULE in text", icalRaw: ptr(singleRaw), want: false},
+		{name: "empty raw", icalRaw: ptr(""), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRecurringEvent(tt.rrule, tt.icalRaw); got != tt.want {
+				t.Errorf("isRecurringEvent = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDeleteEvent checks delete_event removes a whole series and says so.
+func TestDeleteEvent(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	calendarID := seedCalendar(t, pool, hh.HouseholdID)
+	_, handler := NewDeleteEventTool(pool)
+	const stored = `{"title":"Game","start":"2026-11-15T15:00:00Z","end":"2026-11-15T16:00:00Z","all_day":false}`
+
+	tests := []struct {
+		name       string
+		rrule      *string
+		icalRaw    *string
+		wantSeries bool
+	}{
+		{name: "one-off event", wantSeries: false},
+		{name: "recurring series", rrule: ptr("FREQ=WEEKLY"), icalRaw: ptr(weeklyRaw), wantSeries: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			uid := "caldav-" + uuid.NewString() + "@example.com"
+			eventID := seedEvent(t, pool, calendarID, uid, stored)
+			setRecurrence(t, pool, eventID, tt.rrule, tt.icalRaw)
+
+			text, isErr := callTool(t, handler, ctx, map[string]any{"event_id": eventID})
+			if isErr {
+				t.Fatalf("unexpected error: %s", text)
+			}
+			var res struct {
+				Success       bool   `json:"success"`
+				SeriesDeleted bool   `json:"series_deleted"`
+				Note          string `json:"note"`
+			}
+			if err := json.Unmarshal([]byte(text), &res); err != nil {
+				t.Fatalf("decode %q: %v", text, err)
+			}
+			if !res.Success || res.SeriesDeleted != tt.wantSeries {
+				t.Errorf("result = %+v, want success and series_deleted=%v", res, tt.wantSeries)
+			}
+			if tt.wantSeries && !strings.Contains(res.Note, "whole series") {
+				t.Errorf("note = %q, want it to say the whole series was deleted", res.Note)
+			}
+			var n int
+			if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM calendar_objects WHERE id = $1`, eventID).Scan(&n); err != nil {
+				t.Fatalf("count: %v", err)
+			}
+			if n != 0 {
+				t.Error("event row still exists")
+			}
+			var action string
+			if err := pool.QueryRow(context.Background(),
+				`SELECT action FROM calendar_changes WHERE calendar_id = $1 AND event_uid = $2`, calendarID, uid,
+			).Scan(&action); err != nil || action != "delete" {
+				t.Errorf("delete change = %q, %v", action, err)
+			}
+		})
+	}
+}
+
 func mustTime(t *testing.T, s string) time.Time {
 	t.Helper()
 	v, err := time.Parse(time.RFC3339, s)
@@ -245,6 +375,81 @@ func TestUpdateEvent(t *testing.T) {
 			}
 		})
 	}
+
+	// Recurring events are refused without writing anything (#4629): an
+	// edit here would make ical_raw stale and CalDAV would regenerate the
+	// event without its RRULE, flattening the series on every phone.
+	recurring := []struct {
+		name    string
+		rrule   *string
+		icalRaw *string
+	}{
+		{name: "rrule column set", rrule: ptr("FREQ=WEEKLY;BYDAY=TU"), icalRaw: ptr(weeklyRaw)},
+		{name: "only ical_raw carries RRULE", icalRaw: ptr(weeklyRaw)},
+		{name: "ical_raw is an occurrence override (RECURRENCE-ID)", icalRaw: ptr(overrideRaw)},
+	}
+	for _, tt := range recurring {
+		t.Run("recurring event is refused: "+tt.name, func(t *testing.T) {
+			uid := "caldav-" + uuid.NewString() + "@example.com"
+			eventID := seedEvent(t, pool, calendarID, uid, stored)
+			setRecurrence(t, pool, eventID, tt.rrule, tt.icalRaw)
+			before := readRow(t, pool, eventID)
+			var ctagBefore string
+			if err := pool.QueryRow(context.Background(), `SELECT ctag FROM calendars WHERE id = $1`, calendarID).Scan(&ctagBefore); err != nil {
+				t.Fatalf("read ctag: %v", err)
+			}
+
+			text, isErr := callTool(t, handler, ctx, map[string]any{"event_id": eventID, "title": "Soccer (renamed)"})
+			if !isErr {
+				t.Fatalf("want an error result, got %q", text)
+			}
+			for _, want := range []string{"repeats", "phone", "Nothing was changed"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("error %q does not mention %q", text, want)
+				}
+			}
+
+			if after := readRow(t, pool, eventID); after != before {
+				t.Errorf("refused update changed the row:\nbefore %+v\nafter  %+v", before, after)
+			}
+			var changes int
+			if err := pool.QueryRow(context.Background(),
+				`SELECT count(*) FROM calendar_changes WHERE calendar_id = $1 AND event_uid = $2`, calendarID, uid,
+			).Scan(&changes); err != nil {
+				t.Fatalf("count changes: %v", err)
+			}
+			if changes != 0 {
+				t.Errorf("%d calendar_changes rows added for a refused update", changes)
+			}
+			var ctagAfter string
+			if err := pool.QueryRow(context.Background(), `SELECT ctag FROM calendars WHERE id = $1`, calendarID).Scan(&ctagAfter); err != nil {
+				t.Fatalf("read ctag: %v", err)
+			}
+			if ctagAfter != ctagBefore {
+				t.Error("ctag was bumped for a refused update")
+			}
+		})
+	}
+
+	t.Run("non-recurring event with ical_raw still updates", func(t *testing.T) {
+		uid := "caldav-" + uuid.NewString() + "@example.com"
+		eventID := seedEvent(t, pool, calendarID, uid, stored)
+		setRecurrence(t, pool, eventID, nil, ptr(singleRaw))
+		text, isErr := callTool(t, handler, ctx, map[string]any{"event_id": eventID, "title": "Final"})
+		if isErr {
+			t.Fatalf("unexpected error: %s", text)
+		}
+		var got Event
+		if err := json.Unmarshal([]byte(text), &got); err != nil {
+			t.Fatalf("decode response %q: %v", text, err)
+		}
+		if got.Title != "Final" {
+			t.Errorf("title = %q, want Final", got.Title)
+		}
+		if row := readRow(t, pool, eventID); row.Etag == "etag-0" {
+			t.Error("etag was not changed by the update")
+		}
+	})
 
 	t.Run("another household cannot update the event", func(t *testing.T) {
 		eventID := seedEvent(t, pool, calendarID, uuid.NewString(), stored)

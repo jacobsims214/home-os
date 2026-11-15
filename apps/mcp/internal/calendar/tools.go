@@ -1081,10 +1081,50 @@ func NewCreateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 // 4. update_event
 // ─────────────────────────────────────────────
 
+// recurringEditRefusal is the tool error update_event returns for a
+// repeating event. It tells the model what to do next rather than retry.
+const recurringEditRefusal = "This event repeats (it is a recurring series), and repeating events can't be edited from here yet: " +
+	"changing it would turn the whole series into a single event. Nothing was changed. " +
+	"Ask the user to make this change in their phone's calendar app. " +
+	"Only if the user agrees, you can instead delete the series with delete_event and create a one-off event with create_event."
+
+// recurringDeleteNote is added to delete_event's result for a repeating event.
+const recurringDeleteNote = "This was a repeating event: the whole series was deleted, not just one occurrence."
+
+// isRecurringEvent reports whether a calendar_objects row is part of a
+// recurring series: its rrule column is set, or its raw iCalendar carries an
+// RRULE, RDATE or RECURRENCE-ID property (an override of one occurrence).
+// Both columns are NULL for rows written before migration 036.
+func isRecurringEvent(rrule, icalRaw *string) bool {
+	if rrule != nil && strings.TrimSpace(*rrule) != "" {
+		return true
+	}
+	if icalRaw == nil || *icalRaw == "" {
+		return false
+	}
+	for _, line := range strings.Split(*icalRaw, "\n") {
+		// A line starting with a space or tab continues a folded line
+		// (RFC 5545 3.1), e.g. a DESCRIPTION mentioning "RRULE:"; skip it.
+		if line == "" || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		name := strings.ToUpper(strings.TrimRight(line, "\r"))
+		// Property name ends at ':' (value) or ';' (parameters).
+		if i := strings.IndexAny(name, ":;"); i >= 0 {
+			name = name[:i]
+		}
+		switch name {
+		case "RRULE", "RDATE", "RECURRENCE-ID":
+			return true
+		}
+	}
+	return false
+}
+
 // NewUpdateEventTool creates the update_event tool and its handler.
 func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("update_event",
-		mcp.WithDescription("Update an existing calendar event. All fields except event_id are optional — only provided fields are updated. Moving start_time without end_time keeps the event's duration. Returns the updated event."),
+		mcp.WithDescription("Update an existing calendar event. All fields except event_id are optional — only provided fields are updated. Moving start_time without end_time keeps the event's duration. Returns the updated event. Repeating events can't be edited here yet: ask the user to change them in their phone's calendar app."),
 		mcp.WithString("event_id", mcp.Description("Event ID to update"), mcp.Required()),
 		mcp.WithString("title", mcp.Description("New title")),
 		mcp.WithString("start_time", mcp.Description("New start time (ISO 8601). For all_day events a date (2026-08-03) is enough.")),
@@ -1123,12 +1163,20 @@ func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 		// and what calendar_changes must record; it differs from id for
 		// events created over CalDAV.
 		var existingIcalData, eventUID string
+		var rrule, icalRaw *string
 		err = pool.QueryRow(ctx,
-			`SELECT ical_data, uid FROM calendar_objects WHERE id = $1`,
+			`SELECT ical_data, uid, rrule, ical_raw FROM calendar_objects WHERE id = $1`,
 			eventID,
-		).Scan(&existingIcalData, &eventUID)
+		).Scan(&existingIcalData, &eventUID, &rrule, &icalRaw)
 		if err != nil {
 			return mcp.NewToolResultError("event not found"), nil
+		}
+		// Writes here only touch the JSON in ical_data; CalDAV then
+		// regenerates the event without RRULE/EXDATE, so editing a series
+		// would silently flatten it to one event on every phone. Refuse
+		// until recurrence-aware writes exist (#4465).
+		if isRecurringEvent(rrule, icalRaw) {
+			return mcp.NewToolResultError(recurringEditRefusal), nil
 		}
 		var existing eventJSON
 		if err := json.Unmarshal([]byte(existingIcalData), &existing); err != nil {
@@ -1256,7 +1304,7 @@ func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 // NewDeleteEventTool creates the delete_event tool and its handler.
 func NewDeleteEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("delete_event",
-		mcp.WithDescription("Delete a calendar event. Records a calendar_changes entry (action='delete') and bumps the calendar's ctag for CalDAV sync."),
+		mcp.WithDescription("Delete a calendar event. For a repeating event this deletes the whole series, not one occurrence. Records a calendar_changes entry (action='delete') and bumps the calendar's ctag for CalDAV sync."),
 		mcp.WithString("event_id", mcp.Description("Event ID to delete"), mcp.Required()),
 	)
 
@@ -1290,10 +1338,11 @@ func NewDeleteEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 
 		// Delete the event and get the uid for the change record
 		var eventUID string
+		var rrule, icalRaw *string
 		err = tx.QueryRow(ctx,
-			`DELETE FROM calendar_objects WHERE id = $1 RETURNING uid`,
+			`DELETE FROM calendar_objects WHERE id = $1 RETURNING uid, rrule, ical_raw`,
 			eventID,
-		).Scan(&eventUID)
+		).Scan(&eventUID, &rrule, &icalRaw)
 		if err == pgx.ErrNoRows {
 			return mcp.NewToolResultError("event not found"), nil
 		}
@@ -1310,6 +1359,14 @@ func NewDeleteEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 			return mcp.NewToolResultError(fmt.Sprintf("commit: %v", err)), nil
 		}
 
+		if isRecurringEvent(rrule, icalRaw) {
+			slog.Info("delete_event: deleted series", "event_id", eventID)
+			out, err := json.Marshal(map[string]any{"success": true, "series_deleted": true, "note": recurringDeleteNote})
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("event deleted but result could not be encoded: %v", err)), nil
+			}
+			return mcp.NewToolResultText(string(out)), nil
+		}
 		slog.Info("delete_event: deleted", "event_id", eventID)
 		return mcp.NewToolResultText(`{"success":true}`), nil
 	}
