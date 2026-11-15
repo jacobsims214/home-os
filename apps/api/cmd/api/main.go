@@ -267,6 +267,9 @@ func main() {
 		noteHandler := note.NewHandler(noteRepo).WithSearchClient(searchClient)
 		r.Get("/api/v1/notes", noteHandler.List)
 		r.Post("/api/v1/notes", noteHandler.Create)
+		r.Get("/api/v1/notes/{id}", noteHandler.Get)
+		r.Put("/api/v1/notes/{id}", noteHandler.Update)
+		r.Patch("/api/v1/notes/{id}", noteHandler.Update)
 		r.Delete("/api/v1/notes/{id}", noteHandler.Delete)
 
 		// Notification CRUD
