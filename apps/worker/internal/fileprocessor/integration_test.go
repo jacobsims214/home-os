@@ -108,7 +108,14 @@ func TestSemanticIndexingIntegration(t *testing.T) {
 			t.Errorf("embedding field = %+v, want embed from name,extracted_text", f)
 		}
 	}
-	for _, name := range []string{"embedding", "file_id", "chunk_index", "chunk_count", "row_version"} {
+	if !got[search.EmbeddingField] {
+		// InitCollection only logs a failed embedding alter (keyword search
+		// keeps working), so repeat the alter here to put Typesense's reason
+		// in the failure. The usual cause is the one-time model download from
+		// models.typesense.org failing (no route, proxy, slow link), not code.
+		t.Fatalf("migrated schema lacks %s; re-running the alter gives: %s", search.EmbeddingField, ts.alterEmbedding())
+	}
+	for _, name := range []string{"file_id", "chunk_index", "chunk_count", "row_version"} {
 		if !got[name] {
 			t.Errorf("migrated schema lacks %s", name)
 		}
@@ -322,6 +329,27 @@ func (a *tsAdmin) mustDo(t *testing.T, method, path string, in, out any) {
 			t.Fatalf("decode %s: %v", path, err)
 		}
 	}
+}
+
+// alterEmbedding PATCHes the auto-embedding field onto `files` and returns
+// Typesense's status and body (or the transport error), for diagnostics.
+func (a *tsAdmin) alterEmbedding() string {
+	b, _ := json.Marshal(map[string]any{"fields": []map[string]any{{
+		"name": search.EmbeddingField, "type": "float[]",
+		"embed": map[string]any{
+			"from":         []string{"name", "extracted_text"},
+			"model_config": map[string]any{"model_name": search.EmbeddingModel},
+		},
+	}}})
+	req, _ := http.NewRequest(http.MethodPatch, a.base+"/collections/files", bytes.NewReader(b))
+	req.Header.Set("X-TYPESENSE-API-KEY", a.key)
+	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
+	if err != nil {
+		return err.Error()
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return fmt.Sprintf("HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
 func (a *tsAdmin) countFileDocs(t *testing.T, fileID string) int {
