@@ -413,8 +413,9 @@ func TestDomainV2_Backfill039(t *testing.T) {
 			t.Fatalf("apply %s: %v", name, err)
 		}
 	}
-	// Undo later migrations first, newest first: 041, 044 and 046 hang
+	// Undo later migrations first, newest first: 041, 044, 046 and 047 hang
 	// triggers on 038's functions, which 038 down drops without CASCADE.
+	apply("047_meals.down.sql")
 	apply("046_lists.down.sql")
 	apply("044_budgeting.down.sql")
 	apply("043_vendor_trades.down.sql")

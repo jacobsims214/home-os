@@ -47,7 +47,9 @@ func countRows(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) int {
 // person; a second up/down/up cycle works.
 func TestPeople041_BackfillAndReversible(t *testing.T) {
 	pool := NewPool(t)
-	// 046 list_items reference people; undo it first (newest first).
+	// 046 list_items and 047 meal_feedback reference people; undo them
+	// first (newest first).
+	applyMigration(t, pool, "047_meals.down.sql")
 	applyMigration(t, pool, "046_lists.down.sql")
 	applyMigration(t, pool, "041_people.down.sql")
 
@@ -182,6 +184,7 @@ func TestPeople041_EntityKindPerson(t *testing.T) {
 	// Down re-homes refs to remaining people and narrows entity_kind again.
 	kid2 := insertID(t, pool, `INSERT INTO people (household_id, display_name) VALUES ($1, 'Jo') RETURNING id`, f.household)
 	file2 := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'y.pdf', 1, 'person', $3) RETURNING id`, f.household, blob, kid2)
+	applyMigration(t, pool, "047_meals.down.sql") // meal_feedback references people
 	applyMigration(t, pool, "046_lists.down.sql") // list_items reference people
 	applyMigration(t, pool, "041_people.down.sql")
 	var kind string

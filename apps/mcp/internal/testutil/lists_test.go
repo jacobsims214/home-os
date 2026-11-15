@@ -25,6 +25,8 @@ func TestLists046_Reversible(t *testing.T) {
 	blob := insertID(t, pool, `INSERT INTO file_blobs (data, size) VALUES ('x', 1) RETURNING id`)
 	file := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'coupon.pdf', 1, 'list', $3) RETURNING id`, f.household, blob, list)
 
+	// 047 replaces entity_household() on top of 046; undo it first.
+	applyMigration(t, pool, "047_meals.down.sql")
 	applyMigration(t, pool, "046_lists.down.sql")
 	if n := countRows(t, pool, `SELECT count(*) FROM pg_tables WHERE tablename IN ('lists', 'list_items')`); n != 0 {
 		t.Fatalf("down: %d list tables left", n)
@@ -45,6 +47,7 @@ func TestLists046_Reversible(t *testing.T) {
 	mustExec(t, pool, `INSERT INTO notes (household_id, entity_type, entity_id, body) VALUES ($1, 'list', $2, 'ok')`, f.household, list)
 	applyMigration(t, pool, "046_lists.down.sql")
 	applyMigration(t, pool, "046_lists.up.sql")
+	applyMigration(t, pool, "047_meals.up.sql")
 }
 
 // Defaults, same-family rules, rehome on delete and the item triggers.
