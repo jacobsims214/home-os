@@ -55,6 +55,17 @@ spec:
           value: {{ include "home-os.apiPublicUrl" . | quote }}
         - name: ALLOW_REGISTRATION
           value: "{{ .Values.api.allowRegistration }}"
+        # CORS accepts localhost origins only on local docker-desktop.
+        - name: LOCAL_DEV
+          value: {{ .Values.global.allowLocalPublicUrl | default false | quote }}
+        {{- with .Values.api.rateLimit }}
+        - name: API_PUBLIC_RATE_PER_MINUTE
+          value: {{ .perMinute | default 10 | quote }}
+        - name: API_PUBLIC_RATE_BURST
+          value: {{ .burst | default 5 | quote }}
+        - name: API_TRUSTED_PROXIES
+          value: {{ join "," (.trustedProxies | default list) | quote }}
+        {{- end }}
         - name: SMTP_HOST
           value: "{{ .Values.smtp.host }}"
         - name: SMTP_PORT

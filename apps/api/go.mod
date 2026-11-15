@@ -12,6 +12,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/typesense/typesense-go/v3 v3.2.0
 	golang.org/x/crypto v0.52.0
+	golang.org/x/time v0.12.0
 	google.golang.org/grpc v1.76.0
 	home-os/icalx v0.0.0
 )

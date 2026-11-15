@@ -139,7 +139,24 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
-	r.Use(middleware.CORS(true, "")) // dev mode: allow all origins
+	// CORS: only the public origin (PUBLIC_URL). The UI is served from that
+	// same origin through Envoy, so browsers on any other site get no CORS
+	// headers. localhost origins are added only with LOCAL_DEV=true.
+	r.Use(middleware.CORSFor(middleware.OriginOf(cfg.PublicURL), cfg.LocalDev))
+
+	// Per-client-IP rate limit for the unauthenticated routes below (#4685).
+	// In memory per pod (see middleware/ratelimit.go): with 2 replicas a
+	// client can get up to twice the budget, which is acceptable here.
+	trustedProxies, err := middleware.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		slog.Error("invalid API_TRUSTED_PROXIES", "error", err)
+		os.Exit(1)
+	}
+	publicLimiter := middleware.NewRateLimiter(cfg.PublicRatePerMinute, cfg.PublicRateBurst, trustedProxies)
+	limiterCtx, stopLimiter := context.WithCancel(ctx)
+	defer stopLimiter()
+	go publicLimiter.Run(limiterCtx)
+	limited := func(h http.HandlerFunc) http.Handler { return publicLimiter.Middleware(h) }
 
 	// Health endpoint — returns service status.
 	r.Get("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
@@ -172,8 +189,8 @@ func main() {
 
 	r.Get("/api/v1/auth/me", authHandler.Me)
 	r.Post("/api/v1/auth/caldav-password", authHandler.GenerateCaldavPassword)
-	r.Post("/api/v1/auth/forgot-password", authHandler.ForgotPassword)
-	r.Post("/api/v1/auth/reset-password", authHandler.ResetPassword)
+	r.Method(http.MethodPost, "/api/v1/auth/forgot-password", limited(authHandler.ForgotPassword))
+	r.Method(http.MethodPost, "/api/v1/auth/reset-password", limited(authHandler.ResetPassword))
 
 	// Invites. Accept is outside RequireAuth: the invitee is usually not a
 	// household member yet (RequireAuth answers 403 for that), so the handler
@@ -182,13 +199,13 @@ func main() {
 	if dexClient != nil { // a nil *dex.Client must not become a non-nil interface
 		inviteHandler.WithDex(dexClient)
 	}
-	r.Post("/api/v1/invites/accept", inviteHandler.AcceptInvite)
+	r.Method(http.MethodPost, "/api/v1/invites/accept", limited(inviteHandler.AcceptInvite))
 
 	// Household handler. Create (onboarding) is outside RequireAuth for the
 	// same reason as invite accept: a new Dex user has no membership yet, so
 	// the handler verifies the token itself. The /me routes stay protected.
 	householdHandler := household.NewHandler(householdRepo).WithVerifier(oidcVerifier)
-	r.Post("/api/v1/households", householdHandler.Create)
+	r.Method(http.MethodPost, "/api/v1/households", limited(householdHandler.Create))
 
 	// Instance admin endpoints (families, users, deactivation). Outside
 	// RequireAuth: an instance admin need not be a household member. The

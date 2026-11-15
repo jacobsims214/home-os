@@ -156,6 +156,7 @@ services:
     environment:
       PORT: "8080"
       DATABASE_URL: postgres://homeos:homeos@postgres:5432/homeos?sslmode=disable
+      LOCAL_DEV: "true"
       JWT_SECRET: homeos-dev-jwt-secret-change-in-prod
       TYPESENSE_HOST: typesense
       TYPESENSE_PORT: "8108"

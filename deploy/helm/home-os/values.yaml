@@ -47,6 +47,47 @@ api:
   publicUrl: ""
   allowRegistration: "false"
   # Admin bootstrap credentials live in secrets.adminEmail / secrets.adminPassword.
+  # Per-client-IP rate limit on the unauthenticated routes (invite accept,
+  # household create, forgot/reset password; apps/api/internal/middleware/
+  # ratelimit.go). Past the budget they answer 429 + Retry-After. In memory per
+  # pod, so with N replicas a client can get up to N x the budget.
+  rateLimit:
+    # Requests per client IP per minute.
+    perMinute: 10
+    # Requests a client may make at once before the per-minute rate applies.
+    burst: 5
+    # Networks of the reverse proxies in front of the API. X-Forwarded-For is
+    # only believed when the TCP peer is in one of these, and then the
+    # rightmost hop outside them is the client; otherwise the TCP peer is.
+    # Chain: client -> Cloudflare -> Traefik -> Envoy -> api. The pod CIDR
+    # (Talos default 10.244.0.0/16) covers Envoy and Traefik; Cloudflare's
+    # published edge ranges (https://www.cloudflare.com/ips/, re-check when
+    # they change) make the address Cloudflare saw the client. Don't add LAN
+    # ranges: a client in a trusted range could pick its own rate-limit key.
+    trustedProxies:
+      - 10.244.0.0/16
+      - 173.245.48.0/20
+      - 103.21.244.0/22
+      - 103.22.200.0/22
+      - 103.31.4.0/22
+      - 141.101.64.0/18
+      - 108.162.192.0/18
+      - 190.93.240.0/20
+      - 188.114.96.0/20
+      - 197.234.240.0/22
+      - 198.41.128.0/17
+      - 162.158.0.0/15
+      - 104.16.0.0/13
+      - 104.24.0.0/14
+      - 172.64.0.0/13
+      - 131.0.72.0/22
+      - 2400:cb00::/32
+      - 2606:4700::/32
+      - 2803:f800::/32
+      - 2405:b500::/32
+      - 2405:8100::/32
+      - 2a06:98c0::/29
+      - 2c0f:f248::/32
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
