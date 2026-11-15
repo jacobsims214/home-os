@@ -362,9 +362,9 @@ func updatedEvents(t *testing.T, pool *pgxpool.Pool, billID, householdID uuid.UU
 	return n
 }
 
-// TestUpdateBill_PartialUpdate changes amount and due_day only and checks
+// TestBillUpdate_PartialUpdate changes amount and due_day only and checks
 // every other field keeps its value, in the response and in the table.
-func TestUpdateBill_PartialUpdate(t *testing.T) {
+func TestBillUpdate_PartialUpdate(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	vendorID := insertVendor(t, pool, hh.HouseholdID, "Power Co")
@@ -375,15 +375,15 @@ func TestUpdateBill_PartialUpdate(t *testing.T) {
 		t.Fatalf("current date: %v", err)
 	}
 
-	_, _, update := NewUpdateBillTool(pool)
-	res, text := callTool(t, ctx, update, "update_bill", map[string]any{
+	_, _, update := NewBillUpdateTool(pool)
+	res, text := callTool(t, ctx, update, "bill_update", map[string]any{
 		"bill_id": orig.ID.String(),
 		"amount":  99.999, // rounded to cents like create_bill
 		"due_day": float64(today.Day()),
 		"notes":   nil, // null means unchanged
 	})
 	if res.IsError {
-		t.Fatalf("update_bill returned tool error: %s", text)
+		t.Fatalf("bill_update returned tool error: %s", text)
 	}
 	got := decodeUpdated(t, text)
 
@@ -421,17 +421,17 @@ func TestUpdateBill_PartialUpdate(t *testing.T) {
 	}
 }
 
-// TestUpdateBill_SetAndClearOptionalFields sets the remaining fields, then
+// TestBillUpdate_SetAndClearOptionalFields sets the remaining fields, then
 // clears every optional field with empty strings.
-func TestUpdateBill_SetAndClearOptionalFields(t *testing.T) {
+func TestBillUpdate_SetAndClearOptionalFields(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	orig := createTestBill(t, ctx, pool, insertVendor(t, pool, hh.HouseholdID, "Power Co"))
 	newVendor := insertVendor(t, pool, hh.HouseholdID, "Gas Co")
 	vehicleID := uuid.New()
 
-	_, _, update := NewUpdateBillTool(pool)
-	res, text := callTool(t, ctx, update, "update_bill", map[string]any{
+	_, _, update := NewBillUpdateTool(pool)
+	res, text := callTool(t, ctx, update, "bill_update", map[string]any{
 		"bill_id":     orig.ID.String(),
 		"name":        "  Gas  ",
 		"category":    "Fuel",
@@ -443,7 +443,7 @@ func TestUpdateBill_SetAndClearOptionalFields(t *testing.T) {
 		"notes":       "new notes",
 	})
 	if res.IsError {
-		t.Fatalf("update_bill returned tool error: %s", text)
+		t.Fatalf("bill_update returned tool error: %s", text)
 	}
 	got := decodeUpdated(t, text)
 	if got.Name != "Gas" || got.IsAutopay || *got.Category != "Fuel" || *got.VendorID != newVendor ||
@@ -455,7 +455,7 @@ func TestUpdateBill_SetAndClearOptionalFields(t *testing.T) {
 		t.Errorf("amount/due_day changed: %s", text)
 	}
 
-	res, text = callTool(t, ctx, update, "update_bill", map[string]any{
+	res, text = callTool(t, ctx, update, "bill_update", map[string]any{
 		"bill_id":     orig.ID.String(),
 		"category":    "",
 		"vendor_id":   "",
@@ -480,15 +480,15 @@ func TestUpdateBill_SetAndClearOptionalFields(t *testing.T) {
 	}
 }
 
-// TestUpdateBill_OtherHouseholdNotFound checks a bill in another household
+// TestBillUpdate_OtherHouseholdNotFound checks a bill in another household
 // is reported as not found and left unchanged.
-func TestUpdateBill_OtherHouseholdNotFound(t *testing.T) {
+func TestBillUpdate_OtherHouseholdNotFound(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	otherCtx, other := testutil.SeedHousehold(t, pool)
 	orig := createTestBill(t, ctx, pool, insertVendor(t, pool, hh.HouseholdID, "Power Co"))
 
-	_, _, update := NewUpdateBillTool(pool)
+	_, _, update := NewBillUpdateTool(pool)
 
 	tests := []struct {
 		name string
@@ -499,7 +499,7 @@ func TestUpdateBill_OtherHouseholdNotFound(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, text := callTool(t, otherCtx, update, "update_bill", map[string]any{
+			res, text := callTool(t, otherCtx, update, "bill_update", map[string]any{
 				"bill_id": tc.id, "amount": 1.0,
 			})
 			if !res.IsError || !strings.Contains(text, "bill not found") {
@@ -521,9 +521,9 @@ func TestUpdateBill_OtherHouseholdNotFound(t *testing.T) {
 	}
 }
 
-// TestUpdateBill_LegacyNullFields updates a bill created without amount or
+// TestBillUpdate_LegacyNullFields updates a bill created without amount or
 // due_day (possible through the API) without failing.
-func TestUpdateBill_LegacyNullFields(t *testing.T) {
+func TestBillUpdate_LegacyNullFields(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
 
@@ -535,12 +535,12 @@ func TestUpdateBill_LegacyNullFields(t *testing.T) {
 		t.Fatalf("insert bill: %v", err)
 	}
 
-	_, _, update := NewUpdateBillTool(pool)
-	res, text := callTool(t, ctx, update, "update_bill", map[string]any{
+	_, _, update := NewBillUpdateTool(pool)
+	res, text := callTool(t, ctx, update, "bill_update", map[string]any{
 		"bill_id": id.String(), "notes": "still no due day",
 	})
 	if res.IsError {
-		t.Fatalf("update_bill returned tool error: %s", text)
+		t.Fatalf("bill_update returned tool error: %s", text)
 	}
 	got := decodeUpdated(t, text)
 	if got.Amount != nil || got.DueDay != nil || got.NextDueDate != nil || got.DaysUntilDue != nil || got.IsAutopay {
@@ -551,9 +551,34 @@ func TestUpdateBill_LegacyNullFields(t *testing.T) {
 	}
 }
 
-// TestUpdateBill_Validation checks that bad input is a tool error and
+// TestBillUpdate_ToolDefinition pins the catalog v2 name, required param and
+// class U annotations.
+func TestBillUpdate_ToolDefinition(t *testing.T) {
+	name, tool, _ := NewBillUpdateTool(nil)
+	if name != "bill_update" || tool.Name != "bill_update" {
+		t.Errorf("name = %q / %q, want bill_update", name, tool.Name)
+	}
+	if len(tool.InputSchema.Required) != 1 || tool.InputSchema.Required[0] != "bill_id" {
+		t.Errorf("required = %v, want [bill_id]", tool.InputSchema.Required)
+	}
+	if n := len(tool.Description); n > 200 {
+		t.Errorf("description is %d chars, max 200", n)
+	}
+	for param, schema := range tool.InputSchema.Properties {
+		if d, _ := schema.(map[string]any)["description"].(string); len(d) > 80 {
+			t.Errorf("%s description is %d chars, max 80", param, len(d))
+		}
+	}
+	a := tool.Annotations
+	if a.ReadOnlyHint == nil || *a.ReadOnlyHint || a.DestructiveHint == nil || *a.DestructiveHint ||
+		a.IdempotentHint == nil || !*a.IdempotentHint || a.OpenWorldHint == nil || *a.OpenWorldHint {
+		t.Errorf("annotations = %+v, want class U (false, false, true, false)", a)
+	}
+}
+
+// TestBillUpdate_Validation checks that bad input is a tool error and
 // changes nothing.
-func TestUpdateBill_Validation(t *testing.T) {
+func TestBillUpdate_Validation(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	_, other := testutil.SeedHousehold(t, pool)
@@ -565,7 +590,7 @@ func TestUpdateBill_Validation(t *testing.T) {
 		return args
 	}
 
-	_, _, update := NewUpdateBillTool(pool)
+	_, _, update := NewBillUpdateTool(pool)
 
 	tests := []struct {
 		name    string
@@ -594,7 +619,7 @@ func TestUpdateBill_Validation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, text := callTool(t, ctx, update, "update_bill", tc.args)
+			res, text := callTool(t, ctx, update, "bill_update", tc.args)
 			if !res.IsError {
 				t.Fatalf("want tool error, got %s", text)
 			}
@@ -605,7 +630,7 @@ func TestUpdateBill_Validation(t *testing.T) {
 	}
 
 	t.Run("no claims", func(t *testing.T) {
-		res, _ := callTool(t, context.Background(), update, "update_bill", withID(map[string]any{"amount": 1.0}))
+		res, _ := callTool(t, context.Background(), update, "bill_update", withID(map[string]any{"amount": 1.0}))
 		if !res.IsError {
 			t.Fatal("want tool error without claims")
 		}

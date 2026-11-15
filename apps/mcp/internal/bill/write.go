@@ -187,7 +187,7 @@ func NewCreateBillTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 	return "create_bill", tool, handler
 }
 
-// updatedBill is the update_bill response: the stored row after the update
+// updatedBill is the bill_update response: the stored row after the update
 // plus its next due date. amount and due_day are nullable because bills
 // created through the API may lack them; next_due_date and days_until_due
 // are null when the bill has no due_day.
@@ -209,7 +209,7 @@ type updatedBill struct {
 	DaysUntilDue *int       `json:"days_until_due"`
 }
 
-// billUpdate is the validated update_bill arguments: the bill to change and
+// billUpdate is the validated bill_update arguments: the bill to change and
 // the columns to set, in a fixed order. Column names come only from
 // parseUpdateBillInput, never from the caller.
 type billUpdate struct {
@@ -224,47 +224,51 @@ func (u *billUpdate) set(column string, value any) {
 	u.values = append(u.values, value)
 }
 
-// NewUpdateBillTool creates the update_bill MCP tool.
+// NewBillUpdateTool creates the bill_update MCP tool (catalog v2 name; see
+// KB architecture/mcp-tool-catalog.md).
 // It changes only the fields given for a bill in the authenticated household
 // and returns the updated bill including its next due date. A bill in another
 // household is reported as not found. Invalid input returns a tool error and
 // changes nothing.
-func NewUpdateBillTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("update_bill",
-		mcp.WithDescription("Update a bill in the household. Only the fields you pass are changed; "+
-			"omitted (or null) fields keep their current value. Pass an empty string to clear an optional "+
-			"text field (category, vendor_id, payment_url, notes; entity_type and entity_id together). "+
-			"Returns the updated bill with its next due date."),
+func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+	tool := mcp.NewTool("bill_update",
+		mcp.WithDescription("Change a bill; only the given fields change. "+
+			"An empty string clears an optional text field. Returns the bill with its next due date."),
+		mcp.WithTitleAnnotation("Update a bill"),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
 		mcp.WithString("bill_id",
-			mcp.Description("ID (UUID) of the bill to update, e.g. from list_bills"),
+			mcp.Description("Bill ID (UUID), e.g. from list_bills"),
 			mcp.Required(),
 		),
 		mcp.WithString("name",
-			mcp.Description("New bill name"),
+			mcp.Description("New bill name, e.g. Electric"),
 		),
 		mcp.WithNumber("amount",
-			mcp.Description("New amount due each month, in dollars (e.g. 125.50)"),
+			mcp.Description("New monthly amount in dollars, e.g. 125.50"),
 			mcp.Min(0),
 		),
 		mcp.WithNumber("due_day",
-			mcp.Description("New day of the month the bill is due, 1-31. In shorter months a day past the end falls on the last day."),
+			mcp.Description("Day of month due, 1-31; past a short month's end means its last day"),
 			mcp.Min(1),
 			mcp.Max(31),
 		),
 		mcp.WithString("category",
-			mcp.Description("New category (e.g. Utilities); empty string clears it"),
+			mcp.Description("Category, e.g. Utilities; empty string clears it"),
 		),
 		mcp.WithBoolean("is_autopay",
 			mcp.Description("Whether the bill is paid automatically"),
 		),
 		mcp.WithString("vendor_id",
-			mcp.Description("Vendor ID (UUID) of a vendor in this household; empty string clears it"),
+			mcp.Description("Vendor ID (UUID) in this household; empty string clears it"),
 		),
 		mcp.WithString("entity_type",
-			mcp.Description("Entity type the bill belongs to (e.g. property, vehicle, pet). Must be passed with entity_id; empty strings for both clear them."),
+			mcp.Description("e.g. property, vehicle, pet; pass with entity_id; both empty clears"),
 		),
 		mcp.WithString("entity_id",
-			mcp.Description("Entity ID (UUID) the bill belongs to. Must be passed with entity_type."),
+			mcp.Description("Entity ID (UUID) the bill belongs to; pass with entity_type"),
 		),
 		mcp.WithString("payment_url",
 			mcp.Description("http(s) URL where the bill is paid; empty string clears it"),
@@ -363,10 +367,10 @@ func NewUpdateBillTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		return mcp.NewToolResultText(string(result)), nil
 	}
 
-	return "update_bill", tool, handler
+	return "bill_update", tool, handler
 }
 
-// parseUpdateBillInput validates update_bill arguments. A field that is
+// parseUpdateBillInput validates bill_update arguments. A field that is
 // absent or null is left unchanged. name, amount, due_day and is_autopay
 // cannot be cleared; a blank string clears the other text fields. The
 // returned error message is shown to the caller as the tool error.
@@ -534,7 +538,7 @@ func parseCreateBillInput(args map[string]any) (createBillInput, error) {
 	return in, nil
 }
 
-// Field parsers shared by create_bill and update_bill so both tools apply
+// Field parsers shared by create_bill and bill_update so both tools apply
 // the same rules and return the same messages. Each returns nil (or ok=false)
 // when the argument is absent, null or blank.
 
