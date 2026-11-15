@@ -259,7 +259,6 @@ services:
     working_dir: /app
     environment:
       NODE_ENV: development
-      NEXT_PUBLIC_API_URL: https://localhost:8443
       API_URL: http://api:8080
       # OIDC (apps/ui/lib/auth/dex-config.ts). The redirect URI must match the
       # home-os-ui client in deploy/dex/config.yaml exactly.

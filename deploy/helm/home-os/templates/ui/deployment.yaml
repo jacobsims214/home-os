@@ -31,8 +31,6 @@ spec:
         # Server-side /bff proxy target (#4393).
         - name: API_INTERNAL_URL
           value: {{ include "home-os.apiInternalUrl" . | quote }}
-        - name: NEXT_PUBLIC_API_URL
-          value: ""
         - name: PUBLIC_URL
           value: {{ include "home-os.publicUrl" . | quote }}
         - name: DEX_ISSUER
