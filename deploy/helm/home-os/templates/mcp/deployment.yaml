@@ -18,7 +18,7 @@ spec:
       {{- include "home-os.podSecurityContext" (dict "uid" 65532) | nindent 6 }}
       containers:
       - name: mcp
-        image: "{{ .Values.global.imageRegistry }}/mcp:{{ .Values.global.imageTag }}"
+        image: "{{ .Values.global.imageRegistry }}/mcp:{{ include "home-os.imageTag" . }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:

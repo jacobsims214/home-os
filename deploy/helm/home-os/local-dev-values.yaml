@@ -1,6 +1,8 @@
 global:
   imageRegistry: "host.docker.internal:5001/home-os"
   imageTag: latest
+  # Local registry images are rebuilt in place as `latest`.
+  allowLatestImageTag: true
   imagePullPolicy: Always
   # Local docker-desktop: publicUrl stays empty = http://localhost:8000 (Envoy).
   allowLocalPublicUrl: true

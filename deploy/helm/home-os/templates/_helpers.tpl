@@ -4,8 +4,31 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
+{{/*
+Tag for every home-os app image (api, ui, mcp, worker, calendar, migrations).
+All six must run the same build, so there is one tag: global.imageTag.
+
+Guard (#4679): release.yml only moves `latest` on a release or a run on main,
+so on any other branch `latest` silently resolves to an old build (and an old
+migrations image). The render fails when global.imageTag is
+  - the Argo manifest's placeholder (sha-SET_IN_4357), always; or
+  - empty or `latest`, unless global.allowLatestImageTag=true
+    (local docker-desktop only: local-dev-values.yaml sets it).
+Set it to the immutable sha-<short> tag of one release.yml run.
+*/}}
+{{- define "home-os.imageTag" -}}
+{{- $tag := toString (.Values.global.imageTag | default "") -}}
+{{- if contains "SET_IN_4357" $tag -}}
+{{- fail (printf "global.imageTag is still the placeholder %q. Dispatch release.yml on the deploy branch and set global.imageTag to that run's sha-<short> tag (#4357) before syncing." $tag) -}}
+{{- end -}}
+{{- if and (or (not $tag) (eq $tag "latest")) (not .Values.global.allowLatestImageTag) -}}
+{{- fail (printf "global.imageTag is %q: `latest` only moves on releases/main and would deploy an old build and old migrations. Set global.imageTag to an immutable sha-<short> tag from release.yml, or set global.allowLatestImageTag=true for local docker-desktop only." (default "<empty>" $tag)) -}}
+{{- end -}}
+{{- $tag -}}
+{{- end -}}
+
 {{- define "home-os.image" -}}
-{{ .Values.global.imageRegistry }}/{{ .image }}:{{ .Values.global.imageTag }}
+{{ .Values.global.imageRegistry }}/{{ .image }}:{{ include "home-os.imageTag" . }}
 {{- end -}}
 
 {{/*

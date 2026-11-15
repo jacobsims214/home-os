@@ -39,4 +39,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: helm/kind-action@v1
-      - run: helm template deploy/helm/home-os --set global.publicUrl=https://homeos.example.com
+      - run: helm template deploy/helm/home-os --set global.publicUrl=https://homeos.example.com --set global.imageTag=sha-0000000

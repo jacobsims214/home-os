@@ -14,7 +14,7 @@ spec:
       {{- include "home-os.podSecurityContext" (dict "uid" 65532) | nindent 6 }}
       containers:
       - name: migrations
-        image: "{{ .Values.global.imageRegistry }}/migrations:{{ .Values.global.imageTag }}"
+        image: "{{ .Values.global.imageRegistry }}/migrations:{{ include "home-os.imageTag" . }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         env:

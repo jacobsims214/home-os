@@ -12,6 +12,21 @@
 # Requires a chart revision with existingSecret support (home-os #4411,
 # feat/family-hub). Manual sync only: there is no syncPolicy.automated.
 #
+# Images (#4679): every home-os image (api, ui, mcp, worker, calendar AND
+# migrations) runs the one tag in global.imageTag. Never `latest`: release.yml
+# only moves `latest` on a release or a run on main, so on feat/family-hub it
+# still points at an old build and an old migrations image. Procedure (#4357):
+#   1. Dispatch release.yml on feat/family-hub (or the branch being deployed):
+#        gh workflow run release.yml --ref feat/family-hub
+#   2. When the run is green, take its sha tag: sha-<first 7 chars of the run's
+#      head commit>, e.g. sha-624186c. Every image of that run (incl.
+#      migrations) carries it; check with
+#        docker buildx imagetools inspect \
+#          ghcr.io/jacobsims214/home-os/migrations:sha-624186c
+#   3. Set global.imageTag below to that one tag and commit it (do not set it
+#      only on the live Application; the next kubectl apply would revert it).
+# The chart refuses to render while imageTag is the placeholder, latest or empty.
+#
 # Apply: kubectl apply -f deploy/argocd/home-os-application.yaml
 #        (does not trigger a sync)
 apiVersion: argoproj.io/v1alpha1
@@ -36,8 +51,12 @@ spec:
         namespace: home-os
         global:
           imageRegistry: ghcr.io/jacobsims214/home-os
-          imageTag: latest
-          imagePullPolicy: Always
+          # PLACEHOLDER: #4357 sets this to the sha-<short> tag of the
+          # release.yml run on feat/family-hub, one tag for ALL images
+          # (migrations included). See the header for the procedure.
+          imageTag: sha-SET_IN_4357
+          # The tag is immutable, so the node cache is safe.
+          imagePullPolicy: IfNotPresent
           # PLACEHOLDER: #4357 must replace this with the private hostname
           # Jacob picks in #4389. publicUrl alone drives the Dex issuer
           # (<publicUrl>/dex), the UI redirect URI (<publicUrl>/api/auth/callback),

@@ -111,6 +111,7 @@ A production Helm chart is available at `deploy/helm/home-os/`:
 ```bash
 helm install home-os ./deploy/helm/home-os \
   --set global.publicUrl="https://homeos.example.com" \
+  --set global.imageTag="sha-<short>" \
   --set secrets.jwtSecret="..." \
   --set secrets.typesenseApiKey="..." \
   --set secrets.encryptionKey="..."

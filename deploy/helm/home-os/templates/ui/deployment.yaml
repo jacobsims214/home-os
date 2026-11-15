@@ -18,7 +18,7 @@ spec:
       {{- include "home-os.podSecurityContext" (dict "uid" 100 "gid" 101) | nindent 6 }}
       containers:
       - name: ui
-        image: "{{ .Values.global.imageRegistry }}/ui:{{ .Values.global.imageTag }}"
+        image: "{{ .Values.global.imageRegistry }}/ui:{{ include "home-os.imageTag" . }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:

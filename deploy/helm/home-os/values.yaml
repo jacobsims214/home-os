@@ -1,7 +1,16 @@
 global:
   imageRegistry: ghcr.io/jacobsims214/home-os
+  # One tag for every home-os app image (api, ui, mcp, worker, calendar,
+  # migrations): the immutable sha-<short> tag of one release.yml run.
+  # `latest` (or empty) fails the render unless allowLatestImageTag, because
+  # release.yml only moves `latest` on releases/main (templates/_helpers.tpl,
+  # home-os.imageTag).
   imageTag: latest
-  # Pull policy for the home-os app images (global.imageTag, a moving tag by default).
+  # Local docker-desktop only: allow imageTag `latest`/empty. Never set this on
+  # a real deployment.
+  allowLatestImageTag: false
+  # Pull policy for the home-os app images. Always suits a moving tag; use
+  # IfNotPresent with an immutable sha-<short> tag.
   imagePullPolicy: Always
   # Pull policy for the pinned third-party images below (envoy, dex, typesense,
   # tika, CNPG postgres). Their tags are exact versions, so the node cache is safe.
