@@ -220,6 +220,90 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 		}
 	})
 
+	// paid_date follows the MCP rule (paidForDueDate): a payment covers the
+	// most recent due date when at most 7 days late, otherwise the next one.
+	t.Run("bills: paid_date covering the due date", func(t *testing.T) {
+		// Today Nov 18, due_day 20: due in 2 days (Nov 20).
+		tests := []struct {
+			name     string
+			paidDate string // "" = never paid
+			want     bool
+		}{
+			{"paid 3 days ago covers this due date", "2026-11-15", false},
+			{"paid on the due date ahead of time", "2026-11-20", false},
+			{"never paid", "", true},
+			{"paid on last month's due date only", "2026-10-20", true},
+			{"paid early for last month only", "2026-10-18", true},
+			{"paid 5 days late for last month (grace)", "2026-10-25", true},
+			{"paid 7 days late for last month (grace edge)", "2026-10-27", true},
+			{"paid 8 days late: pays this month", "2026-10-28", false},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				if _, err := pool.Exec(ctx, `TRUNCATE notifications, bills, maintenance_tasks CASCADE`); err != nil {
+					t.Fatal(err)
+				}
+				hh := seedHousehold(t, pool)
+				billID := seedBill(t, pool, hh, "Electric", 20)
+				if tc.paidDate != "" {
+					if _, err := pool.Exec(ctx, `UPDATE bills SET paid_date = $2::date WHERE id = $1`, billID, tc.paidDate); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				got, err := insertDueNotifications(ctx, pool, day("2026-11-18"))
+				if err != nil {
+					t.Fatalf("insertDueNotifications: %v", err)
+				}
+				if tc.want != (len(got) == 1) || len(got) > 1 {
+					t.Fatalf("got %d notifications, want created=%v: %+v", len(got), tc.want, got)
+				}
+				if tc.want && got[0].Body != "Payment of $42.50 due on Nov 20" {
+					t.Errorf("body = %q", got[0].Body)
+				}
+			})
+		}
+	})
+
+	t.Run("bills: today in the household timezone", func(t *testing.T) {
+		// 03:00 UTC Nov 10 is 21:00 Nov 9 in Chicago.
+		now := time.Date(2026, 11, 10, 3, 0, 0, 0, time.UTC)
+		tests := []struct {
+			name   string
+			tz     string
+			dueDay int
+			want   bool
+		}{
+			{"UTC: Nov 13 is in 3 days", "UTC", 13, true},
+			{"Chicago: Nov 13 is in 4 days", "America/Chicago", 13, false},
+			{"UTC: Nov 9 was yesterday", "UTC", 9, false},
+			{"Chicago: Nov 9 is today", "America/Chicago", 9, true},
+			{"unknown timezone falls back to UTC", "Not/AZone", 13, true},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				if _, err := pool.Exec(ctx, `TRUNCATE notifications, bills, maintenance_tasks CASCADE`); err != nil {
+					t.Fatal(err)
+				}
+				hh := seedHousehold(t, pool)
+				if _, err := pool.Exec(ctx, `UPDATE households SET timezone = $2 WHERE id = $1`, hh, tc.tz); err != nil {
+					t.Fatal(err)
+				}
+				seedBill(t, pool, hh, "Gas", tc.dueDay)
+
+				got, err := insertDueNotifications(ctx, pool, now)
+				if err != nil {
+					t.Fatalf("insertDueNotifications: %v", err)
+				}
+				if tc.want != (len(got) == 1) || len(got) > 1 {
+					t.Fatalf("got %d notifications, want created=%v: %+v", len(got), tc.want, got)
+				}
+			})
+		}
+	})
+
 	t.Run("dedupe within 24h and maintenance window", func(t *testing.T) {
 		ctx := context.Background()
 		if _, err := pool.Exec(ctx, `TRUNCATE notifications, bills, maintenance_tasks CASCADE`); err != nil {
