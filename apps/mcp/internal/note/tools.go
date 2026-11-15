@@ -19,15 +19,49 @@ import (
 	"home-os/mcp/internal/server"
 )
 
+// noteColumns is the SELECT list shared by list_notes and create_note. It
+// needs "notes n LEFT JOIN users u ON u.id = n.author_id" in the FROM clause.
+const noteColumns = `n.id, n.entity_type, n.entity_id, n.title, n.body,
+	n.author_id, u.name, n.created_at, n.updated_at`
+
+// householdEntityType is the entity_type given to notes created without an
+// entity: they are attached to the household itself (entity_id = household
+// id), since the notes table requires both columns.
+const householdEntityType = "household"
+
+// noteResult is one note as returned by list_notes and create_note.
+type noteResult struct {
+	ID             uuid.UUID  `json:"id"`
+	EntityType     string     `json:"entity_type"`
+	EntityID       uuid.UUID  `json:"entity_id"`
+	Title          *string    `json:"title"`
+	Body           string     `json:"body"`
+	ContentPreview string     `json:"content_preview"`
+	AuthorID       *uuid.UUID `json:"author_id"`
+	AuthorName     *string    `json:"author_name"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+func scanNote(row pgx.Row) (noteResult, error) {
+	var n noteResult
+	if err := row.Scan(&n.ID, &n.EntityType, &n.EntityID, &n.Title, &n.Body,
+		&n.AuthorID, &n.AuthorName, &n.CreatedAt, &n.UpdatedAt); err != nil {
+		return noteResult{}, err
+	}
+	n.ContentPreview = truncate(n.Body, 100)
+	return n, nil
+}
+
 // NewListNotesTool creates the list_notes MCP tool.
-// It returns id, title, content_preview (first 100 chars), created_at, and
-// updated_at for the authenticated household, optionally filtered by
-// entity_type and entity_id.
+// It returns each note's id, entity, title, full body, content_preview (first
+// 100 chars), author (id + name) and timestamps for the authenticated
+// household, optionally filtered by entity_type and entity_id.
 func NewListNotesTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("list_notes",
-		mcp.WithDescription("List notes for the household, optionally filtered by entity type and entity ID"),
+		mcp.WithDescription("List notes for the household, optionally filtered by entity type and entity ID. Each note includes its full body and its author (author_id, author_name). Notes created without an entity have entity_type \"household\"."),
 		mcp.WithString("entity_type",
-			mcp.Description("Optional entity type filter (e.g. property, vehicle, pet)"),
+			mcp.Description("Optional entity type filter (e.g. property, vehicle, pet, household)"),
 		),
 		mcp.WithString("entity_id",
 			mcp.Description("Optional entity ID filter (UUID)"),
@@ -57,18 +91,18 @@ func NewListNotesTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Co
 				return mcp.NewToolResultText(fmt.Sprintf(`{"error":"invalid entity_id: %s"}`, parseErr.Error())), nil
 			}
 			rows, err = pool.Query(ctx,
-				`SELECT id, title, body, created_at, updated_at
-				 FROM notes
-				 WHERE household_id = $1 AND entity_type = $2 AND entity_id = $3
-				 ORDER BY created_at DESC`,
+				`SELECT `+noteColumns+`
+				 FROM notes n LEFT JOIN users u ON u.id = n.author_id
+				 WHERE n.household_id = $1 AND n.entity_type = $2 AND n.entity_id = $3
+				 ORDER BY n.created_at DESC`,
 				claims.HouseholdID, entityType, entityID,
 			)
 		} else {
 			rows, err = pool.Query(ctx,
-				`SELECT id, title, body, created_at, updated_at
-				 FROM notes
-				 WHERE household_id = $1
-				 ORDER BY created_at DESC`,
+				`SELECT `+noteColumns+`
+				 FROM notes n LEFT JOIN users u ON u.id = n.author_id
+				 WHERE n.household_id = $1
+				 ORDER BY n.created_at DESC`,
 				claims.HouseholdID,
 			)
 		}
@@ -77,31 +111,17 @@ func NewListNotesTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Co
 		}
 		defer rows.Close()
 
-		type noteResult struct {
-			ID             uuid.UUID `json:"id"`
-			Title          *string   `json:"title"`
-			ContentPreview string    `json:"content_preview"`
-			CreatedAt      time.Time `json:"created_at"`
-			UpdatedAt      time.Time `json:"updated_at"`
-		}
-
-		var notes []noteResult
+		notes := []noteResult{}
 		for rows.Next() {
-			var n noteResult
-			var body string
-			if err := rows.Scan(&n.ID, &n.Title, &body, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			n, err := scanNote(rows)
+			if err != nil {
 				return nil, fmt.Errorf("scan note: %w", err)
 			}
-			n.ContentPreview = truncate(body, 100)
 			notes = append(notes, n)
 		}
 
 		if err := rows.Err(); err != nil {
 			return nil, fmt.Errorf("iterate notes: %w", err)
-		}
-
-		if notes == nil {
-			notes = []noteResult{}
 		}
 
 		result, _ := json.Marshal(notes)
@@ -112,11 +132,14 @@ func NewListNotesTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Co
 }
 
 // NewCreateNoteTool creates the create_note MCP tool.
-// It inserts a new note with the given title and body, optionally
-// associated with an entity via entity_type and entity_id.
+// It inserts a new note with the given title and body, authored by the
+// caller, optionally associated with an entity via entity_type and
+// entity_id. Without an entity the note is attached to the household
+// (entity_type "household", entity_id = household id). The response is the
+// stored note in the same shape list_notes returns.
 func NewCreateNoteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("create_note",
-		mcp.WithDescription("Create a new note, optionally associated with an entity"),
+		mcp.WithDescription("Create a new note authored by the caller, optionally associated with an entity. Without an entity the note is attached to the household."),
 		mcp.WithString("title",
 			mcp.Description("Note title"),
 			mcp.Required(),
@@ -126,10 +149,10 @@ func NewCreateNoteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			mcp.Required(),
 		),
 		mcp.WithString("entity_type",
-			mcp.Description("Optional entity type to associate the note with"),
+			mcp.Description("Optional entity type to associate the note with (requires entity_id)"),
 		),
 		mcp.WithString("entity_id",
-			mcp.Description("Optional entity ID (UUID) to associate the note with"),
+			mcp.Description("Optional entity ID (UUID) to associate the note with (requires entity_type)"),
 		),
 	)
 
@@ -148,15 +171,19 @@ func NewCreateNoteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		if title == "" || content == "" {
 			return mcp.NewToolResultText(`{"error":"title and content are required"}`), nil
 		}
-
-		// Use defaults for entity_type/entity_id if not provided.
-		// The notes table requires these columns, so we use empty string
-		// and zero UUID as "standalone" defaults.
-		if entityType == "" {
-			entityType = ""
+		if (entityType == "") != (entityIDStr == "") {
+			return mcp.NewToolResultText(`{"error":"entity_type and entity_id must be provided together"}`), nil
 		}
-		var entityID uuid.UUID
-		if entityIDStr != "" {
+
+		householdID, err := uuid.Parse(claims.HouseholdID)
+		if err != nil {
+			return mcp.NewToolResultText(`{"error":"unauthorized"}`), nil
+		}
+
+		entityID := householdID
+		if entityType == "" {
+			entityType = householdEntityType
+		} else {
 			var parseErr error
 			entityID, parseErr = uuid.Parse(entityIDStr)
 			if parseErr != nil {
@@ -164,24 +191,29 @@ func NewCreateNoteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			}
 		}
 
-		var noteID uuid.UUID
-		var createdAt, updatedAt time.Time
-		err := pool.QueryRow(ctx,
-			`INSERT INTO notes (household_id, entity_type, entity_id, title, body)
-			 VALUES ($1, $2, $3, $4, $5)
-			 RETURNING id, created_at, updated_at`,
-			claims.HouseholdID, entityType, entityID, title, content,
-		).Scan(&noteID, &createdAt, &updatedAt)
+		// claims.UserID is the users.id UUID once enriched, but may be an
+		// OIDC subject or "local-dev" otherwise. Only record an author that
+		// is a real user, so the author_id foreign key can never fail.
+		var authorID *uuid.UUID
+		if id, parseErr := uuid.Parse(claims.UserID); parseErr == nil {
+			authorID = &id
+		}
+
+		n, err := scanNote(pool.QueryRow(ctx,
+			`WITH inserted AS (
+				INSERT INTO notes (household_id, entity_type, entity_id, title, body, author_id)
+				VALUES ($1, $2, $3, $4, $5, (SELECT id FROM users WHERE id = $6))
+				RETURNING *
+			)
+			SELECT `+noteColumns+`
+			FROM inserted n LEFT JOIN users u ON u.id = n.author_id`,
+			householdID, entityType, entityID, title, content, authorID,
+		))
 		if err != nil {
 			return nil, fmt.Errorf("create note: %w", err)
 		}
 
-		result, _ := json.Marshal(map[string]interface{}{
-			"id":         noteID.String(),
-			"title":      title,
-			"created_at": createdAt,
-			"updated_at": updatedAt,
-		})
+		result, _ := json.Marshal(n)
 		return mcp.NewToolResultText(string(result)), nil
 	}
 
