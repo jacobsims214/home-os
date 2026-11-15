@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { DEX_UI_CLIENT_ID, dexConfig } from "@/lib/auth/dex-config";
+import { PKCE_COOKIE, PKCE_COOKIE_PATH, decodePkceCookie } from "@/lib/auth/pkce-cookie";
+import { returnUrl } from "@/lib/auth/return-path";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,9 +21,6 @@ const DEFAULT_TOKEN_MAX_AGE = 60 * 60 * 24;
 // Dex does not report refresh-token lifetime. Its default config never expires
 // them, so cap the cookie at 30 days; a rejected refresh just means re-login.
 const REFRESH_MAX_AGE = 60 * 60 * 24 * 30;
-// Set by app/api/auth/login/route.ts as "<state>.<code_verifier>".
-const PKCE_COOKIE = "home-os-pkce";
-const PKCE_COOKIE_PATH = "/api/auth";
 
 const baseCookie = () => ({
   httpOnly: true,
@@ -68,11 +68,9 @@ export async function GET(request: NextRequest) {
   const code = searchParams.get("code");
   const state = searchParams.get("state");
 
-  // Build the public origin from Host headers (what the browser sees)
-  // This MUST match the redirect_uri sent in the initial auth request
-  const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || "localhost:8000";
-  const proto = request.headers.get("x-forwarded-proto") || "http";
-  const publicOrigin = `${proto}://${host}`;
+  // Same values as app/api/auth/login: redirect_uri MUST match the authorize
+  // request exactly, and every redirect below goes to the public origin.
+  const { publicOrigin, redirectUri, tokenUrl } = dexConfig(request);
 
   if (!code) {
     return redirectClearingPkce(new URL("/login?error=no_code", publicOrigin));
@@ -80,30 +78,25 @@ export async function GET(request: NextRequest) {
 
   // PKCE: the verifier must come from the httpOnly cookie set when this login
   // started, and the state must match. Without it we never call Dex.
-  const pkce = request.cookies.get(PKCE_COOKIE)?.value ?? "";
-  const sep = pkce.indexOf(".");
-  const expectedState = sep > 0 ? pkce.slice(0, sep) : "";
-  const codeVerifier = sep > 0 ? pkce.slice(sep + 1) : "";
-  if (!codeVerifier) {
+  const pkce = decodePkceCookie(request.cookies.get(PKCE_COOKIE)?.value);
+  if (!pkce) {
     return redirectClearingPkce(new URL("/login?error=missing_verifier", publicOrigin));
   }
-  if (!state || state !== expectedState) {
+  if (!state || state !== pkce.state) {
     return redirectClearingPkce(new URL("/login?error=state_mismatch", publicOrigin));
   }
 
   try {
-    const redirectUri = `${publicOrigin}/api/auth/callback`;
-
-    // Exchange code for tokens via Dex
-    const tokenResponse = await fetch("http://home-os-dex:5556/dex/token", {
+    // Exchange code for tokens via Dex (DEX_TOKEN_URL, shared with the BFF refresh).
+    const tokenResponse = await fetch(tokenUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         grant_type: "authorization_code",
         code,
         redirect_uri: redirectUri,
-        client_id: "home-os-ui",
-        code_verifier: codeVerifier,
+        client_id: DEX_UI_CLIENT_ID,
+        code_verifier: pkce.verifier,
       }),
       cache: "no-store",
     });
@@ -128,7 +121,9 @@ export async function GET(request: NextRequest) {
       return redirectClearingPkce(new URL("/login?error=token_expired", publicOrigin));
     }
 
-    const response = redirectClearingPkce(new URL("/dashboard", publicOrigin));
+    // Back to the page the user started from (sanitised again: the cookie
+    // only ever held what /api/auth/login accepted, but trust nothing).
+    const response = redirectClearingPkce(returnUrl(publicOrigin, pkce.returnPath));
     // Session token for the BFF; expires with the id token.
     response.cookies.set(COOKIE_NAME, idToken, { ...baseCookie(), maxAge });
     if (typeof refreshToken === "string" && refreshToken) {

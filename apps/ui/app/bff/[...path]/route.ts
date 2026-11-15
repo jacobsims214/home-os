@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { DEX_UI_CLIENT_ID, dexTokenUrl } from "@/lib/auth/dex-config";
 
 /**
  * BFF proxy: /bff/<path> → ${API_INTERNAL_URL}/api/v1/<path>
@@ -18,7 +19,9 @@ import { NextRequest, NextResponse } from "next/server";
  *
  * Env: API_INTERNAL_URL — base URL of the Go API reachable from the UI pod
  * (default http://home-os-api:8080). DEX_TOKEN_URL — Dex token endpoint
- * (default http://home-os-dex:5556/dex/token). Both read at request time.
+ * (default http://home-os-dex:5556/dex/token; resolved by
+ * lib/auth/dex-config.ts, shared with the OIDC callback). Both read at
+ * request time.
  */
 
 export const runtime = "nodejs";
@@ -29,8 +32,6 @@ const REFRESH_COOKIE = "home-os-refresh";
 // Removed in #4412; expired here too so a dead session leaves nothing behind.
 const LEGACY_CLIENT_COOKIE = "home-os-token-client";
 const DEFAULT_API_URL = "http://home-os-api:8080";
-const DEFAULT_DEX_TOKEN_URL = "http://home-os-dex:5556/dex/token";
-const DEX_CLIENT_ID = "home-os-ui"; // public client: no secret
 
 // Same cookie sizing as app/api/auth/callback/route.ts.
 const DEFAULT_TOKEN_MAX_AGE = 60 * 60 * 24;
@@ -110,10 +111,6 @@ type RefreshOutcome =
 const inflightRefreshes = new Map<string, Promise<RefreshOutcome>>();
 const recentRefreshes = new Map<string, { at: number; tokens: SessionTokens }>();
 
-function dexTokenUrl(): string {
-  return process.env.DEX_TOKEN_URL || DEFAULT_DEX_TOKEN_URL;
-}
-
 // exp claim in epoch seconds, or null. The signature is not checked: this only
 // decides when to refresh and sizes the cookie; the Go API validates tokens.
 function jwtExp(jwt: string): number | null {
@@ -141,7 +138,7 @@ async function redeemRefreshToken(refreshToken: string): Promise<RefreshOutcome>
       body: new URLSearchParams({
         grant_type: "refresh_token",
         refresh_token: refreshToken,
-        client_id: DEX_CLIENT_ID,
+        client_id: DEX_UI_CLIENT_ID,
       }),
       cache: "no-store",
       signal: AbortSignal.timeout(DEX_TIMEOUT_MS),
