@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS users_dex_sub_key;
+ALTER TABLE users DROP COLUMN IF EXISTS dex_sub;
