@@ -102,7 +102,7 @@ func TestLegacyInitializeClient(t *testing.T) {
 				t.Fatalf("tools/list returned %d tools, %d registered", len(seen), srv.ToolCount())
 			}
 			t.Logf("tools/list over protocol %s returned %d tools", version, len(seen))
-			for _, name := range []string{"ping", "list_notes", "create_event", "get_financial_summary", "bill_find", "bill_create", "bill_update", "bill_delete", "bill_pay", "note_get", "note_update", "note_delete", "family_update"} {
+			for _, name := range []string{"ping", "note_find", "note_create", "create_event", "get_financial_summary", "bill_find", "bill_create", "bill_update", "bill_delete", "bill_pay", "note_get", "note_update", "note_delete", "family_update"} {
 				if !seen[name] {
 					t.Errorf("tools/list is missing %q", name)
 				}
@@ -123,9 +123,9 @@ func TestLegacyInitializeClient(t *testing.T) {
 
 			// A DB-backed tool: proves the claims context reaches the handler.
 			var notes callResult
-			c.call("tools/call", map[string]any{"name": "list_notes", "arguments": map[string]any{}}, &notes)
+			c.call("tools/call", map[string]any{"name": "note_find", "arguments": map[string]any{}}, &notes)
 			if notes.IsError || len(notes.Content) != 1 || !strings.Contains(notes.Content[0].Text, "Legacy client note") {
-				t.Fatalf("list_notes returned %+v", notes)
+				t.Fatalf("note_find returned %+v", notes)
 			}
 		})
 	}
@@ -228,9 +228,9 @@ func TestModernStatelessClient(t *testing.T) {
 		t.Fatalf("ping returned %+v", ping)
 	}
 	var notes callResult
-	c.call(string(mcp.MethodToolsCall), map[string]any{"name": "list_notes", "arguments": map[string]any{}}, &notes)
+	c.call(string(mcp.MethodToolsCall), map[string]any{"name": "note_find", "arguments": map[string]any{}}, &notes)
 	if notes.IsError || len(notes.Content) != 1 || !strings.Contains(notes.Content[0].Text, "Modern client note") {
-		t.Fatalf("list_notes returned %+v", notes)
+		t.Fatalf("note_find returned %+v", notes)
 	}
 }
 

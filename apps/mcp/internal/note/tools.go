@@ -1,19 +1,25 @@
-// Package note provides MCP tools for managing notes in Home OS.
-// Notes are polymorphic — they can be attached to any entity type
-// (property, vehicle, pet, asset, vendor, bill, etc.) via entity_type
-// and entity_id. All operations are scoped to the authenticated household.
+// Package note provides the MCP note tools of catalog v2 (KB
+// architecture/mcp-tool-catalog.md): note_find, note_get, note_create,
+// note_update and note_delete. A note is about the family (the default) or
+// about one row of the same family, named by about_type and about_id. Every
+// result is built with internal/respond, and every tool declares its
+// annotations and outputSchema. All operations are scoped to the caller's
+// household.
 package note
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -21,188 +27,490 @@ import (
 	"home-os/mcp/internal/server"
 )
 
-// noteColumns is the SELECT list shared by list_notes, create_note and note_get. It
-// needs "notes n LEFT JOIN users u ON u.id = n.author_id" in the FROM clause.
-const noteColumns = `n.id, n.entity_type, n.entity_id, n.title, n.body,
-	n.author_id, u.name, n.created_at, n.updated_at`
+// noteColumns is the SELECT list scanNote reads. It needs
+// "notes n LEFT JOIN users u ON u.id = n.author_id JOIN households h ON
+// h.id = n.household_id" in the FROM clause (n may be a CTE with the notes
+// columns). Local dates and weekdays are computed in the family's timezone.
+const noteColumns = `n.id, n.entity_type, n.entity_id, n.household_id, n.title, n.body,
+	n.author_id, u.name, n.created_at, n.updated_at,
+	to_char(n.created_at AT TIME ZONE h.timezone, 'YYYY-MM-DD'),
+	to_char(n.created_at AT TIME ZONE h.timezone, 'Dy'),
+	to_char(n.updated_at AT TIME ZONE h.timezone, 'YYYY-MM-DD'),
+	to_char(n.updated_at AT TIME ZONE h.timezone, 'Dy')`
 
-// householdEntityType is the entity_type given to notes created without an
-// entity: they are attached to the household itself (entity_id = household
-// id), since the notes table requires both columns.
-const householdEntityType = "household"
+// noteJoins completes a FROM clause that starts with "<table or CTE> n".
+const noteJoins = ` LEFT JOIN users u ON u.id = n.author_id JOIN households h ON h.id = n.household_id`
 
-// noteResult is one note as returned by list_notes, create_note and
-// note_get. IDs are strings, not uuid.UUID: the outputSchema is inferred
-// with jsonschema-go, which sees uuid.UUID as a [16]byte array and would
-// reject the string UUIDs that are actually on the wire.
+// exampleNoteID is the note_id used in error examples.
+const exampleNoteID = "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"
+
+// noteResult is one note in full, as returned by note_get, note_create,
+// note_update and note_delete. IDs are strings, not uuid.UUID: the
+// outputSchema is inferred with jsonschema-go, which sees uuid.UUID as a
+// [16]byte array and would reject the string UUIDs that are on the wire.
 type noteResult struct {
-	ID             string    `json:"id"`
-	EntityType     string    `json:"entity_type"`
-	EntityID       string    `json:"entity_id"`
-	Title          *string   `json:"title"`
-	Body           string    `json:"body"`
-	ContentPreview string    `json:"content_preview"`
-	AuthorID       *string   `json:"author_id"`
-	AuthorName     *string   `json:"author_name"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID               string    `json:"id" jsonschema_description:"The note's id; pass it as note_id."`
+	AboutType        string    `json:"about_type" jsonschema_description:"What the note is about: family, person, property, vehicle, ..."`
+	AboutID          *string   `json:"about_id" jsonschema_description:"Id of the row it is about; null for family notes."`
+	Title            *string   `json:"title"`
+	Body             string    `json:"body"`
+	AuthorID         *string   `json:"author_id"`
+	AuthorName       *string   `json:"author_name"`
+	CreatedAt        time.Time `json:"created_at"`
+	CreatedLocalDate string    `json:"created_local_date" jsonschema_description:"created_at as YYYY-MM-DD in the family timezone."`
+	CreatedWeekday   string    `json:"created_weekday" jsonschema_description:"Weekday of created_local_date, e.g. Thu."`
+	UpdatedAt        time.Time `json:"updated_at"`
+	UpdatedLocalDate string    `json:"updated_local_date" jsonschema_description:"updated_at as YYYY-MM-DD in the family timezone."`
+	UpdatedWeekday   string    `json:"updated_weekday" jsonschema_description:"Weekday of updated_local_date, e.g. Thu."`
+	Duplicate        bool      `json:"duplicate,omitempty" jsonschema_description:"true when note_create returned an identical note saved minutes ago instead of a copy."`
 }
 
-func scanNote(row pgx.Row) (noteResult, error) {
+// noteSummary is one note_find item: a preview, not the whole body.
+type noteSummary struct {
+	ID               string    `json:"id" jsonschema_description:"The note's id; pass it as note_id."`
+	AboutType        string    `json:"about_type"`
+	AboutID          *string   `json:"about_id" jsonschema_description:"Id of the row it is about; null for family notes."`
+	Title            *string   `json:"title"`
+	Preview          string    `json:"preview" jsonschema_description:"The first 100 characters of the body. Read all of it with note_get."`
+	AuthorName       *string   `json:"author_name"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	UpdatedLocalDate string    `json:"updated_local_date" jsonschema_description:"updated_at as YYYY-MM-DD in the family timezone."`
+	UpdatedWeekday   string    `json:"updated_weekday" jsonschema_description:"Weekday of updated_local_date, e.g. Thu."`
+}
+
+// scanNote reads noteColumns from row, then any extra columns into extra.
+func scanNote(row pgx.Row, extra ...any) (noteResult, error) {
 	var (
-		n            noteResult
-		id, entityID uuid.UUID
-		authorID     *uuid.UUID
+		n                         noteResult
+		id, entityID, householdID uuid.UUID
+		entityType                string
+		authorID                  *uuid.UUID
 	)
-	if err := row.Scan(&id, &n.EntityType, &entityID, &n.Title, &n.Body,
-		&authorID, &n.AuthorName, &n.CreatedAt, &n.UpdatedAt); err != nil {
+	dest := append([]any{&id, &entityType, &entityID, &householdID, &n.Title, &n.Body,
+		&authorID, &n.AuthorName, &n.CreatedAt, &n.UpdatedAt,
+		&n.CreatedLocalDate, &n.CreatedWeekday, &n.UpdatedLocalDate, &n.UpdatedWeekday}, extra...)
+	if err := row.Scan(dest...); err != nil {
 		return noteResult{}, err
 	}
-	n.ID, n.EntityID = id.String(), entityID.String()
+	n.ID = id.String()
+	n.AboutType, n.AboutID = aboutFromDB(entityType, entityID, householdID)
 	if authorID != nil {
 		s := authorID.String()
 		n.AuthorID = &s
 	}
-	n.ContentPreview = truncate(n.Body, 100)
 	return n, nil
 }
 
-// NewListNotesTool creates the list_notes MCP tool.
-// It returns each note's id, entity, title, full body, content_preview (first
-// 100 chars), author (id + name) and timestamps for the authenticated
-// household, optionally filtered by entity_type and entity_id.
-func NewListNotesTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("list_notes",
-		mcp.WithDescription("List notes for the household, optionally filtered by entity type and entity ID. Each note includes its full body and its author (author_id, author_name). Notes created without an entity have entity_type \"household\"."),
-		mcp.WithString("entity_type",
-			mcp.Description("Optional entity type filter (e.g. property, vehicle, pet, household)"),
+func (n noteResult) summary() noteSummary {
+	return noteSummary{
+		ID: n.ID, AboutType: n.AboutType, AboutID: n.AboutID, Title: n.Title,
+		Preview: truncate(n.Body, 100), AuthorName: n.AuthorName,
+		UpdatedAt: n.UpdatedAt, UpdatedLocalDate: n.UpdatedLocalDate, UpdatedWeekday: n.UpdatedWeekday,
+	}
+}
+
+// displayTitle is the title for summaries; NULL or empty is "(untitled)".
+func (n noteResult) displayTitle() string {
+	if n.Title != nil && *n.Title != "" {
+		return *n.Title
+	}
+	return "(untitled)"
+}
+
+// aboutTypes is the catalog's about_type enum, in catalog order.
+var aboutTypes = []string{
+	"family", "person", "property", "room", "asset", "vehicle", "pet", "contact",
+	"bill", "loan", "maintenance", "event", "list", "recipe", "guide",
+}
+
+// aboutToDB maps the catalog names that differ from the DB entity_kind.
+var aboutToDB = map[string]string{
+	"family":      "household",
+	"contact":     "vendor",
+	"maintenance": "maintenance_task",
+}
+
+// aboutFinder names the tool that finds ids for each about_type.
+var aboutFinder = map[string]string{
+	"person": "person_find", "property": "property_find", "room": "property_find",
+	"asset": "asset_find", "vehicle": "vehicle_find", "pet": "pet_find",
+	"contact": "contact_find", "bill": "bill_find", "loan": "loan_find",
+	"maintenance": "maintenance_find", "event": "event_find", "list": "list_find",
+	"recipe": "recipe_find", "guide": "guide_find",
+}
+
+// aboutFromDB maps a stored (entity_type, entity_id) to the catalog's
+// (about_type, about_id). Family notes have no about_id.
+func aboutFromDB(entityType string, entityID, householdID uuid.UUID) (string, *string) {
+	for about, kind := range aboutToDB {
+		if kind == entityType {
+			entityType = about
+			break
+		}
+	}
+	if entityType == "family" && entityID == householdID {
+		return entityType, nil
+	}
+	s := entityID.String()
+	return entityType, &s
+}
+
+// about is a parsed about_type/about_id pair.
+type about struct {
+	Type string    // catalog name, e.g. "contact"
+	Kind string    // DB entity_kind, e.g. "vendor"
+	ID   uuid.UUID // the row; uuid.Nil when only the type was given (find)
+}
+
+func validAboutType(t string) bool {
+	for _, a := range aboutTypes {
+		if a == t {
+			return true
+		}
+	}
+	return false
+}
+
+// parseAbout reads about_type and about_id. requireID is true for
+// note_create, where any about_type but family needs an about_id. An empty
+// about_type with no about_id returns ok with a zero about (the caller's
+// default). A failed parse returns the isError result to send.
+func parseAbout(args map[string]any, requireID bool, example map[string]any) (about, *mcp.CallToolResult) {
+	t := strings.ToLower(strings.TrimSpace(str(args, "about_type")))
+	rawID := strings.TrimSpace(str(args, "about_id"))
+	if t == "" && rawID == "" {
+		return about{}, nil
+	}
+	if t == "" {
+		return about{}, respond.Invalid("about_type", "about_id was given without about_type.",
+			"Pass about_type too (e.g. vehicle), or leave both out for a family note.", example)
+	}
+	if !validAboutType(t) {
+		return about{}, respond.Invalid("about_type", fmt.Sprintf("about_type %q is not one of the known kinds.", t),
+			"Use one of: "+strings.Join(aboutTypes, ", ")+".", example)
+	}
+	a := about{Type: t, Kind: t}
+	if k, ok := aboutToDB[t]; ok {
+		a.Kind = k
+	}
+	if t == "family" {
+		return a, nil // the family's id comes from the caller's household
+	}
+	if rawID == "" {
+		if !requireID {
+			return a, nil
+		}
+		return about{}, respond.Invalid("about_id", fmt.Sprintf("about_type %s needs about_id.", t),
+			fmt.Sprintf("Pass the %s's id as about_id (find it with %s), or leave about_type out for a family note.", t, aboutFinder[t]),
+			example)
+	}
+	id, err := uuid.Parse(rawID)
+	if err != nil {
+		return about{}, respond.Invalid("about_id", fmt.Sprintf("about_id %q is not a UUID.", rawID),
+			fmt.Sprintf("Pass the %s's id (a UUID) from %s, not its name.", t, aboutFinder[t]), example)
+	}
+	a.ID = id
+	return a, nil
+}
+
+// str returns args[key] as a string ("" when missing or not a string).
+func str(args map[string]any, key string) string {
+	s, _ := args[key].(string)
+	return s
+}
+
+// notSignedIn is the result for calls without household claims.
+func notSignedIn() *mcp.CallToolResult {
+	return respond.Fail(respond.Error{
+		Message: "You are not signed in to a household.",
+		Fix:     "Tell the user to reconnect Home OS; retrying will not help.",
+	})
+}
+
+const (
+	defaultFindLimit = 25
+	maxFindLimit     = 100
+)
+
+// encodeCursor and decodeCursor make the opaque note_find cursor: the offset
+// of the next page.
+func encodeCursor(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte("o:" + strconv.Itoa(offset)))
+}
+
+func decodeCursor(c string) (int, bool) {
+	b, err := base64.RawURLEncoding.DecodeString(c)
+	if err != nil || !strings.HasPrefix(string(b), "o:") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(string(b), "o:"))
+	return n, err == nil && n >= 0
+}
+
+// intArg reads a numeric argument sent as a JSON number or a numeric string.
+func intArg(args map[string]any, key string) (int, bool, bool) {
+	switch v := args[key].(type) {
+	case nil:
+		return 0, false, true
+	case float64:
+		return int(v), true, v == float64(int(v))
+	case int:
+		return v, true, true
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return 0, false, true
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		return n, true, err == nil
+	}
+	return 0, true, false
+}
+
+// NewNoteFindTool creates note_find (catalog v2, class R). It lists the
+// household's notes, newest change first, optionally filtered by text
+// (query, matched case-insensitively in title and body) and by what they
+// are about. Items carry a 100-character preview; note_get reads a whole
+// note. Paging uses limit (default 25, max 100) and an opaque cursor that a
+// truncated result hands back in narrow and next.
+func NewNoteFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+	tool := mcp.NewTool("note_find",
+		mcp.WithDescription("List or search notes by text or what they're about. Returns titles and short previews; read a whole note with note_get."),
+		mcp.WithString("query",
+			mcp.Description("Words to find in the title or body, e.g. wifi"),
 		),
-		mcp.WithString("entity_id",
-			mcp.Description("Optional entity ID filter (UUID)"),
+		mcp.WithString("about_type",
+			mcp.Description("Only notes about this kind of thing; family = family-wide notes"),
+			mcp.Enum(aboutTypes...),
 		),
+		mcp.WithString("about_id",
+			mcp.Description("Only notes about this row (UUID); needs about_type"),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("How many notes to return (default 25, max 100)"),
+			mcp.Min(1), mcp.Max(maxFindLimit),
+		),
+		mcp.WithString("cursor",
+			mcp.Description("Paging cursor from the previous note_find result"),
+		),
+		mcp.WithTitleAnnotation("Find notes"),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
+		respond.ListSchema[noteSummary](),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		claims := server.ClaimsFromContext(ctx)
 		if claims == nil {
-			return mcp.NewToolResultText(`{"error":"unauthorized"}`), nil
+			return notSignedIn(), nil
+		}
+		householdID, err := uuid.Parse(claims.HouseholdID)
+		if err != nil {
+			return notSignedIn(), nil
 		}
 
 		args := req.GetArguments()
-		entityType, _ := args["entity_type"].(string)
-		entityIDStr, _ := args["entity_id"].(string)
-
-		if (entityType == "") != (entityIDStr == "") {
-			return mcp.NewToolResultText(`{"error":"entity_type and entity_id must be provided together"}`), nil
+		example := map[string]any{"query": "wifi", "about_type": "property"}
+		query := strings.TrimSpace(str(args, "query"))
+		a, bad := parseAbout(args, false, example)
+		if bad != nil {
+			return bad, nil
 		}
-
-		var rows pgx.Rows
-		var err error
-
-		if entityType != "" && entityIDStr != "" {
-			entityID, parseErr := uuid.Parse(entityIDStr)
-			if parseErr != nil {
-				return mcp.NewToolResultText(fmt.Sprintf(`{"error":"invalid entity_id: %s"}`, parseErr.Error())), nil
+		limit, given, ok := intArg(args, "limit")
+		if !ok || (given && (limit < 1 || limit > maxFindLimit)) {
+			return respond.Invalid("limit", fmt.Sprintf("limit must be a whole number from 1 to %d.", maxFindLimit),
+				"Pass limit as a number, e.g. 25, or leave it out.", map[string]any{"limit": 25}), nil
+		}
+		if !given {
+			limit = defaultFindLimit
+		}
+		offset := 0
+		if c := strings.TrimSpace(str(args, "cursor")); c != "" {
+			if offset, ok = decodeCursor(c); !ok {
+				return respond.Invalid("cursor", "cursor is not one note_find returned.",
+					"Pass the cursor exactly as the previous note_find result gave it, or leave it out to start over.",
+					map[string]any{"query": "wifi"}), nil
 			}
-			rows, err = pool.Query(ctx,
-				`SELECT `+noteColumns+`
-				 FROM notes n LEFT JOIN users u ON u.id = n.author_id
-				 WHERE n.household_id = $1 AND n.entity_type = $2 AND n.entity_id = $3
-				 ORDER BY n.created_at DESC`,
-				claims.HouseholdID, entityType, entityID,
-			)
-		} else {
-			rows, err = pool.Query(ctx,
-				`SELECT `+noteColumns+`
-				 FROM notes n LEFT JOIN users u ON u.id = n.author_id
-				 WHERE n.household_id = $1
-				 ORDER BY n.created_at DESC`,
-				claims.HouseholdID,
-			)
 		}
+
+		var kind *string
+		var aboutID *uuid.UUID
+		if a.Type != "" {
+			kind = &a.Kind
+			switch {
+			case a.Type == "family":
+				aboutID = &householdID
+			case a.ID != uuid.Nil:
+				aboutID = &a.ID
+			}
+		}
+
+		// entity_type is compared as text: a kind the DB does not know yet
+		// (e.g. recipe) simply matches nothing instead of failing the cast.
+		rows, err := pool.Query(ctx,
+			`SELECT `+noteColumns+`, COUNT(*) OVER ()
+			 FROM notes n`+noteJoins+`
+			 WHERE n.household_id = $1
+			   AND ($2::text IS NULL OR n.entity_type::text = $2::text)
+			   AND ($3::uuid IS NULL OR n.entity_id = $3::uuid)
+			   AND ($4::text = '' OR position(lower($4::text) IN lower(coalesce(n.title, '') || ' ' || n.body)) > 0)
+			 ORDER BY n.updated_at DESC, n.id
+			 LIMIT $5 OFFSET $6`,
+			householdID, kind, aboutID, query, limit, offset,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("list notes: %w", err)
+			return respond.Failed("list notes", err), nil
 		}
 		defer rows.Close()
 
-		notes := []noteResult{}
+		items := []noteSummary{}
+		total := 0
 		for rows.Next() {
-			n, err := scanNote(rows)
+			n, err := scanNote(rows, &total)
 			if err != nil {
-				return nil, fmt.Errorf("scan note: %w", err)
+				return respond.Failed("list notes", err), nil
 			}
-			notes = append(notes, n)
+			items = append(items, n.summary())
 		}
-
 		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("iterate notes: %w", err)
+			return respond.Failed("list notes", err), nil
 		}
 
-		result, _ := json.Marshal(notes)
-		return mcp.NewToolResultText(string(result)), nil
+		if len(items) == 0 {
+			if offset > 0 {
+				return respond.List("No more notes past this cursor.", items, respond.Page{},
+					"Leave cursor out to start from the newest note."), nil
+			}
+			return respond.List("No notes found.", items, respond.Page{},
+				"Save one with note_create.",
+				"Try note_find without filters, or search_all to look everywhere."), nil
+		}
+
+		next := []string{fmt.Sprintf("Read one in full with note_get note_id=%s.", items[0].ID)}
+		remaining := total - offset - len(items)
+		summary := fmt.Sprintf("Found %d notes.", total)
+		if offset > 0 || remaining > 0 {
+			summary = fmt.Sprintf("Found %d notes; showing %d–%d.", total, offset+1, offset+len(items))
+		}
+		if total == 1 {
+			summary = fmt.Sprintf("Found 1 note: %q.", noteResult{Title: items[0].Title}.displayTitle())
+		}
+		page := respond.Page{}
+		if remaining > 0 {
+			c := encodeCursor(offset + len(items))
+			page = respond.Page{
+				Total:  len(items) + remaining,
+				Narrow: fmt.Sprintf("%d more. Pass cursor=%q with the same filters for the next page, or add query or about_type to narrow.", remaining, c),
+			}
+			next = append(next, fmt.Sprintf("Next page: note_find cursor=%s with the same filters.", c))
+		}
+		return respond.List(summary, items, page, next...), nil
 	}
 
-	return "list_notes", tool, handler
+	return "note_find", tool, handler
 }
 
-// NewCreateNoteTool creates the create_note MCP tool.
-// It inserts a new note with the given title and body, authored by the
-// caller, optionally associated with an entity via entity_type and
-// entity_id. Without an entity the note is attached to the household
-// (entity_type "household", entity_id = household id). The response is the
-// stored note in the same shape list_notes returns.
-func NewCreateNoteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("create_note",
-		mcp.WithDescription("Create a new note authored by the caller, optionally associated with an entity. Without an entity the note is attached to the household."),
+// maxNoteTitleRunes is the notes.title column limit (VARCHAR(500)).
+const maxNoteTitleRunes = 500
+
+// createDedupeWindow is how far back note_create looks for an identical
+// note by the same member (catalog v2 loop guard).
+const createDedupeWindow = "10 minutes"
+
+// titleTooLong is the isError result for a title over maxNoteTitleRunes.
+func titleTooLong(title string, example map[string]any) *mcp.CallToolResult {
+	return respond.Invalid("title",
+		fmt.Sprintf("title is %d characters; the limit is %d.", utf8.RuneCountInString(title), maxNoteTitleRunes),
+		"Shorten the title and put the details in the body.", example)
+}
+
+// looksLikeChecklist is true for a body of at least 3 short non-empty lines.
+func looksLikeChecklist(body string) bool {
+	lines := 0
+	for _, l := range strings.Split(body, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if utf8.RuneCountInString(l) > 60 {
+			return false
+		}
+		lines++
+	}
+	return lines >= 3
+}
+
+// NewNoteCreateTool creates note_create (catalog v2, class C). It saves a
+// note authored by the caller, about the family (the default) or about one
+// row of the family named by about_type and about_id. The DB rejects rows
+// of other families (migration 038, SQLSTATE 23503) and kinds it does not
+// know yet (entity_kind domain, 23514); both come back as isError results
+// naming about_id or about_type. Loop guard: an identical note (same title,
+// body and subject) the same member saved in the last 10 minutes is
+// returned with duplicate:true instead of a second row.
+func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+	tool := mcp.NewTool("note_create",
+		mcp.WithDescription("Save a note for the family, optionally about a person, house, car, etc. For checklists (grocery, chores, packing) use list_create instead."),
 		mcp.WithString("title",
-			mcp.Description("Note title"),
+			mcp.Description("Short title, max 500 characters, e.g. Wi-Fi password"),
 			mcp.Required(),
 		),
 		mcp.WithString("content",
-			mcp.Description("Note body content (markdown supported)"),
+			mcp.Description("The note's body (markdown is fine)"),
 			mcp.Required(),
 		),
-		mcp.WithString("entity_type",
-			mcp.Description("Optional entity type to associate the note with (requires entity_id)"),
+		mcp.WithString("about_type",
+			mcp.Description("What it's about (default family); others need about_id"),
+			mcp.Enum(aboutTypes...),
 		),
-		mcp.WithString("entity_id",
-			mcp.Description("Optional entity ID (UUID) to associate the note with (requires entity_type)"),
+		mcp.WithString("about_id",
+			mcp.Description("Id (UUID) of the person, property, vehicle, ... it's about"),
 		),
+		mcp.WithTitleAnnotation("Create note"),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(false),
+		respond.Schema[noteResult](),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		claims := server.ClaimsFromContext(ctx)
 		if claims == nil {
-			return mcp.NewToolResultText(`{"error":"unauthorized"}`), nil
+			return notSignedIn(), nil
+		}
+		householdID, err := uuid.Parse(claims.HouseholdID)
+		if err != nil {
+			return notSignedIn(), nil
 		}
 
 		args := req.GetArguments()
-		title, _ := args["title"].(string)
-		content, _ := args["content"].(string)
-		entityType, _ := args["entity_type"].(string)
-		entityIDStr, _ := args["entity_id"].(string)
-
-		if title == "" || content == "" {
-			return mcp.NewToolResultText(`{"error":"title and content are required"}`), nil
+		title := strings.TrimSpace(str(args, "title"))
+		content := str(args, "content")
+		example := map[string]any{"title": "Wi-Fi", "content": "Network HomeNet, password on the router"}
+		if title == "" {
+			return respond.Invalid("title", "title is required.",
+				"Pass a short title, e.g. \"Wi-Fi\".", example), nil
 		}
-		if (entityType == "") != (entityIDStr == "") {
-			return mcp.NewToolResultText(`{"error":"entity_type and entity_id must be provided together"}`), nil
+		if strings.TrimSpace(content) == "" {
+			return respond.Invalid("content", "content is required.",
+				"Pass the note's text as content.", example), nil
 		}
-
-		householdID, err := uuid.Parse(claims.HouseholdID)
-		if err != nil {
-			return mcp.NewToolResultText(`{"error":"unauthorized"}`), nil
+		if utf8.RuneCountInString(title) > maxNoteTitleRunes {
+			return titleTooLong(title, example), nil
 		}
-
-		entityID := householdID
-		if entityType == "" {
-			entityType = householdEntityType
-		} else {
-			var parseErr error
-			entityID, parseErr = uuid.Parse(entityIDStr)
-			if parseErr != nil {
-				return mcp.NewToolResultText(fmt.Sprintf(`{"error":"invalid entity_id: %s"}`, parseErr.Error())), nil
-			}
+		aboutExample := map[string]any{"title": "Tires", "content": "Rotate every 6k miles",
+			"about_type": "vehicle", "about_id": "9a1c2b3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d"}
+		a, bad := parseAbout(args, true, aboutExample)
+		if bad != nil {
+			return bad, nil
+		}
+		if a.Type == "" {
+			a = about{Type: "family", Kind: "household"}
+		}
+		if a.Type == "family" {
+			a.ID = householdID
 		}
 
 		// claims.UserID is the users.id UUID once enriched, but may be an
@@ -213,32 +521,77 @@ func NewCreateNoteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			authorID = &id
 		}
 
+		// Loop guard: the same member saving the same note again within the
+		// window gets the existing row back.
 		n, err := scanNote(pool.QueryRow(ctx,
+			`SELECT `+noteColumns+`
+			 FROM notes n`+noteJoins+`
+			 WHERE n.household_id = $1 AND n.entity_type::text = $2 AND n.entity_id = $3
+			   AND n.title = $4 AND n.body = $5
+			   AND n.author_id IS NOT DISTINCT FROM (SELECT id FROM users WHERE id = $6)
+			   AND n.created_at > NOW() - $7::interval
+			 ORDER BY n.created_at DESC
+			 LIMIT 1`,
+			householdID, a.Kind, a.ID, title, content, authorID, createDedupeWindow,
+		))
+		switch {
+		case err == nil:
+			n.Duplicate = true
+			return respond.OK(fmt.Sprintf("You already saved note %q in the last 10 minutes; returned it instead of saving a copy.",
+				n.displayTitle()), n,
+				fmt.Sprintf("To change it use note_update note_id=%s.", n.ID)), nil
+		case !errors.Is(err, pgx.ErrNoRows):
+			return respond.Failed("save the note", err), nil
+		}
+
+		n, err = scanNote(pool.QueryRow(ctx,
 			`WITH inserted AS (
 				INSERT INTO notes (household_id, entity_type, entity_id, title, body, author_id)
 				VALUES ($1, $2, $3, $4, $5, (SELECT id FROM users WHERE id = $6))
 				RETURNING *
 			)
 			SELECT `+noteColumns+`
-			FROM inserted n LEFT JOIN users u ON u.id = n.author_id`,
-			householdID, entityType, entityID, title, content, authorID,
+			FROM inserted n`+noteJoins,
+			householdID, a.Kind, a.ID, title, content, authorID,
 		))
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			switch {
+			case pgErr.Code == "23503": // enforce_entity_owner: missing or another family's row
+				return respond.Invalid("about_id",
+					fmt.Sprintf("No %s with id %s was found in this family.", a.Type, a.ID),
+					fmt.Sprintf("Find the right id with %s, or leave about_type and about_id out to save a family note.", aboutFinder[a.Type]),
+					aboutExample), nil
+			case pgErr.Code == "23514" && pgErr.ConstraintName == "entity_kind_check":
+				return respond.Invalid("about_type",
+					fmt.Sprintf("Notes about a %s can't be saved yet.", a.Type),
+					fmt.Sprintf("Leave about_type and about_id out to save it as a family note, and name the %s in the title.", a.Type),
+					example), nil
+			}
+		}
 		if err != nil {
-			return nil, fmt.Errorf("create note: %w", err)
+			return respond.Failed("save the note", err), nil
 		}
 
-		result, _ := json.Marshal(n)
-		return mcp.NewToolResultText(string(result)), nil
+		summary := fmt.Sprintf("Saved note %q for the family.", n.displayTitle())
+		if a.Type != "family" {
+			summary = fmt.Sprintf("Saved note %q about %s %s.", n.displayTitle(), a.Type, a.ID)
+		}
+		next := []string{fmt.Sprintf("Add to it later with note_update note_id=%s append_text=….", n.ID)}
+		if looksLikeChecklist(content) {
+			next = append(next, "This looks like a checklist; consider list_create so items can be checked off.")
+		}
+		return respond.OK(summary, n, next...), nil
 	}
 
-	return "create_note", tool, handler
+	return "note_create", tool, handler
 }
 
 // NewNoteGetTool creates the note_get MCP tool (catalog v2, class R).
 // It returns one note in full: title, complete body, author (id + name),
-// entity link and timestamps. A note that does not exist or belongs to
+// what it is about and timestamps. A note that does not exist or belongs to
 // another household is reported as not found, so ids from other households
-// reveal nothing. Results are built with internal/respond.
+// reveal nothing.
 func NewNoteGetTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("note_get",
 		mcp.WithDescription("Read one note in full, with who wrote it and when."),
@@ -257,27 +610,17 @@ func NewNoteGetTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		claims := server.ClaimsFromContext(ctx)
 		if claims == nil {
-			return respond.Fail(respond.Error{
-				Message: "You are not signed in to a household.",
-				Fix:     "Tell the user to reconnect Home OS; retrying will not help.",
-			}), nil
+			return notSignedIn(), nil
 		}
 
-		raw, _ := req.GetArguments()["note_id"].(string)
-		example := map[string]any{"note_id": "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"}
-		if raw == "" {
-			return respond.Invalid("note_id", "note_id is required.",
-				"Pass the note's id as note_id. Call note_find to find it.", example), nil
-		}
-		noteID, err := uuid.Parse(raw)
-		if err != nil {
-			return respond.Invalid("note_id", fmt.Sprintf("note_id %q is not a UUID.", raw),
-				"Pass the note's id (a UUID) from note_find, not its title.", example), nil
+		noteID, raw, bad := parseNoteID(req.GetArguments(), map[string]any{"note_id": exampleNoteID})
+		if bad != nil {
+			return bad, nil
 		}
 
 		n, err := scanNote(pool.QueryRow(ctx,
 			`SELECT `+noteColumns+`
-			 FROM notes n LEFT JOIN users u ON u.id = n.author_id
+			 FROM notes n`+noteJoins+`
 			 WHERE n.id = $1 AND n.household_id = $2`,
 			noteID, claims.HouseholdID,
 		))
@@ -288,13 +631,9 @@ func NewNoteGetTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 			return respond.Failed("get the note", err), nil
 		}
 
-		title := "(untitled)"
-		if n.Title != nil && *n.Title != "" {
-			title = *n.Title
-		}
-		summary := fmt.Sprintf("Found note %q.", title)
+		summary := fmt.Sprintf("Found note %q.", n.displayTitle())
 		if n.AuthorName != nil && *n.AuthorName != "" {
-			summary = fmt.Sprintf("Found note %q by %s.", title, *n.AuthorName)
+			summary = fmt.Sprintf("Found note %q by %s.", n.displayTitle(), *n.AuthorName)
 		}
 		return respond.OK(summary, n,
 			fmt.Sprintf("Use note_update note_id=%s with append_text to add to it.", n.ID)), nil
@@ -303,8 +642,20 @@ func NewNoteGetTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 	return "note_get", tool, handler
 }
 
-// maxNoteTitleRunes is the notes.title column limit (VARCHAR(500)).
-const maxNoteTitleRunes = 500
+// parseNoteID reads the required note_id argument.
+func parseNoteID(args map[string]any, example map[string]any) (uuid.UUID, string, *mcp.CallToolResult) {
+	raw := strings.TrimSpace(str(args, "note_id"))
+	if raw == "" {
+		return uuid.Nil, raw, respond.Invalid("note_id", "note_id is required.",
+			"Pass the note's id as note_id. Call note_find to find it.", example)
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return uuid.Nil, raw, respond.Invalid("note_id", fmt.Sprintf("note_id %q is not a UUID.", raw),
+			"Pass the note's id (a UUID) from note_find, not its title.", example)
+	}
+	return id, raw, nil
+}
 
 // appendDedupeWindow is how long a repeated, identical append_text is ignored
 // (catalog v2: "A second identical append_text within 60 s is ignored").
@@ -312,17 +663,18 @@ const appendDedupeWindow = "60 seconds"
 
 // NewNoteUpdateTool creates the note_update MCP tool (catalog v2, class U).
 // Only the given fields change: title renames the note, content replaces
-// the whole body, and append_text adds lines to the end of the body without
+// the whole body, and append_text adds a line to the end of the body without
 // overwriting what others wrote. The update is a single statement, so
 // concurrent appends never lose each other's text. updated_at moves to now.
 // A note that does not exist or belongs to another household is reported
 // as not found. Empty strings count as "not given", because small models
 // often send "" for optional params they don't mean to set.
 //
-// Duplicate guard: when append_text is the only change and the note already
-// ends with that exact text from an update in the last 60 seconds, nothing
-// is written and the unchanged note is returned (a looping agent cannot
-// stack the same line). Results are built with internal/respond.
+// Duplicate guard: when append_text is the only change, the note's last
+// line is exactly that text (the whole body, or the text after the last
+// newline) and the note changed in the last 60 seconds, nothing is written
+// and the unchanged note is returned, so a looping agent cannot stack the
+// same line. A text that only matches the end of the last line is appended.
 func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("note_update",
 		mcp.WithDescription("Change a note. Use append_text to add lines without overwriting what others wrote."),
@@ -350,28 +702,18 @@ func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		claims := server.ClaimsFromContext(ctx)
 		if claims == nil {
-			return respond.Fail(respond.Error{
-				Message: "You are not signed in to a household.",
-				Fix:     "Tell the user to reconnect Home OS; retrying will not help.",
-			}), nil
+			return notSignedIn(), nil
 		}
 
 		args := req.GetArguments()
-		raw, _ := args["note_id"].(string)
-		title, _ := args["title"].(string)
-		content, _ := args["content"].(string)
-		appendText, _ := args["append_text"].(string)
+		title := strings.TrimSpace(str(args, "title"))
+		content := str(args, "content")
+		appendText := str(args, "append_text")
 
-		const exampleID = "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"
-		appendExample := map[string]any{"note_id": exampleID, "append_text": "- milk"}
-		if raw == "" {
-			return respond.Invalid("note_id", "note_id is required.",
-				"Pass the note's id as note_id. Call note_find to find it.", appendExample), nil
-		}
-		noteID, err := uuid.Parse(raw)
-		if err != nil {
-			return respond.Invalid("note_id", fmt.Sprintf("note_id %q is not a UUID.", raw),
-				"Pass the note's id (a UUID) from note_find, not its title.", appendExample), nil
+		appendExample := map[string]any{"note_id": exampleNoteID, "append_text": "- milk"}
+		noteID, raw, bad := parseNoteID(args, appendExample)
+		if bad != nil {
+			return bad, nil
 		}
 		if title == "" && content == "" && appendText == "" {
 			return respond.Invalid("", "Nothing to change: pass title, content or append_text.",
@@ -384,10 +726,7 @@ func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 				appendExample), nil
 		}
 		if utf8.RuneCountInString(title) > maxNoteTitleRunes {
-			return respond.Invalid("title",
-				fmt.Sprintf("title is %d characters; the limit is %d.", utf8.RuneCountInString(title), maxNoteTitleRunes),
-				"Shorten the title and put the details in content or append_text.",
-				map[string]any{"note_id": exampleID, "title": "Grocery"}), nil
+			return titleTooLong(title, map[string]any{"note_id": exampleNoteID, "title": "Grocery"}), nil
 		}
 
 		// mode: 0 keep body, 1 replace with content, 2 append.
@@ -412,11 +751,12 @@ func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 				WHERE id = $1 AND household_id = $2
 				  AND NOT ($6::boolean
 				       AND updated_at > NOW() - $7::interval
-				       AND right(body, char_length($5::text)) = $5::text)
+				       AND (body = $5::text
+				            OR right(body, char_length($5::text) + 1) = E'\n' || $5::text))
 				RETURNING *
 			)
 			SELECT `+noteColumns+`
-			FROM updated n LEFT JOIN users u ON u.id = n.author_id`,
+			FROM updated n`+noteJoins,
 			noteID, claims.HouseholdID, title, mode, text, guard, appendDedupeWindow,
 		))
 		duplicate := false
@@ -424,7 +764,7 @@ func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			// Either the note is not ours, or the guard skipped a repeat.
 			n, err = scanNote(pool.QueryRow(ctx,
 				`SELECT `+noteColumns+`
-				 FROM notes n LEFT JOIN users u ON u.id = n.author_id
+				 FROM notes n`+noteJoins+`
 				 WHERE n.id = $1 AND n.household_id = $2`,
 				noteID, claims.HouseholdID,
 			))
@@ -437,10 +777,7 @@ func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return respond.Failed("update the note", err), nil
 		}
 
-		name := "(untitled)"
-		if n.Title != nil && *n.Title != "" {
-			name = *n.Title
-		}
+		name := n.displayTitle()
 		readHint := fmt.Sprintf("Read it in full with note_get note_id=%s.", n.ID)
 		if duplicate {
 			return respond.OK(fmt.Sprintf("Note %q already ends with that text; nothing was added.", name), n,
@@ -468,11 +805,9 @@ func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 // It deletes one note in the authenticated household and returns the note as
 // it was, so the model can tell the user what was removed. A note that does
 // not exist or belongs to another household is reported as not found and
-// nothing is deleted, so ids from other households reveal nothing. Deleting
-// is a single DELETE ... RETURNING statement; a repeat of the call finds
-// nothing and changes nothing more (idempotent). Notes write no outbox events
-// and nothing references them, so the row is all there is to remove. Results
-// are built with internal/respond.
+// nothing is deleted. A repeat of the call finds nothing and changes nothing
+// more (idempotent). Notes write no outbox events; the AFTER DELETE trigger
+// of migration 038 removes rows that were about the note.
 func NewNoteDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("note_delete",
 		mcp.WithDescription("Delete a note."),
@@ -491,22 +826,12 @@ func NewNoteDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		claims := server.ClaimsFromContext(ctx)
 		if claims == nil {
-			return respond.Fail(respond.Error{
-				Message: "You are not signed in to a household.",
-				Fix:     "Tell the user to reconnect Home OS; retrying will not help.",
-			}), nil
+			return notSignedIn(), nil
 		}
 
-		raw, _ := req.GetArguments()["note_id"].(string)
-		example := map[string]any{"note_id": "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"}
-		if raw == "" {
-			return respond.Invalid("note_id", "note_id is required.",
-				"Pass the note's id as note_id. Call note_find to find it.", example), nil
-		}
-		noteID, err := uuid.Parse(raw)
-		if err != nil {
-			return respond.Invalid("note_id", fmt.Sprintf("note_id %q is not a UUID.", raw),
-				"Pass the note's id (a UUID) from note_find, not its title.", example), nil
+		noteID, raw, bad := parseNoteID(req.GetArguments(), map[string]any{"note_id": exampleNoteID})
+		if bad != nil {
+			return bad, nil
 		}
 
 		n, err := scanNote(pool.QueryRow(ctx,
@@ -516,7 +841,7 @@ func NewNoteDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 				RETURNING *
 			)
 			SELECT `+noteColumns+`
-			FROM deleted n LEFT JOIN users u ON u.id = n.author_id`,
+			FROM deleted n`+noteJoins,
 			noteID, claims.HouseholdID,
 		))
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -527,11 +852,7 @@ func NewNoteDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return respond.Failed("delete the note", err), nil
 		}
 
-		name := "(untitled)"
-		if n.Title != nil && *n.Title != "" {
-			name = *n.Title
-		}
-		return respond.OK(fmt.Sprintf("Deleted note %q.", name), n,
+		return respond.OK(fmt.Sprintf("Deleted note %q.", n.displayTitle()), n,
 			"It cannot be restored. Save it again with note_create if this was a mistake."), nil
 	}
 
