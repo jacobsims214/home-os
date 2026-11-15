@@ -747,6 +747,25 @@ func LocalDay(start, end string, allDay bool, loc *time.Location) (localStart, l
 	return ev.Start, ev.LocalDate, ev.Weekday
 }
 
+// EventsBetween returns the household's events overlapping [start, end),
+// sorted by start instant, exactly as agenda_get lists them (all-day events
+// read as household-local days in loc). Exported for family_overview's
+// next_days (#4385) so both tools agree. Always returns a non-nil slice.
+func EventsBetween(ctx context.Context, pool *pgxpool.Pool, householdID string, loc *time.Location, start, end time.Time) ([]Event, error) {
+	events, err := queryEvents(ctx, pool, householdID, loc, nil, start, end)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Event, 0, len(events))
+	for _, ev := range events {
+		if eventOverlapsRange(ev, start, end) {
+			out = append(out, ev)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return startsBefore(out[i].Start, out[j].Start) })
+	return out, nil
+}
+
 // startsBefore orders RFC 3339 start times by instant. Stored times mix
 // offsets (timed events in UTC, all-day events as local midnights), so a
 // string comparison is wrong; unparseable values fall back to it.
