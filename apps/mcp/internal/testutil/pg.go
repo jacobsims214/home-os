@@ -6,14 +6,19 @@
 // use. Every migration in packages/db/migrations/*.up.sql is applied once to a
 // template database, and each NewPool call gets its own fresh database cloned
 // from that template, so tests are isolated and fast. The container is removed
-// by the testcontainers reaper when the test process exits.
+// by the testcontainers reaper when the test process exits. Container start
+// is retried with backoff because parallel packages race on the shared
+// reaper (see startPostgres), so plain `go test ./...` is safe.
 //
 // Requires a running Docker daemon.
 package testutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
+	"math/rand/v2"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -148,16 +153,7 @@ func setup() error {
 	}
 	sort.Strings(files) // zero-padded numeric prefixes sort lexically
 
-	container, err := tcpostgres.Run(ctx, postgresImage,
-		tcpostgres.WithDatabase(templateDB),
-		tcpostgres.WithUsername("homeos"),
-		tcpostgres.WithPassword("homeos"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(2*time.Minute),
-		),
-	)
+	container, err := startPostgres(ctx)
 	if err != nil {
 		return fmt.Errorf("start postgres container (is Docker running?): %w", err)
 	}
@@ -198,6 +194,55 @@ func setup() error {
 		return fmt.Errorf("close template db: %w", err)
 	}
 	return nil
+}
+
+// startAttempts bounds how often startPostgres tries before giving up.
+const startAttempts = 5
+
+// startPostgres starts the Postgres container, retrying with backoff.
+//
+// `go test ./...` runs one test binary per package in parallel, and they all
+// share one testcontainers session (the session ID comes from the parent
+// `go test` process), so they share one Ryuk reaper container. The first
+// binary creates it; a binary that looks it up before Docker has moved it
+// from "created" to "running" fails with
+//
+//	wait for reaper <id>: unexpected container status "created"
+//
+// which testcontainers-go (v0.44.0) treats as permanent. A moment later the
+// reaper is running and a retry reuses it, so retrying here is enough.
+func startPostgres(ctx context.Context) (*tcpostgres.PostgresContainer, error) {
+	delay := 500 * time.Millisecond
+	var errs []error
+	for attempt := 1; ; attempt++ {
+		container, err := tcpostgres.Run(ctx, postgresImage,
+			tcpostgres.WithDatabase(templateDB),
+			tcpostgres.WithUsername("homeos"),
+			tcpostgres.WithPassword("homeos"),
+			testcontainers.WithWaitStrategy(
+				wait.ForLog("database system is ready to accept connections").
+					WithOccurrence(2).
+					WithStartupTimeout(2*time.Minute),
+			),
+		)
+		if err == nil {
+			return container, nil
+		}
+		// Run can return a half-started container alongside the error.
+		errs = append(errs, fmt.Errorf("attempt %d: %w", attempt, errors.Join(err, testcontainers.TerminateContainer(container))))
+		if attempt == startAttempts {
+			return nil, errors.Join(errs...)
+		}
+		// Jitter so parallel test binaries do not retry in lockstep.
+		sleep := delay/2 + rand.N(delay)
+		log.Printf("testutil: postgres start attempt %d/%d failed, retrying in %s: %v", attempt, startAttempts, sleep, err)
+		select {
+		case <-ctx.Done():
+			return nil, errors.Join(append(errs, ctx.Err())...)
+		case <-time.After(sleep):
+		}
+		delay *= 2
+	}
 }
 
 // migrationsDir finds packages/db/migrations by walking up from this source
