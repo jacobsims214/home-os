@@ -94,12 +94,10 @@ test("overflow check catches a too-wide element", async ({ page }) => {
   await expect(expectNoHorizontalOverflow(page)).rejects.toThrow(/horizontal overflow[\s\S]*div/);
 });
 
-// KNOWN BUG: middleware (#4413) lets a page load with only home-os-refresh so
-// the BFF can renew the session, but app/(dashboard)/layout.tsx still
-// redirects to /login when home-os-token is missing. The id token cookie
-// expires with the token, so users bounce through Dex daily instead of
-// refreshing silently. Flip fixme -> test once the layout guard is fixed.
-test.fixme("refresh-only session renews silently on the home screen", async ({ page, baseURL, stubStats }) => {
+// Regression (#4626): with only home-os-refresh, middleware and the dashboard
+// layout both let the page render, and the first /bff call renews the session
+// through Dex's refresh_token grant instead of bouncing the user to /dex/auth.
+test("refresh-only session renews silently on the home screen", async ({ page, baseURL, stubStats }) => {
   test.skip(!!process.env.E2E_BASE_URL, "needs the stub");
   await signInWithStub(page, baseURL!, { idToken: false });
   const before = (await stubStats()).dexRefreshes;
