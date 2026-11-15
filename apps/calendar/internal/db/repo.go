@@ -51,22 +51,48 @@ type CalDAVUser struct {
 
 // GetUserByEmailForCalDAV looks up a user by email for CalDAV Basic Auth.
 // Returns nil, nil if the user is not found.
+//
+// The match is case-insensitive (lower(email) = lower($1)), like the API's
+// member resolver (apps/api/internal/auth/resolve.go): users.email keeps the
+// capitalisation the account was created with, and phone clients send
+// whatever the member typed. users.email's UNIQUE constraint is
+// case-sensitive, so two rows could differ only by case. If one of them is an
+// exact match it is used. If none is exact, the login is ambiguous and is
+// refused (nil, nil, the same as an unknown email) rather than picking one.
 func (r *Repo) GetUserByEmailForCalDAV(ctx context.Context, email string) (*CalDAVUser, error) {
-	row := r.pool.QueryRow(ctx, `
+	rows, err := r.pool.Query(ctx, `
 		SELECT id, email, caldav_password_hash, active
 		FROM users
-		WHERE email = $1
+		WHERE lower(email) = lower($1)
+		ORDER BY (email = $1) DESC, id
+		LIMIT 2
 	`, email)
-
-	var u CalDAVUser
-	err := row.Scan(&u.ID, &u.Email, &u.CalDAVPasswordHash, &u.Active)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("db: get user by email for caldav: %w", err)
 	}
-	return &u, nil
+	defer rows.Close()
+
+	var found []CalDAVUser
+	for rows.Next() {
+		var u CalDAVUser
+		if err := rows.Scan(&u.ID, &u.Email, &u.CalDAVPasswordHash, &u.Active); err != nil {
+			return nil, fmt.Errorf("db: get user by email for caldav: %w", err)
+		}
+		found = append(found, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("db: get user by email for caldav: %w", err)
+	}
+
+	switch {
+	case len(found) == 0:
+		return nil, nil
+	case found[0].Email == email || len(found) == 1:
+		return &found[0], nil
+	default:
+		// Two or more accounts differ only by case and none matches exactly.
+		return nil, nil
+	}
 }
 
 // GetHouseholdIDForUser returns the user's default household: the one from
