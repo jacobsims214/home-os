@@ -39,6 +39,8 @@ spec:
         {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         env:
         {{- include "home-os.databaseEnv" . | nindent 8 }}
+        resources:
+          {{- toYaml .Values.migrations.resources | nindent 10 }}
         volumeMounts:
         {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
       volumes:

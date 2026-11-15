@@ -107,6 +107,12 @@ ui:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
 
+# Schema migrations Job (templates/migrations/job.yaml): golang-migrate, short-lived.
+migrations:
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
 typesense:
   replicas: 1
   # Pinned. 30.x supports built-in auto-embedding (embed fields with ts/* models)
@@ -124,9 +130,20 @@ typesense:
   # Turn it back off after the first successful start.
   fixDataOwnership: false
   fixDataOwnershipImage: busybox:1.37.0
+  # Init container above: a find + chown over /data, so it needs very little.
+  fixDataOwnershipResources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { memory: 64Mi }
+  # Typesense keeps its whole index in RAM and also loads the local embedding
+  # model ts/all-MiniLM-L12-v2 (#4438: ~128 MB of weights plus ONNX inference
+  # buffers). It re-embeds every document when a collection's schema changes,
+  # which is CPU-heavy and spikes memory. So: a 512Mi request to cover the model
+  # plus a household-sized index, a 2Gi memory limit for re-embed headroom, and
+  # no CPU limit (CFS throttling would stall embedding; the 250m request still
+  # guarantees a fair share). Raise memory if the index grows past ~1Gi.
   resources:
-    requests: { cpu: 100m, memory: 256Mi }
-    limits: { cpu: 500m, memory: 1Gi }
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 2Gi }
 
 tika:
   replicas: 1
@@ -173,6 +190,10 @@ dex:
   # forced re-logins on multi-device users, but a stolen id_token stays valid
   # longer. Empty = Dex default (24h).
   idTokenExpiry: "24h"
+  # Dex is a small Go binary serving OIDC for a handful of users.
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 250m, memory: 256Mi }
 
 # Workloads get DB_PASSWORD from a Secret (secretKeyRef) and DATABASE_URL is
 # assembled from parts with $(DB_PASSWORD), so no password is rendered into env.

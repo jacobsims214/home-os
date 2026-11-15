@@ -44,6 +44,8 @@ spec:
           capabilities:
             drop: ["ALL"]
             add: ["CHOWN", "FOWNER"]
+        resources:
+          {{- toYaml .Values.typesense.fixDataOwnershipResources | nindent 10 }}
         volumeMounts:
         - name: data
           mountPath: /data
@@ -63,6 +65,8 @@ spec:
               key: typesenseApiKey
         - name: TYPESENSE_DATA_DIR
           value: /data
+        resources:
+          {{- toYaml .Values.typesense.resources | nindent 10 }}
         volumeMounts:
         {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         - name: data

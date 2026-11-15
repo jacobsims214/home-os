@@ -23,6 +23,8 @@ spec:
         {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: 8080
+        resources:
+          {{- toYaml .Values.envoy.resources | nindent 10 }}
         volumeMounts:
         {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         - name: config

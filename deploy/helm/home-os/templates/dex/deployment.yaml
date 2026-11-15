@@ -41,6 +41,8 @@ spec:
               name: {{ include "home-os.dbSecretName" . }}
               key: {{ include "home-os.dbSecretPasswordKey" . }}
               {{- end }}
+        resources:
+          {{- toYaml .Values.dex.resources | nindent 10 }}
         volumeMounts:
         {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         - name: config
