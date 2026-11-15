@@ -77,6 +77,14 @@ type ConflictEvent struct {
 	CalendarName string `json:"calendar_name,omitempty"`
 }
 
+// createEventResponse is create_event's result: the new event's id and the
+// existing events it overlaps (never null; empty when there are none).
+type createEventResponse struct {
+	ID             string          `json:"id"`
+	Conflicts      []ConflictEvent `json:"conflicts"`
+	ConflictsError string          `json:"conflicts_error,omitempty"`
+}
+
 // ─────────────────────────────────────────────
 // Helper: extract a string param from the tool request
 // ─────────────────────────────────────────────
@@ -531,6 +539,46 @@ func queryEvents(ctx context.Context, pool *pgxpool.Pool, householdID string, lo
 	return events, nil
 }
 
+// findConflicts returns the household's events (optionally limited to
+// calendarIDs) whose [start, end) overlaps [start, end), sorted by start
+// instant. excludeID skips one event (create_event passes the event it just
+// made). It is shared by check_conflicts and create_event so both agree on
+// what a conflict is. All-day events come back from queryEvents as
+// household-local days, so one on 11/18 conflicts with any range touching
+// 11/18 household time and none on 11/19. Always returns a non-nil slice.
+func findConflicts(ctx context.Context, pool *pgxpool.Pool, householdID string, loc *time.Location, calendarIDs []string, start, end time.Time, excludeID string) ([]ConflictEvent, error) {
+	events, err := queryEvents(ctx, pool, householdID, loc, calendarIDs, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("query events: %w", err)
+	}
+
+	conflicts := make([]ConflictEvent, 0)
+	for _, ev := range events {
+		if ev.ID == excludeID || !eventOverlapsRange(ev, start, end) {
+			continue
+		}
+		conflicts = append(conflicts, ConflictEvent{
+			ID:           ev.ID,
+			CalendarID:   ev.CalendarID,
+			Title:        ev.Title,
+			Start:        ev.Start,
+			End:          ev.End,
+			CalendarName: ev.CalendarName,
+		})
+	}
+
+	slices.SortStableFunc(conflicts, func(a, b ConflictEvent) int {
+		switch {
+		case startsBefore(a.Start, b.Start):
+			return -1
+		case startsBefore(b.Start, a.Start):
+			return 1
+		}
+		return 0
+	})
+	return conflicts, nil
+}
+
 // ─────────────────────────────────────────────
 // Helper: filter events that overlap a given date range (inclusive of boundaries)
 // ─────────────────────────────────────────────
@@ -834,7 +882,7 @@ func NewListEventsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, 
 // NewCreateEventTool creates the create_event tool and its handler.
 func NewCreateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("create_event",
-		mcp.WithDescription("Create a new calendar event. Records a calendar_changes entry and bumps the calendar's ctag for CalDAV sync."),
+		mcp.WithDescription("Create a new calendar event. Records a calendar_changes entry and bumps the calendar's ctag for CalDAV sync. Returns {\"id\", \"conflicts\"}: conflicts lists existing events on any household calendar that overlap the new one (same rule as check_conflicts). The event is created either way; tell the user about any conflicts."),
 		mcp.WithString("calendar_id", mcp.Description("Calendar ID to create the event in"), mcp.Required()),
 		mcp.WithString("title", mcp.Description("Event title"), mcp.Required()),
 		mcp.WithString("start_time", mcp.Description("Start time (ISO 8601, e.g. 2026-08-03T14:00:00-05:00). For all_day events a date (2026-08-03) is enough; any clock time is ignored."), mcp.Required()),
@@ -886,13 +934,20 @@ func NewCreateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 		// Validate time formats and ordering. All-day events are normalised
 		// to whole days (UTC-midnight dates, exclusive end; see allDayRange).
 		// Timed events are stored as UTC RFC 3339, as the API and CalDAV do.
+		// rangeStart/rangeEnd is the span the event occupies, used for the
+		// conflict check: all-day events cover household-local days, the
+		// same reading localizeAllDay gives existing all-day events.
+		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
 		var storedStart, storedEnd string
+		var rangeStart, rangeEnd time.Time
 		if allDay {
 			first, endExcl, err := allDayRange(startTime, endTime)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 			storedStart, storedEnd = storeAllDay(first, endExcl)
+			rangeStart = time.Date(first.Year(), first.Month(), first.Day(), 0, 0, 0, 0, loc)
+			rangeEnd = time.Date(endExcl.Year(), endExcl.Month(), endExcl.Day(), 0, 0, 0, 0, loc)
 		} else {
 			startT, err := time.Parse(time.RFC3339, startTime)
 			if err != nil {
@@ -906,6 +961,7 @@ func NewCreateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 				return mcp.NewToolResultError("end_time must be after start_time"), nil
 			}
 			storedStart, storedEnd = startT.UTC().Format(time.RFC3339), endT.UTC().Format(time.RFC3339)
+			rangeStart, rangeEnd = startT, endT
 		}
 
 		// Generate IDs
@@ -944,7 +1000,24 @@ func NewCreateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context,
 		}
 
 		slog.Info("create_event: created", "event_id", eventID, "calendar_id", calendarID)
-		return mcp.NewToolResultText(fmt.Sprintf(`{"id":"%s"}`, eventID)), nil
+
+		// Report overlapping events on every household calendar. The event
+		// is already committed, so a failed lookup must not fail the call:
+		// it returns an empty list plus conflicts_error instead.
+		resp := createEventResponse{ID: eventID}
+		conflicts, err := findConflicts(ctx, pool, claims.HouseholdID, loc, nil, rangeStart, rangeEnd, eventID)
+		if err != nil {
+			slog.Warn("create_event: conflict check failed", "event_id", eventID, "error", err)
+			conflicts = []ConflictEvent{}
+			resp.ConflictsError = "conflict check failed; call check_conflicts to verify"
+		}
+		resp.Conflicts = conflicts
+
+		data, err := json.Marshal(resp)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
+		}
+		return mcp.NewToolResultText(string(data)), nil
 	}
 
 	return tool, handler
@@ -1615,39 +1688,10 @@ func NewCheckConflictsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Conte
 		calendarIDs := getStringSliceArg(args, "calendar_ids")
 		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
 
-		// Query all events for the household (or filtered calendars).
-		// All-day events come back as local days, so one on 11/18 conflicts
-		// with any proposal on 11/18 household time and none on 11/19.
-		events, err := queryEvents(ctx, pool, claims.HouseholdID, loc, calendarIDs, proposedStart, proposedEnd)
+		conflicts, err := findConflicts(ctx, pool, claims.HouseholdID, loc, calendarIDs, proposedStart, proposedEnd, "")
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("query events: %v", err)), nil
+			return mcp.NewToolResultError(err.Error()), nil
 		}
-
-		// Filter to events that overlap the proposed time range
-		conflicts := make([]ConflictEvent, 0)
-		for _, ev := range events {
-			if eventOverlapsRange(ev, proposedStart, proposedEnd) {
-				conflicts = append(conflicts, ConflictEvent{
-					ID:           ev.ID,
-					CalendarID:   ev.CalendarID,
-					Title:        ev.Title,
-					Start:        ev.Start,
-					End:          ev.End,
-					CalendarName: ev.CalendarName,
-				})
-			}
-		}
-
-		// Sort by start time
-		slices.SortStableFunc(conflicts, func(a, b ConflictEvent) int {
-			switch {
-			case startsBefore(a.Start, b.Start):
-				return -1
-			case startsBefore(b.Start, a.Start):
-				return 1
-			}
-			return 0
-		})
 
 		data, err := json.Marshal(conflicts)
 		if err != nil {

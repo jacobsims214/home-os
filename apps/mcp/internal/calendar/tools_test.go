@@ -867,3 +867,121 @@ func TestAllDayEventsEastOfUTC(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateEventConflicts checks that create_event reports overlapping
+// events on any household calendar, using check_conflicts' rule (half-open
+// ranges, all-day events as household-local days), and still creates the
+// event.
+func TestCreateEventConflicts(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	setHouseholdTimezone(t, pool, hh.HouseholdID, "America/New_York")
+	family := seedCalendar(t, pool, hh.HouseholdID)
+	work := seedCalendar(t, pool, hh.HouseholdID)
+
+	// 10:00-11:00 New York on 11/18, stored as UTC, on the other calendar.
+	dentist := seedEvent(t, pool, work, uuid.NewString(),
+		`{"title":"Dentist","start":"2026-11-18T15:00:00Z","end":"2026-11-18T16:00:00Z","all_day":false}`)
+	// All-day on 11/20, stored the CalDAV way.
+	trip := seedEvent(t, pool, family, uuid.NewString(),
+		`{"title":"Trip","start":"2026-11-20T00:00:00Z","end":"2026-11-21T00:00:00Z","all_day":true}`)
+
+	// Another household's overlapping event must never show up.
+	_, other := testutil.SeedHousehold(t, pool)
+	otherCal := seedCalendar(t, pool, other.HouseholdID)
+	seedEvent(t, pool, otherCal, uuid.NewString(),
+		`{"title":"Stranger","start":"2026-11-18T15:00:00Z","end":"2026-11-18T16:00:00Z","all_day":false}`)
+
+	_, create := NewCreateEventTool(pool)
+
+	tests := []struct {
+		name string
+		args map[string]any
+		want []string // conflict ids, in order
+	}{
+		{
+			name: "timed overlap on another calendar",
+			args: map[string]any{"start_time": "2026-11-18T10:30:00-05:00", "end_time": "2026-11-18T11:30:00-05:00"},
+			want: []string{dentist},
+		},
+		{
+			name: "touching end is not a conflict",
+			args: map[string]any{"start_time": "2026-11-18T11:00:00-05:00", "end_time": "2026-11-18T12:00:00-05:00"},
+			want: []string{},
+		},
+		{
+			name: "no overlap",
+			args: map[string]any{"start_time": "2026-11-19T10:00:00-05:00", "end_time": "2026-11-19T11:00:00-05:00"},
+			want: []string{},
+		},
+		{
+			// 21:00 New York on 11/20 is 02:00Z on 11/21: outside the UTC
+			// day but inside the household-local all-day event.
+			name: "timed inside local all-day event",
+			args: map[string]any{"start_time": "2026-11-20T21:00:00-05:00", "end_time": "2026-11-20T22:00:00-05:00"},
+			want: []string{trip},
+		},
+		{
+			// 20:00 New York on 11/19 is 01:00Z on 11/20: inside the UTC
+			// day but before the household-local all-day event.
+			name: "timed before local all-day event",
+			args: map[string]any{"start_time": "2026-11-19T20:00:00-05:00", "end_time": "2026-11-19T21:00:00-05:00"},
+			want: []string{},
+		},
+		{
+			name: "all-day create overlaps timed event",
+			args: map[string]any{"start_time": "2026-11-18", "end_time": "2026-11-18", "all_day": true},
+			want: []string{dentist},
+		},
+		{
+			name: "all-day create next to all-day event",
+			args: map[string]any{"start_time": "2026-11-21", "end_time": "2026-11-21", "all_day": true},
+			want: []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := map[string]any{"calendar_id": family, "title": "New " + tt.name}
+			for k, v := range tt.args {
+				args[k] = v
+			}
+			text, isErr := callTool(t, create, ctx, args)
+			if isErr {
+				t.Fatalf("create_event: %s", text)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(text), &raw); err != nil {
+				t.Fatalf("decode %q: %v", text, err)
+			}
+			if string(raw["conflicts"]) == "null" || raw["conflicts"] == nil {
+				t.Fatalf("conflicts must be a list, got %q", text)
+			}
+			var out createEventResponse
+			if err := json.Unmarshal([]byte(text), &out); err != nil {
+				t.Fatalf("decode %q: %v", text, err)
+			}
+			if out.ID == "" || out.ConflictsError != "" {
+				t.Fatalf("unexpected response %q", text)
+			}
+			// The event was created even when it conflicts.
+			var n int
+			if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM calendar_objects WHERE id = $1`, out.ID).Scan(&n); err != nil || n != 1 {
+				t.Fatalf("event %s not stored (n=%d, err=%v)", out.ID, n, err)
+			}
+			got := make([]string, 0, len(out.Conflicts))
+			for _, c := range out.Conflicts {
+				if c.ID == out.ID {
+					t.Errorf("new event listed as its own conflict")
+				}
+				got = append(got, c.ID)
+			}
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("conflicts = %v, want %v (%s)", got, tt.want, text)
+			}
+			// Remove it so later cases only see the seeded events.
+			if _, err := pool.Exec(context.Background(), `DELETE FROM calendar_objects WHERE id = $1`, out.ID); err != nil {
+				t.Fatalf("cleanup: %v", err)
+			}
+		})
+	}
+}
