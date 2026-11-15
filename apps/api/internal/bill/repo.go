@@ -22,6 +22,12 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 	return &Repo{pool: pool}
 }
 
+// billColumns is the select list scanBill reads, in its order.
+const billColumns = `id, household_id, property_id, name, amount, due_day,
+	category, vendor_id, rrule, notes, created_at, updated_at,
+	vehicle_id, asset_id, paid_date, is_autopay, account_number, payment_url,
+	frequency, due_date, budget_category_id, paid_for_due_date`
+
 // scanBill scans a single Bill from a pgx.Row.
 func scanBill(row pgx.Row) (*Bill, error) {
 	b := &Bill{}
@@ -44,6 +50,10 @@ func scanBill(row pgx.Row) (*Bill, error) {
 		&b.IsAutopay,
 		&b.AccountNumber,
 		&b.PaymentURL,
+		&b.Frequency,
+		&b.DueDate,
+		&b.BudgetCategoryID,
+		&b.PaidForDueDate,
 	)
 	if err != nil {
 		return nil, err
@@ -54,9 +64,7 @@ func scanBill(row pgx.Row) (*Bill, error) {
 // List returns all bills for a household, ordered by name.
 func (r *Repo) List(ctx context.Context, householdID uuid.UUID) ([]*Bill, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, property_id, name, amount, due_day,
-		        category, vendor_id, rrule, notes, created_at, updated_at,
-		        vehicle_id, asset_id, paid_date, is_autopay, account_number, payment_url
+		`SELECT `+billColumns+`
 		 FROM bills
 		 WHERE household_id = $1
 		 ORDER BY name`,
@@ -84,9 +92,7 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID) ([]*Bill, error)
 // Get returns a single bill by ID, scoped to the household.
 func (r *Repo) Get(ctx context.Context, id, householdID uuid.UUID) (*Bill, error) {
 	row := r.pool.QueryRow(ctx,
-		`SELECT id, household_id, property_id, name, amount, due_day,
-		        category, vendor_id, rrule, notes, created_at, updated_at,
-		        vehicle_id, asset_id, paid_date, is_autopay, account_number, payment_url
+		`SELECT `+billColumns+`
 		 FROM bills
 		 WHERE id = $1 AND household_id = $2`,
 		id, householdID,
@@ -113,14 +119,15 @@ func (r *Repo) Create(ctx context.Context, b *Bill) (*Bill, error) {
 	row := tx.QueryRow(ctx,
 		`INSERT INTO bills (household_id, property_id, name, amount, due_day,
 		                    category, vendor_id, rrule, notes,
-		                    vehicle_id, asset_id, is_autopay, account_number, payment_url)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-		 RETURNING id, household_id, property_id, name, amount, due_day,
-		           category, vendor_id, rrule, notes, created_at, updated_at,
-		           vehicle_id, asset_id, paid_date, is_autopay, account_number, payment_url`,
+		                    vehicle_id, asset_id, is_autopay, account_number, payment_url,
+		                    frequency, due_date, budget_category_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+		         COALESCE(NULLIF($15, ''), 'monthly'), $16, $17)
+		 RETURNING `+billColumns,
 		b.HouseholdID, b.PropertyID, b.Name, b.Amount, b.DueDay,
 		b.Category, b.VendorID, b.Rrule, b.Notes,
 		b.VehicleID, b.AssetID, b.IsAutopay, b.AccountNumber, b.PaymentURL,
+		b.Frequency, b.DueDate, b.BudgetCategoryID,
 	)
 	created, err := scanBill(row)
 	if err != nil {
@@ -159,21 +166,25 @@ func (r *Repo) Update(ctx context.Context, b *Bill) (*Bill, error) {
 	row := tx.QueryRow(ctx,
 		`UPDATE bills
 		 SET property_id = $2, name = $3, amount = $4, due_day = $5,
-		     -- a stored paid_for_due_date is on the old due day: clear it
-		     -- when the day changes (migration 052, #4655)
-		     paid_for_due_date = CASE WHEN due_day IS DISTINCT FROM $5 THEN NULL ELSE paid_for_due_date END,
+		     -- a stored paid_for_due_date is on the old schedule: clear it
+		     -- when the due day, frequency or due date changes (migration
+		     -- 052, #4655), so coverage is inferred again for the new one
+		     paid_for_due_date = CASE WHEN due_day IS DISTINCT FROM $5
+		                                OR frequency IS DISTINCT FROM $16
+		                                OR due_date IS DISTINCT FROM $17::date
+		                              THEN NULL ELSE paid_for_due_date END,
 		     category = $6, vendor_id = $7, rrule = $8, notes = $9,
 		     vehicle_id = $10, asset_id = $11, is_autopay = $12,
 		     account_number = $13, payment_url = $14,
+		     frequency = $16, due_date = $17, budget_category_id = $18,
 		     updated_at = NOW()
 		 WHERE id = $1 AND household_id = $15
-		 RETURNING id, household_id, property_id, name, amount, due_day,
-		           category, vendor_id, rrule, notes, created_at, updated_at,
-		           vehicle_id, asset_id, paid_date, is_autopay, account_number, payment_url`,
+		 RETURNING `+billColumns,
 		b.ID, b.PropertyID, b.Name, b.Amount, b.DueDay,
 		b.Category, b.VendorID, b.Rrule, b.Notes,
 		b.VehicleID, b.AssetID, b.IsAutopay, b.AccountNumber, b.PaymentURL,
 		b.HouseholdID,
+		b.Frequency, b.DueDate, b.BudgetCategoryID,
 	)
 	updated, err := scanBill(row)
 	if err != nil {

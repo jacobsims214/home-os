@@ -34,7 +34,8 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID, f Filter) ([]*Lo
 	q := `SELECT id, household_id, name, property_id, vehicle_id, asset_id,
 	             lender, original_amount, interest_rate, term_months,
 	             monthly_payment, remaining_balance, start_date::text, notes,
-	             created_at, updated_at
+	             created_at, updated_at,
+	             due_day, term_end::text, account_number, budget_category_id
 	      FROM loans
 	      WHERE household_id = $1`
 	args := []any{householdID}
@@ -76,7 +77,8 @@ func (r *Repo) Get(ctx context.Context, id, householdID uuid.UUID) (*Loan, error
 		`SELECT id, household_id, name, property_id, vehicle_id, asset_id,
 		        lender, original_amount, interest_rate, term_months,
 		        monthly_payment, remaining_balance, start_date::text, notes,
-		        created_at, updated_at
+		        created_at, updated_at,
+		        due_day, term_end::text, account_number, budget_category_id
 		 FROM loans WHERE id = $1 AND household_id = $2`,
 		id, householdID,
 	)
@@ -100,15 +102,19 @@ func (r *Repo) Create(ctx context.Context, householdID uuid.UUID, l *Loan) (*Loa
 	rows, err := r.pool.Query(ctx,
 		`INSERT INTO loans (household_id, name, property_id, vehicle_id, asset_id,
 		                    lender, original_amount, interest_rate, term_months,
-		                    monthly_payment, remaining_balance, start_date, notes)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		                    monthly_payment, remaining_balance, start_date, notes,
+		                    due_day, term_end, account_number, budget_category_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+		         $14, $15, $16, $17)
 		 RETURNING id, household_id, name, property_id, vehicle_id, asset_id,
 		           lender, original_amount, interest_rate, term_months,
 		           monthly_payment, remaining_balance, start_date::text, notes,
-		           created_at, updated_at`,
+		           created_at, updated_at,
+		           due_day, term_end::text, account_number, budget_category_id`,
 		householdID, l.Name, l.PropertyID, l.VehicleID, l.AssetID,
 		l.Lender, l.OriginalAmount, l.InterestRate, l.TermMonths,
 		l.MonthlyPayment, l.RemainingBalance, l.StartDate, l.Notes,
+		l.DueDay, l.TermEnd, l.AccountNumber, l.BudgetCategoryID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create loan: %w", err)
@@ -132,16 +138,20 @@ func (r *Repo) Update(ctx context.Context, id, householdID uuid.UUID, l *Loan) (
 		     lender = $7, original_amount = $8, interest_rate = $9,
 		     term_months = $10, monthly_payment = $11,
 		     remaining_balance = $12, start_date = $13, notes = $14,
+		     due_day = $15, term_end = $16, account_number = $17,
+		     budget_category_id = $18,
 		     updated_at = NOW()
 		 WHERE id = $1 AND household_id = $2
 		 RETURNING id, household_id, name, property_id, vehicle_id, asset_id,
 		           lender, original_amount, interest_rate, term_months,
 		           monthly_payment, remaining_balance, start_date::text, notes,
-		           created_at, updated_at`,
+		           created_at, updated_at,
+		           due_day, term_end::text, account_number, budget_category_id`,
 		id, householdID,
 		l.Name, l.PropertyID, l.VehicleID, l.AssetID,
 		l.Lender, l.OriginalAmount, l.InterestRate, l.TermMonths,
 		l.MonthlyPayment, l.RemainingBalance, l.StartDate, l.Notes,
+		l.DueDay, l.TermEnd, l.AccountNumber, l.BudgetCategoryID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update loan: %w", err)

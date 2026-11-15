@@ -17,9 +17,9 @@ import (
 // to null in JSON and numeric values are carried as strings to avoid
 // float64 precision loss during JSON serialization.
 type Loan struct {
-	ID               uuid.UUID
-	HouseholdID      uuid.UUID
-	Name             string
+	ID          uuid.UUID
+	HouseholdID uuid.UUID
+	Name        string
 	// Subject columns are scanned by position: property_id, vehicle_id, asset_id.
 	subject.Subject
 	Lender           *string
@@ -32,4 +32,13 @@ type Loan struct {
 	Notes            *string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+	// Migration 044 budgeting fields, scanned after updated_at.
+	// DueDay is the day of the month the payment is due (1-31).
+	DueDay *int
+	// TermEnd (YYYY-MM-DD) is when the loan is paid off.
+	TermEnd       *string
+	AccountNumber *string
+	// BudgetCategoryID is the family's budget category the payment counts
+	// towards (same-family FK).
+	BudgetCategoryID *uuid.UUID
 }
