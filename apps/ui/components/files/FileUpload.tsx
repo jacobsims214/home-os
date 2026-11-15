@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, ApiError, bffPath } from "@/lib/api";
+import { apiFetch, ApiError, bffPath, redirectToLogin } from "@/lib/api";
 import { fileKeys } from "@/lib/query-keys";
 import type { FileRecord, FileOCRStatus } from "@/lib/types/api";
 
@@ -131,6 +131,8 @@ function uploadFile(
           );
         }
       } else {
+        // Session gone (the BFF already tried a refresh): go sign in again.
+        if (xhr.status === 401) redirectToLogin();
         let body: unknown;
         try {
           body = JSON.parse(xhr.responseText);

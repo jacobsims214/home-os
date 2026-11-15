@@ -10,16 +10,25 @@
  * Callers may pass either `/api/v1/<path>` (rewritten to `/bff/<path>`) or
  * `/bff/<path>` directly. Login and token exchange live on `/api/auth`, never
  * on /bff (see KB architecture/bff-proxy.md).
+ * 3. On a 401 from /bff, sends the browser to /login?redirect=<current page>
+ *    (redirectToLogin). The BFF has already tried a silent refresh before it
+ *    answers 401, so the session is really gone.
  */
 
+// Relative with the extension so `node --test` can load this file directly.
+import { safeRedirectPath } from "../middleware.ts";
+
 export class ApiError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-    public body?: unknown,
-  ) {
+  // Explicit fields rather than constructor parameter properties, which
+  // Node's type stripping (node --test) cannot run.
+  status: number;
+  body?: unknown;
+
+  constructor(status: number, message: string, body?: unknown) {
     super(message);
     this.name = "ApiError";
+    this.status = status;
+    this.body = body;
   }
 }
 
@@ -55,6 +64,42 @@ export function bffPath(path: string): string {
     return `${BFF_PREFIX}${path.slice(API_PREFIX.length)}`;
   }
   return path;
+}
+
+// Set once a login redirect has started, so several requests failing with 401
+// together navigate only once.
+let loginRedirectStarted = false;
+
+/** Test hook: forget that a login redirect started. */
+export function resetLoginRedirect(): void {
+  loginRedirectStarted = false;
+}
+
+function underLogin(pathname: string): boolean {
+  return pathname === "/login" || pathname.startsWith("/login/");
+}
+
+/**
+ * Sends the browser to /login?redirect=<current path+query>, at most once per
+ * page. The return path goes through the same same-origin rule the middleware
+ * uses (safeRedirectPath). No-op on the server and when already under /login,
+ * so a 401 on the login page cannot loop. Returns true if it navigated.
+ *
+ * Only for a 401 from /bff: a 503 AUTH_UNAVAILABLE (Dex down) keeps the
+ * session and must surface as a normal error instead.
+ */
+export function redirectToLogin(): boolean {
+  if (typeof window === "undefined" || loginRedirectStarted) return false;
+  const { pathname, search } = window.location;
+  if (underLogin(pathname)) return false;
+  loginRedirectStarted = true;
+  window.location.assign(`/login?redirect=${encodeURIComponent(safeRedirectPath(pathname + search))}`);
+  return true;
+}
+
+/** True for a same-origin BFF path (/bff or /bff/...). */
+export function isBffPath(pathname: string): boolean {
+  return pathname === BFF_PREFIX || pathname.startsWith(`${BFF_PREFIX}/`);
 }
 
 /**
@@ -108,6 +153,8 @@ export async function apiFetch<T = unknown>(
     } catch {
       // response may not be JSON
     }
+    // Public pre-login paths go to /api/v1, not /bff, and may 401 legitimately.
+    if (response.status === 401 && isBffPath(url.pathname)) redirectToLogin();
     throw new ApiError(
       response.status,
       `API ${response.status}: ${response.statusText}`,
