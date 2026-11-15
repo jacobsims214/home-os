@@ -17,6 +17,37 @@ spec:
         app: home-os-typesense
     spec:
       {{- include "home-os.podSecurityContext" (dict "uid" 10000) | nindent 6 }}
+      {{- if .Values.typesense.fixDataOwnership }}
+      # One-time fix (typesense.fixDataOwnership): NFS ignores fsGroup, so data
+      # written by older root-run Typesense stays root-owned. Runs as root, so
+      # the namespace must allow PodSecurity "baseline" while it is on.
+      initContainers:
+      - name: fix-data-ownership
+        image: "{{ .Values.typesense.fixDataOwnershipImage }}"
+        imagePullPolicy: {{ .Values.global.thirdPartyImagePullPolicy }}
+        command:
+        - sh
+        - -c
+        - |
+          if [ -n "$(find /data \( ! -user 10000 -o ! -group 10000 \) -print | head -n 1)" ]; then
+            echo "chown -R 10000:10000 /data"
+            chown -R 10000:10000 /data
+          else
+            echo "/data already owned by 10000:10000"
+          fi
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+            add: ["CHOWN", "FOWNER"]
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      {{- end }}
       containers:
       - name: typesense
         image: "{{ .Values.typesense.image }}"

@@ -115,6 +115,15 @@ typesense:
   port: 8108
   persistence:
     size: 10Gi
+  # One-time ownership fix for an existing /data volume. Typesense runs as uid
+  # 10000, but NFS volumes ignore fsGroup, so data left by an older root-run
+  # Typesense (<= 27.1) stays root-owned and 30.x can't write it. When true, an
+  # init container chowns /data to 10000:10000 (only if something under it
+  # isn't already). It runs as root with CHOWN/FOWNER, which PodSecurity
+  # "restricted" forbids: the namespace must allow "baseline" while it is on.
+  # Turn it back off after the first successful start.
+  fixDataOwnership: false
+  fixDataOwnershipImage: busybox:1.37.0
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { cpu: 500m, memory: 1Gi }
