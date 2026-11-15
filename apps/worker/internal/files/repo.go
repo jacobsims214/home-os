@@ -120,6 +120,58 @@ func (r *Repo) ListPending(ctx context.Context, limit int) ([]PendingFile, error
 	return out, nil
 }
 
+// RetryableFile is a failed file whose OCR may be retried: the same
+// fields as PendingFile plus the ocr_error text, which carries the retry
+// state (attempt number and next-attempt time) written by the processor.
+type RetryableFile struct {
+	PendingFile
+	OCRError string
+}
+
+// ListRetryable returns up to limit files with ocr_status 'failed' whose
+// ocr_error starts with the processor's retry marker
+// "[retry <k>/<n> next=<RFC3339>]" and whose next-attempt time has
+// passed, oldest due first. Files that ran out of retries have no marker
+// and are never returned. The due check runs in SQL so rows still waiting
+// out their backoff cannot fill the batch and starve due ones.
+//
+// An empty (non-nil) slice is returned when nothing is due.
+func (r *Repo) ListRetryable(ctx context.Context, limit int) ([]RetryableFile, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, household_id, COALESCE(content_type, ''), ocr_error
+		 FROM (
+		     SELECT id, household_id, content_type, ocr_error,
+		            substring(ocr_error FROM '^\[retry [0-9]+/[0-9]+ next=([^\]]+)\]')::timestamptz AS next_attempt
+		     FROM files
+		     WHERE ocr_status = $1 AND ocr_error LIKE '[retry %'
+		 ) f
+		 WHERE next_attempt <= NOW()
+		 ORDER BY next_attempt ASC
+		 LIMIT $2`,
+		OCRStatusFailed, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("files: list retryable: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]RetryableFile, 0)
+	for rows.Next() {
+		var rf RetryableFile
+		if err := rows.Scan(&rf.ID, &rf.HouseholdID, &rf.ContentType, &rf.OCRError); err != nil {
+			return nil, fmt.Errorf("files: scan retryable row: %w", err)
+		}
+		out = append(out, rf)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("files: iterate retryable rows: %w", err)
+	}
+	return out, nil
+}
+
 // GetBlob returns the raw bytes of the blob backing the given file.
 // It joins files -> file_blobs on blob_id so the worker can fetch bytes
 // by file id alone (it already knows the file id from ListPending).
