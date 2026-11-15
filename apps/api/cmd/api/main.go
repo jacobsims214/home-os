@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/api/internal/activity"
 	"home-os/api/internal/admin"
@@ -21,6 +22,7 @@ import (
 	"home-os/api/internal/asset"
 	"home-os/api/internal/auth"
 	"home-os/api/internal/bill"
+	"home-os/api/internal/budget"
 	"home-os/api/internal/calendar"
 	"home-os/api/internal/config"
 	"home-os/api/internal/db"
@@ -364,22 +366,8 @@ func main() {
 		// Agent tokens: each member creates, lists and revokes their own.
 		agenttoken.NewHandler(agenttoken.NewRepo(pool)).RegisterRoutes(r)
 
-		// People and preferences (Stage 2, #4463). #4489 may consolidate the
-		// Stage 2 route wiring.
-		people.NewHandler(people.NewRepo(pool)).RegisterRoutes(r)
-
-		// Shared lists (grocery, packing, chores, ...) and their items.
-		lists.NewHandler(lists.NewRepo(pool)).RegisterRoutes(r)
-
-		// Recipes, meal plans and meal feedback (Stage 2, #4475).
-		meals.NewHandler(meals.NewRepo(pool)).RegisterRoutes(r)
-
-		// Family change feed (activity_log, migration 050). Any member reads;
-		// the roles policy (#4689) plugs in via WithReadPolicy.
-		activity.NewHandler(activity.NewRepo(pool)).RegisterRoutes(r)
-
-		// Guides and runbooks with revisions, indexed for hybrid search (#4479).
-		guides.NewHandler(guides.NewRepo(pool)).WithSearch(searchClient).RegisterRoutes(r)
+		// Stage 2 family routes: people, budget, lists, meals, activity, guides.
+		registerStage2Routes(r, pool, searchClient)
 	})
 
 	// Start the HTTP server.
@@ -408,4 +396,23 @@ func main() {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}
+}
+
+// registerStage2Routes mounts the Stage 2 family routes (#4489): people and
+// preferences (#4463), budget categories and obligations (#4471), lists
+// (#4472), recipes/meal plans/feedback (#4475), the activity feed (#4505) and
+// guides (#4479).
+//
+// r must already run middleware.RequireAuth, which resolves the caller's
+// household (X-Household-ID aware, #4429) and role. Each handler applies its
+// own role policy from that role (DefaultPolicy until #4689 plugs in the
+// household role policy via WithPolicy / WithReadPolicy), so nothing here
+// re-checks roles. index may be nil (guides are then not indexed).
+func registerStage2Routes(r chi.Router, pool *pgxpool.Pool, index guides.SearchIndex) {
+	people.NewHandler(people.NewRepo(pool)).RegisterRoutes(r)
+	budget.NewHandler(budget.NewRepo(pool)).RegisterRoutes(r)
+	lists.NewHandler(lists.NewRepo(pool)).RegisterRoutes(r)
+	meals.NewHandler(meals.NewRepo(pool)).RegisterRoutes(r)
+	activity.NewHandler(activity.NewRepo(pool)).RegisterRoutes(r)
+	guides.NewHandler(guides.NewRepo(pool)).WithSearch(index).RegisterRoutes(r)
 }
