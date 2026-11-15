@@ -134,6 +134,9 @@ database:
       enabled: true
       schedule: "0 2 * * *"
   external:
+    # Dex connects to the same host/port/user/sslmode but uses its own database
+    # named `dex`. Managed mode creates it; in external mode create it yourself
+    # (e.g. CREATE DATABASE dex OWNER <user>) before installing.
     host: ""
     port: 5432
     database: homeos

@@ -1,6 +1,13 @@
 {{- if .Values.dex.dbPassword }}
 {{- fail "dex.dbPassword was removed: Dex reads its DB password from a Secret. Put it in a Secret and set dex.existingSecret (and dex.existingSecretPasswordKey), or leave both unset to use home-os-db-secret." }}
 {{- end }}
+{{- /*
+Dex storage uses the same server, port, user and SSL mode as the API
+(home-os.dbHost/dbPort/dbUser/dbSslMode). Managed mode creates the `dex`
+database at CNPG initdb (postgres/cnpg-cluster.yaml); with database.mode=external
+the operator must create a `dex` database owned by database.external.user first.
+The ssl comment below describes managed mode; external uses database.external.sslmode.
+*/}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,10 +20,10 @@ data:
     storage:
       type: postgres
       config:
-        host: home-os-postgres-rw
-        port: 5432
+        host: {{ include "home-os.dbHost" . }}
+        port: {{ include "home-os.dbPort" . }}
         database: dex
-        user: app
+        user: {{ include "home-os.dbUser" . }}
         # Expanded by Dex at startup from the DEX_DB_PASSWORD env var, which the
         # Deployment sources from a Secret (dex.existingSecret). Never inline it here.
         password: $DEX_DB_PASSWORD
@@ -24,7 +31,7 @@ data:
           # SSL mode is "disable" because the CNPG cluster does not currently
           # configure TLS for client connections. Revisit if TLS is enabled
           # in the postgres cluster spec.
-          mode: disable
+          mode: {{ include "home-os.dbSslMode" . }}
     
     web:
       http: 0.0.0.0:5556

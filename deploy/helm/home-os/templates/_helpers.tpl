@@ -60,6 +60,44 @@ smtpPassword
 {{- end -}}
 
 {{/*
+Database connection parts, shared by home-os.databaseUrl and Dex's storage
+config. Managed: the chart's CNPG cluster as `app`, no TLS. External:
+database.external.*. home-os.dbHost is the bare Service name in managed mode;
+DATABASE_URL qualifies it with the namespace itself.
+*/}}
+{{- define "home-os.dbHost" -}}
+{{- if eq .Values.database.mode "managed" -}}
+home-os-postgres-rw
+{{- else -}}
+{{- .Values.database.external.host -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "home-os.dbPort" -}}
+{{- if eq .Values.database.mode "managed" -}}
+5432
+{{- else -}}
+{{- .Values.database.external.port -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "home-os.dbUser" -}}
+{{- if eq .Values.database.mode "managed" -}}
+app
+{{- else -}}
+{{- .Values.database.external.user -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "home-os.dbSslMode" -}}
+{{- if eq .Values.database.mode "managed" -}}
+disable
+{{- else -}}
+{{- .Values.database.external.sslmode | default "disable" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 DATABASE_URL with the password referenced as $(DB_PASSWORD), which Kubernetes
 expands from the preceding DB_PASSWORD env var (secretKeyRef). The password
 must be URL-safe (no @ : / ? # % etc.); otherwise percent-encode it in the
@@ -67,9 +105,9 @@ Secret.
 */}}
 {{- define "home-os.databaseUrl" -}}
 {{- if eq .Values.database.mode "managed" -}}
-postgres://app:$(DB_PASSWORD)@home-os-postgres-rw.{{ .Values.namespace }}:5432/app?sslmode=disable
+postgres://{{ include "home-os.dbUser" . }}:$(DB_PASSWORD)@{{ include "home-os.dbHost" . }}.{{ .Values.namespace }}:{{ include "home-os.dbPort" . }}/app?sslmode={{ include "home-os.dbSslMode" . }}
 {{- else -}}
-postgres://{{ .Values.database.external.user }}:$(DB_PASSWORD)@{{ .Values.database.external.host }}:{{ .Values.database.external.port }}/{{ .Values.database.external.database }}?sslmode={{ .Values.database.external.sslmode | default "disable" }}
+postgres://{{ include "home-os.dbUser" . }}:$(DB_PASSWORD)@{{ include "home-os.dbHost" . }}:{{ include "home-os.dbPort" . }}/{{ .Values.database.external.database }}?sslmode={{ include "home-os.dbSslMode" . }}
 {{- end -}}
 {{- end -}}
 
