@@ -303,6 +303,182 @@ func NewNoteGetTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 	return "note_get", tool, handler
 }
 
+// maxNoteTitleRunes is the notes.title column limit (VARCHAR(500)).
+const maxNoteTitleRunes = 500
+
+// appendDedupeWindow is how long a repeated, identical append_text is ignored
+// (catalog v2: "A second identical append_text within 60 s is ignored").
+const appendDedupeWindow = "60 seconds"
+
+// NewNoteUpdateTool creates the note_update MCP tool (catalog v2, class U).
+// Only the given fields change: title renames the note, content replaces
+// the whole body, and append_text adds lines to the end of the body without
+// overwriting what others wrote. The update is a single statement, so
+// concurrent appends never lose each other's text. updated_at moves to now.
+// A note that does not exist or belongs to another household is reported
+// as not found. Empty strings count as "not given", because small models
+// often send "" for optional params they don't mean to set.
+//
+// Duplicate guard: when append_text is the only change and the note already
+// ends with that exact text from an update in the last 60 seconds, nothing
+// is written and the unchanged note is returned (a looping agent cannot
+// stack the same line). Results are built with internal/respond.
+func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+	tool := mcp.NewTool("note_update",
+		mcp.WithDescription("Change a note. Use append_text to add lines without overwriting what others wrote."),
+		mcp.WithString("note_id",
+			mcp.Description("The note's id (UUID), e.g. from note_find"),
+			mcp.Required(),
+		),
+		mcp.WithString("title",
+			mcp.Description("New title (max 500 characters)"),
+		),
+		mcp.WithString("content",
+			mcp.Description("New body; replaces the whole body. Prefer append_text to add to it"),
+		),
+		mcp.WithString("append_text",
+			mcp.Description("Text added on a new line at the end of the body, e.g. \"- milk\""),
+		),
+		mcp.WithTitleAnnotation("Update note"),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
+		respond.Schema[noteResult](),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		claims := server.ClaimsFromContext(ctx)
+		if claims == nil {
+			return respond.Fail(respond.Error{
+				Message: "You are not signed in to a household.",
+				Fix:     "Tell the user to reconnect Home OS; retrying will not help.",
+			}), nil
+		}
+
+		args := req.GetArguments()
+		raw, _ := args["note_id"].(string)
+		title, _ := args["title"].(string)
+		content, _ := args["content"].(string)
+		appendText, _ := args["append_text"].(string)
+
+		const exampleID = "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"
+		appendExample := map[string]any{"note_id": exampleID, "append_text": "- milk"}
+		if raw == "" {
+			return respond.Invalid("note_id", "note_id is required.",
+				"Pass the note's id as note_id. Call note_find to find it.", appendExample), nil
+		}
+		noteID, err := uuid.Parse(raw)
+		if err != nil {
+			return respond.Invalid("note_id", fmt.Sprintf("note_id %q is not a UUID.", raw),
+				"Pass the note's id (a UUID) from note_find, not its title.", appendExample), nil
+		}
+		if title == "" && content == "" && appendText == "" {
+			return respond.Invalid("", "Nothing to change: pass title, content or append_text.",
+				"Pass append_text to add to the note, content to replace its body, or title to rename it.",
+				appendExample), nil
+		}
+		if content != "" && appendText != "" {
+			return respond.Invalid("append_text", "Pass content or append_text, not both.",
+				"Use content to replace the whole body, or append_text to add to the end.",
+				appendExample), nil
+		}
+		if utf8.RuneCountInString(title) > maxNoteTitleRunes {
+			return respond.Invalid("title",
+				fmt.Sprintf("title is %d characters; the limit is %d.", utf8.RuneCountInString(title), maxNoteTitleRunes),
+				"Shorten the title and put the details in content or append_text.",
+				map[string]any{"note_id": exampleID, "title": "Grocery"}), nil
+		}
+
+		// mode: 0 keep body, 1 replace with content, 2 append.
+		mode, text := 0, ""
+		switch {
+		case content != "":
+			mode, text = 1, content
+		case appendText != "":
+			mode, text = 2, appendText
+		}
+		guard := mode == 2 && title == ""
+
+		n, err := scanNote(pool.QueryRow(ctx,
+			`WITH updated AS (
+				UPDATE notes SET
+					title = CASE WHEN $3::text <> '' THEN $3::text ELSE title END,
+					body = CASE $4::int
+						WHEN 1 THEN $5::text
+						WHEN 2 THEN CASE WHEN body = '' THEN $5::text ELSE body || E'\n' || $5::text END
+						ELSE body END,
+					updated_at = NOW()
+				WHERE id = $1 AND household_id = $2
+				  AND NOT ($6::boolean
+				       AND updated_at > NOW() - $7::interval
+				       AND right(body, char_length($5::text)) = $5::text)
+				RETURNING *
+			)
+			SELECT `+noteColumns+`
+			FROM updated n LEFT JOIN users u ON u.id = n.author_id`,
+			noteID, claims.HouseholdID, title, mode, text, guard, appendDedupeWindow,
+		))
+		duplicate := false
+		if errors.Is(err, pgx.ErrNoRows) && guard {
+			// Either the note is not ours, or the guard skipped a repeat.
+			n, err = scanNote(pool.QueryRow(ctx,
+				`SELECT `+noteColumns+`
+				 FROM notes n LEFT JOIN users u ON u.id = n.author_id
+				 WHERE n.id = $1 AND n.household_id = $2`,
+				noteID, claims.HouseholdID,
+			))
+			duplicate = err == nil
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return respond.NotFound("note", raw, "Call note_find to find the note_id."), nil
+		}
+		if err != nil {
+			return respond.Failed("update the note", err), nil
+		}
+
+		name := "(untitled)"
+		if n.Title != nil && *n.Title != "" {
+			name = *n.Title
+		}
+		readHint := fmt.Sprintf("Read it in full with note_get note_id=%s.", n.ID)
+		if duplicate {
+			return respond.OK(fmt.Sprintf("Note %q already ends with that text; nothing was added.", name), n,
+				readHint), nil
+		}
+		var changed []string
+		if title != "" {
+			changed = append(changed, "renamed it")
+		}
+		switch mode {
+		case 1:
+			changed = append(changed, "replaced its body")
+		case 2:
+			changed = append(changed, "added text to the end")
+		}
+		summary := fmt.Sprintf("Updated note %q: %s.", name, joinAnd(changed))
+		return respond.OK(summary, n, readHint,
+			fmt.Sprintf("Add more with note_update note_id=%s append_text=….", n.ID)), nil
+	}
+
+	return "note_update", tool, handler
+}
+
+// joinAnd joins parts as "a", "a and b" or "a, b and c".
+func joinAnd(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	}
+	out := parts[0]
+	for _, p := range parts[1 : len(parts)-1] {
+		out += ", " + p
+	}
+	return out + " and " + parts[len(parts)-1]
+}
+
 // truncate returns the first n characters of s, respecting Unicode boundaries.
 // If s is shorter than n, it returns s unchanged.
 func truncate(s string, n int) string {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
@@ -487,5 +488,302 @@ func TestNoteGet(t *testing.T) {
 				t.Error("fix hint is empty")
 			}
 		})
+	}
+}
+
+// updatedNote is the data payload of a note_update result.
+type updatedNote struct {
+	ID         uuid.UUID  `json:"id"`
+	Title      *string    `json:"title"`
+	Body       string     `json:"body"`
+	AuthorID   *uuid.UUID `json:"author_id"`
+	EntityType string     `json:"entity_type"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+}
+
+type noteUpdateEnvelope struct {
+	OK      bool         `json:"ok"`
+	Summary string       `json:"summary"`
+	Data    *updatedNote `json:"data"`
+	Next    []string     `json:"next"`
+	Error   *struct {
+		Message string         `json:"message"`
+		Fix     string         `json:"fix"`
+		Field   string         `json:"field"`
+		Example map[string]any `json:"example"`
+	} `json:"error"`
+}
+
+// TestNoteUpdate runs note_update against a real, fully migrated Postgres.
+// Every result must mirror structuredContent in its text block and validate
+// against the tool's outputSchema.
+func TestNoteUpdate(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	otherCtx, _ := testutil.SeedHousehold(t, pool)
+
+	name, tool, update := NewNoteUpdateTool(pool)
+	_, _, create := NewCreateNoteTool(pool)
+	if name != "note_update" || tool.Name != "note_update" {
+		t.Fatalf("tool name: got %q / %q", name, tool.Name)
+	}
+	if got := tool.InputSchema.Required; len(got) != 1 || got[0] != "note_id" {
+		t.Errorf("required params: want [note_id], got %v", got)
+	}
+	for _, p := range []string{"title", "content", "append_text"} {
+		if _, ok := tool.InputSchema.Properties[p]; !ok {
+			t.Errorf("missing optional param %q", p)
+		}
+	}
+	a := tool.Annotations
+	if a.Title != "Update note" || a.ReadOnlyHint == nil || *a.ReadOnlyHint ||
+		a.DestructiveHint == nil || *a.DestructiveHint ||
+		a.IdempotentHint == nil || !*a.IdempotentHint ||
+		a.OpenWorldHint == nil || *a.OpenWorldHint {
+		t.Errorf("annotations: want class U (not read-only, idempotent, not destructive, closed world), got %+v", a)
+	}
+	rs := noteGetOutputSchema(t, tool)
+
+	call := func(t *testing.T, ctx context.Context, args map[string]any) (bool, noteUpdateEnvelope) {
+		t.Helper()
+		var req mcp.CallToolRequest
+		req.Params.Name = "note_update"
+		req.Params.Arguments = args
+		res, err := update(ctx, req)
+		if err != nil {
+			t.Fatalf("note_update returned a protocol error: %v", err)
+		}
+		b, err := json.Marshal(res)
+		if err != nil {
+			t.Fatalf("marshal result: %v", err)
+		}
+		var w noteGetWire
+		if err := json.Unmarshal(b, &w); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(w.Content) != 1 || w.Content[0].Type != "text" {
+			t.Fatalf("want exactly one text block, got %+v", w.Content)
+		}
+		var fromText map[string]any
+		if err := json.Unmarshal([]byte(w.Content[0].Text), &fromText); err != nil {
+			t.Fatalf("text block is not JSON: %v", err)
+		}
+		x, _ := json.Marshal(fromText)
+		y, _ := json.Marshal(w.StructuredContent)
+		if string(x) != string(y) {
+			t.Fatalf("text and structuredContent differ:\n%s\n%s", x, y)
+		}
+		if err := rs.Validate(w.StructuredContent); err != nil {
+			t.Fatalf("structuredContent does not match outputSchema: %v\n%s", err, y)
+		}
+		var env noteUpdateEnvelope
+		if err := json.Unmarshal([]byte(w.Content[0].Text), &env); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		return w.IsError, env
+	}
+
+	newNote := func(t *testing.T, ctx context.Context, title, body string) uuid.UUID {
+		t.Helper()
+		var n authoredNote
+		callJSON(t, ctx, create, map[string]any{"title": title, "content": body}, &n)
+		// Backdate so updated_at visibly moves and the append guard is out of its window.
+		if _, err := pool.Exec(context.Background(),
+			`UPDATE notes SET created_at = NOW() - interval '1 hour', updated_at = NOW() - interval '1 hour' WHERE id = $1`,
+			n.ID); err != nil {
+			t.Fatalf("backdate: %v", err)
+		}
+		return n.ID
+	}
+	stored := func(t *testing.T, id uuid.UUID) (title *string, body string, updatedAt time.Time) {
+		t.Helper()
+		if err := pool.QueryRow(context.Background(),
+			`SELECT title, body, updated_at FROM notes WHERE id = $1`, id).Scan(&title, &body, &updatedAt); err != nil {
+			t.Fatalf("read note: %v", err)
+		}
+		return title, body, updatedAt
+	}
+
+	t.Run("title and content persist and updated_at moves", func(t *testing.T) {
+		id := newNote(t, ctx, "Groceries", "eggs")
+		_, _, before := stored(t, id)
+
+		isErr, env := call(t, ctx, map[string]any{"note_id": id.String(), "title": "Weekly groceries", "content": "milk\nbread"})
+		if isErr || !env.OK || env.Data == nil {
+			t.Fatalf("want success, got isError=%v %+v", isErr, env)
+		}
+		if env.Data.ID != id || env.Data.Title == nil || *env.Data.Title != "Weekly groceries" || env.Data.Body != "milk\nbread" {
+			t.Errorf("returned note: %+v", env.Data)
+		}
+		if !env.Data.UpdatedAt.After(before) || !env.Data.UpdatedAt.After(env.Data.CreatedAt) {
+			t.Errorf("updated_at did not move: before %v, created %v, now %v", before, env.Data.CreatedAt, env.Data.UpdatedAt)
+		}
+		if env.Data.AuthorID == nil || *env.Data.AuthorID != hh.UserID {
+			t.Errorf("author changed: %v", env.Data.AuthorID)
+		}
+		title, body, after := stored(t, id)
+		if title == nil || *title != "Weekly groceries" || body != "milk\nbread" || !after.After(before) {
+			t.Errorf("stored: title %v body %q updated_at %v (before %v)", title, body, after, before)
+		}
+		if env.Summary != `Updated note "Weekly groceries": renamed it and replaced its body.` {
+			t.Errorf("summary: got %q", env.Summary)
+		}
+		if len(env.Next) == 0 || !strings.Contains(env.Next[0], id.String()) {
+			t.Errorf("next: want hints with the id, got %v", env.Next)
+		}
+	})
+
+	t.Run("title only keeps the body", func(t *testing.T) {
+		id := newNote(t, ctx, "Old", "keep me")
+		_, env := call(t, ctx, map[string]any{"note_id": id.String(), "title": "New", "content": "", "append_text": ""})
+		if env.Data == nil || *env.Data.Title != "New" || env.Data.Body != "keep me" {
+			t.Fatalf("got %+v", env.Data)
+		}
+	})
+
+	t.Run("append_text adds a line and keeps the rest", func(t *testing.T) {
+		id := newNote(t, ctx, "Packing", "- socks")
+		_, env := call(t, ctx, map[string]any{"note_id": id.String(), "append_text": "- toothbrush"})
+		if env.Data == nil || env.Data.Body != "- socks\n- toothbrush" || *env.Data.Title != "Packing" {
+			t.Fatalf("got %+v", env.Data)
+		}
+		if env.Summary != `Updated note "Packing": added text to the end.` {
+			t.Errorf("summary: got %q", env.Summary)
+		}
+
+		// The identical append again within 60 s is ignored.
+		_, _, at := stored(t, id)
+		isErr, env := call(t, ctx, map[string]any{"note_id": id.String(), "append_text": "- toothbrush"})
+		if isErr || env.Data == nil || env.Data.Body != "- socks\n- toothbrush" {
+			t.Fatalf("duplicate append: isError=%v %+v", isErr, env.Data)
+		}
+		if !strings.Contains(env.Summary, "nothing was added") {
+			t.Errorf("duplicate summary: got %q", env.Summary)
+		}
+		if _, body, at2 := stored(t, id); body != "- socks\n- toothbrush" || !at2.Equal(at) {
+			t.Errorf("duplicate append wrote: body %q updated_at %v -> %v", body, at, at2)
+		}
+
+		// A different line is still appended.
+		_, env = call(t, ctx, map[string]any{"note_id": id.String(), "append_text": "- charger"})
+		if env.Data == nil || env.Data.Body != "- socks\n- toothbrush\n- charger" {
+			t.Fatalf("second append: %+v", env.Data)
+		}
+	})
+
+	t.Run("the same append is accepted again after the window", func(t *testing.T) {
+		id := newNote(t, ctx, "Log", "fed the cat")
+		if _, err := pool.Exec(context.Background(),
+			`UPDATE notes SET body = 'fed the cat', updated_at = NOW() - interval '2 minutes' WHERE id = $1`, id); err != nil {
+			t.Fatalf("reset: %v", err)
+		}
+		_, env := call(t, ctx, map[string]any{"note_id": id.String(), "append_text": "fed the cat"})
+		if env.Data == nil || env.Data.Body != "fed the cat\nfed the cat" {
+			t.Fatalf("got %+v", env.Data)
+		}
+	})
+
+	theirs := newNote(t, otherCtx, "Secret", "other household")
+	mine := newNote(t, ctx, "Mine", "body")
+
+	t.Run("cross-household update changes nothing", func(t *testing.T) {
+		for _, args := range []map[string]any{
+			{"note_id": theirs.String(), "content": "hijacked"},
+			{"note_id": theirs.String(), "append_text": "other household"},
+		} {
+			isErr, env := call(t, ctx, args)
+			want := `No note with id "` + theirs.String() + `" was found.`
+			if !isErr || env.Error == nil || env.Error.Message != want {
+				t.Fatalf("want not-found, got isError=%v %+v", isErr, env)
+			}
+		}
+		if title, body, _ := stored(t, theirs); *title != "Secret" || body != "other household" {
+			t.Errorf("other household's note changed: %v %q", title, body)
+		}
+	})
+
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		args      map[string]any
+		wantField string
+		wantMsg   string
+	}{
+		{
+			name:    "own note is not found from the other household",
+			ctx:     otherCtx,
+			args:    map[string]any{"note_id": mine.String(), "title": "x"},
+			wantMsg: `No note with id "` + mine.String() + `" was found.`,
+		},
+		{
+			name:    "unknown id is not found",
+			ctx:     ctx,
+			args:    map[string]any{"note_id": "00000000-0000-0000-0000-000000000001", "title": "x"},
+			wantMsg: `No note with id "00000000-0000-0000-0000-000000000001" was found.`,
+		},
+		{
+			name:      "title instead of id is invalid",
+			ctx:       ctx,
+			args:      map[string]any{"note_id": "Groceries", "title": "x"},
+			wantField: "note_id",
+			wantMsg:   `note_id "Groceries" is not a UUID.`,
+		},
+		{
+			name:      "missing note_id is invalid",
+			ctx:       ctx,
+			args:      map[string]any{"title": "x"},
+			wantField: "note_id",
+			wantMsg:   "note_id is required.",
+		},
+		{
+			name:    "nothing to change is invalid",
+			ctx:     ctx,
+			args:    map[string]any{"note_id": mine.String(), "title": ""},
+			wantMsg: "Nothing to change: pass title, content or append_text.",
+		},
+		{
+			name:      "content with append_text is invalid",
+			ctx:       ctx,
+			args:      map[string]any{"note_id": mine.String(), "content": "a", "append_text": "b"},
+			wantField: "append_text",
+			wantMsg:   "Pass content or append_text, not both.",
+		},
+		{
+			name:      "title over 500 characters is invalid",
+			ctx:       ctx,
+			args:      map[string]any{"note_id": mine.String(), "title": strings.Repeat("é", 501)},
+			wantField: "title",
+			wantMsg:   "title is 501 characters; the limit is 500.",
+		},
+		{
+			name:    "no claims is refused",
+			ctx:     context.Background(),
+			args:    map[string]any{"note_id": mine.String(), "title": "x"},
+			wantMsg: "You are not signed in to a household.",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isErr, env := call(t, tc.ctx, tc.args)
+			if !isErr || env.OK || env.Error == nil {
+				t.Fatalf("want isError result, got isError=%v %+v", isErr, env)
+			}
+			if env.Data != nil {
+				t.Errorf("error result leaked data: %+v", env.Data)
+			}
+			if env.Error.Message != tc.wantMsg || env.Summary != tc.wantMsg {
+				t.Errorf("message: want %q, got %q (summary %q)", tc.wantMsg, env.Error.Message, env.Summary)
+			}
+			if env.Error.Field != tc.wantField {
+				t.Errorf("field: want %q, got %q", tc.wantField, env.Error.Field)
+			}
+			if env.Error.Fix == "" {
+				t.Error("fix hint is empty")
+			}
+		})
+	}
+	if title, body, _ := stored(t, mine); *title != "Mine" || body != "body" {
+		t.Errorf("rejected calls changed the note: %v %q", title, body)
 	}
 }
