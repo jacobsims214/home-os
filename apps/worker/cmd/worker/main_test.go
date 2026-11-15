@@ -272,6 +272,55 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 		}
 	})
 
+	// Non-monthly bills (044, #4468): quarterly/semiannual/annual repeat on
+	// due_date's day every 3/6/12 months, once is due on due_date only.
+	t.Run("bills: frequencies", func(t *testing.T) {
+		// Today Nov 18; the window is [Nov 18, Nov 21].
+		tests := []struct {
+			name      string
+			frequency string
+			dueDate   string // "" = NULL
+			paidDate  string // "" = never paid
+			want      string // notification body; "" = none
+		}{
+			{"annual from last year", "annual", "2025-11-20", "", "Payment of $42.50 due on Nov 20"},
+			{"annual not until next year", "annual", "2025-12-20", "", ""},
+			{"quarterly from August", "quarterly", "2026-08-21", "", "Payment of $42.50 due on Nov 21"},
+			{"quarterly next month", "quarterly", "2026-09-20", "", ""},
+			{"semiannual from May", "semiannual", "2026-05-19", "", "Payment of $42.50 due on Nov 19"},
+			{"annual paid early", "annual", "2025-11-20", "2026-11-17", ""},
+			{"once tomorrow", "once", "2026-11-19", "", "Payment of $42.50 due on Nov 19"},
+			{"once tomorrow, paid", "once", "2026-11-19", "2026-11-10", ""},
+			{"once already past", "once", "2026-11-15", "", ""},
+			{"annual without due_date", "annual", "", "", ""},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				if _, err := pool.Exec(ctx, `TRUNCATE notifications, bills, maintenance_tasks CASCADE`); err != nil {
+					t.Fatal(err)
+				}
+				hh := seedHousehold(t, pool)
+				if _, err := pool.Exec(ctx,
+					`INSERT INTO bills (household_id, name, amount, frequency, due_date, paid_date)
+					 VALUES ($1, 'Insurance', 42.50, $2, NULLIF($3, '')::date, NULLIF($4, '')::date)`,
+					hh, tc.frequency, tc.dueDate, tc.paidDate); err != nil {
+					t.Fatalf("insert bill: %v", err)
+				}
+				got, err := insertDueNotifications(ctx, pool, day("2026-11-18"))
+				if err != nil {
+					t.Fatalf("insertDueNotifications: %v", err)
+				}
+				if (tc.want != "") != (len(got) == 1) || len(got) > 1 {
+					t.Fatalf("got %d notifications, want %q: %+v", len(got), tc.want, got)
+				}
+				if tc.want != "" && got[0].Body != tc.want {
+					t.Errorf("body = %q, want %q", got[0].Body, tc.want)
+				}
+			})
+		}
+	})
+
 	t.Run("bills: today in the household timezone", func(t *testing.T) {
 		// 03:00 UTC Nov 10 is 21:00 Nov 9 in Chicago.
 		now := time.Date(2026, 11, 10, 3, 0, 0, 0, time.UTC)

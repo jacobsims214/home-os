@@ -62,7 +62,9 @@ func normalizeArgs(args map[string]any) map[string]any {
 type createBillInput struct {
 	name       string
 	amount     float64
-	dueDay     int
+	frequency  string
+	dueDay     *int       // monthly bills only
+	dueDate    *time.Time // every other frequency
 	category   *string
 	autopay    bool
 	contactID  *uuid.UUID
@@ -121,23 +123,26 @@ func writeOutbox(ctx context.Context, tx pgx.Tx, eventType, householdID string, 
 // NewBillCreateTool creates the bill_create MCP tool (catalog v2, class C),
 // replacing the S1 working name create_bill.
 //
-// It inserts a monthly bill (due on due_day each month; rrule is left unset)
-// for the authenticated household and returns it with its next due date.
+// It inserts a bill for the authenticated household and returns it with its
+// next due date. frequency defaults to monthly, which needs due_day; any
+// other frequency (quarterly, semiannual, annual, once) needs due_date and
+// no due_day (044's bills_due_day_monthly_check, #4468). rrule is left unset.
 // Invalid input returns an isError result and inserts nothing. Loop guard:
-// the same name (any case), amount and due_day created in the household in
+// the same name (any case), amount and schedule created in the household in
 // the last 10 minutes returns that bill with duplicate true instead of a
 // second row (bills have no author column, so the guard is household-wide).
-// frequency, due_date and estimate arrive with #4468. The bill may be about
+// The bill may be about
 // one property, vehicle or asset (typed subject columns, domain model v2);
 // the legacy entity_type/entity_id params are mapped onto them.
 func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
-		mcp.WithDescription("Add a recurring monthly bill (electric, internet, Netflix) due on due_day each month. " +
-			"Use this, not a calendar event. Then mark payments with bill_pay."),
+		mcp.WithDescription("Add a bill (electric, Netflix, property tax). Give due_day for monthly bills, or frequency " +
+			"plus due_date for quarterly, annual or one-time ones. Use this, not a calendar event."),
 		mcp.WithString("name", mcp.Description("Bill name, e.g. Electric"), mcp.Required()),
-		mcp.WithNumber("amount", mcp.Description("Amount due each month, e.g. 142.50"), mcp.Required(), mcp.Min(0)),
-		mcp.WithNumber("due_day", mcp.Description("Day of the month due, 1-31; a short month uses its last day"),
-			mcp.Required(), mcp.Min(1), mcp.Max(31)),
+		mcp.WithNumber("amount", mcp.Description("Amount due each time, e.g. 142.50"), mcp.Required(), mcp.Min(0)),
+		mcp.WithString("frequency", mcp.Description("How often it is due (default monthly)"), mcp.Enum(frequencies...)),
+		mcp.WithNumber("due_day", mcp.Description("Monthly bills: day of the month due, 1-31"), mcp.Min(1), mcp.Max(31)),
+		mcp.WithString("due_date", mcp.Description("Other bills: next due date, YYYY-MM-DD; repeats every 3/6/12 months")),
 		mcp.WithString("category", mcp.Description("Category, e.g. Utilities, Insurance, Subscription")),
 		mcp.WithBoolean("autopay", mcp.Description("true when it is paid automatically (default false)")),
 		mcp.WithString("contact_id", mcp.Description("Contact (vendor) id it is paid to, from contact_find")),
@@ -193,11 +198,12 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		dup, err := scanBill(tx.QueryRow(ctx,
 			`SELECT `+billColumns+`
 			 FROM bills
-			 WHERE household_id = $1 AND lower(name) = lower($2) AND amount = $3 AND due_day = $4
-			   AND created_at > NOW() - $5::interval
+			 WHERE household_id = $1 AND lower(name) = lower($2) AND amount = $3
+			   AND frequency = $4 AND due_day IS NOT DISTINCT FROM $5::int AND due_date IS NOT DISTINCT FROM $6::date
+			   AND created_at > NOW() - $7::interval
 			 ORDER BY created_at DESC
 			 LIMIT 1`,
-			claims.HouseholdID, in.name, in.amount, in.dueDay, duplicateWindow,
+			claims.HouseholdID, in.name, in.amount, in.frequency, in.dueDay, in.dueDate, duplicateWindow,
 		))
 		switch {
 		case err == nil:
@@ -215,11 +221,12 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 
 		r, err := scanBill(tx.QueryRow(ctx,
 			`INSERT INTO bills (household_id, name, amount, due_day, category, is_autopay,
-			                    vendor_id, property_id, vehicle_id, asset_id, payment_url, notes)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			                    vendor_id, property_id, vehicle_id, asset_id, payment_url, notes, frequency, due_date)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 			 RETURNING `+billColumns,
 			claims.HouseholdID, in.name, in.amount, in.dueDay, in.category, in.autopay,
 			in.contactID, in.subject.propertyID, in.subject.vehicleID, in.subject.assetID, in.paymentURL, in.notes,
+			in.frequency, in.dueDate,
 		))
 		if err != nil {
 			if res := subjectDBError(err, createExample); res != nil {
@@ -258,6 +265,16 @@ type billUpdate struct {
 	params    []string   // the catalog parameter names that changed, for the summary
 	contactID *uuid.UUID // set when contact_id is being set (not cleared)
 	subject   subject    // the new subject when any subject param was given
+	// The schedule params, nil when not given. They are checked against the
+	// stored row (resolveSchedule) because 044 ties due_day to monthly.
+	frequency *string
+	dueDay    *int
+	dueDate   *time.Time
+}
+
+// scheduleGiven reports whether frequency, due_day or due_date was given.
+func (u billUpdate) scheduleGiven() bool {
+	return u.frequency != nil || u.dueDay != nil || u.dueDate != nil
 }
 
 func (u *billUpdate) set(param, column string, value any) {
@@ -279,9 +296,10 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			"Returns the bill with its next due date."),
 		mcp.WithString("bill_id", mcp.Description("The bill's id (UUID), from bill_find"), mcp.Required()),
 		mcp.WithString("name", mcp.Description("New name, e.g. Electric")),
-		mcp.WithNumber("amount", mcp.Description("New amount due each month, e.g. 142.50"), mcp.Min(0)),
-		mcp.WithNumber("due_day", mcp.Description("Day of the month due, 1-31; a short month uses its last day"),
-			mcp.Min(1), mcp.Max(31)),
+		mcp.WithNumber("amount", mcp.Description("New amount due each time, e.g. 142.50"), mcp.Min(0)),
+		mcp.WithString("frequency", mcp.Description("How often it is due; monthly needs due_day, others due_date"), mcp.Enum(frequencies...)),
+		mcp.WithNumber("due_day", mcp.Description("Monthly bills: day of the month due, 1-31"), mcp.Min(1), mcp.Max(31)),
+		mcp.WithString("due_date", mcp.Description("Other bills: next due date, YYYY-MM-DD")),
 		mcp.WithString("category", mcp.Description("Category, e.g. Utilities; empty string clears it")),
 		mcp.WithBoolean("autopay", mcp.Description("true when it is paid automatically")),
 		mcp.WithString("contact_id", mcp.Description("Contact (vendor) id from contact_find; empty string clears it")),
@@ -330,20 +348,41 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return res, nil
 		}
 
+		if in.scheduleGiven() {
+			// Lock the row and merge the schedule params with what is stored.
+			var stored Schedule
+			err := tx.QueryRow(ctx,
+				`SELECT frequency, due_day, due_date FROM bills WHERE id = $1 AND household_id = $2 FOR UPDATE`,
+				in.billID, claims.HouseholdID,
+			).Scan(&stored.Frequency, &stored.DueDay, &stored.DueDate)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return respond.NotFound("bill", in.billID.String(), "Call bill_find to get the bill_id."), nil
+			}
+			if err != nil {
+				return respond.Failed("update the bill", err), nil
+			}
+			next, err := resolveSchedule(stored, in)
+			if err != nil {
+				return invalid(err, example), nil
+			}
+			in.columns = append(in.columns, "frequency", "due_day", "due_date")
+			in.values = append(in.values, next.Frequency, next.DueDay, next.DueDate)
+			if !sameSchedule(stored, next) {
+				// A stored paid_for_due_date is a date on the old schedule:
+				// when the schedule really changes, clear it so coverage is
+				// inferred from paid_date for the new one (#4655), as the
+				// API's Repo.Update does.
+				in.columns = append(in.columns, "paid_for_due_date")
+				in.values = append(in.values, nil)
+			}
+		}
+
 		// $1 is the bill id, $2 the household; the SET values follow.
 		args := []any{in.billID, claims.HouseholdID}
-		sets := make([]string, 0, len(in.columns)+2)
+		sets := make([]string, 0, len(in.columns)+1)
 		for i, col := range in.columns {
 			sets = append(sets, fmt.Sprintf("%s = $%d", col, i+3))
 			args = append(args, in.values[i])
-			if col == "due_day" {
-				// A stored paid_for_due_date is a date on the old due day:
-				// when the day really changes, clear it so coverage is
-				// inferred from paid_date for the new day (#4655). The
-				// right-hand due_day is the row's value before the update.
-				sets = append(sets, fmt.Sprintf(
-					"paid_for_due_date = CASE WHEN due_day IS DISTINCT FROM $%d THEN NULL ELSE paid_for_due_date END", i+3))
-			}
 		}
 		sets = append(sets, "updated_at = NOW()")
 
@@ -455,11 +494,6 @@ func NewBillDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 	return "bill_delete", tool, handler
 }
 
-// lateGraceDays is how late a payment can be and still pay the due date it
-// follows. A payment more than this many days after a due date pays the next
-// one instead.
-const lateGraceDays = 7
-
 // billPayInput is the validated bill_pay arguments. paidDate is nil when the
 // caller left it to default to the household's today.
 type billPayInput struct {
@@ -538,7 +572,7 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 			return respond.Failed("record the payment", err), nil
 		}
 
-		hasDueDay := r.validDueDay()
+		c, hasSchedule := r.schedule().cadence()
 		if in.forDueDate != nil {
 			if res := checkForDueDate(r, *in.forDueDate, today); res != nil {
 				return res, nil
@@ -546,17 +580,18 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 		}
 
 		// target is the due date this payment covers: for_due_date, else
-		// inferred from the payment date. nil for a bill with no due day.
+		// inferred from the payment date by the bill's frequency. nil for a
+		// bill with no schedule.
 		var target *time.Time
-		if hasDueDay {
-			target = coveredDueDate(*r.DueDay, &paid, in.forDueDate)
+		if hasSchedule {
+			target = coveredDueDate(c, &paid, in.forDueDate)
 		}
 		alreadyPaid := false
-		if hasDueDay {
+		if hasSchedule {
 			// Already paid when the stored coverage (paid_for_due_date, or
 			// inferred from paid_date for rows written before it existed)
 			// is this due date or a later one; coverage never moves back.
-			if stored := coveredDueDate(*r.DueDay, r.PaidDate, r.PaidFor); stored != nil {
+			if stored := coveredDueDate(c, r.PaidDate, r.PaidFor); stored != nil {
 				alreadyPaid = !stored.Before(*target)
 			}
 		} else if r.PaidDate != nil {
@@ -609,34 +644,70 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 }
 
 // checkForDueDate validates bill_pay's for_due_date against the bill: it must
-// be one of the bill's due dates (due_day of its month, clamped to the
-// month's length) and no more than one month after today, so a typo can't
-// mark a year of bills paid. It returns the tool error, or nil when valid.
+// be one of the bill's due dates (due_day of its month for a monthly bill,
+// the anchored date every 3/6/12 months from due_date, or due_date itself
+// for a once bill, clamped to short months) and no more than one period
+// (one month for a monthly bill) after today, so a typo can't mark a year
+// of bills paid. It returns the tool error, or nil when valid.
 func checkForDueDate(r billRow, forDue, today time.Time) *mcp.CallToolResult {
 	given := forDue.Format(time.DateOnly)
-	if !r.validDueDay() {
+	c, ok := r.schedule().cadence()
+	if !ok {
 		return respond.Invalid("for_due_date",
-			fmt.Sprintf("Bill %s has no due day, so for_due_date %s cannot be checked.", r.Name, given),
-			"Leave for_due_date out, or set the bill's due_day with bill_update first.",
+			fmt.Sprintf("Bill %s has no due day or due date, so for_due_date %s cannot be checked.", r.Name, given),
+			"Leave for_due_date out, or set the bill's due_day (monthly) or due_date with bill_update first.",
 			map[string]any{"bill_id": r.ID.String()})
 	}
-	dueDay := *r.DueDay
-	if want := dueDateInMonth(forDue.Year(), forDue.Month(), dueDay); !want.Equal(forDue) {
+	if last, ok := c.onOrBefore(forDue); !ok || !last.Equal(forDue) {
+		var want time.Time
+		var which string
+		if c.step == 1 {
+			want = dueDateInMonth(forDue.Year(), forDue.Month(), c.day)
+			which = fmt.Sprintf("due on day %d of each month (%s that month)", c.day, want.Format(time.DateOnly))
+		} else {
+			if want, ok = c.onOrAfter(forDue); !ok {
+				want = c.anchor
+			}
+			which = fmt.Sprintf("%s (next %s)", scheduleText(r.schedule()), want.Format(time.DateOnly))
+		}
 		return respond.Invalid("for_due_date",
-			fmt.Sprintf("for_due_date %s is not a due date of %s, which is due on day %d of each month (%s that month).",
-				given, r.Name, dueDay, want.Format(time.DateOnly)),
+			fmt.Sprintf("for_due_date %s is not a due date of %s, which is %s.", given, r.Name, which),
 			fmt.Sprintf("Pass the due date being paid, e.g. %s, or leave for_due_date out.", want.Format(time.DateOnly)),
 			map[string]any{"bill_id": r.ID.String(), "for_due_date": want.Format(time.DateOnly)})
 	}
-	if limit := today.AddDate(0, 1, 0); forDue.After(limit) {
-		next := nextDueDate(today, dueDay).Format(time.DateOnly)
+	if c.step == 0 {
+		return nil // a once bill has one due date; paying it early is fine
+	}
+	if limit := today.AddDate(0, c.step, 0); forDue.After(limit) {
+		next, _ := c.onOrAfter(today)
+		period := "a month"
+		if c.step > 1 {
+			period = fmt.Sprintf("%d months", c.step)
+		}
 		return respond.Invalid("for_due_date",
-			fmt.Sprintf("for_due_date %s is more than a month after today (%s in the family's timezone).",
-				given, today.Format(time.DateOnly)),
-			fmt.Sprintf("Pay one due date at a time: pass the next one, %s, or leave for_due_date out.", next),
-			map[string]any{"bill_id": r.ID.String(), "for_due_date": next})
+			fmt.Sprintf("for_due_date %s is more than %s after today (%s in the family's timezone).",
+				given, period, today.Format(time.DateOnly)),
+			fmt.Sprintf("Pay one due date at a time: pass the next one, %s, or leave for_due_date out.", next.Format(time.DateOnly)),
+			map[string]any{"bill_id": r.ID.String(), "for_due_date": next.Format(time.DateOnly)})
 	}
 	return nil
+}
+
+// scheduleText describes a valid schedule for messages, e.g. "due on day 20
+// of each month", "due every 3 months from 2026-01-15" or "due once, on
+// 2026-03-01".
+func scheduleText(s Schedule) string {
+	c, ok := s.cadence()
+	switch {
+	case !ok:
+		return "not scheduled"
+	case c.step == 1:
+		return fmt.Sprintf("due on day %d of each month", c.day)
+	case c.step == 0:
+		return "due once, on " + c.anchor.Format(time.DateOnly)
+	default:
+		return fmt.Sprintf("due every %d months from %s", c.step, c.anchor.Format(time.DateOnly))
+	}
 }
 
 // paySummary is bill_pay's one-line summary.
@@ -717,31 +788,6 @@ func parseBillPayInput(args map[string]any) (billPayInput, error) {
 	return in, nil
 }
 
-// Due is where a monthly bill stands on a given day, as every bill tool
-// (bill_find, bill_create, bill_update) reports it.
-type Due struct {
-	// Next is the next due date that still needs paying (midnight UTC).
-	Next time.Time
-	// DaysUntil is the whole days from today to Next.
-	DaysUntil int
-	// Status is "paid" when the last payment covers the current due date (so
-	// Next is the one after it), otherwise "due".
-	Status string
-	// PaidFor is the due date the last payment covers, nil when never paid.
-	PaidFor *time.Time
-}
-
-// BillDue is the single rule for when a bill is due: billDue (due_day
-// clamped to the month, the last payment moving the bill to the following
-// due date) as of today, which should come from HouseholdToday. paidDate and
-// paidFor are bills.paid_date and bills.paid_for_due_date (either may be
-// nil; paidFor wins when set). Exported so other packages (e.g. the daily
-// briefing) give the same answer as the bill tools.
-func BillDue(today time.Time, dueDay int, paidDate, paidFor *time.Time) Due {
-	info := billDue(today, dueDay, paidDate, paidFor)
-	return Due{Next: info.next, DaysUntil: daysBetween(today, info.next), Status: info.status, PaidFor: info.paidFor}
-}
-
 // HouseholdToday is householdToday for other packages: today's date in the
 // household's timezone as midnight UTC.
 func HouseholdToday(ctx context.Context, q interface {
@@ -766,24 +812,6 @@ func householdToday(ctx context.Context, q interface {
 	}
 	y, m, d := time.Now().In(loc).Date()
 	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC), nil
-}
-
-// paidForDueDate returns the due date a payment made on paid pays: the most
-// recent due date (on or before paid) when the payment is at most
-// lateGraceDays late, otherwise the first due date on or after paid. It is
-// the coverage bill_pay stores when the caller gives no for_due_date, and the
-// fallback when bills.paid_for_due_date is NULL (see coveredDueDate).
-func paidForDueDate(paid time.Time, dueDay int) time.Time {
-	y, m, d := paid.Date()
-	paid = time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
-	last := dueDateInMonth(y, m, dueDay)
-	if last.After(paid) {
-		last = dueDateInMonth(y, m-1, dueDay)
-	}
-	if paid.Sub(last) <= lateGraceDays*24*time.Hour {
-		return last
-	}
-	return nextDueDate(paid, dueDay)
 }
 
 // parseUpdateBillInput validates bill_update arguments (already normalized).
@@ -813,10 +841,23 @@ func parseUpdateBillInput(args map[string]any) (billUpdate, error) {
 		u.set("amount", "amount", amount)
 	}
 
+	if f, err := parseFrequency(args); err != nil {
+		return u, err
+	} else if f != nil {
+		u.frequency = f
+		u.params = append(u.params, "frequency")
+	}
 	if dueDay, ok, err := parseDueDay(args); err != nil {
 		return u, err
 	} else if ok {
-		u.set("due_day", "due_day", dueDay)
+		u.dueDay = &dueDay
+		u.params = append(u.params, "due_day")
+	}
+	if d, err := parseDueDate(args); err != nil {
+		return u, err
+	} else if d != nil {
+		u.dueDate = d
+		u.params = append(u.params, "due_date")
 	}
 
 	if given(args, "category") {
@@ -871,9 +912,9 @@ func parseUpdateBillInput(args map[string]any) (billUpdate, error) {
 		u.set("notes", "notes", notes)
 	}
 
-	if len(u.columns) == 0 {
+	if len(u.columns) == 0 && !u.scheduleGiven() {
 		return u, badArg("", "No fields to update.",
-			"Pass bill_id plus at least one of name, amount, due_day, category, autopay, contact_id, property_id, vehicle_id, asset_id, notes.")
+			"Pass bill_id plus at least one of name, amount, frequency, due_day, due_date, category, autopay, contact_id, property_id, vehicle_id, asset_id, notes.")
 	}
 	return u, nil
 }
@@ -906,14 +947,9 @@ func parseCreateBillInput(args map[string]any) (createBillInput, error) {
 	}
 	in.amount = amount
 
-	dueDay, ok, err := parseDueDay(args)
-	if err != nil {
+	if in.frequency, in.dueDay, in.dueDate, err = parseCreateSchedule(args); err != nil {
 		return in, err
 	}
-	if !ok {
-		return in, badArg("due_day", "due_day is required.", "Pass the day of the month it is due as a number from 1 to 31.")
-	}
-	in.dueDay = dueDay
 
 	if in.category, err = parseCategory(args); err != nil {
 		return in, err
@@ -934,6 +970,162 @@ func parseCreateBillInput(args map[string]any) (createBillInput, error) {
 		return in, err
 	}
 	return in, nil
+}
+
+// parseCreateSchedule reads bill_create's frequency (default monthly),
+// due_day and due_date, applying 044's rule: a monthly bill needs due_day
+// and has no due_date; any other bill needs due_date and has no due_day.
+func parseCreateSchedule(args map[string]any) (frequency string, dueDay *int, dueDate *time.Time, err error) {
+	f, err := parseFrequency(args)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	day, hasDay, err := parseDueDay(args)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if hasDay {
+		dueDay = &day
+	}
+	if dueDate, err = parseDueDate(args); err != nil {
+		return "", nil, nil, err
+	}
+	frequency = FrequencyMonthly
+	if f != nil {
+		frequency = *f
+	}
+	if err := checkSchedule(Schedule{Frequency: frequency, DueDay: dueDay, DueDate: dueDate}, f != nil); err != nil {
+		return "", nil, nil, err
+	}
+	return frequency, dueDay, dueDate, nil
+}
+
+// checkSchedule applies 044's rule to a bill's final schedule: a monthly
+// bill needs due_day and no due_date, any other bill needs due_date and no
+// due_day. frequencyGiven says whether the caller passed frequency (it
+// changes the advice for a due_date on a monthly bill).
+func checkSchedule(s Schedule, frequencyGiven bool) error {
+	if s.Frequency == FrequencyMonthly {
+		if s.DueDate != nil {
+			if frequencyGiven {
+				return badArg("due_date", "due_date is only for bills that are not monthly; a monthly bill uses due_day.",
+					"Pass due_day (1-31) for a monthly bill, or a frequency such as annual with due_date.")
+			}
+			return badArg("due_date", "due_date needs a frequency: monthly bills use due_day.",
+				"Pass frequency (quarterly, semiannual, annual or once) with due_date, or due_day for a monthly bill.")
+		}
+		if s.DueDay == nil {
+			return badArg("due_day", "due_day is required for a monthly bill.",
+				"Pass the day of the month it is due as a number from 1 to 31, or a frequency with due_date.")
+		}
+		return nil
+	}
+	if s.DueDay != nil {
+		return badArg("due_day", fmt.Sprintf("due_day is only for monthly bills; %s bills use due_date.", s.Frequency),
+			fmt.Sprintf("Pass due_date (YYYY-MM-DD) for %s bills, or frequency monthly with due_day.", s.Frequency))
+	}
+	if s.DueDate == nil {
+		return badArg("due_date", fmt.Sprintf("due_date is required for %s bills.", s.Frequency),
+			"Pass the next due date as YYYY-MM-DD, e.g. 2027-04-15.")
+	}
+	return nil
+}
+
+// resolveSchedule merges bill_update's schedule params with the stored row.
+// A value carried over from the row that no longer fits the frequency is
+// dropped (switching annual to monthly drops due_date), as the API does; a
+// conflicting value the caller passed is an error.
+func resolveSchedule(stored Schedule, u billUpdate) (Schedule, error) {
+	next := stored
+	if next.Frequency == "" {
+		next.Frequency = FrequencyMonthly
+	}
+	if u.frequency != nil {
+		next.Frequency = *u.frequency
+	}
+	if u.dueDay != nil {
+		next.DueDay = u.dueDay
+	}
+	if u.dueDate != nil {
+		next.DueDate = u.dueDate
+	}
+	if next.Frequency == FrequencyMonthly {
+		if u.dueDate != nil {
+			return next, checkSchedule(next, u.frequency != nil)
+		}
+		next.DueDate = nil
+	} else {
+		if u.dueDay != nil {
+			return next, checkSchedule(next, u.frequency != nil)
+		}
+		next.DueDay = nil
+	}
+	if err := checkSchedule(next, u.frequency != nil); err != nil {
+		var ae *argError
+		if errors.As(err, &ae) && u.frequency != nil {
+			ae.message = fmt.Sprintf("Changing %s to %s needs %s.", stored.frequencyName(), next.Frequency, ae.field)
+		}
+		return next, err
+	}
+	return next, nil
+}
+
+// frequencyName is s.Frequency, with "" read as monthly.
+func (s Schedule) frequencyName() string {
+	if s.Frequency == "" {
+		return FrequencyMonthly
+	}
+	return s.Frequency
+}
+
+// sameSchedule reports whether two schedules are the same stored values.
+func sameSchedule(a, b Schedule) bool {
+	sameDay := (a.DueDay == nil) == (b.DueDay == nil) && (a.DueDay == nil || *a.DueDay == *b.DueDay)
+	sameDate := (a.DueDate == nil) == (b.DueDate == nil) && (a.DueDate == nil || midnight(*a.DueDate).Equal(midnight(*b.DueDate)))
+	return a.frequencyName() == b.frequencyName() && sameDay && sameDate
+}
+
+// frequencyAliases maps common words to bills.frequency values.
+var frequencyAliases = map[string]string{
+	"month": FrequencyMonthly, "every month": FrequencyMonthly,
+	"quarter": FrequencyQuarterly, "every 3 months": FrequencyQuarterly,
+	"semi-annual": FrequencySemiannual, "semi_annual": FrequencySemiannual, "semi annual": FrequencySemiannual,
+	"semiannually": FrequencySemiannual, "biannual": FrequencySemiannual, "half-yearly": FrequencySemiannual,
+	"twice a year": FrequencySemiannual, "every 6 months": FrequencySemiannual,
+	"yearly": FrequencyAnnual, "annually": FrequencyAnnual, "year": FrequencyAnnual, "every year": FrequencyAnnual,
+	"one-time": FrequencyOnce, "one time": FrequencyOnce, "one_time": FrequencyOnce, "onetime": FrequencyOnce, "one-off": FrequencyOnce,
+}
+
+// parseFrequency reads frequency (any case, common words accepted); nil when
+// absent, null or blank.
+func parseFrequency(args map[string]any) (*string, error) {
+	f, err := optionalString(args, "frequency")
+	if err != nil || f == nil {
+		return nil, err
+	}
+	v := strings.ToLower(*f)
+	if a, ok := frequencyAliases[v]; ok {
+		v = a
+	}
+	if _, ok := frequencyMonths(v); !ok {
+		return nil, badArg("frequency", fmt.Sprintf("frequency %q is not one of %s.", *f, strings.Join(frequencies, ", ")),
+			"Pass monthly, quarterly, semiannual, annual or once.")
+	}
+	return &v, nil
+}
+
+// parseDueDate reads due_date as YYYY-MM-DD; nil when absent, null or blank.
+func parseDueDate(args map[string]any) (*time.Time, error) {
+	s, err := optionalString(args, "due_date")
+	if err != nil || s == nil {
+		return nil, err
+	}
+	d, err := time.Parse(time.DateOnly, *s)
+	if err != nil {
+		return nil, badArg("due_date", fmt.Sprintf("due_date %q is not a date: due_date must be YYYY-MM-DD.", *s),
+			"Pass due_date as YYYY-MM-DD, e.g. 2027-04-15.")
+	}
+	return &d, nil
 }
 
 // Field parsers shared by bill_create and bill_update so both tools apply
@@ -1092,27 +1284,4 @@ func wholeNumber(args map[string]any, key string, lo, hi int) (int, bool, error)
 			fmt.Sprintf("Pass %s as a whole number between %d and %d.", key, lo, hi))
 	}
 	return int(n), true, nil
-}
-
-// nextDueDate returns the first date on or after today that falls on dueDay
-// of its month. When a month is shorter than dueDay, the bill is due on that
-// month's last day (due_day 31 is due on 30 April).
-func nextDueDate(today time.Time, dueDay int) time.Time {
-	y, m, _ := today.Date()
-	today = time.Date(y, m, today.Day(), 0, 0, 0, 0, time.UTC)
-	candidate := dueDateInMonth(y, m, dueDay)
-	if candidate.Before(today) {
-		candidate = dueDateInMonth(y, m+1, dueDay)
-	}
-	return candidate
-}
-
-// dueDateInMonth returns dueDay of the given month, clamped to the month's
-// last day. time.Date normalises a month of 13 into January of the next year.
-func dueDateInMonth(year int, month time.Month, dueDay int) time.Time {
-	lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
-	if dueDay > lastDay {
-		dueDay = lastDay
-	}
-	return time.Date(year, month, dueDay, 0, 0, 0, 0, time.UTC)
 }

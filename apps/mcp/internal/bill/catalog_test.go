@@ -327,7 +327,7 @@ func TestSummarizeByCategory(t *testing.T) {
 	insertBill(t, pool, hh.HouseholdID, "Gym", 25, 3, nil, false, nil)
 	insertBill(t, pool, other.HouseholdID, "Not mine", 999, 3, nil, false, nil)
 
-	totals, grand, err := SummarizeByCategory(ctx, pool, hh.HouseholdID.String())
+	totals, grand, err := SummarizeByCategory(ctx, pool, hh.HouseholdID.String(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestSummarizeByCategory(t *testing.T) {
 		t.Errorf("totals = %v grand = %v", totals, grand)
 	}
 
-	empty, grand, err := SummarizeByCategory(ctx, pool, uuid.NewString())
+	empty, grand, err := SummarizeByCategory(ctx, pool, uuid.NewString(), time.Now())
 	if err != nil || empty == nil || len(empty) != 0 || grand != 0 {
 		t.Errorf("empty household = %v %v %v", empty, grand, err)
 	}

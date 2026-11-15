@@ -153,10 +153,14 @@ const (
 	maintenanceDueWindowDays = 7
 )
 
-// billCandidatesSQL lists every bill with a usable due_day and no bill_due
-// notification in the last 24 hours, with what the due-date rule needs: the
-// household's timezone (for "today"), due_day, paid_date and
-// paid_for_due_date (migration 052, #4655). Which of them
+// billCandidatesSQL lists every bill with a usable schedule (a monthly bill
+// with due_day 1-31, or a quarterly/semiannual/annual/once bill with a
+// due_date, migration 044, #4468) and no bill_due notification in the last
+// 24 hours, with what the due-date rule needs: the household's timezone (for
+// "today"), frequency, due_day, due_date, paid_date and paid_for_due_date
+// (migration 052, #4655). $1 is now's UTC date: a once bill due more than a
+// day before it can never be in any household's window (every local date is
+// within a day of UTC), so it is not fetched. Which of them
 // are due within the window is decided in Go by nextUnpaidDue (billdue.go),
 // the same rule as the MCP bill tools (apps/mcp/internal/bill.BillDue and
 // coveredDueDate), so a bill marked paid with bill_pay is not notified for
@@ -164,10 +168,12 @@ const (
 // paidForDueDate in another language, and AT TIME ZONE fails the whole
 // query on a bad households.timezone where the MCP tools fall back to UTC.
 const billCandidatesSQL = `
-	SELECT b.id::text, h.timezone, b.due_day, b.paid_date, b.paid_for_due_date
+	SELECT b.id::text, h.timezone, b.frequency, b.due_day, b.due_date, b.paid_date, b.paid_for_due_date
 	FROM bills b
 	JOIN households h ON h.id = b.household_id
-	WHERE b.due_day BETWEEN 1 AND 31
+	WHERE ((b.frequency = 'monthly' AND b.due_day BETWEEN 1 AND 31)
+	    OR (b.frequency <> 'monthly' AND b.due_date IS NOT NULL))
+	AND NOT (b.frequency = 'once' AND b.due_date < $1::date - 1)
 	AND NOT EXISTS (
 		SELECT 1 FROM notifications n
 		WHERE n.entity_id = b.id AND n.type = 'bill_due'
@@ -198,27 +204,34 @@ const billDueSQL = `
 
 // billCandidate is one row of billCandidatesSQL.
 type billCandidate struct {
-	ID       string
-	Timezone string
-	DueDay   int
-	PaidDate *time.Time
-	PaidFor  *time.Time
+	ID        string
+	Timezone  string
+	Frequency string
+	DueDay    *int
+	DueDate   *time.Time
+	PaidDate  *time.Time
+	PaidFor   *time.Time
 }
 
 // dueBills returns the ids and next unpaid due dates of the candidates whose
 // due date falls within [today, today + windowDays], where today is now's
 // date in each bill's household timezone.
 //
-// bills.due_day is a day of the month (1-31), so the next due date can be in
-// this month or the next one: on Nov 29 a bill due on the 1st is due Dec 1.
-// The day is clamped to the month's length, so due_day 31 is due Feb 28 (or
-// 29), and Apr 30. A payment that covers that due date moves the bill on to
-// the following one, which is at least 28 days away and so never notifies.
+// A monthly bill's due_day is a day of the month (1-31), so the next due
+// date can be in this month or the next one: on Nov 29 a bill due on the 1st
+// is due Dec 1. The day is clamped to the month's length, so due_day 31 is
+// due Feb 28 (or 29), and Apr 30. A quarterly, semiannual or annual bill is
+// due every 3/6/12 months on its due_date's day; a once bill on due_date
+// only. A payment that covers that due date moves the bill on to the
+// following one, which is at least 28 days away and so never notifies (a
+// paid once bill has none). An unpaid once bill whose date has passed is
+// overdue, not due soon, so it is not notified again.
 func dueBills(now time.Time, candidates []billCandidate, windowDays int) (ids []string, dueDates []time.Time) {
 	for _, c := range candidates {
 		today := householdToday(now, c.Timezone)
-		next := nextUnpaidDue(today, c.DueDay, c.PaidDate, c.PaidFor)
-		if !next.After(today.AddDate(0, 0, windowDays)) {
+		s := schedule{frequency: c.Frequency, dueDay: c.DueDay, dueDate: c.DueDate}
+		next, ok := nextUnpaidDue(today, s, c.PaidDate, c.PaidFor)
+		if ok && !next.Before(today) && !next.After(today.AddDate(0, 0, windowDays)) {
 			ids = append(ids, c.ID)
 			dueDates = append(dueDates, next)
 		}
@@ -313,7 +326,7 @@ func generateNotifications(ctx context.Context, pool *pgxpool.Pool, smtpClient *
 // now in each household's timezone (households.timezone, UTC when unknown),
 // and returns the inserted rows.
 func insertDueNotifications(ctx context.Context, pool *pgxpool.Pool, now time.Time) ([]notif, error) {
-	rows, err := pool.Query(ctx, billCandidatesSQL)
+	rows, err := pool.Query(ctx, billCandidatesSQL, now.UTC().Format(time.DateOnly))
 	if err != nil {
 		return nil, fmt.Errorf("bill notifications: %w", err)
 	}

@@ -288,7 +288,7 @@ func TestBudgetSummary_Obligations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cats, grand, err := bill.SummarizeByCategory(context.Background(), pool, hh.HouseholdID.String())
+	cats, grand, err := bill.SummarizeByCategory(context.Background(), pool, hh.HouseholdID.String(), time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}

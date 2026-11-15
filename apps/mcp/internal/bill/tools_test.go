@@ -68,7 +68,7 @@ func TestBillDue(t *testing.T) {
 				p := mustDate(t, tc.paidFor)
 				paidFor = &p
 			}
-			got := billDue(mustDate(t, tc.today), tc.dueDay, paid, paidFor)
+			got, _ := billDue(mustDate(t, tc.today), MonthlySchedule(tc.dueDay), paid, paidFor)
 			if g := got.next.Format(time.DateOnly); g != tc.wantNext {
 				t.Errorf("next = %s, want %s", g, tc.wantNext)
 			}

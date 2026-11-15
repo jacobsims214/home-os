@@ -283,12 +283,13 @@ func householdMonth(ctx context.Context, pool *pgxpool.Pool, householdID string)
 	return time.Date(y, m, 1, 0, 0, 0, 0, time.UTC), nil
 }
 
-// loadObligations totals bills with bill.SummarizeByCategory (so the numbers
+// loadObligations totals bills with bill.SummarizeByCategory for month (bills
+// spread to monthly amounts, #4468; so the numbers
 // match what bill tools report) and adds the monthly payments of loans that
 // are active in month: a balance left, started before the month ends (or no
 // start date) and not ended before it begins (or no term_end).
 func loadObligations(ctx context.Context, pool *pgxpool.Pool, householdID string, month time.Time) (*obligations, error) {
-	cats, billsTotal, err := bill.SummarizeByCategory(ctx, pool, householdID)
+	cats, billsTotal, err := bill.SummarizeByCategory(ctx, pool, householdID, month)
 	if err != nil {
 		return nil, err
 	}

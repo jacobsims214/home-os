@@ -1029,7 +1029,8 @@ func TestPaidForDueDate(t *testing.T) {
 	}
 	for _, tc := range tests {
 		paid, _ := time.Parse(time.DateOnly, tc.paid)
-		if got := paidForDueDate(paid, tc.dueDay).Format(time.DateOnly); got != tc.want {
+		c, _ := MonthlySchedule(tc.dueDay).cadence()
+		if got := paidForDueDate(paid, c).Format(time.DateOnly); got != tc.want {
 			t.Errorf("paidForDueDate(%s, %d) = %s, want %s", tc.paid, tc.dueDay, got, tc.want)
 		}
 	}
@@ -1605,10 +1606,11 @@ func TestBillPay_ForDueDate(t *testing.T) {
 		assertPayMatchesFind(t, ctx, pool, on)
 	})
 
+	monthly20, _ := MonthlySchedule(20).cadence()
 	t.Run("without for_due_date the grace rule is unchanged", func(t *testing.T) {
 		id := insertPayBill(t, pool, hh.HouseholdID, ptr(142.5), ptr(20))
 		got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": paid.Format(time.DateOnly)})
-		want := paidForDueDate(paid, 20).Format(time.DateOnly) // 8 days late: the next due date
+		want := paidForDueDate(paid, monthly20).Format(time.DateOnly) // 8 days late: the next due date
 		if strOrNil(got.PaidForDueDate) != want {
 			t.Errorf("paid_for_due_date = %s, want %s", strOrNil(got.PaidForDueDate), want)
 		}
@@ -1626,7 +1628,7 @@ func TestBillPay_ForDueDate(t *testing.T) {
 		// Inferred coverage is the 20th after the payment, so paying the
 		// overdue one is already covered and changes nothing.
 		got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "for_due_date": overdue.Format(time.DateOnly)})
-		if !*got.AlreadyPaid || strOrNil(got.PaidForDueDate) != paidForDueDate(paid, 20).Format(time.DateOnly) {
+		if !*got.AlreadyPaid || strOrNil(got.PaidForDueDate) != paidForDueDate(paid, monthly20).Format(time.DateOnly) {
 			t.Errorf("already_paid=%v paid_for=%s", *got.AlreadyPaid, strOrNil(got.PaidForDueDate))
 		}
 		if d := storedPaidFor(t, pool, id); d != "" {

@@ -44,61 +44,6 @@ const (
 // exampleBillID is the UUID used in error examples.
 const exampleBillID = "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"
 
-// billDueInfo is where a monthly bill stands on a given day.
-type billDueInfo struct {
-	// next is the next due date that still needs paying.
-	next time.Time
-	// status is statusPaid when the current due date (the first one on or
-	// after today) is already covered by the last payment, otherwise statusDue.
-	status string
-	// paidFor is the due date the last payment covers, nil when never paid.
-	paidFor *time.Time
-}
-
-// billDue computes a bill's next unpaid due date as of today (household-local
-// midnight UTC, see householdToday).
-//
-// The current due date is due_day of this month or, once it has passed, of
-// next month, with due_day clamped to the month's length (31 is Nov 30 and
-// Feb 28 or 29). This is the same rule the worker's bill_due notification job
-// uses (#4418), so agents and notifications agree. If the last payment covers
-// that due date or a later one (coveredDueDate: bills.paid_for_due_date when
-// stored, else inferred from paid_date), the bill is paid and moves on to the
-// due date after the one paid.
-func billDue(today time.Time, dueDay int, paidDate, paidFor *time.Time) billDueInfo {
-	info := billDueInfo{next: nextDueDate(today, dueDay), status: statusDue}
-	covered := coveredDueDate(dueDay, paidDate, paidFor)
-	if covered == nil {
-		return info
-	}
-	info.paidFor = covered
-	if covered.Before(info.next) {
-		return info
-	}
-	info.status = statusPaid
-	for !covered.Before(info.next) {
-		info.next = dueDateInMonth(info.next.Year(), info.next.Month()+1, dueDay)
-	}
-	return info
-}
-
-// coveredDueDate is the due date a bill's last payment covers, nil when it
-// was never paid: bills.paid_for_due_date when stored (bill_pay, #4655),
-// otherwise inferred from paid_date by paidForDueDate (rows written before
-// 052, or after due_day changed).
-func coveredDueDate(dueDay int, paidDate, paidFor *time.Time) *time.Time {
-	if paidFor != nil {
-		y, m, d := paidFor.Date()
-		c := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
-		return &c
-	}
-	if paidDate == nil {
-		return nil
-	}
-	c := paidForDueDate(*paidDate, dueDay)
-	return &c
-}
-
 // daysBetween returns the whole days from a to b (both midnight UTC dates).
 func daysBetween(a, b time.Time) int {
 	return int(b.Sub(a).Hours() / 24)
@@ -110,7 +55,7 @@ func daysBetween(a, b time.Time) int {
 // in RETURNING clauses.
 const billColumns = `id, name, amount, due_day, category, COALESCE(is_autopay, false),
 	vendor_id, property_id, vehicle_id, asset_id, payment_url, notes,
-	created_at, updated_at, paid_date, paid_for_due_date,
+	created_at, updated_at, paid_date, paid_for_due_date, frequency, due_date,
 	COALESCE((SELECT a.name FROM assets a WHERE a.id = bills.asset_id),
 	         (SELECT NULLIF(concat_ws(' ', v.year, v.make, v.model), '') FROM vehicles v WHERE v.id = bills.vehicle_id),
 	         (SELECT p.name FROM properties p WHERE p.id = bills.property_id))`
@@ -136,6 +81,12 @@ type billRow struct {
 	// PaidFor is bills.paid_for_due_date: the due date paid_date covers,
 	// nil when not stored (coverage is then inferred from paid_date).
 	PaidFor *time.Time
+	// Frequency is bills.frequency (044): monthly, quarterly, semiannual,
+	// annual or once.
+	Frequency string
+	// DueDate is bills.due_date: the anchor date of a bill that is not
+	// monthly (044 allows due_day only on monthly bills).
+	DueDate *time.Time
 	// SubjectName is the name of the property, vehicle or asset.
 	SubjectName *string
 }
@@ -145,26 +96,37 @@ func scanBill(row pgx.Row) (billRow, error) {
 	var r billRow
 	err := row.Scan(&r.ID, &r.Name, &r.Amount, &r.DueDay, &r.Category, &r.AutoPay,
 		&r.VendorID, &r.PropertyID, &r.VehicleID, &r.AssetID, &r.PaymentURL, &r.Notes,
-		&r.CreatedAt, &r.UpdatedAt, &r.PaidDate, &r.PaidFor, &r.SubjectName)
+		&r.CreatedAt, &r.UpdatedAt, &r.PaidDate, &r.PaidFor, &r.Frequency, &r.DueDate, &r.SubjectName)
 	return r, err
 }
 
-// validDueDay reports whether a bill has a usable monthly due day.
-func (r billRow) validDueDay() bool {
-	return r.DueDay != nil && *r.DueDay >= 1 && *r.DueDay <= 31
+// schedule is the row's due schedule (frequency with due_day or due_date).
+func (r billRow) schedule() Schedule {
+	return Schedule{Frequency: r.Frequency, DueDay: r.DueDay, DueDate: r.DueDate}
+}
+
+// hasSchedule reports whether the bill has a usable due schedule: a monthly
+// bill with a due_day of 1-31, or another bill with a due_date.
+func (r billRow) hasSchedule() bool {
+	_, ok := r.schedule().cadence()
+	return ok
 }
 
 // billData is one bill in every bill tool's output. IDs are strings (a
 // uuid.UUID would be advertised as a byte array in the outputSchema).
 // next_due_date is the next unpaid due date in the family's timezone, with
 // its weekday; the due-date fields are null, and status omitted, when the
-// bill has no due_day. amount_paid and already_paid are set only by
+// bill has no schedule (a monthly bill without due_day, another bill without
+// due_date). A paid once bill has status paid and no next_due_date. amount_paid and already_paid are set only by
 // bill_pay, duplicate only by bill_create's loop guard.
 type billData struct {
 	ID             string    `json:"id" jsonschema_description:"The bill_id to pass to bill_update, bill_pay or bill_delete."`
 	Name           string    `json:"name"`
 	Amount         *float64  `json:"amount" jsonschema_description:"Amount due each time, in the family's currency."`
-	DueDay         *int      `json:"due_day" jsonschema_description:"Day of the month it is due (1-31); a short month uses its last day."`
+	Frequency      string    `json:"frequency" jsonschema_description:"monthly, quarterly, semiannual, annual or once."`
+	DueDay         *int      `json:"due_day" jsonschema_description:"Monthly bills: day of the month it is due (1-31); a short month uses its last day."`
+	DueDate        *string   `json:"due_date" jsonschema_description:"Other bills: a due date, YYYY-MM-DD; it repeats on that day every 3, 6 or 12 months."`
+	MonthlyAmount  *float64  `json:"monthly_amount" jsonschema_description:"amount spread per month: quarterly /3, semiannual /6, annual /12; null for once."`
 	Category       *string   `json:"category"`
 	Autopay        bool      `json:"autopay"`
 	ContactID      *string   `json:"contact_id" jsonschema_description:"The contact (vendor) the bill is paid to."`
@@ -212,7 +174,7 @@ func uuidString(id *uuid.UUID) *string {
 // data builds the output for r as of today, applying BillDue.
 func (r billRow) data(today time.Time) billData {
 	b := billData{
-		ID: r.ID.String(), Name: r.Name, Amount: r.Amount, DueDay: r.DueDay,
+		ID: r.ID.String(), Name: r.Name, Amount: r.Amount, Frequency: r.Frequency, DueDay: r.DueDay,
 		Category: r.Category, Autopay: r.AutoPay, ContactID: uuidString(r.VendorID),
 		PropertyID: uuidString(r.PropertyID), VehicleID: uuidString(r.VehicleID), AssetID: uuidString(r.AssetID),
 		SubjectType: subjectType(r.PropertyID, r.VehicleID, r.AssetID),
@@ -222,15 +184,25 @@ func (r billRow) data(today time.Time) billData {
 	if b.SubjectType != nil {
 		b.SubjectName = r.SubjectName
 	}
+	if b.Frequency == "" {
+		b.Frequency = FrequencyMonthly
+	}
+	if r.DueDate != nil {
+		b.DueDate = dateOnly(*r.DueDate)
+	}
+	b.MonthlyAmount = monthlyAmount(r.Amount, b.Frequency)
 	if r.PaidDate != nil {
 		b.PaidDate = dateOnly(*r.PaidDate)
 	}
-	if !r.validDueDay() {
+	due, ok := BillDueFor(today, r.schedule(), r.PaidDate, r.PaidFor)
+	if !ok {
 		return b
 	}
-	due := BillDue(today, *r.DueDay, r.PaidDate, r.PaidFor)
-	days := due.DaysUntil
-	b.NextDueDate, b.NextDueWeekday, b.DaysUntilDue, b.Status = dateOnly(due.Next), weekday(due.Next), &days, due.Status
+	b.Status = due.Status
+	if !due.Next.IsZero() {
+		days := due.DaysUntil
+		b.NextDueDate, b.NextDueWeekday, b.DaysUntilDue = dateOnly(due.Next), weekday(due.Next), &days
+	}
 	if due.PaidFor != nil {
 		b.PaidForDueDate = dateOnly(*due.PaidFor)
 	}
@@ -279,6 +251,7 @@ type findInput struct {
 	category      string
 	dueWithinDays *int
 	autopay       *bool
+	frequency     string
 	propertyID    *uuid.UUID
 	vehicleID     *uuid.UUID
 	assetID       *uuid.UUID
@@ -292,7 +265,7 @@ type findInput struct {
 // filtered reports whether any filter narrows the list.
 func (in findInput) filtered() bool {
 	return in.id != nil || in.query != "" || in.category != "" || in.dueWithinDays != nil ||
-		in.autopay != nil || in.propertyID != nil || in.vehicleID != nil || in.assetID != nil || in.subjectKind != ""
+		in.autopay != nil || in.frequency != "" || in.propertyID != nil || in.vehicleID != nil || in.assetID != nil || in.subjectKind != ""
 }
 
 // NewBillFindTool creates the bill_find MCP tool (catalog v2, class R),
@@ -308,7 +281,7 @@ func (in findInput) filtered() bool {
 // including bills about its assets (their property_id is derived).
 func NewBillFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
-		mcp.WithDescription("List or search bills with amount and next due date. Use due_within_days for \"what's due soon?\". " +
+		mcp.WithDescription("List or search bills with amount, frequency and next due date. Use due_within_days for \"what's due soon?\". " +
 			"Bills live here, not on the calendar."),
 		mcp.WithString("id", mcp.Description("A bill_id (UUID) to get exactly that bill")),
 		mcp.WithString("query", mcp.Description("Text in the name, category or notes, e.g. electric")),
@@ -317,6 +290,7 @@ func NewBillFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 			mcp.Description("Only bills next due within this many days; 0 = today, e.g. 7"),
 			mcp.Min(0), mcp.Max(maxDueWithinDays)),
 		mcp.WithBoolean("autopay", mcp.Description("true = only autopay bills, false = only manual ones")),
+		mcp.WithString("frequency", mcp.Description("Only bills due this often, e.g. annual"), mcp.Enum(frequencies...)),
 		mcp.WithString("property_id", mcp.Description("Only bills for this property (UUID from property_find)")),
 		mcp.WithString("vehicle_id", mcp.Description("Only bills for this vehicle (UUID from vehicle_find)")),
 		mcp.WithNumber("limit", mcp.Description("Max bills to return, 1-100 (default 25)"), mcp.Min(1), mcp.Max(maxLimit)),
@@ -353,9 +327,10 @@ func NewBillFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 			   AND ($7::uuid IS NULL OR vehicle_id = $7)
 			   AND ($8::uuid IS NULL OR asset_id = $8)
 			   AND ($9 = '' OR ($9 = 'property' AND property_id IS NOT NULL)
-			        OR ($9 = 'vehicle' AND vehicle_id IS NOT NULL) OR ($9 = 'asset' AND asset_id IS NOT NULL))`,
+			        OR ($9 = 'vehicle' AND vehicle_id IS NOT NULL) OR ($9 = 'asset' AND asset_id IS NOT NULL))
+			   AND ($10 = '' OR frequency = $10)`,
 			claims.HouseholdID, in.id, escapeLike(in.query), in.category, in.autopay,
-			in.propertyID, in.vehicleID, in.assetID, in.subjectKind,
+			in.propertyID, in.vehicleID, in.assetID, in.subjectKind, in.frequency,
 		)
 		if err != nil {
 			return respond.Failed("find bills", err), nil
@@ -514,6 +489,11 @@ func parseFindInput(args map[string]any) (findInput, error) {
 		return in, err
 	} else if ok {
 		in.autopay = &v
+	}
+	if f, err := parseFrequency(args); err != nil {
+		return in, err
+	} else if f != nil {
+		in.frequency = *f
 	}
 	if in.propertyID, err = optionalUUID(args, "property_id"); err != nil {
 		return in, err
