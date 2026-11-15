@@ -1,7 +1,6 @@
 package bill
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -75,16 +74,16 @@ func TestBillDue(t *testing.T) {
 	}
 }
 
-func decodeBills(t *testing.T, text string) []billResult {
+func decodeBills(t *testing.T, text string) []billData {
 	t.Helper()
-	var out []billResult
-	if err := json.Unmarshal([]byte(text), &out); err != nil {
+	var out []billData
+	if err := unmarshalData(text, &out); err != nil {
 		t.Fatalf("decode %q: %v", text, err)
 	}
 	return out
 }
 
-func findBill(bills []billResult, id string) *billResult {
+func findBill(bills []billData, id string) *billData {
 	for i := range bills {
 		if bills[i].ID == id {
 			return &bills[i]
@@ -94,8 +93,8 @@ func findBill(bills []billResult, id string) *billResult {
 }
 
 // TestReadTools_PaidBillAdvances pays a bill due today with bill_pay and
-// checks get_upcoming_bills drops that due date and lists the next one, and
-// list_bills reports it as paid with the next due date.
+// checks bill_find due_within_days drops that due date and lists the next one, and
+// bill_find reports it as paid with the next due date.
 func TestReadTools_PaidBillAdvances(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
@@ -114,14 +113,14 @@ func TestReadTools_PaidBillAdvances(t *testing.T) {
 	wantNext := dueDateInMonth(y, m+1, today.Day()).Format(time.DateOnly)
 	todayStr := today.Format(time.DateOnly)
 
-	_, _, upcoming := NewGetUpcomingBillsTool(pool)
-	_, _, list := NewListBillsTool(pool)
+	_, _, upcoming := NewBillFindTool(pool)
+	_, _, list := NewBillFindTool(pool)
 	_, _, pay := NewBillPayTool(pool)
 
-	_, text := callTool(t, ctx, upcoming, "get_upcoming_bills", map[string]any{"days": float64(7)})
+	_, text := callTool(t, ctx, upcoming, "bill_find", map[string]any{"due_within_days": float64(7)})
 	b := findBill(decodeBills(t, text), idStr)
 	if b == nil {
-		t.Fatalf("before pay: bill due today missing from get_upcoming_bills: %s", text)
+		t.Fatalf("before pay: bill due today missing from bill_find due_within_days: %s", text)
 	}
 	if *b.NextDueDate != todayStr || *b.DaysUntilDue != 0 || b.Status != statusDue {
 		t.Errorf("before pay: got next=%s days=%d status=%s, want %s 0 due", *b.NextDueDate, *b.DaysUntilDue, b.Status, todayStr)
@@ -132,37 +131,37 @@ func TestReadTools_PaidBillAdvances(t *testing.T) {
 		t.Fatalf("bill_pay paid_for_due_date = %v, want %s", paid.PaidForDueDate, todayStr)
 	}
 
-	_, text = callTool(t, ctx, upcoming, "get_upcoming_bills", map[string]any{"days": float64(7)})
+	_, text = callTool(t, ctx, upcoming, "bill_find", map[string]any{"due_within_days": float64(7)})
 	if findBill(decodeBills(t, text), idStr) != nil {
-		t.Errorf("after pay: get_upcoming_bills (7 days) still lists the paid due date: %s", text)
+		t.Errorf("after pay: bill_find due_within_days (7 days) still lists the paid due date: %s", text)
 	}
 
-	_, text = callTool(t, ctx, upcoming, "get_upcoming_bills", map[string]any{"days": float64(40)})
+	_, text = callTool(t, ctx, upcoming, "bill_find", map[string]any{"due_within_days": float64(40)})
 	b = findBill(decodeBills(t, text), idStr)
 	if b == nil {
-		t.Fatalf("after pay: get_upcoming_bills (40 days) missing the next due date: %s", text)
+		t.Fatalf("after pay: bill_find due_within_days (40 days) missing the next due date: %s", text)
 	}
 	if *b.NextDueDate != wantNext || b.Status != statusPaid || b.PaidDate == nil || *b.PaidDate != todayStr {
 		t.Errorf("after pay: got next=%s status=%s paid_date=%v, want %s paid %s", *b.NextDueDate, b.Status, b.PaidDate, wantNext, todayStr)
 	}
 
-	_, text = callTool(t, ctx, list, "list_bills", nil)
+	_, text = callTool(t, ctx, list, "bill_find", nil)
 	b = findBill(decodeBills(t, text), idStr)
 	if b == nil {
-		t.Fatalf("list_bills missing bill: %s", text)
+		t.Fatalf("bill_find missing bill: %s", text)
 	}
 	if *b.NextDueDate != wantNext || b.Status != statusPaid || b.PaidForDueDate == nil || *b.PaidForDueDate != todayStr {
-		t.Errorf("list_bills: got next=%s status=%s paid_for=%v, want %s paid %s", *b.NextDueDate, b.Status, b.PaidForDueDate, wantNext, todayStr)
+		t.Errorf("bill_find: got next=%s status=%s paid_for=%v, want %s paid %s", *b.NextDueDate, b.Status, b.PaidForDueDate, wantNext, todayStr)
 	}
 	if want := daysBetween(today, mustDate(t, wantNext)); *b.DaysUntilDue != want {
-		t.Errorf("list_bills days_until_due = %d, want %d", *b.DaysUntilDue, want)
+		t.Errorf("bill_find days_until_due = %d, want %d", *b.DaysUntilDue, want)
 	}
 }
 
-// TestGetUpcomingBills_MonthEndClamp checks a due_day 31 bill is reported on
+// TestBillFind_MonthEndClamp checks a due_day 31 bill is reported on
 // this month's last day, not overflowed into next month, and that the window
 // is inclusive of today and of today+days.
-func TestGetUpcomingBills_MonthEndClamp(t *testing.T) {
+func TestBillFind_MonthEndClamp(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	y, m, d := time.Now().UTC().Date()
@@ -177,15 +176,15 @@ func TestGetUpcomingBills_MonthEndClamp(t *testing.T) {
 		t.Fatalf("nextDueDate(%s, 31) = %s, outside this month", today.Format(time.DateOnly), want.Format(time.DateOnly))
 	}
 
-	_, _, upcoming := NewGetUpcomingBillsTool(pool)
-	_, _, list := NewListBillsTool(pool)
+	_, _, upcoming := NewBillFindTool(pool)
+	_, _, list := NewBillFindTool(pool)
 
 	// Exactly wantDays ahead (minimum 1) is inside the window.
 	days := wantDays
 	if days < 1 {
 		days = 1
 	}
-	_, text := callTool(t, ctx, upcoming, "get_upcoming_bills", map[string]any{"days": float64(days)})
+	_, text := callTool(t, ctx, upcoming, "bill_find", map[string]any{"due_within_days": float64(days)})
 	b := findBill(decodeBills(t, text), id.String())
 	if b == nil {
 		t.Fatalf("due_day 31 bill due %s (in %d days) missing with days=%d: %s", want.Format(time.DateOnly), wantDays, days, text)
@@ -195,39 +194,39 @@ func TestGetUpcomingBills_MonthEndClamp(t *testing.T) {
 	}
 
 	if wantDays > 1 {
-		_, text = callTool(t, ctx, upcoming, "get_upcoming_bills", map[string]any{"days": float64(wantDays - 1)})
+		_, text = callTool(t, ctx, upcoming, "bill_find", map[string]any{"due_within_days": float64(wantDays - 1)})
 		if findBill(decodeBills(t, text), id.String()) != nil {
 			t.Errorf("bill due in %d days listed with days=%d: %s", wantDays, wantDays-1, text)
 		}
 	}
 
-	_, text = callTool(t, ctx, list, "list_bills", nil)
+	_, text = callTool(t, ctx, list, "bill_find", nil)
 	b = findBill(decodeBills(t, text), id.String())
 	if b == nil || *b.NextDueDate != want.Format(time.DateOnly) || b.Status != statusDue || b.PaidDate != nil {
-		t.Errorf("list_bills: got %+v, want next %s, status due, no paid_date", b, want.Format(time.DateOnly))
+		t.Errorf("bill_find: got %+v, want next %s, status due, no paid_date", b, want.Format(time.DateOnly))
 	}
 }
 
-// TestListBills_LegacyNullDueDay checks a bill without due_day is listed
-// with null due-date fields and never appears in get_upcoming_bills.
-func TestListBills_LegacyNullDueDay(t *testing.T) {
+// TestBillFind_LegacyNullDueDay checks a bill without due_day is listed
+// with null due-date fields and never appears in bill_find due_within_days.
+func TestBillFind_LegacyNullDueDay(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	id := insertPayBill(t, pool, hh.HouseholdID, nil, nil)
 
-	_, _, list := NewListBillsTool(pool)
-	_, text := callTool(t, ctx, list, "list_bills", nil)
+	_, _, list := NewBillFindTool(pool)
+	_, text := callTool(t, ctx, list, "bill_find", nil)
 	b := findBill(decodeBills(t, text), id.String())
 	if b == nil {
-		t.Fatalf("list_bills missing legacy bill: %s", text)
+		t.Fatalf("bill_find missing legacy bill: %s", text)
 	}
 	if b.NextDueDate != nil || b.DaysUntilDue != nil || b.Status != "" {
 		t.Errorf("legacy bill due fields = %v %v %q, want null", b.NextDueDate, b.DaysUntilDue, b.Status)
 	}
 
-	_, _, upcoming := NewGetUpcomingBillsTool(pool)
-	_, text = callTool(t, ctx, upcoming, "get_upcoming_bills", map[string]any{"days": float64(60)})
+	_, _, upcoming := NewBillFindTool(pool)
+	_, text = callTool(t, ctx, upcoming, "bill_find", map[string]any{"due_within_days": float64(60)})
 	if findBill(decodeBills(t, text), id.String()) != nil {
-		t.Errorf("legacy bill listed in get_upcoming_bills: %s", text)
+		t.Errorf("legacy bill listed in bill_find due_within_days: %s", text)
 	}
 }

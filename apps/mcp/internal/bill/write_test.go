@@ -2,7 +2,7 @@ package bill
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +33,7 @@ func callTool(t *testing.T, ctx context.Context, handler toolHandler, name strin
 	if !ok {
 		t.Fatalf("%s: want TextContent, got %T", name, res.Content[0])
 	}
+	checkShape(t, name, res, text.Text)
 	return res, text.Text
 }
 
@@ -45,14 +46,14 @@ func countBills(t *testing.T, pool *pgxpool.Pool) int {
 	return n
 }
 
-// TestCreateBill_VisibleToReadTools creates a bill and checks it shows up in
-// list_bills and get_upcoming_bills for its household only.
-func TestCreateBill_VisibleToReadTools(t *testing.T) {
+// TestBillCreate_VisibleToReadTools creates a bill and checks it shows up in
+// bill_find and bill_find due_within_days for its household only.
+func TestBillCreate_VisibleToReadTools(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	otherCtx, _ := testutil.SeedHousehold(t, pool)
 
-	// Due today (by the database clock) so get_upcoming_bills must include it.
+	// Due today (by the database clock) so bill_find due_within_days must include it.
 	var today time.Time
 	if err := pool.QueryRow(context.Background(), `SELECT CURRENT_DATE`).Scan(&today); err != nil {
 		t.Fatalf("current date: %v", err)
@@ -67,38 +68,38 @@ func TestCreateBill_VisibleToReadTools(t *testing.T) {
 	}
 	propertyID := uuid.New()
 
-	_, _, create := NewCreateBillTool(pool)
-	res, text := callTool(t, ctx, create, "create_bill", map[string]any{
+	_, _, create := NewBillCreateTool(pool)
+	res, text := callTool(t, ctx, create, "bill_create", map[string]any{
 		"name":        "  Electric  ",
 		"amount":      125.5,
 		"due_day":     float64(today.Day()),
 		"category":    "Utilities",
-		"is_autopay":  true,
-		"vendor_id":   vendorID.String(),
+		"autopay":     true,
+		"contact_id":  vendorID.String(),
 		"entity_type": "property",
 		"entity_id":   propertyID.String(),
 		"payment_url": "https://power.example.com/pay",
 		"notes":       "Paperless billing",
 	})
 	if res.IsError {
-		t.Fatalf("create_bill returned tool error: %s", text)
+		t.Fatalf("bill_create returned tool error: %s", text)
 	}
 
-	var got createdBill
-	if err := json.Unmarshal([]byte(text), &got); err != nil {
+	var got billData
+	if err := unmarshalData(text, &got); err != nil {
 		t.Fatalf("decode %q: %v", text, err)
 	}
-	if got.ID == uuid.Nil || got.Name != "Electric" || got.Amount != 125.5 || got.DueDay != today.Day() {
+	if got.ID == "" || got.Name != "Electric" || got.Amount == nil || *got.Amount != 125.5 || got.DueDay == nil || *got.DueDay != today.Day() {
 		t.Errorf("unexpected bill: %+v", got)
 	}
-	if !got.IsAutopay || got.Category == nil || *got.Category != "Utilities" {
+	if !got.Autopay || got.Category == nil || *got.Category != "Utilities" {
 		t.Errorf("autopay/category not stored: %+v", got)
 	}
-	if got.VendorID == nil || *got.VendorID != vendorID || got.EntityID == nil || *got.EntityID != propertyID {
+	if got.ContactID == nil || *got.ContactID != vendorID.String() || got.EntityID == nil || *got.EntityID != propertyID.String() {
 		t.Errorf("vendor/entity not stored: %+v", got)
 	}
-	if want := today.Format("2006-01-02"); got.NextDueDate != want || got.DaysUntilDue != 0 {
-		t.Errorf("next due = %s (+%d days), want %s (+0)", got.NextDueDate, got.DaysUntilDue, want)
+	if want := today.Format("2006-01-02"); strOrNil(got.NextDueDate) != want || got.DaysUntilDue == nil || *got.DaysUntilDue != 0 {
+		t.Errorf("next due = %s (+%v days), want %s (+0)", strOrNil(got.NextDueDate), got.DaysUntilDue, want)
 	}
 
 	var rrule *string
@@ -126,7 +127,7 @@ func TestCreateBill_VisibleToReadTools(t *testing.T) {
 		t.Helper()
 		_, text := callTool(t, ctx, handler, name, args)
 		var rows []billRow
-		if err := json.Unmarshal([]byte(text), &rows); err != nil {
+		if err := unmarshalData(text, &rows); err != nil {
 			t.Fatalf("%s: decode %q: %v", name, text, err)
 		}
 		out := make([]uuid.UUID, len(rows))
@@ -136,8 +137,8 @@ func TestCreateBill_VisibleToReadTools(t *testing.T) {
 		return out
 	}
 
-	_, _, list := NewListBillsTool(pool)
-	_, _, upcoming := NewGetUpcomingBillsTool(pool)
+	_, _, list := NewBillFindTool(pool)
+	_, _, upcoming := NewBillFindTool(pool)
 
 	tests := []struct {
 		name    string
@@ -147,11 +148,11 @@ func TestCreateBill_VisibleToReadTools(t *testing.T) {
 		args    map[string]any
 		want    int
 	}{
-		{"list_bills in own household", ctx, list, "list_bills", nil, 1},
-		{"list_bills by category", ctx, list, "list_bills", map[string]any{"category": "Utilities"}, 1},
-		{"get_upcoming_bills in own household", ctx, upcoming, "get_upcoming_bills", map[string]any{"days": float64(7)}, 1},
-		{"list_bills in other household", otherCtx, list, "list_bills", nil, 0},
-		{"get_upcoming_bills in other household", otherCtx, upcoming, "get_upcoming_bills", map[string]any{"days": float64(7)}, 0},
+		{"bill_find in own household", ctx, list, "bill_find", nil, 1},
+		{"bill_find by category", ctx, list, "bill_find", map[string]any{"category": "Utilities"}, 1},
+		{"bill_find due_within_days in own household", ctx, upcoming, "bill_find", map[string]any{"due_within_days": float64(7)}, 1},
+		{"bill_find in other household", otherCtx, list, "bill_find", nil, 0},
+		{"bill_find due_within_days in other household", otherCtx, upcoming, "bill_find", map[string]any{"due_within_days": float64(7)}, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -159,41 +160,41 @@ func TestCreateBill_VisibleToReadTools(t *testing.T) {
 			if len(got2) != tc.want {
 				t.Fatalf("got %d bills (%v), want %d", len(got2), got2, tc.want)
 			}
-			if tc.want == 1 && got2[0] != got.ID {
+			if tc.want == 1 && got2[0].String() != got.ID {
 				t.Errorf("got bill %s, want %s", got2[0], got.ID)
 			}
 		})
 	}
 }
 
-// TestCreateBill_MinimalFields stores NULL for every optional field.
-func TestCreateBill_MinimalFields(t *testing.T) {
+// TestBillCreate_MinimalFields stores NULL for every optional field.
+func TestBillCreate_MinimalFields(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, _ := testutil.SeedHousehold(t, pool)
 
-	_, _, create := NewCreateBillTool(pool)
-	res, text := callTool(t, ctx, create, "create_bill", map[string]any{
+	_, _, create := NewBillCreateTool(pool)
+	res, text := callTool(t, ctx, create, "bill_create", map[string]any{
 		"name": "Netflix", "amount": float64(0), "due_day": float64(15),
 	})
 	if res.IsError {
-		t.Fatalf("create_bill returned tool error: %s", text)
+		t.Fatalf("bill_create returned tool error: %s", text)
 	}
-	var got createdBill
-	if err := json.Unmarshal([]byte(text), &got); err != nil {
+	var got billData
+	if err := unmarshalData(text, &got); err != nil {
 		t.Fatalf("decode %q: %v", text, err)
 	}
-	if got.IsAutopay || got.Category != nil || got.VendorID != nil || got.EntityType != nil ||
+	if got.Autopay || got.Category != nil || got.ContactID != nil || got.EntityType != nil ||
 		got.EntityID != nil || got.PaymentURL != nil || got.Notes != nil {
 		t.Errorf("optional fields should be empty: %s", text)
 	}
-	if got.NextDueDate == "" {
+	if got.NextDueDate == nil || got.NextDueWeekday == nil {
 		t.Error("next_due_date missing")
 	}
 }
 
-// TestCreateBill_Validation checks that bad input is a tool error and
+// TestBillCreate_Validation checks that bad input is a tool error and
 // inserts nothing.
-func TestCreateBill_Validation(t *testing.T) {
+func TestBillCreate_Validation(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, _ := testutil.SeedHousehold(t, pool)
 	_, other := testutil.SeedHousehold(t, pool)
@@ -218,7 +219,7 @@ func TestCreateBill_Validation(t *testing.T) {
 		return args
 	}
 
-	_, _, create := NewCreateBillTool(pool)
+	_, _, create := NewBillCreateTool(pool)
 
 	tests := []struct {
 		name    string
@@ -237,9 +238,9 @@ func TestCreateBill_Validation(t *testing.T) {
 		{"due_day zero", valid(map[string]any{"due_day": 0.0}), "due_day must be a whole number"},
 		{"due_day 32", valid(map[string]any{"due_day": 32.0}), "due_day must be a whole number"},
 		{"due_day fractional", valid(map[string]any{"due_day": 1.5}), "due_day must be a whole number"},
-		{"is_autopay not a bool", valid(map[string]any{"is_autopay": "yes"}), "is_autopay must be a boolean"},
-		{"vendor_id not a uuid", valid(map[string]any{"vendor_id": "abc"}), "vendor_id must be a UUID"},
-		{"vendor from another household", valid(map[string]any{"vendor_id": otherVendor.String()}), "vendor_id not found"},
+		{"autopay not a bool", valid(map[string]any{"autopay": "yes"}), "autopay must be a boolean"},
+		{"contact_id not a uuid", valid(map[string]any{"contact_id": "abc"}), "contact_id must be a UUID"},
+		{"vendor from another household", valid(map[string]any{"contact_id": otherVendor.String()}), "No contact with id"},
 		{"entity_type without entity_id", valid(map[string]any{"entity_type": "vehicle"}), "must be provided together"},
 		{"entity_id without entity_type", valid(map[string]any{"entity_id": uuid.NewString()}), "must be provided together"},
 		{"entity_id not a uuid", valid(map[string]any{"entity_type": "pet", "entity_id": "x"}), "entity_id must be a UUID"},
@@ -247,7 +248,7 @@ func TestCreateBill_Validation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, text := callTool(t, ctx, create, "create_bill", tc.args)
+			res, text := callTool(t, ctx, create, "bill_create", tc.args)
 			if !res.IsError {
 				t.Fatalf("want tool error, got %s", text)
 			}
@@ -262,7 +263,7 @@ func TestCreateBill_Validation(t *testing.T) {
 	}
 
 	t.Run("no claims", func(t *testing.T) {
-		res, _ := callTool(t, context.Background(), create, "create_bill", valid(nil))
+		res, _ := callTool(t, context.Background(), create, "bill_create", valid(nil))
 		if !res.IsError {
 			t.Fatal("want tool error without claims")
 		}
@@ -302,27 +303,33 @@ func TestNextDueDate(t *testing.T) {
 	}
 }
 
-// createTestBill creates a fully populated bill through create_bill.
-func createTestBill(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vendorID uuid.UUID) createdBill {
+// createTestBill creates a fully populated bill through bill_create, named
+// Electric unless a name is given. It passes the hidden aliases entity_type,
+// entity_id and payment_url too.
+func createTestBill(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vendorID uuid.UUID, name ...string) billData {
 	t.Helper()
-	_, _, create := NewCreateBillTool(pool)
-	res, text := callTool(t, ctx, create, "create_bill", map[string]any{
-		"name":        "Electric",
+	billName := "Electric"
+	if len(name) > 0 {
+		billName = name[0]
+	}
+	_, _, create := NewBillCreateTool(pool)
+	res, text := callTool(t, ctx, create, "bill_create", map[string]any{
+		"name":        billName,
 		"amount":      125.5,
 		"due_day":     10.0,
 		"category":    "Utilities",
-		"is_autopay":  true,
-		"vendor_id":   vendorID.String(),
+		"autopay":     true,
+		"contact_id":  vendorID.String(),
 		"entity_type": "property",
 		"entity_id":   uuid.NewString(),
 		"payment_url": "https://power.example.com/pay",
 		"notes":       "Paperless billing",
 	})
 	if res.IsError {
-		t.Fatalf("create_bill returned tool error: %s", text)
+		t.Fatalf("bill_create returned tool error: %s", text)
 	}
-	var b createdBill
-	if err := json.Unmarshal([]byte(text), &b); err != nil {
+	var b billData
+	if err := unmarshalData(text, &b); err != nil {
 		t.Fatalf("decode %q: %v", text, err)
 	}
 	return b
@@ -340,22 +347,22 @@ func insertVendor(t *testing.T, pool *pgxpool.Pool, householdID uuid.UUID, name 
 	return id
 }
 
-func decodeUpdated(t *testing.T, text string) updatedBill {
+func decodeUpdated(t *testing.T, text string) billData {
 	t.Helper()
-	var b updatedBill
-	if err := json.Unmarshal([]byte(text), &b); err != nil {
+	var b billData
+	if err := unmarshalData(text, &b); err != nil {
 		t.Fatalf("decode %q: %v", text, err)
 	}
 	return b
 }
 
-func updatedEvents(t *testing.T, pool *pgxpool.Pool, billID, householdID uuid.UUID) int {
+func updatedEvents(t *testing.T, pool *pgxpool.Pool, billID any, householdID uuid.UUID) int {
 	t.Helper()
 	var n int
 	if err := pool.QueryRow(context.Background(),
 		`SELECT COUNT(*) FROM outbox_events
 		 WHERE type = 'bill.updated' AND payload->>'id' = $1 AND household_id = $2`,
-		billID.String(), householdID,
+		fmt.Sprint(billID), householdID,
 	).Scan(&n); err != nil {
 		t.Fatalf("count events: %v", err)
 	}
@@ -377,8 +384,8 @@ func TestBillUpdate_PartialUpdate(t *testing.T) {
 
 	_, _, update := NewBillUpdateTool(pool)
 	res, text := callTool(t, ctx, update, "bill_update", map[string]any{
-		"bill_id": orig.ID.String(),
-		"amount":  99.999, // rounded to cents like create_bill
+		"bill_id": orig.ID,
+		"amount":  99.999, // rounded to cents like bill_create
 		"due_day": float64(today.Day()),
 		"notes":   nil, // null means unchanged
 	})
@@ -390,8 +397,8 @@ func TestBillUpdate_PartialUpdate(t *testing.T) {
 	if got.ID != orig.ID || got.Amount == nil || *got.Amount != 100 || got.DueDay == nil || *got.DueDay != today.Day() {
 		t.Errorf("amount/due_day not updated: %s", text)
 	}
-	if got.Name != orig.Name || got.IsAutopay != orig.IsAutopay ||
-		*got.Category != *orig.Category || *got.VendorID != *orig.VendorID ||
+	if got.Name != orig.Name || got.Autopay != orig.Autopay ||
+		*got.Category != *orig.Category || *got.ContactID != *orig.ContactID ||
 		*got.EntityType != *orig.EntityType || *got.EntityID != *orig.EntityID ||
 		*got.PaymentURL != *orig.PaymentURL || *got.Notes != *orig.Notes {
 		t.Errorf("untouched fields changed:\n got %s\n was %+v", text, orig)
@@ -432,11 +439,11 @@ func TestBillUpdate_SetAndClearOptionalFields(t *testing.T) {
 
 	_, _, update := NewBillUpdateTool(pool)
 	res, text := callTool(t, ctx, update, "bill_update", map[string]any{
-		"bill_id":     orig.ID.String(),
+		"bill_id":     orig.ID,
 		"name":        "  Gas  ",
 		"category":    "Fuel",
-		"is_autopay":  false,
-		"vendor_id":   newVendor.String(),
+		"autopay":     false,
+		"contact_id":  newVendor.String(),
 		"entity_type": "vehicle",
 		"entity_id":   vehicleID.String(),
 		"payment_url": "http://gas.example.com",
@@ -446,8 +453,8 @@ func TestBillUpdate_SetAndClearOptionalFields(t *testing.T) {
 		t.Fatalf("bill_update returned tool error: %s", text)
 	}
 	got := decodeUpdated(t, text)
-	if got.Name != "Gas" || got.IsAutopay || *got.Category != "Fuel" || *got.VendorID != newVendor ||
-		*got.EntityType != "vehicle" || *got.EntityID != vehicleID ||
+	if got.Name != "Gas" || got.Autopay || *got.Category != "Fuel" || *got.ContactID != newVendor.String() ||
+		*got.EntityType != "vehicle" || *got.EntityID != vehicleID.String() ||
 		*got.PaymentURL != "http://gas.example.com" || *got.Notes != "new notes" {
 		t.Errorf("fields not set: %s", text)
 	}
@@ -456,9 +463,9 @@ func TestBillUpdate_SetAndClearOptionalFields(t *testing.T) {
 	}
 
 	res, text = callTool(t, ctx, update, "bill_update", map[string]any{
-		"bill_id":     orig.ID.String(),
+		"bill_id":     orig.ID,
 		"category":    "",
-		"vendor_id":   "",
+		"contact_id":  "",
 		"entity_type": " ",
 		"entity_id":   "",
 		"payment_url": "",
@@ -468,7 +475,7 @@ func TestBillUpdate_SetAndClearOptionalFields(t *testing.T) {
 		t.Fatalf("clearing update returned tool error: %s", text)
 	}
 	got = decodeUpdated(t, text)
-	if got.Category != nil || got.VendorID != nil || got.EntityType != nil || got.EntityID != nil ||
+	if got.Category != nil || got.ContactID != nil || got.EntityType != nil || got.EntityID != nil ||
 		got.PaymentURL != nil || got.Notes != nil {
 		t.Errorf("optional fields not cleared: %s", text)
 	}
@@ -494,7 +501,7 @@ func TestBillUpdate_OtherHouseholdNotFound(t *testing.T) {
 		name string
 		id   string
 	}{
-		{"bill in another household", orig.ID.String()},
+		{"bill in another household", orig.ID},
 		{"bill that does not exist", uuid.NewString()},
 	}
 	for _, tc := range tests {
@@ -502,8 +509,8 @@ func TestBillUpdate_OtherHouseholdNotFound(t *testing.T) {
 			res, text := callTool(t, otherCtx, update, "bill_update", map[string]any{
 				"bill_id": tc.id, "amount": 1.0,
 			})
-			if !res.IsError || !strings.Contains(text, "bill not found") {
-				t.Fatalf("want 'bill not found' tool error, got %s", text)
+			if !res.IsError || !strings.Contains(text, "No bill with id") {
+				t.Fatalf("want 'No bill with id' tool error, got %s", text)
 			}
 		})
 	}
@@ -543,7 +550,7 @@ func TestBillUpdate_LegacyNullFields(t *testing.T) {
 		t.Fatalf("bill_update returned tool error: %s", text)
 	}
 	got := decodeUpdated(t, text)
-	if got.Amount != nil || got.DueDay != nil || got.NextDueDate != nil || got.DaysUntilDue != nil || got.IsAutopay {
+	if got.Amount != nil || got.DueDay != nil || got.NextDueDate != nil || got.DaysUntilDue != nil || got.Autopay {
 		t.Errorf("unexpected legacy fields: %s", text)
 	}
 	if got.Notes == nil || *got.Notes != "still no due day" {
@@ -586,7 +593,7 @@ func TestBillUpdate_Validation(t *testing.T) {
 	otherVendor := insertVendor(t, pool, other.HouseholdID, "Not mine")
 
 	withID := func(args map[string]any) map[string]any {
-		args["bill_id"] = orig.ID.String()
+		args["bill_id"] = orig.ID
 		return args
 	}
 
@@ -599,8 +606,8 @@ func TestBillUpdate_Validation(t *testing.T) {
 	}{
 		{"missing bill_id", map[string]any{"amount": 1.0}, "bill_id is required"},
 		{"bill_id not a uuid", map[string]any{"bill_id": "abc", "amount": 1.0}, "bill_id must be a UUID"},
-		{"no fields", withID(map[string]any{}), "no fields to update"},
-		{"only null fields", withID(map[string]any{"name": nil, "notes": nil}), "no fields to update"},
+		{"no fields", withID(map[string]any{}), "No fields to update"},
+		{"only null fields", withID(map[string]any{"name": nil, "notes": nil}), "No fields to update"},
 		{"blank name", withID(map[string]any{"name": "  "}), "name cannot be blank"},
 		{"name too long", withID(map[string]any{"name": strings.Repeat("x", 256)}), "name must be at most"},
 		{"negative amount", withID(map[string]any{"amount": -1.0}), "amount must be between"},
@@ -608,9 +615,9 @@ func TestBillUpdate_Validation(t *testing.T) {
 		{"due_day 32", withID(map[string]any{"due_day": 32.0}), "due_day must be a whole number"},
 		{"due_day fractional", withID(map[string]any{"due_day": 1.5}), "due_day must be a whole number"},
 		{"category too long", withID(map[string]any{"category": strings.Repeat("c", 101)}), "category must be at most"},
-		{"is_autopay not a bool", withID(map[string]any{"is_autopay": "yes"}), "is_autopay must be a boolean"},
-		{"vendor_id not a uuid", withID(map[string]any{"vendor_id": "abc"}), "vendor_id must be a UUID"},
-		{"vendor from another household", withID(map[string]any{"vendor_id": otherVendor.String()}), "vendor_id not found"},
+		{"autopay not a bool", withID(map[string]any{"autopay": "yes"}), "autopay must be a boolean"},
+		{"contact_id not a uuid", withID(map[string]any{"contact_id": "abc"}), "contact_id must be a UUID"},
+		{"vendor from another household", withID(map[string]any{"contact_id": otherVendor.String()}), "No contact with id"},
 		{"entity_type alone", withID(map[string]any{"entity_type": "pet"}), "must be provided together"},
 		{"entity_id alone", withID(map[string]any{"entity_id": uuid.NewString()}), "must be provided together"},
 		{"entity cleared on one side", withID(map[string]any{"entity_type": "", "entity_id": uuid.NewString()}), "set or cleared together"},
@@ -642,7 +649,7 @@ func TestBillUpdate_Validation(t *testing.T) {
 		`SELECT amount, vendor_id FROM bills WHERE id = $1`, orig.ID).Scan(&amount, &vendor); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if amount != 125.5 || vendor != *orig.VendorID {
+	if amount != 125.5 || vendor.String() != *orig.ContactID {
 		t.Errorf("invalid calls changed the bill: amount=%v vendor=%s", amount, vendor)
 	}
 	if n := updatedEvents(t, pool, orig.ID, hh.HouseholdID); n != 0 {
@@ -650,39 +657,39 @@ func TestBillUpdate_Validation(t *testing.T) {
 	}
 }
 
-func deletedEvents(t *testing.T, pool *pgxpool.Pool, billID uuid.UUID) int {
+func deletedEvents(t *testing.T, pool *pgxpool.Pool, billID any) int {
 	t.Helper()
 	var n int
 	if err := pool.QueryRow(context.Background(),
 		`SELECT COUNT(*) FROM outbox_events WHERE type = 'bill.deleted' AND payload->>'id' = $1`,
-		billID.String(),
+		fmt.Sprint(billID),
 	).Scan(&n); err != nil {
 		t.Fatalf("count events: %v", err)
 	}
 	return n
 }
 
-func billExists(t *testing.T, pool *pgxpool.Pool, id uuid.UUID) bool {
+func billExists(t *testing.T, pool *pgxpool.Pool, id any) bool {
 	t.Helper()
 	var ok bool
 	if err := pool.QueryRow(context.Background(),
-		`SELECT EXISTS (SELECT 1 FROM bills WHERE id = $1)`, id).Scan(&ok); err != nil {
+		`SELECT EXISTS (SELECT 1 FROM bills WHERE id = $1::uuid)`, fmt.Sprint(id)).Scan(&ok); err != nil {
 		t.Fatalf("bill exists: %v", err)
 	}
 	return ok
 }
 
-func listBillIDs(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []uuid.UUID {
+func listBillIDs(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []string {
 	t.Helper()
-	_, _, list := NewListBillsTool(pool)
-	_, text := callTool(t, ctx, list, "list_bills", nil)
+	_, _, list := NewBillFindTool(pool)
+	_, text := callTool(t, ctx, list, "bill_find", nil)
 	var rows []struct {
-		ID uuid.UUID `json:"id"`
+		ID string `json:"id"`
 	}
-	if err := json.Unmarshal([]byte(text), &rows); err != nil {
-		t.Fatalf("list_bills: decode %q: %v", text, err)
+	if err := unmarshalData(text, &rows); err != nil {
+		t.Fatalf("bill_find: decode %q: %v", text, err)
 	}
-	ids := make([]uuid.UUID, len(rows))
+	ids := make([]string, len(rows))
 	for i, r := range rows {
 		ids[i] = r.ID
 	}
@@ -690,38 +697,38 @@ func listBillIDs(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []uuid.U
 }
 
 // TestBillDelete_RemovesFromListBills deletes one of two bills and checks it
-// is gone from list_bills, the response is the deleted row, and a bill.deleted
+// is gone from bill_find, the response is the deleted row, and a bill.deleted
 // event is written.
 func TestBillDelete_RemovesFromListBills(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	vendorID := insertVendor(t, pool, hh.HouseholdID, "Power Co")
 	doomed := createTestBill(t, ctx, pool, vendorID)
-	kept := createTestBill(t, ctx, pool, vendorID)
+	kept := createTestBill(t, ctx, pool, vendorID, "Water")
 
 	if got := listBillIDs(t, ctx, pool); len(got) != 2 {
-		t.Fatalf("before delete: list_bills = %v, want 2 bills", got)
+		t.Fatalf("before delete: bill_find = %v, want 2 bills", got)
 	}
 
 	_, _, del := NewBillDeleteTool(pool)
-	res, text := callTool(t, ctx, del, "bill_delete", map[string]any{"bill_id": doomed.ID.String()})
+	res, text := callTool(t, ctx, del, "bill_delete", map[string]any{"bill_id": doomed.ID})
 	if res.IsError {
 		t.Fatalf("bill_delete returned tool error: %s", text)
 	}
-	var got deletedBill
-	if err := json.Unmarshal([]byte(text), &got); err != nil {
+	var got billData
+	if err := unmarshalData(text, &got); err != nil {
 		t.Fatalf("decode %q: %v", text, err)
 	}
-	if !got.Deleted || got.ID != doomed.ID || got.Name != "Electric" ||
+	if got.ID != doomed.ID || got.Name != "Electric" ||
 		got.Amount == nil || *got.Amount != 125.5 || got.DueDay == nil || *got.DueDay != 10 ||
-		!got.IsAutopay || got.VendorID == nil || *got.VendorID != vendorID ||
+		!got.Autopay || got.ContactID == nil || *got.ContactID != vendorID.String() ||
 		got.Notes == nil || *got.Notes != "Paperless billing" {
 		t.Errorf("unexpected deleted bill: %s", text)
 	}
 
 	ids := listBillIDs(t, ctx, pool)
 	if len(ids) != 1 || ids[0] != kept.ID {
-		t.Errorf("after delete: list_bills = %v, want only %s", ids, kept.ID)
+		t.Errorf("after delete: bill_find = %v, want only %s", ids, kept.ID)
 	}
 	if billExists(t, pool, doomed.ID) {
 		t.Error("deleted bill still in table")
@@ -732,7 +739,7 @@ func TestBillDelete_RemovesFromListBills(t *testing.T) {
 	if err := pool.QueryRow(context.Background(),
 		`SELECT COUNT(*), MAX(payload->>'name') FROM outbox_events
 		 WHERE type = 'bill.deleted' AND payload->>'id' = $1 AND household_id = $2`,
-		doomed.ID.String(), hh.HouseholdID,
+		doomed.ID, hh.HouseholdID,
 	).Scan(&events, &name); err != nil {
 		t.Fatalf("read events: %v", err)
 	}
@@ -741,9 +748,9 @@ func TestBillDelete_RemovesFromListBills(t *testing.T) {
 	}
 
 	// A repeat call deletes nothing more and says so.
-	res, text = callTool(t, ctx, del, "bill_delete", map[string]any{"bill_id": doomed.ID.String()})
-	if !res.IsError || !strings.Contains(text, "bill not found") {
-		t.Errorf("repeat delete: want 'bill not found' tool error, got %s", text)
+	res, text = callTool(t, ctx, del, "bill_delete", map[string]any{"bill_id": doomed.ID})
+	if !res.IsError || !strings.Contains(text, "No bill with id") {
+		t.Errorf("repeat delete: want 'No bill with id' tool error, got %s", text)
 	}
 	if n := deletedEvents(t, pool, doomed.ID); n != 1 {
 		t.Errorf("repeat delete wrote events: total %d, want 1", n)
@@ -763,16 +770,16 @@ func TestBillDelete_OtherHouseholdNotFound(t *testing.T) {
 
 	tests := []struct {
 		name string
-		id   uuid.UUID
+		id   string
 	}{
 		{"bill in another household", orig.ID},
-		{"bill that does not exist", missing},
+		{"bill that does not exist", missing.String()},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, text := callTool(t, otherCtx, del, "bill_delete", map[string]any{"bill_id": tc.id.String()})
-			if !res.IsError || !strings.Contains(text, "bill not found") {
-				t.Fatalf("want 'bill not found' tool error, got %s", text)
+			res, text := callTool(t, otherCtx, del, "bill_delete", map[string]any{"bill_id": tc.id})
+			if !res.IsError || !strings.Contains(text, "No bill with id") {
+				t.Fatalf("want 'No bill with id' tool error, got %s", text)
 			}
 			if n := deletedEvents(t, pool, tc.id); n != 0 {
 				t.Errorf("bill.deleted events = %d, want 0", n)
@@ -784,7 +791,7 @@ func TestBillDelete_OtherHouseholdNotFound(t *testing.T) {
 		t.Fatal("other household deleted the bill")
 	}
 	if ids := listBillIDs(t, ctx, pool); len(ids) != 1 || ids[0] != orig.ID {
-		t.Errorf("owner's list_bills = %v, want [%s]", ids, orig.ID)
+		t.Errorf("owner's bill_find = %v, want [%s]", ids, orig.ID)
 	}
 }
 
@@ -807,11 +814,11 @@ func TestBillDelete_LegacyNullFields(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("bill_delete returned tool error: %s", text)
 	}
-	var got deletedBill
-	if err := json.Unmarshal([]byte(text), &got); err != nil {
+	var got billData
+	if err := unmarshalData(text, &got); err != nil {
 		t.Fatalf("decode %q: %v", text, err)
 	}
-	if !got.Deleted || got.Name != "Old" || got.Amount != nil || got.DueDay != nil || got.IsAutopay {
+	if got.Name != "Old" || got.Amount != nil || got.DueDay != nil || got.Autopay {
 		t.Errorf("unexpected legacy deleted bill: %s", text)
 	}
 	if billExists(t, pool, id) {
@@ -845,8 +852,8 @@ func TestBillDelete_ToolDefinition(t *testing.T) {
 		a.IdempotentHint == nil || !*a.IdempotentHint || a.OpenWorldHint == nil || *a.OpenWorldHint {
 		t.Errorf("annotations = %+v, want class X (false, true, true, false)", a)
 	}
-	if a.Title != "Delete a bill" {
-		t.Errorf("title = %q, want Delete a bill", a.Title)
+	if a.Title != "Delete bill" {
+		t.Errorf("title = %q, want Delete bill", a.Title)
 	}
 }
 
@@ -883,7 +890,7 @@ func TestBillDelete_Validation(t *testing.T) {
 	}
 
 	t.Run("no claims", func(t *testing.T) {
-		res, _ := callTool(t, context.Background(), del, "bill_delete", map[string]any{"bill_id": orig.ID.String()})
+		res, _ := callTool(t, context.Background(), del, "bill_delete", map[string]any{"bill_id": orig.ID})
 		if !res.IsError {
 			t.Fatal("want tool error without claims")
 		}
@@ -932,16 +939,16 @@ func setHouseholdTZ(t *testing.T, pool *pgxpool.Pool, householdID uuid.UUID, tz 
 	}
 }
 
-func decodePaid(t *testing.T, text string) paidBill {
+func decodePaid(t *testing.T, text string) billData {
 	t.Helper()
-	var b paidBill
-	if err := json.Unmarshal([]byte(text), &b); err != nil {
+	var b billData
+	if err := unmarshalData(text, &b); err != nil {
 		t.Fatalf("decode %q: %v", text, err)
 	}
 	return b
 }
 
-func payBill(t *testing.T, ctx context.Context, pay toolHandler, args map[string]any) paidBill {
+func payBill(t *testing.T, ctx context.Context, pay toolHandler, args map[string]any) billData {
 	t.Helper()
 	res, text := callTool(t, ctx, pay, "bill_pay", args)
 	if res.IsError {
@@ -999,8 +1006,8 @@ func TestBillPay_SetsPaidDateAndNextDue(t *testing.T) {
 	_, _, pay := NewBillPayTool(pool)
 
 	got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": "2026-01-18"})
-	if got.ID != id || got.PaidDate != "2026-01-18" || got.AlreadyPaid {
-		t.Errorf("first payment: id=%s paid_date=%s already_paid=%v", got.ID, got.PaidDate, got.AlreadyPaid)
+	if got.ID != id.String() || strOrNil(got.PaidDate) != "2026-01-18" || *got.AlreadyPaid {
+		t.Errorf("first payment: id=%s paid_date=%s already_paid=%v", got.ID, strOrNil(got.PaidDate), got.AlreadyPaid)
 	}
 	if strOrNil(got.PaidForDueDate) != "2026-01-20" || strOrNil(got.NextDueDate) != "2026-02-20" {
 		t.Errorf("paid_for_due_date=%s next_due_date=%s, want 2026-01-20 / 2026-02-20",
@@ -1030,9 +1037,9 @@ func TestBillPay_SetsPaidDateAndNextDue(t *testing.T) {
 	// Same call again, and a later payment for the same due date: no change.
 	for _, paidDate := range []string{"2026-01-18", "2026-01-22", "2026-01-10"} {
 		again := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": paidDate})
-		if !again.AlreadyPaid || again.PaidDate != "2026-01-18" || strOrNil(again.NextDueDate) != "2026-02-20" {
+		if !*again.AlreadyPaid || strOrNil(again.PaidDate) != "2026-01-18" || strOrNil(again.NextDueDate) != "2026-02-20" {
 			t.Errorf("repeat with %s: already_paid=%v paid_date=%s next=%s, want true/2026-01-18/2026-02-20",
-				paidDate, again.AlreadyPaid, again.PaidDate, strOrNil(again.NextDueDate))
+				paidDate, again.AlreadyPaid, strOrNil(again.PaidDate), strOrNil(again.NextDueDate))
 		}
 		if !again.UpdatedAt.Equal(firstUpdatedAt) {
 			t.Errorf("repeat with %s changed updated_at", paidDate)
@@ -1047,7 +1054,7 @@ func TestBillPay_SetsPaidDateAndNextDue(t *testing.T) {
 
 	// Next month's payment, with an explicit amount.
 	next := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": "2026-02-15", "amount": 150.555})
-	if next.AlreadyPaid || next.PaidDate != "2026-02-15" ||
+	if *next.AlreadyPaid || strOrNil(next.PaidDate) != "2026-02-15" ||
 		strOrNil(next.PaidForDueDate) != "2026-02-20" || strOrNil(next.NextDueDate) != "2026-03-20" {
 		t.Errorf("second payment: %+v", next)
 	}
@@ -1060,8 +1067,8 @@ func TestBillPay_SetsPaidDateAndNextDue(t *testing.T) {
 
 	// An older payment date never moves the bill backwards.
 	old := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": "2026-01-19"})
-	if !old.AlreadyPaid || old.PaidDate != "2026-02-15" {
-		t.Errorf("older payment: already_paid=%v paid_date=%s", old.AlreadyPaid, old.PaidDate)
+	if !*old.AlreadyPaid || strOrNil(old.PaidDate) != "2026-02-15" {
+		t.Errorf("older payment: already_paid=%v paid_date=%s", old.AlreadyPaid, strOrNil(old.PaidDate))
 	}
 	if n := updatedEvents(t, pool, id, hh.HouseholdID); n != 2 {
 		t.Errorf("bill.updated events = %d, want 2", n)
@@ -1089,18 +1096,18 @@ func TestBillPay_DefaultsToHouseholdToday(t *testing.T) {
 			got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String()})
 			after := time.Now().In(loc).Format(time.DateOnly)
 
-			if got.PaidDate != before && got.PaidDate != after {
-				t.Errorf("paid_date = %s, want household-local today %s", got.PaidDate, before)
+			if strOrNil(got.PaidDate) != before && strOrNil(got.PaidDate) != after {
+				t.Errorf("paid_date = %s, want household-local today %s", strOrNil(got.PaidDate), before)
 			}
-			if d := storedPaidDate(t, pool, id); d != got.PaidDate {
-				t.Errorf("stored paid_date = %q, want %q", d, got.PaidDate)
+			if d := storedPaidDate(t, pool, id); d != strOrNil(got.PaidDate) {
+				t.Errorf("stored paid_date = %q, want %q", d, strOrNil(got.PaidDate))
 			}
 			if got.NextDueDate == nil || got.DaysUntilDue == nil || *got.DaysUntilDue < 0 {
 				t.Errorf("next_due_date=%s days_until_due=%v, want a date not before today",
 					strOrNil(got.NextDueDate), got.DaysUntilDue)
 			}
-			if *got.NextDueDate <= got.PaidDate {
-				t.Errorf("next_due_date %s is not after paid_date %s", *got.NextDueDate, got.PaidDate)
+			if *got.NextDueDate <= strOrNil(got.PaidDate) {
+				t.Errorf("next_due_date %s is not after paid_date %s", *got.NextDueDate, strOrNil(got.PaidDate))
 			}
 		})
 	}
@@ -1135,7 +1142,7 @@ func TestBillPay_OtherHouseholdNotFound(t *testing.T) {
 	_, _, pay := NewBillPayTool(pool)
 	for _, billID := range []string{id.String(), uuid.NewString()} {
 		res, text := callTool(t, otherCtx, pay, "bill_pay", map[string]any{"bill_id": billID, "paid_date": "2026-01-10"})
-		if !res.IsError || !strings.Contains(text, "bill not found") {
+		if !res.IsError || !strings.Contains(text, "No bill with id") {
 			t.Errorf("bill %s: want bill not found, got %s", billID, text)
 		}
 	}
@@ -1162,7 +1169,7 @@ func TestBillPay_LegacyNullFields(t *testing.T) {
 
 	_, _, pay := NewBillPayTool(pool)
 	got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": "2026-01-10"})
-	if got.AlreadyPaid || got.PaidDate != "2026-01-10" || got.Amount != nil || got.DueDay != nil ||
+	if *got.AlreadyPaid || strOrNil(got.PaidDate) != "2026-01-10" || got.Amount != nil || got.DueDay != nil ||
 		got.PaidForDueDate != nil || got.NextDueDate != nil || got.DaysUntilDue != nil || got.AmountPaid != nil {
 		t.Errorf("unexpected legacy response: %+v", got)
 	}
@@ -1170,7 +1177,7 @@ func TestBillPay_LegacyNullFields(t *testing.T) {
 		t.Errorf("stored paid_date = %q, want 2026-01-10", d)
 	}
 	again := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": "2026-01-10"})
-	if !again.AlreadyPaid {
+	if !*again.AlreadyPaid {
 		t.Error("repeat payment of a legacy bill was not already_paid")
 	}
 	if n := updatedEvents(t, pool, id, hh.HouseholdID); n != 1 {
@@ -1209,8 +1216,8 @@ func TestBillPay_ToolDefinition(t *testing.T) {
 		a.IdempotentHint == nil || !*a.IdempotentHint || a.OpenWorldHint == nil || *a.OpenWorldHint {
 		t.Errorf("annotations = %+v, want class U (false, false, true, false)", a)
 	}
-	if a.Title != "Pay a bill" {
-		t.Errorf("title = %q, want Pay a bill", a.Title)
+	if a.Title != "Pay bill" {
+		t.Errorf("title = %q, want Pay bill", a.Title)
 	}
 }
 
@@ -1230,8 +1237,8 @@ func TestBillPay_Validation(t *testing.T) {
 		{"missing bill_id", map[string]any{}, "bill_id is required"},
 		{"blank bill_id", map[string]any{"bill_id": " "}, "bill_id is required"},
 		{"bill_id not a uuid", map[string]any{"bill_id": "abc"}, "bill_id must be a UUID"},
-		{"paid_date US format", map[string]any{"bill_id": id.String(), "paid_date": "11/20/2026"}, "paid_date must be a date as YYYY-MM-DD"},
-		{"paid_date with time", map[string]any{"bill_id": id.String(), "paid_date": "2026-01-10T10:00:00Z"}, "paid_date must be a date"},
+		{"paid_date US format", map[string]any{"bill_id": id.String(), "paid_date": "11/20/2026"}, "paid_date must be YYYY-MM-DD"},
+		{"paid_date with time", map[string]any{"bill_id": id.String(), "paid_date": "2026-01-10T10:00:00Z"}, "is not a date"},
 		{"paid_date not a string", map[string]any{"bill_id": id.String(), "paid_date": 20.0}, "paid_date must be a string"},
 		{"negative amount", map[string]any{"bill_id": id.String(), "amount": -1.0}, "amount must be between"},
 		{"amount not a number", map[string]any{"bill_id": id.String(), "amount": "ten"}, "amount must be a number"},
@@ -1263,7 +1270,7 @@ func TestBillPay_Validation(t *testing.T) {
 	}
 }
 
-// ── write tools agree with list_bills (#4627) ────────────────────────────
+// ── write tools agree with bill_find (#4627) ────────────────────────────
 
 // householdTodayIn returns today in tz as midnight UTC, like householdToday.
 func householdTodayIn(t *testing.T, tz string) time.Time {
@@ -1276,24 +1283,24 @@ func householdTodayIn(t *testing.T, tz string) time.Time {
 	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }
 
-// listedBill returns the list_bills entry for id.
-func listedBill(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id string) billResult {
+// listedBill returns the bill_find entry for id.
+func listedBill(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id string) billData {
 	t.Helper()
-	_, _, list := NewListBillsTool(pool)
-	_, text := callTool(t, ctx, list, "list_bills", nil)
+	_, _, list := NewBillFindTool(pool)
+	_, text := callTool(t, ctx, list, "bill_find", nil)
 	b := findBill(decodeBills(t, text), id)
 	if b == nil {
-		t.Fatalf("list_bills missing bill %s: %s", id, text)
+		t.Fatalf("bill_find missing bill %s: %s", id, text)
 	}
 	if b.NextDueDate == nil || b.DaysUntilDue == nil {
-		t.Fatalf("list_bills bill %s has no due fields: %s", id, text)
+		t.Fatalf("bill_find bill %s has no due fields: %s", id, text)
 	}
 	return *b
 }
 
 // TestBillUpdate_PaidBillMatchesListBills pays a bill due today and then
 // changes its amount: bill_update must report next month's due date, as
-// list_bills does, not the due date that was just paid.
+// bill_find does, not the due date that was just paid.
 func TestBillUpdate_PaidBillMatchesListBills(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
@@ -1301,21 +1308,21 @@ func TestBillUpdate_PaidBillMatchesListBills(t *testing.T) {
 	setHouseholdTZ(t, pool, hh.HouseholdID, tz)
 	today := householdTodayIn(t, tz)
 
-	_, _, create := NewCreateBillTool(pool)
-	res, text := callTool(t, ctx, create, "create_bill", map[string]any{
+	_, _, create := NewBillCreateTool(pool)
+	res, text := callTool(t, ctx, create, "bill_create", map[string]any{
 		"name": "Electric", "amount": 80.0, "due_day": float64(today.Day()),
 	})
 	if res.IsError {
-		t.Fatalf("create_bill returned tool error: %s", text)
+		t.Fatalf("bill_create returned tool error: %s", text)
 	}
-	var created createdBill
-	if err := json.Unmarshal([]byte(text), &created); err != nil {
+	var created billData
+	if err := unmarshalData(text, &created); err != nil {
 		t.Fatalf("decode %q: %v", text, err)
 	}
-	if created.NextDueDate != today.Format(time.DateOnly) || created.DaysUntilDue != 0 {
-		t.Fatalf("create_bill next=%s days=%d, want %s 0", created.NextDueDate, created.DaysUntilDue, today.Format(time.DateOnly))
+	if strOrNil(created.NextDueDate) != today.Format(time.DateOnly) || created.DaysUntilDue == nil || *created.DaysUntilDue != 0 {
+		t.Fatalf("bill_create next=%s days=%v, want %s 0", strOrNil(created.NextDueDate), created.DaysUntilDue, today.Format(time.DateOnly))
 	}
-	id := created.ID.String()
+	id := created.ID
 
 	_, _, pay := NewBillPayTool(pool)
 	payBill(t, ctx, pay, map[string]any{"bill_id": id})
@@ -1330,33 +1337,33 @@ func TestBillUpdate_PaidBillMatchesListBills(t *testing.T) {
 
 	wantNext := dueDateInMonth(today.Year(), today.Month()+1, today.Day()).Format(time.DateOnly)
 	if *want.NextDueDate != wantNext {
-		t.Fatalf("list_bills next_due_date = %s, want next month %s", *want.NextDueDate, wantNext)
+		t.Fatalf("bill_find next_due_date = %s, want next month %s", *want.NextDueDate, wantNext)
 	}
 	if got.NextDueDate == nil || got.DaysUntilDue == nil {
 		t.Fatalf("bill_update has no due fields: %s", text)
 	}
 	if *got.NextDueDate != *want.NextDueDate || *got.DaysUntilDue != *want.DaysUntilDue {
-		t.Errorf("bill_update next=%s days=%d, list_bills next=%s days=%d",
+		t.Errorf("bill_update next=%s days=%d, bill_find next=%s days=%d",
 			*got.NextDueDate, *got.DaysUntilDue, *want.NextDueDate, *want.DaysUntilDue)
 	}
 	if got.Status != want.Status || got.Status != statusPaid {
-		t.Errorf("bill_update status=%q, list_bills status=%q, want %q", got.Status, want.Status, statusPaid)
+		t.Errorf("bill_update status=%q, bill_find status=%q, want %q", got.Status, want.Status, statusPaid)
 	}
-	if strOrNil(got.PaidDate) != strOrNil(want.PaidDate) || strOrNil(got.PaidForDue) != strOrNil(want.PaidForDueDate) {
-		t.Errorf("bill_update paid_date=%s paid_for=%s, list_bills paid_date=%s paid_for=%s",
-			strOrNil(got.PaidDate), strOrNil(got.PaidForDue), strOrNil(want.PaidDate), strOrNil(want.PaidForDueDate))
+	if strOrNil(got.PaidDate) != strOrNil(want.PaidDate) || strOrNil(got.PaidForDueDate) != strOrNil(want.PaidForDueDate) {
+		t.Errorf("bill_update paid_date=%s paid_for=%s, bill_find paid_date=%s paid_for=%s",
+			strOrNil(got.PaidDate), strOrNil(got.PaidForDueDate), strOrNil(want.PaidDate), strOrNil(want.PaidForDueDate))
 	}
 	if got.Amount == nil || *got.Amount != 95.25 {
 		t.Errorf("bill_update amount = %v, want 95.25", got.Amount)
 	}
 }
 
-// TestCreateBill_FarTimezoneMatchesListBills creates bills in households far
-// from UTC: create_bill's next_due_date and days_until_due must equal
-// list_bills', which use the household's local today.
-func TestCreateBill_FarTimezoneMatchesListBills(t *testing.T) {
+// TestBillCreate_FarTimezoneMatchesListBills creates bills in households far
+// from UTC: bill_create's next_due_date and days_until_due must equal
+// bill_find', which use the household's local today.
+func TestBillCreate_FarTimezoneMatchesListBills(t *testing.T) {
 	pool := testutil.NewPool(t)
-	_, _, create := NewCreateBillTool(pool)
+	_, _, create := NewBillCreateTool(pool)
 
 	for _, tz := range []string{"Pacific/Kiritimati", "Pacific/Pago_Pago"} {
 		t.Run(tz, func(t *testing.T) {
@@ -1366,23 +1373,23 @@ func TestCreateBill_FarTimezoneMatchesListBills(t *testing.T) {
 
 			// Due on the household's today: a UTC-clock answer would be
 			// today (0 days) or next month, depending on the hour.
-			res, text := callTool(t, ctx, create, "create_bill", map[string]any{
+			res, text := callTool(t, ctx, create, "bill_create", map[string]any{
 				"name": "Water", "amount": 40.0, "due_day": float64(today.Day()),
 			})
 			if res.IsError {
-				t.Fatalf("create_bill returned tool error: %s", text)
+				t.Fatalf("bill_create returned tool error: %s", text)
 			}
-			var got createdBill
-			if err := json.Unmarshal([]byte(text), &got); err != nil {
+			var got billData
+			if err := unmarshalData(text, &got); err != nil {
 				t.Fatalf("decode %q: %v", text, err)
 			}
-			want := listedBill(t, ctx, pool, got.ID.String())
-			if got.NextDueDate != *want.NextDueDate || got.DaysUntilDue != *want.DaysUntilDue {
-				t.Errorf("create_bill next=%s days=%d, list_bills next=%s days=%d",
-					got.NextDueDate, got.DaysUntilDue, *want.NextDueDate, *want.DaysUntilDue)
+			want := listedBill(t, ctx, pool, got.ID)
+			if strOrNil(got.NextDueDate) != *want.NextDueDate || *got.DaysUntilDue != *want.DaysUntilDue {
+				t.Errorf("bill_create next=%s days=%d, bill_find next=%s days=%d",
+					strOrNil(got.NextDueDate), *got.DaysUntilDue, *want.NextDueDate, *want.DaysUntilDue)
 			}
-			if got.NextDueDate != today.Format(time.DateOnly) {
-				t.Errorf("create_bill next_due_date = %s, want household today %s", got.NextDueDate, today.Format(time.DateOnly))
+			if strOrNil(got.NextDueDate) != today.Format(time.DateOnly) {
+				t.Errorf("bill_create next_due_date = %s, want household today %s", strOrNil(got.NextDueDate), today.Format(time.DateOnly))
 			}
 		})
 	}

@@ -4,21 +4,15 @@ import (
 	"home-os/mcp/internal/server"
 )
 
-// Register adds the bill tools to srv. cmd/mcp calls it once at startup,
-// so changes to these tools stay inside this package.
+// Register adds the bill tools (catalog v2: bill_find, bill_create,
+// bill_update, bill_delete, bill_pay) to srv. cmd/mcp calls it once at
+// startup, so changes to these tools stay inside this package. The old
+// get_bill_summary is folded into budget_summary (finance, #4372), which can
+// use SummarizeByCategory for its obligations section.
 func Register(srv *server.Server, deps server.Deps) {
-	billListName, billListTool, billListHandler := NewListBillsTool(deps.Pool)
-	srv.RegisterTool(billListName, billListTool, billListHandler)
-	billUpcomingName, billUpcomingTool, billUpcomingHandler := NewGetUpcomingBillsTool(deps.Pool)
-	srv.RegisterTool(billUpcomingName, billUpcomingTool, billUpcomingHandler)
-	billSummaryName, billSummaryTool, billSummaryHandler := NewGetBillSummaryTool(deps.Pool)
-	srv.RegisterTool(billSummaryName, billSummaryTool, billSummaryHandler)
-	billCreateName, billCreateTool, billCreateHandler := NewCreateBillTool(deps.Pool)
-	srv.RegisterTool(billCreateName, billCreateTool, billCreateHandler)
-	billUpdateName, billUpdateTool, billUpdateHandler := NewBillUpdateTool(deps.Pool)
-	srv.RegisterTool(billUpdateName, billUpdateTool, billUpdateHandler)
-	billDeleteName, billDeleteTool, billDeleteHandler := NewBillDeleteTool(deps.Pool)
-	srv.RegisterTool(billDeleteName, billDeleteTool, billDeleteHandler)
-	billPayName, billPayTool, billPayHandler := NewBillPayTool(deps.Pool)
-	srv.RegisterTool(billPayName, billPayTool, billPayHandler)
+	srv.RegisterTool(NewBillFindTool(deps.Pool))
+	srv.RegisterTool(NewBillCreateTool(deps.Pool))
+	srv.RegisterTool(NewBillUpdateTool(deps.Pool))
+	srv.RegisterTool(NewBillDeleteTool(deps.Pool))
+	srv.RegisterTool(NewBillPayTool(deps.Pool))
 }

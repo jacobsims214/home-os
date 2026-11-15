@@ -1,12 +1,18 @@
-// Package bill provides MCP tools for managing household bills.
-// All operations are scoped to the authenticated household via JWT claims.
+// Package bill provides the MCP bill tools (catalog v2, KB
+// architecture/mcp-tool-catalog.md "bill"): bill_find, bill_create,
+// bill_update, bill_delete and bill_pay. Every result is built with
+// internal/respond and every tool declares all four annotation hints and an
+// outputSchema. All operations are scoped to the authenticated household via
+// JWT claims.
 package bill
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,10 +20,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 )
 
-// Bill status values reported by the read tools.
+// Bill status values reported in bill output.
 const (
 	// statusDue means the bill's current due date has not been paid yet.
 	statusDue = "due"
@@ -25,6 +32,17 @@ const (
 	// so next_due_date is the following one.
 	statusPaid = "paid"
 )
+
+// Pagination limits shared by every catalog find tool.
+const (
+	defaultLimit = 25
+	maxLimit     = 100
+	// maxDueWithinDays bounds due_within_days to a year and a bit.
+	maxDueWithinDays = 366
+)
+
+// exampleBillID is the UUID used in error examples.
+const exampleBillID = "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"
 
 // billDueInfo is where a monthly bill stands on a given day.
 type billDueInfo struct {
@@ -68,34 +86,38 @@ func daysBetween(a, b time.Time) int {
 	return int(b.Sub(a).Hours() / 24)
 }
 
-// billRow is a bill as the read tools load it. amount, due_day and
-// is_autopay are pointers because API-created rows can leave them NULL.
+// billColumns is the column list every bill query selects or returns, in
+// the order scanBill reads it.
+const billColumns = `id, name, amount, due_day, category, COALESCE(is_autopay, false),
+	vendor_id, entity_type, entity_id, payment_url, notes,
+	created_at, updated_at, paid_date`
+
+// billRow is a bills row as the tools load it. amount and due_day are
+// pointers because API-created rows can leave them NULL.
 type billRow struct {
-	ID       uuid.UUID
-	Name     string
-	Amount   *float64
-	DueDay   *int
-	Category *string
-	AutoPay  *bool
-	PaidDate *time.Time
+	ID         uuid.UUID
+	Name       string
+	Amount     *float64
+	DueDay     *int
+	Category   *string
+	AutoPay    bool
+	VendorID   *uuid.UUID
+	EntityType *string
+	EntityID   *uuid.UUID
+	PaymentURL *string
+	Notes      *string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	PaidDate   *time.Time
 }
 
-// billResult is a bill in list_bills and get_upcoming_bills output.
-// next_due_date is the next unpaid due date (YYYY-MM-DD) and days_until_due
-// counts from today in the household's timezone; both are null, and status
-// is omitted, when the bill has no due_day.
-type billResult struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Amount         *float64 `json:"amount,omitempty"`
-	DueDay         *int     `json:"due_day"`
-	Category       *string  `json:"category"`
-	AutoPay        *bool    `json:"auto_pay"`
-	NextDueDate    *string  `json:"next_due_date"`
-	DaysUntilDue   *int     `json:"days_until_due"`
-	Status         string   `json:"status,omitempty"`
-	PaidDate       *string  `json:"paid_date"`
-	PaidForDueDate *string  `json:"paid_for_due_date"`
+// scanBill reads one row of billColumns.
+func scanBill(row pgx.Row) (billRow, error) {
+	var r billRow
+	err := row.Scan(&r.ID, &r.Name, &r.Amount, &r.DueDay, &r.Category, &r.AutoPay,
+		&r.VendorID, &r.EntityType, &r.EntityID, &r.PaymentURL, &r.Notes,
+		&r.CreatedAt, &r.UpdatedAt, &r.PaidDate)
+	return r, err
 }
 
 // validDueDay reports whether a bill has a usable monthly due day.
@@ -103,230 +125,370 @@ func (r billRow) validDueDay() bool {
 	return r.DueDay != nil && *r.DueDay >= 1 && *r.DueDay <= 31
 }
 
-// result builds the output for r as of today.
-func (r billRow) result(today time.Time) billResult {
-	b := billResult{
+// billData is one bill in every bill tool's output. IDs are strings (a
+// uuid.UUID would be advertised as a byte array in the outputSchema).
+// next_due_date is the next unpaid due date in the family's timezone, with
+// its weekday; the due-date fields are null, and status omitted, when the
+// bill has no due_day. amount_paid and already_paid are set only by
+// bill_pay, duplicate only by bill_create's loop guard.
+type billData struct {
+	ID             string    `json:"id" jsonschema_description:"The bill_id to pass to bill_update, bill_pay or bill_delete."`
+	Name           string    `json:"name"`
+	Amount         *float64  `json:"amount" jsonschema_description:"Amount due each time, in the family's currency."`
+	DueDay         *int      `json:"due_day" jsonschema_description:"Day of the month it is due (1-31); a short month uses its last day."`
+	Category       *string   `json:"category"`
+	Autopay        bool      `json:"autopay"`
+	ContactID      *string   `json:"contact_id" jsonschema_description:"The contact (vendor) the bill is paid to."`
+	EntityType     *string   `json:"entity_type"`
+	EntityID       *string   `json:"entity_id"`
+	PaymentURL     *string   `json:"payment_url"`
+	Notes          *string   `json:"notes"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	NextDueDate    *string   `json:"next_due_date" jsonschema_description:"Next unpaid due date, YYYY-MM-DD in the family's timezone."`
+	NextDueWeekday *string   `json:"next_due_weekday" jsonschema_description:"Weekday of next_due_date, e.g. Thu."`
+	DaysUntilDue   *int      `json:"days_until_due" jsonschema_description:"Whole days from today (family timezone) to next_due_date."`
+	Status         string    `json:"status,omitempty" jsonschema_description:"due, or paid when the current due date is already paid."`
+	PaidDate       *string   `json:"paid_date" jsonschema_description:"Date of the last recorded payment, YYYY-MM-DD."`
+	PaidForDueDate *string   `json:"paid_for_due_date" jsonschema_description:"The due date the last payment covered, YYYY-MM-DD."`
+	AmountPaid     *float64  `json:"amount_paid,omitempty" jsonschema_description:"bill_pay only: the amount paid."`
+	AlreadyPaid    *bool     `json:"already_paid,omitempty" jsonschema_description:"bill_pay only: true when that due date was already paid and nothing changed."`
+	Duplicate      bool      `json:"duplicate,omitempty" jsonschema_description:"bill_create only: true when the same bill was created minutes ago and was returned instead."`
+}
+
+// dateOnly formats t as YYYY-MM-DD.
+func dateOnly(t time.Time) *string {
+	s := t.Format(time.DateOnly)
+	return &s
+}
+
+// weekday is t's short weekday name, e.g. "Thu".
+func weekday(t time.Time) *string {
+	s := t.Weekday().String()[:3]
+	return &s
+}
+
+// uuidString is id as a string, nil when id is nil.
+func uuidString(id *uuid.UUID) *string {
+	if id == nil {
+		return nil
+	}
+	s := id.String()
+	return &s
+}
+
+// data builds the output for r as of today, applying BillDue.
+func (r billRow) data(today time.Time) billData {
+	b := billData{
 		ID: r.ID.String(), Name: r.Name, Amount: r.Amount, DueDay: r.DueDay,
-		Category: r.Category, AutoPay: r.AutoPay,
+		Category: r.Category, Autopay: r.AutoPay, ContactID: uuidString(r.VendorID),
+		EntityType: r.EntityType, EntityID: uuidString(r.EntityID),
+		PaymentURL: r.PaymentURL, Notes: r.Notes,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
 	if r.PaidDate != nil {
-		s := r.PaidDate.Format(time.DateOnly)
-		b.PaidDate = &s
+		b.PaidDate = dateOnly(*r.PaidDate)
 	}
 	if !r.validDueDay() {
 		return b
 	}
-	info := billDue(today, *r.DueDay, r.PaidDate)
-	next := info.next.Format(time.DateOnly)
-	days := daysBetween(today, info.next)
-	b.NextDueDate, b.DaysUntilDue, b.Status = &next, &days, info.status
-	if info.paidFor != nil {
-		s := info.paidFor.Format(time.DateOnly)
-		b.PaidForDueDate = &s
+	due := BillDue(today, *r.DueDay, r.PaidDate)
+	days := due.DaysUntil
+	b.NextDueDate, b.NextDueWeekday, b.DaysUntilDue, b.Status = dateOnly(due.Next), weekday(due.Next), &days, due.Status
+	if due.PaidFor != nil {
+		b.PaidForDueDate = dateOnly(*due.PaidFor)
 	}
 	return b
 }
 
-// scanBillRows reads id, name, amount, due_day, category, is_autopay and
-// paid_date rows.
-func scanBillRows(rows pgx.Rows) ([]billRow, error) {
-	defer rows.Close()
-	var out []billRow
-	for rows.Next() {
-		var r billRow
-		if err := rows.Scan(&r.ID, &r.Name, &r.Amount, &r.DueDay, &r.Category, &r.AutoPay, &r.PaidDate); err != nil {
-			return nil, fmt.Errorf("scan bill: %w", err)
-		}
-		out = append(out, r)
+// dueText describes when b is next due, e.g. "due Thu Nov 20", or "" when
+// it has no due day.
+func (b billData) dueText() string {
+	if b.NextDueDate == nil {
+		return ""
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate bills: %w", err)
+	d, err := time.Parse(time.DateOnly, *b.NextDueDate)
+	if err != nil {
+		return ""
 	}
-	return out, nil
+	return "due " + d.Format("Mon Jan 2")
 }
 
-// NewListBillsTool creates the list_bills MCP tool.
-// It returns all bills for the household, optionally filtered by category,
-// each with its next unpaid due date and paid status.
-func NewListBillsTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("list_bills",
-		mcp.WithDescription("List bills for the household, optionally filtered by category, with each bill's next unpaid due date and paid status"),
-		mcp.WithString("category",
-			mcp.Description("Optional category filter (e.g. Mortgage, Utilities, Subscription)"),
-		),
-	)
+// money formats an amount for summaries, e.g. "$142.50".
+func money(v float64) string { return fmt.Sprintf("$%.2f", v) }
+
+// notSignedIn is the result for a call without household claims.
+func notSignedIn() *mcp.CallToolResult {
+	return respond.Fail(respond.Error{
+		Message: "You are not signed in to a household.",
+		Fix:     "Tell the user to reconnect Home OS; retrying will not help.",
+	})
+}
+
+// readAnnotations are class R (catalog §1): read-only, safe to repeat.
+func readAnnotations(title string) []mcp.ToolOption {
+	return []mcp.ToolOption{
+		mcp.WithTitleAnnotation(title),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
+	}
+}
+
+// findInput is the validated bill_find arguments.
+type findInput struct {
+	id            *uuid.UUID
+	query         string
+	category      string
+	dueWithinDays *int
+	autopay       *bool
+	entityType    *string
+	entityID      *uuid.UUID
+	limit         int
+	offset        int
+}
+
+// filtered reports whether any filter narrows the list.
+func (in findInput) filtered() bool {
+	return in.id != nil || in.query != "" || in.category != "" || in.dueWithinDays != nil ||
+		in.autopay != nil || in.entityType != nil || in.entityID != nil
+}
+
+// NewBillFindTool creates the bill_find MCP tool (catalog v2, class R),
+// replacing list_bills and get_upcoming_bills.
+//
+// It lists the household's bills, each with its next unpaid due date and
+// paid status (BillDue against today in the family's timezone), sorted by
+// that date (bills without a due day last), then name. due_within_days keeps
+// bills whose next unpaid due date is within [today, today+N]; a bill
+// already paid for its current due date counts under the following one.
+// Pagination is limit + an opaque offset cursor.
+func NewBillFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+	opts := []mcp.ToolOption{
+		mcp.WithDescription("List or search bills with amount and next due date. Use due_within_days for \"what's due soon?\". " +
+			"Bills live here, not on the calendar."),
+		mcp.WithString("id", mcp.Description("A bill_id (UUID) to get exactly that bill")),
+		mcp.WithString("query", mcp.Description("Text in the name, category or notes, e.g. electric")),
+		mcp.WithString("category", mcp.Description("Exact category, any case, e.g. Utilities")),
+		mcp.WithNumber("due_within_days",
+			mcp.Description("Only bills next due within this many days; 0 = today, e.g. 7"),
+			mcp.Min(0), mcp.Max(maxDueWithinDays)),
+		mcp.WithBoolean("autopay", mcp.Description("true = only autopay bills, false = only manual ones")),
+		mcp.WithNumber("limit", mcp.Description("Max bills to return, 1-100 (default 25)"), mcp.Min(1), mcp.Max(maxLimit)),
+		mcp.WithString("cursor", mcp.Description("Cursor from a previous result's narrow hint, for the next page")),
+		respond.ListSchema[billData](),
+	}
+	tool := mcp.NewTool("bill_find", append(opts, readAnnotations("Find bills")...)...)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		claims := server.ClaimsFromContext(ctx)
 		if claims == nil {
-			return mcp.NewToolResultText(`{"error":"unauthorized"}`), nil
+			return notSignedIn(), nil
 		}
 
-		args := req.GetArguments()
-		category, _ := args["category"].(string)
-
-		today, err := householdToday(ctx, pool, claims.HouseholdID)
+		in, err := parseFindInput(normalizeArgs(req.GetArguments()))
 		if err != nil {
-			return nil, err
-		}
-
-		rows, err := pool.Query(ctx,
-			`SELECT id, name, amount, due_day, category, is_autopay, paid_date
-			 FROM bills
-			 WHERE household_id = $1 AND ($2 = '' OR category = $2)
-			 ORDER BY due_day, name`,
-			claims.HouseholdID, category,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("list bills: %w", err)
-		}
-		loaded, err := scanBillRows(rows)
-		if err != nil {
-			return nil, err
-		}
-
-		bills := make([]billResult, 0, len(loaded))
-		for _, r := range loaded {
-			bills = append(bills, r.result(today))
-		}
-
-		result, _ := json.Marshal(bills)
-		return mcp.NewToolResultText(string(result)), nil
-	}
-
-	return "list_bills", tool, handler
-}
-
-// NewGetUpcomingBillsTool creates the get_upcoming_bills MCP tool.
-// It returns bills whose next unpaid due date falls within
-// [today, today + days] (today in the household's timezone), sorted by that
-// date. A bill already paid for its current due date is listed under the
-// following due date, if that is inside the window.
-func NewGetUpcomingBillsTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("get_upcoming_bills",
-		mcp.WithDescription("Get bills with an unpaid due date within the next N days (today included); paid bills show their next due date"),
-		mcp.WithNumber("days",
-			mcp.Description("Number of days to look ahead (default 7)"),
-		),
-	)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return mcp.NewToolResultText(`{"error":"unauthorized"}`), nil
-		}
-
-		// Parse days parameter, default 7.
-		days := 7
-		args := req.GetArguments()
-		if daysVal, ok := args["days"].(float64); ok {
-			days = int(daysVal)
-		}
-		if days < 1 {
-			days = 1
+			return invalid(err, map[string]any{"due_within_days": 7}), nil
 		}
 
 		today, err := householdToday(ctx, pool, claims.HouseholdID)
 		if err != nil {
-			return nil, err
+			return respond.Failed("find bills", err), nil
 		}
 
-		// Due dates are computed in Go (billDue) so month ends clamp and
-		// paid_date is respected the same way as bill_pay.
 		rows, err := pool.Query(ctx,
-			`SELECT id, name, amount, due_day, category, is_autopay, paid_date
+			`SELECT `+billColumns+`
 			 FROM bills
-			 WHERE household_id = $1 AND due_day BETWEEN 1 AND 31`,
-			claims.HouseholdID,
+			 WHERE household_id = $1
+			   AND ($2::uuid IS NULL OR id = $2)
+			   AND ($3 = '' OR name ILIKE '%' || $3 || '%' OR category ILIKE '%' || $3 || '%' OR notes ILIKE '%' || $3 || '%')
+			   AND ($4 = '' OR lower(category) = lower($4))
+			   AND ($5::boolean IS NULL OR COALESCE(is_autopay, false) = $5)
+			   AND ($6::text IS NULL OR entity_type = $6)
+			   AND ($7::uuid IS NULL OR entity_id = $7)`,
+			claims.HouseholdID, in.id, escapeLike(in.query), in.category, in.autopay, in.entityType, in.entityID,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("get upcoming bills: %w", err)
+			return respond.Failed("find bills", err), nil
 		}
-		loaded, err := scanBillRows(rows)
+		loaded, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (billRow, error) { return scanBill(row) })
 		if err != nil {
-			return nil, err
+			return respond.Failed("find bills", err), nil
 		}
 
-		bills := []billResult{}
+		if in.id != nil && len(loaded) == 0 {
+			return respond.NotFound("bill", in.id.String(), "Call bill_find without id to list bills and their ids."), nil
+		}
+
+		bills := make([]billData, 0, len(loaded))
 		for _, r := range loaded {
-			b := r.result(today)
-			if b.DaysUntilDue == nil || *b.DaysUntilDue < 0 || *b.DaysUntilDue > days {
+			b := r.data(today)
+			if in.dueWithinDays != nil && (b.DaysUntilDue == nil || *b.DaysUntilDue < 0 || *b.DaysUntilDue > *in.dueWithinDays) {
 				continue
 			}
 			bills = append(bills, b)
 		}
 		sort.SliceStable(bills, func(i, j int) bool {
-			if *bills[i].DaysUntilDue != *bills[j].DaysUntilDue {
-				return *bills[i].DaysUntilDue < *bills[j].DaysUntilDue
+			a, b := bills[i].DaysUntilDue, bills[j].DaysUntilDue
+			if (a == nil) != (b == nil) {
+				return a != nil
 			}
-			return bills[i].Name < bills[j].Name
+			if a != nil && *a != *b {
+				return *a < *b
+			}
+			return strings.ToLower(bills[i].Name) < strings.ToLower(bills[j].Name)
 		})
 
-		result, _ := json.Marshal(bills)
-		return mcp.NewToolResultText(string(result)), nil
+		total := len(bills)
+		if in.offset > total {
+			in.offset = total
+		}
+		end := min(in.offset+in.limit, total)
+		page := bills[in.offset:end]
+
+		return respond.List(findSummary(in, page, total), page, respond.Page{
+			Total:  total - in.offset,
+			Narrow: fmt.Sprintf("Pass cursor=%q for the next page, or add category, query or due_within_days.", strconv.Itoa(end)),
+		}, findNext(in, page)...), nil
 	}
 
-	return "get_upcoming_bills", tool, handler
+	return "bill_find", tool, handler
 }
 
-// NewGetBillSummaryTool creates the get_bill_summary MCP tool.
-// It aggregates all recurring bills by category with total amounts.
-func NewGetBillSummaryTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("get_bill_summary",
-		mcp.WithDescription("Aggregate all recurring bills by category with total amounts"),
-	)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return mcp.NewToolResultText(`{"error":"unauthorized"}`), nil
+// findSummary is bill_find's one-line summary.
+func findSummary(in findInput, page []billData, total int) string {
+	window := ""
+	if in.dueWithinDays != nil {
+		switch *in.dueWithinDays {
+		case 0:
+			window = " due today"
+		case 1:
+			window = " due today or tomorrow"
+		default:
+			window = fmt.Sprintf(" due in the next %d days", *in.dueWithinDays)
 		}
-
-		type categorySummary struct {
-			Category string  `json:"category"`
-			Count    int     `json:"count"`
-			Total    float64 `json:"total"`
-		}
-
-		rows, err := pool.Query(ctx,
-			`SELECT COALESCE(category, 'Uncategorized') AS category,
-			        COUNT(*) AS count,
-			        COALESCE(SUM(amount), 0) AS total
-			 FROM bills
-			 WHERE household_id = $1
-			 GROUP BY category
-			 ORDER BY total DESC`,
-			claims.HouseholdID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("get bill summary: %w", err)
-		}
-		defer rows.Close()
-
-		var categories []categorySummary
-		grandTotal := 0.0
-		for rows.Next() {
-			var cs categorySummary
-			if err := rows.Scan(&cs.Category, &cs.Count, &cs.Total); err != nil {
-				return nil, fmt.Errorf("scan category summary: %w", err)
-			}
-			grandTotal += cs.Total
-			categories = append(categories, cs)
-		}
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("iterate bill summary: %w", err)
-		}
-
-		if categories == nil {
-			categories = []categorySummary{}
-		}
-
-		result, _ := json.Marshal(map[string]interface{}{
-			"categories":  categories,
-			"grand_total": grandTotal,
-		})
-		return mcp.NewToolResultText(string(result)), nil
 	}
+	noun := "bills"
+	if total == 1 {
+		noun = "bill"
+	}
+	switch {
+	case total == 0 && !in.filtered():
+		return "No bills yet."
+	case total == 0:
+		return "No bills" + window + " match."
+	case len(page) == 1 && total == 1:
+		b := page[0]
+		s := fmt.Sprintf("Found bill %s", b.Name)
+		if b.Amount != nil {
+			s += ", " + money(*b.Amount)
+		}
+		if d := b.dueText(); d != "" {
+			s += " " + d
+			if b.Status == statusPaid {
+				s += " (current one paid)"
+			}
+		}
+		return s + "."
+	case len(page) < total-in.offset || in.offset > 0:
+		return fmt.Sprintf("Found %d %s%s; showing %d-%d.", total, noun, window, in.offset+1, in.offset+len(page))
+	default:
+		return fmt.Sprintf("Found %d %s%s.", total, noun, window)
+	}
+}
 
-	return "get_bill_summary", tool, handler
+// findNext is bill_find's next-step hints.
+func findNext(in findInput, page []billData) []string {
+	if len(page) == 0 {
+		if !in.filtered() {
+			return []string{"No bills yet. Add one with bill_create; don't put bills on the calendar as events."}
+		}
+		return []string{"Call bill_find with fewer filters, or add the bill with bill_create."}
+	}
+	first := page[0].ID
+	return []string{
+		fmt.Sprintf("Mark one paid with bill_pay bill_id=%s.", first),
+		fmt.Sprintf("Change one with bill_update bill_id=%s.", first),
+		"See monthly totals by category with budget_summary.",
+	}
+}
+
+// parseFindInput validates bill_find arguments.
+func parseFindInput(args map[string]any) (findInput, error) {
+	in := findInput{limit: defaultLimit}
+	var err error
+	if in.id, err = optionalUUID(args, "id"); err != nil {
+		return in, err
+	}
+	if q, err := optionalString(args, "query"); err != nil {
+		return in, err
+	} else if q != nil {
+		in.query = *q
+	}
+	if c, err := optionalString(args, "category"); err != nil {
+		return in, err
+	} else if c != nil {
+		in.category = *c
+	}
+	if n, ok, err := wholeNumber(args, "due_within_days", 0, maxDueWithinDays); err != nil {
+		return in, err
+	} else if ok {
+		in.dueWithinDays = &n
+	}
+	if v, ok, err := optionalBool(args, "autopay"); err != nil {
+		return in, err
+	} else if ok {
+		in.autopay = &v
+	}
+	// Hidden aliases until domain model v2 (#4450) adds typed subjects.
+	if in.entityType, err = optionalString(args, "entity_type"); err != nil {
+		return in, err
+	}
+	if in.entityID, err = optionalUUID(args, "entity_id"); err != nil {
+		return in, err
+	}
+	if n, ok, err := wholeNumber(args, "limit", 1, maxLimit); err != nil {
+		return in, err
+	} else if ok {
+		in.limit = n
+	}
+	if c, err := optionalString(args, "cursor"); err != nil {
+		return in, err
+	} else if c != nil {
+		off, convErr := strconv.Atoi(*c)
+		if convErr != nil || off < 0 {
+			return in, badArg("cursor", fmt.Sprintf("cursor %q is not a cursor from bill_find.", *c),
+				"Pass the cursor value from the previous result's narrow hint, or leave cursor out for the first page.")
+		}
+		in.offset = off
+	}
+	return in, nil
+}
+
+// escapeLike escapes ILIKE wildcards so query matches literally.
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+// argError is a bad argument: which field, what is wrong, how to fix it.
+type argError struct {
+	field, message, fix string
+}
+
+func (e *argError) Error() string { return e.message }
+
+// badArg returns an *argError.
+func badArg(field, message, fix string) error {
+	return &argError{field: field, message: message, fix: fix}
+}
+
+// invalid turns a parse error into an isError result with a fix and a
+// valid example.
+func invalid(err error, example map[string]any) *mcp.CallToolResult {
+	var ae *argError
+	if errors.As(err, &ae) {
+		return respond.Invalid(ae.field, ae.message, ae.fix, example)
+	}
+	return respond.Invalid("", err.Error(), "Correct the arguments and call again.", example)
 }
