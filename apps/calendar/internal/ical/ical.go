@@ -113,26 +113,32 @@ func ParseEvent(icalData string) (*CalEvent, error) {
 	// First pass: collect VTIMEZONE definitions so DTSTART;TZID=... can resolve.
 	timezones := parseVTimezones(lines)
 
-	var inCalendar, inEvent bool
+	inEvent := false
+	// nested counts components open inside the VEVENT (VALARM, etc.). Their
+	// properties (an alarm's DESCRIPTION or SUMMARY) belong to them, not the
+	// event, so only depth-0 VEVENT properties are read.
+	nested := 0
 
 	for _, line := range lines {
 		line = strings.TrimRight(line, "\r")
 
 		switch {
-		case strings.HasPrefix(line, "BEGIN:VCALENDAR"):
-			inCalendar = true
-		case strings.HasPrefix(line, "END:VCALENDAR"):
-			inCalendar = false
-		case strings.HasPrefix(line, "BEGIN:VEVENT"):
+		case !inEvent && strings.HasPrefix(line, "BEGIN:VEVENT"):
 			inEvent = true
-		case strings.HasPrefix(line, "END:VEVENT"):
+			nested = 0
+			continue
+		case inEvent && nested == 0 && strings.HasPrefix(line, "END:VEVENT"):
 			inEvent = false
-		}
-
-		if !inEvent && !inCalendar {
+			continue
+		case inEvent && strings.HasPrefix(line, "BEGIN:"):
+			nested++
+			continue
+		case inEvent && nested > 0 && strings.HasPrefix(line, "END:"):
+			nested--
 			continue
 		}
-		if !inEvent {
+
+		if !inEvent || nested > 0 {
 			continue
 		}
 

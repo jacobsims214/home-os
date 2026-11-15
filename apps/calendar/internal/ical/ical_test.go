@@ -317,10 +317,10 @@ func TestUnescapeText_Direct(t *testing.T) {
 		escaped string
 		want    string
 	}{
-		{`a\\nb`, `a\nb`},       // escaped backslash + letter n → literal \n
-		{`a\\;b`, `a\;b`},        // escaped backslash + semicolon → literal \;
-		{`a\\,b`, `a\,b`},        // escaped backslash + comma → literal \,
-		{`a\\Nb`, `a\Nb`},        // escaped backslash + letter N → literal \N
+		{`a\\nb`, `a\nb`},                // escaped backslash + letter n → literal \n
+		{`a\\;b`, `a\;b`},                // escaped backslash + semicolon → literal \;
+		{`a\\,b`, `a\,b`},                // escaped backslash + comma → literal \,
+		{`a\\Nb`, `a\Nb`},                // escaped backslash + letter N → literal \N
 		{`line1\nline2`, "line1\nline2"}, // \n escape → newline
 		{`line1\nLine2`, "line1\nLine2"}, // \N escape → newline (case-insensitive)
 		{`semi\;colon`, `semi;colon`},    // \; escape → semicolon
@@ -1030,5 +1030,73 @@ func TestCalEvent_JSON_ColorRoundTrip(t *testing.T) {
 	}
 	if loaded.EventType != "event" {
 		t.Errorf("EventType lost in round trip: got %q, want %q", loaded.EventType, "event")
+	}
+}
+
+// TestParseEvent_VAlarmDoesNotOverrideEventProperties locks in the fix for
+// #4616: properties of components nested in the VEVENT (here VALARM) must not
+// replace the event's own DESCRIPTION/SUMMARY in the parsed event or its JSON.
+func TestParseEvent_VAlarmDoesNotOverrideEventProperties(t *testing.T) {
+	cases := []struct {
+		name      string
+		ics       string
+		wantTitle string
+		wantDesc  string
+	}{
+		{
+			name: "event description kept, alarm after it",
+			ics: "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:alarm-1@homeos\r\n" +
+				"DTSTART:20260607T100000Z\r\nDTEND:20260607T110000Z\r\nSUMMARY:Dentist\r\n" +
+				"DESCRIPTION:Bring insurance card\r\n" +
+				"BEGIN:VALARM\r\nACTION:DISPLAY\r\nSUMMARY:Alarm summary\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n" +
+				"END:VEVENT\r\nEND:VCALENDAR\r\n",
+			wantTitle: "Dentist",
+			wantDesc:  "Bring insurance card",
+		},
+		{
+			name: "event description after alarm still read",
+			ics: "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:alarm-2@homeos\r\nDTSTART:20260607T100000Z\r\n" +
+				"BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n" +
+				"SUMMARY:Dentist\r\nDESCRIPTION:Bring insurance card\r\n" +
+				"END:VEVENT\r\nEND:VCALENDAR\r\n",
+			wantTitle: "Dentist",
+			wantDesc:  "Bring insurance card",
+		},
+		{
+			name: "only alarm has a description",
+			ics: "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:alarm-3@homeos\r\nDTSTART:20260607T100000Z\r\nSUMMARY:Dentist\r\n" +
+				"BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n" +
+				"END:VEVENT\r\nEND:VCALENDAR\r\n",
+			wantTitle: "Dentist",
+			wantDesc:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, err := ParseEvent(tc.ics)
+			if err != nil {
+				t.Fatalf("ParseEvent: %v", err)
+			}
+			if ev.Title != tc.wantTitle {
+				t.Errorf("Title = %q, want %q", ev.Title, tc.wantTitle)
+			}
+			if ev.Description != tc.wantDesc {
+				t.Errorf("Description = %q, want %q", ev.Description, tc.wantDesc)
+			}
+			b, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			if strings.Contains(string(b), "Reminder") {
+				t.Errorf("stored JSON contains alarm text: %s", b)
+			}
+			var back CalEvent
+			if err := json.Unmarshal(b, &back); err != nil {
+				t.Fatalf("json.Unmarshal: %v", err)
+			}
+			if back.Description != tc.wantDesc {
+				t.Errorf("JSON description = %q, want %q", back.Description, tc.wantDesc)
+			}
+		})
 	}
 }
