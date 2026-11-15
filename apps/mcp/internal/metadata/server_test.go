@@ -73,8 +73,8 @@ func TestHandler_Metadata(t *testing.T) {
 			RegistrationEndpoint  string `json:"registration_endpoint"`
 		}
 		get(t, path, &doc)
-		if doc.Issuer != cfg.DexIssuer || doc.AuthorizationEndpoint != "https://home.example/authorize" ||
-			doc.RegistrationEndpoint != "https://home.example/register" {
+		if doc.Issuer != cfg.DexIssuer || doc.AuthorizationEndpoint != "https://home.example/oauth/authorize" ||
+			doc.RegistrationEndpoint != "https://home.example/oauth/register" {
 			t.Errorf("%s = %+v", path, doc)
 		}
 	}

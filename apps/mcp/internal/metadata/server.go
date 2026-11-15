@@ -285,10 +285,10 @@ func NewHandler(cfg *config.Config) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"issuer":                                Issuer(cfg),
-			"authorization_endpoint":                cfg.PublicBaseURL + "/authorize",
+			"authorization_endpoint":                cfg.PublicBaseURL + "/oauth/authorize",
 			"token_endpoint":                        cfg.PublicBaseURL + "/dex/token",
 			"jwks_uri":                              cfg.PublicBaseURL + "/dex/keys",
-			"registration_endpoint":                 cfg.PublicBaseURL + "/register",
+			"registration_endpoint":                 cfg.PublicBaseURL + "/oauth/register",
 			"scopes_supported":                      ScopesSupported,
 			"response_types_supported":              []string{"code"},
 			"code_challenge_methods_supported":      []string{"S256"},
