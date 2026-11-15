@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/api/internal/config"
+	"home-os/api/internal/guides"
 	"home-os/api/internal/search"
 )
 
@@ -91,5 +92,18 @@ func main() {
 		}
 		rows.Close()
 	}
+	// Guides carry tags and property_id too, so they use the same document
+	// builder as the API instead of the generic name/body query above.
+	if err := guides.NewRepo(pool).All(ctx, func(g *guides.Guide) error {
+		if err := sc.IndexDocument(ctx, guides.Document(g)); err != nil {
+			log.Printf("ERR guides/%s: %v", g.ID, err)
+		} else {
+			total++
+		}
+		return nil
+	}); err != nil {
+		log.Printf("skip guides: %v", err)
+	}
+
 	fmt.Printf("Indexed %d documents\n", total)
 }

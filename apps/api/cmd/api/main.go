@@ -26,6 +26,7 @@ import (
 	"home-os/api/internal/db"
 	"home-os/api/internal/dex"
 	"home-os/api/internal/file"
+	"home-os/api/internal/guides"
 	"home-os/api/internal/household"
 	"home-os/api/internal/integration"
 	"home-os/api/internal/invite"
@@ -374,6 +375,9 @@ func main() {
 		// Family change feed (activity_log, migration 050). Any member reads;
 		// the roles policy (#4689) plugs in via WithReadPolicy.
 		activity.NewHandler(activity.NewRepo(pool)).RegisterRoutes(r)
+
+		// Guides and runbooks with revisions, indexed for hybrid search (#4479).
+		guides.NewHandler(guides.NewRepo(pool)).WithSearch(searchClient).RegisterRoutes(r)
 	})
 
 	// Start the HTTP server.
