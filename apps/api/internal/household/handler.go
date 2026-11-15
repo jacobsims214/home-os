@@ -38,6 +38,9 @@ func (h *Handler) WithVerifier(v *auth.Verifier) *Handler {
 const (
 	maxHouseholdName = 255
 	maxTimezone      = 100
+	// maxCreateBody caps the unauthenticated POST /api/v1/households body;
+	// a real one ({"name","timezone"}) is a few hundred bytes.
+	maxCreateBody = 16 << 10
 )
 
 // Create POST /api/v1/households — onboarding: create a family.
@@ -56,9 +59,12 @@ const (
 // the owner membership, and creates the Family/Bills/Maintenance calendars.
 //
 // Responses: 201 with the household and role; 400 bad body, name or timezone;
+// 413 body over 16 KiB;
 // 401 missing or invalid token; 403 deactivated user; 409 caller already
 // belongs to a household and is not an instance admin.
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+	// Cap the body first: this route is outside RequireAuth.
+	r.Body = http.MaxBytesReader(w, r.Body, maxCreateBody)
 	ident, ok := h.creatorIdentity(w, r)
 	if !ok {
 		return
@@ -69,6 +75,13 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		Timezone string `json:"timezone"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			apierr.JSON(w, http.StatusRequestEntityTooLarge, apierr.ErrorResponse{Error: apierr.ErrorDetail{
+				Code: "PAYLOAD_TOO_LARGE", Message: "request body too large",
+			}})
+			return
+		}
 		apierr.BadRequest(w, "invalid request body")
 		return
 	}

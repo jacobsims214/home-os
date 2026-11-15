@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -473,4 +474,73 @@ func TestInvites_WaveCheckExploitFails(t *testing.T) {
 	// The invite is single-use.
 	rec = do(f.h, http.MethodPost, "/api/v1/invites/accept", "", map[string]string{"token": tok, "name": "Evil", "password": "correct-horse"})
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+}
+
+// Signup is unauthenticated and public, so bcrypt (cost 12) must never run
+// for a token that cannot be used: unknown, expired and already-accepted
+// tokens are refused after one lookup, without hashing or touching Dex.
+func TestAcceptInvite_SignupWithUnusableTokenNeverHashes(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	email := "nohash-" + uuid.NewString()[:8] + "@example.com"
+	f.cleanupUser(t, email)
+
+	expiredTok := f.invite(t, email, "viewer")
+	usedTok := f.invite(t, email, "viewer")
+	validTok := f.invite(t, email, "viewer")
+	_, err := f.pool.Exec(ctx, `UPDATE invitations SET expires_at = NOW() - interval '1 hour' WHERE token = $1`, expiredTok)
+	require.NoError(t, err)
+	_, err = f.pool.Exec(ctx, `UPDATE invitations SET accepted_at = NOW() WHERE token = $1`, usedTok)
+	require.NoError(t, err)
+
+	var hashes atomic.Int32
+	dex := &fakeDex{}
+	ih := invite.NewHandler(invite.NewRepo(f.pool), &config.Config{PublicURL: testPublicURL}, nil).
+		WithVerifier(f.s.verifier(f.pool)).
+		WithDex(dex).
+		WithPasswordHasher(func(string) (string, error) {
+			hashes.Add(1)
+			return "$2a$12$not-a-real-hash", nil
+		})
+	h := chi.NewRouter()
+	h.Post("/api/v1/invites/accept", ih.AcceptInvite)
+
+	const pw = "long enough pw"
+	tests := []struct {
+		name  string
+		token string
+		want  int
+	}{
+		{"unknown token", uuid.NewString(), http.StatusNotFound},
+		{"garbage token", "x", http.StatusNotFound},
+		{"expired invite", expiredTok, http.StatusBadRequest},
+		{"already accepted invite", usedTok, http.StatusConflict},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(h, http.MethodPost, "/api/v1/invites/accept", "",
+				map[string]string{"token": tc.token, "name": "Mallory", "password": pw})
+			assert.Equal(t, tc.want, rec.Code, rec.Body.String())
+			assert.Zero(t, hashes.Load(), "bcrypt ran for an unusable token")
+			_, called := dex.get(email)
+			assert.False(t, called, "Dex was called for an unusable token")
+		})
+	}
+
+	t.Run("oversized body is refused before decoding", func(t *testing.T) {
+		rec := do(h, http.MethodPost, "/api/v1/invites/accept", "",
+			map[string]string{"token": validTok, "name": "Big", "password": strings.Repeat("p", 20<<10)})
+		assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+		assert.Zero(t, hashes.Load())
+	})
+
+	// Control: a pending invite does hash, once, so the counter is wired.
+	t.Run("pending invite hashes once", func(t *testing.T) {
+		rec := do(h, http.MethodPost, "/api/v1/invites/accept", "",
+			map[string]string{"token": validTok, "name": "Valid", "password": pw})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		assert.Equal(t, int32(1), hashes.Load())
+		_, called := dex.get(email)
+		assert.True(t, called)
+	})
 }

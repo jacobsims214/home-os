@@ -307,3 +307,20 @@ func TestCreate_AccessRules(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
 }
+
+// POST /api/v1/households is outside RequireAuth, so its body is capped.
+func TestCreate_OversizedBodyRefused(t *testing.T) {
+	pool := testDB(t)
+	s := newSigner(t)
+	h := router(pool, s.verifier(pool))
+
+	sub, email := uniq("big")
+	body := map[string]string{"name": string(bytes.Repeat([]byte("a"), 20<<10)), "timezone": "UTC"}
+	rec := do(h, http.MethodPost, "/api/v1/households", s.token(t, sub, email), body)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+
+	var n int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM users WHERE dex_sub = $1 OR email = $2`, sub, email).Scan(&n))
+	assert.Zero(t, n)
+}

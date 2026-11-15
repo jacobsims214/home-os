@@ -28,6 +28,9 @@ type Handler struct {
 	smtp     *smtp.Client
 	verifier *auth.Verifier
 	dex      PasswordStore
+	// hashPassword is auth.HashPassword (bcrypt). WithPasswordHasher swaps
+	// it so tests can prove invalid signups never reach bcrypt.
+	hashPassword func(password string) (string, error)
 }
 
 // PasswordStore creates a password entry in Dex's local password database.
@@ -37,7 +40,15 @@ type PasswordStore interface {
 }
 
 func NewHandler(repo *Repo, cfg *config.Config, smtpClient *smtp.Client) *Handler {
-	return &Handler{repo: repo, cfg: cfg, smtp: smtpClient}
+	return &Handler{repo: repo, cfg: cfg, smtp: smtpClient, hashPassword: auth.HashPassword}
+}
+
+// WithPasswordHasher replaces the bcrypt hasher signup uses. It exists for
+// tests (counting calls, or skipping bcrypt's cost); production keeps the
+// default auth.HashPassword.
+func (h *Handler) WithPasswordHasher(hash func(password string) (string, error)) *Handler {
+	h.hashPassword = hash
+	return h
 }
 
 // WithVerifier lets AcceptInvite verify the caller's Dex token itself, so the
@@ -252,6 +263,11 @@ const (
 	minPasswordLen = 8
 	maxPasswordLen = 72
 	maxNameLen     = 100
+
+	// maxAcceptBody caps the POST /api/v1/invites/accept body. The route is
+	// unauthenticated and public; a real body ({"token","name","password"})
+	// is well under 1 KiB.
+	maxAcceptBody = 16 << 10
 )
 
 // errPasswordStore marks a failure to create the Dex password on signup.
@@ -274,7 +290,8 @@ var errPasswordStore = errors.New("password store")
 //     membership and the Dex password entry in one transaction. The person
 //     then signs in through Dex with the invited email and that password.
 //
-// Responses: 200 (accept) or 201 (signup) with the membership; 400 bad body,
+// Responses: 200 (accept) or 201 (signup) with the membership; 413 body over
+// 16 KiB; 400 bad body,
 // expired, or a weak password/name; 401 missing or invalid token (and no
 // signup fields); 403 email differs from the invited email, or the account is
 // deactivated; 404 unknown token; 409 already accepted, already a member, or
@@ -286,8 +303,10 @@ func (h *Handler) AcceptInvite(w http.ResponseWriter, r *http.Request) {
 		Name     string `json:"name"`
 		Password string `json:"password"`
 	}
+	// Cap the body before reading anything: this route needs no auth.
+	r.Body = http.MaxBytesReader(w, r.Body, maxAcceptBody)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		apierr.BadRequest(w, "invalid request body")
+		writeDecodeError(w, err)
 		return
 	}
 	req.Token = strings.TrimSpace(req.Token)
@@ -315,9 +334,16 @@ func (h *Handler) AcceptInvite(w http.ResponseWriter, r *http.Request) {
 }
 
 // signup is AcceptInvite for a person with no account: it validates the
-// name and password, hashes the password before the transaction (bcrypt is
-// slow; the invitation row stays locked only for the writes) and runs
-// Repo.Signup with a callback that stores the hash in Dex.
+// name and password, checks the invitation read-only, hashes the password
+// before the transaction (bcrypt is slow; the invitation row stays locked
+// only for the writes) and runs Repo.Signup with a callback that stores the
+// hash in Dex.
+//
+// The route is unauthenticated, so bcrypt (cost 12, ~250ms of CPU) must only
+// run for a pending invitation: an unknown, used or expired token is refused
+// after one indexed lookup, with the same responses Repo.Signup gives. That
+// pre-check is only an early exit; Repo.Signup re-checks under FOR UPDATE and
+// stays authoritative (an invite accepted between the two still fails there).
 func (h *Handler) signup(w http.ResponseWriter, r *http.Request, token, name, password string) {
 	if token == "" {
 		apierr.BadRequest(w, "token is required")
@@ -346,12 +372,23 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request, token, name, pa
 		return
 	}
 
-	hash, err := auth.HashPassword(password)
+	now := time.Now()
+	inv, err := h.repo.GetByToken(r.Context(), token)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
-	res, err := h.repo.Signup(r.Context(), token, name, hash, time.Now(),
+	if err := checkPending(inv, now); err != nil {
+		writeAcceptError(w, err)
+		return
+	}
+
+	hash, err := h.hashPassword(password)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	res, err := h.repo.Signup(r.Context(), token, name, hash, now,
 		func(ctx context.Context, email, userID string) error {
 			if err := h.dex.CreatePassword(ctx, email, hash, userID); err != nil {
 				return fmt.Errorf("%w: %w", errPasswordStore, err)
@@ -363,6 +400,33 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request, token, name, pa
 		return
 	}
 	h.writeAccepted(w, http.StatusCreated, res)
+}
+
+// checkPending applies lockPendingInvitation's rules to an invitation read
+// without a lock (nil when the token is unknown), returning the same errors.
+func checkPending(inv *Invitation, now time.Time) error {
+	switch {
+	case inv == nil:
+		return ErrInviteNotFound
+	case inv.AcceptedAt != nil:
+		return ErrInviteAccepted
+	case now.After(inv.ExpiresAt):
+		return ErrInviteExpired
+	}
+	return nil
+}
+
+// writeDecodeError answers a failed request body decode: 413 when the body
+// went past its http.MaxBytesReader cap, 400 otherwise.
+func writeDecodeError(w http.ResponseWriter, err error) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		apierr.JSON(w, http.StatusRequestEntityTooLarge, apierr.ErrorResponse{Error: apierr.ErrorDetail{
+			Code: "PAYLOAD_TOO_LARGE", Message: "request body too large",
+		}})
+		return
+	}
+	apierr.BadRequest(w, "invalid request body")
 }
 
 // writeAcceptError maps Repo.Accept / Repo.Signup errors to HTTP responses.
