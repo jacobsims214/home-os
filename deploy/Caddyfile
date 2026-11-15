@@ -1,6 +1,27 @@
 localhost:8443 {
 	tls internal
 
+	# Dex (OIDC provider). Its issuer is https://localhost:8443/dex, so the
+	# path is passed through unchanged.
+	handle /dex/* {
+		reverse_proxy home-os-dex:5556
+	}
+
+	# The UI's own routes: the OIDC login/callback/logout handlers under
+	# /api/auth and the BFF proxy. Caddy sorts single-path handle blocks by
+	# specificity, so /api/auth/* wins over the /api/* -> api rule below.
+	handle /api/auth/* {
+		reverse_proxy ui:3000
+	}
+
+	handle /api/auth {
+		reverse_proxy ui:3000
+	}
+
+	handle /bff/* {
+		reverse_proxy ui:3000
+	}
+
 	handle /api/* {
 		reverse_proxy api:8080
 	}

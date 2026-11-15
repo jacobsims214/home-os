@@ -4,7 +4,9 @@
 # Usage:
 #   docker compose -f deploy/docker-compose.yml up -d --build
 #
-# Demo account: admin@homeos.demo / demo1234 (seeded automatically)
+# Open https://localhost:8443 and sign in through Dex with the demo account
+# admin@homeos.demo / demo1234 (seeded by the API with DEMO_MODE=true and by
+# deploy/dex/config.yaml as a Dex static password; dev only).
 
 name: homeos
 
@@ -86,6 +88,28 @@ services:
       - ui
       - api
       - calendar
+      - home-os-dex
+
+  # ──────────────────────────────────────────────────────────────
+  # Dex — OIDC provider (same pin as the Helm chart)
+  # Config: deploy/dex/config.yaml (dev-only values, sqlite storage).
+  # No host port: browsers reach it through Caddy at /dex, containers at
+  # http://home-os-dex:5556 (HTTP) and home-os-dex:5557 (gRPC).
+  # ──────────────────────────────────────────────────────────────
+
+  home-os-dex:
+    image: ghcr.io/dexidp/dex:v2.42.0
+    restart: unless-stopped
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./dex/config.yaml:/etc/dex/config.yaml:ro
+      - dex_data:/var/dex
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5556/dex/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
 
   # ──────────────────────────────────────────────────────────────
   # Tika — OCR service for worker
@@ -138,6 +162,8 @@ services:
         condition: service_healthy
       migrations:
         condition: service_completed_successfully
+      home-os-dex:
+        condition: service_healthy
     volumes:
       - ../apps/api:/app
       - api_gopath:/root/go/pkg/mod
@@ -156,6 +182,11 @@ services:
       ENCRYPTION_KEY: homeos-dev-enc-key-32-chars-xxxxx
       LOG_LEVEL: debug
       DEMO_MODE: "true"
+      PUBLIC_URL: https://localhost:8443
+      # Must equal the issuer in deploy/dex/config.yaml (the iss claim in tokens).
+      DEX_ISSUER: https://localhost:8443/dex
+      DEX_JWKS_URL: http://home-os-dex:5556/dex/keys
+      DEX_GRPC_ADDR: home-os-dex:5557
 
   calendar:
     build:
@@ -221,6 +252,7 @@ services:
       - "3000:3000"
     depends_on:
       - api
+      - home-os-dex
     volumes:
       - ../apps/ui:/app
       - ui_node_modules:/app/node_modules
@@ -229,6 +261,11 @@ services:
       NODE_ENV: development
       NEXT_PUBLIC_API_URL: https://localhost:8443
       API_URL: http://api:8080
+      # OIDC (apps/ui/lib/auth/dex-config.ts). The redirect URI must match the
+      # home-os-ui client in deploy/dex/config.yaml exactly.
+      PUBLIC_URL: https://localhost:8443
+      DEX_UI_REDIRECT_URI: https://localhost:8443/api/auth/callback
+      DEX_TOKEN_URL: http://home-os-dex:5556/dex/token
 
 # ──────────────────────────────────────────────────────────────
 # VOLUMES
@@ -240,6 +277,7 @@ volumes:
   minio_data:
   caddy_data:
   caddy_config:
+  dex_data:
   api_gopath:
   calendar_gopath:
   worker_gopath:
