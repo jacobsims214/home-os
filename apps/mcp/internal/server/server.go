@@ -8,6 +8,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -321,7 +322,17 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 			}
 
 			claims, err := s.verifier.VerifyTokenAndEnrich(r.Context(), s.pool, parts[1])
-			if err != nil {
+			switch {
+			case err == nil:
+			case errors.Is(err, auth.ErrNoMembership):
+				slog.Warn("auth middleware: token valid but no household membership", "error", err)
+				writeJSONError(w, http.StatusForbidden, "authenticated, but this account is not a member of any household")
+				return
+			case errors.Is(err, auth.ErrMemberLookup):
+				slog.Error("auth middleware: membership lookup failed", "error", err)
+				writeJSONError(w, http.StatusInternalServerError, "could not resolve household membership")
+				return
+			default:
 				slog.Warn("auth middleware: token verification failed", "error", err)
 				writeJSONError(w, http.StatusUnauthorized, "invalid or expired token")
 				return
