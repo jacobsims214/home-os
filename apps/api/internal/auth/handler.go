@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 
 	"home-os/api/internal/config"
 	"home-os/api/internal/dex"
@@ -212,11 +211,56 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GenerateCaldavPassword generates a random 32-character CalDAV app password,
-// hashes it with bcrypt, stores it in the database, and returns the plaintext
-// password to the user. POST /api/v1/auth/caldav-password.
+// caldavPasswordAlphabet is the character set for CalDAV app passwords.
+// Alphanumeric only: app passwords get typed into phone settings screens and
+// pasted through shells, so punctuation buys little and costs usability.
+const caldavPasswordAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+// caldavPasswordLength gives log2(62^32) ≈ 190 bits of entropy.
+const caldavPasswordLength = 32
+
+// generateCaldavPassword returns a uniformly random app password drawn from
+// crypto/rand. It fails rather than returning a weak password if the system
+// RNG errors.
+func generateCaldavPassword() (string, error) {
+	max := big.NewInt(int64(len(caldavPasswordAlphabet)))
+	buf := make([]byte, caldavPasswordLength)
+	for i := range buf {
+		n, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", fmt.Errorf("generate caldav password: %w", err)
+		}
+		buf[i] = caldavPasswordAlphabet[n.Int64()]
+	}
+	return string(buf), nil
+}
+
+// caldavPasswordResponse is returned once by GenerateCaldavPassword. The
+// plaintext password is never stored or shown again.
+type caldavPasswordResponse struct {
+	Password  string `json:"password"`
+	Username  string `json:"username"`
+	ServerURL string `json:"server_url"`
+}
+
+// caldavServerURL is the public CalDAV endpoint: the calendar service is
+// served under /dav/ on the same public origin (envoy routes /dav/ to it).
+func (h *Handler) caldavServerURL() string {
+	base := ""
+	if h.cfg != nil {
+		base = strings.TrimRight(h.cfg.PublicURL, "/")
+	}
+	return base + "/dav/"
+}
+
+// GenerateCaldavPassword generates a fresh CalDAV app password for the calling
+// member, stores its bcrypt hash in users.caldav_password_hash (replacing, and
+// so invalidating, any previous app password) and returns the plaintext once
+// together with the CalDAV server URL and username (the member's email, which
+// the calendar service's Basic auth matches on). POST /api/v1/auth/caldav-password.
 func (h *Handler) GenerateCaldavPassword(w http.ResponseWriter, r *http.Request) {
-	// Extract and verify JWT from Authorization header directly
+	// Extract and verify the Dex token. The verifier's member resolver maps
+	// the Dex identity to the Home OS user, so claims.UserID is users.id.
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
@@ -233,25 +277,6 @@ func (h *Handler) GenerateCaldavPassword(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Generate a random 32-char password
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%"
-	buf := make([]byte, 32)
-	for i := range buf {
-		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		buf[i] = chars[n.Int64()]
-	}
-	plaintext := string(buf)
-
-	// Hash with bcrypt
-	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), 12)
-	if err != nil {
-		apierr.JSON(w, http.StatusInternalServerError, apierr.ErrorResponse{
-			Error: apierr.ErrorDetail{Code: "HASH_ERROR", Message: "Failed to hash password"},
-		})
-		return
-	}
-
-	// Store in database
 	userUUID, err := uuid.Parse(claims.UserID)
 	if err != nil {
 		apierr.JSON(w, http.StatusBadRequest, apierr.ErrorResponse{
@@ -259,14 +284,44 @@ func (h *Handler) GenerateCaldavPassword(w http.ResponseWriter, r *http.Request)
 		})
 		return
 	}
-	if err := h.repo.UpdateCaldavPasswordHash(r.Context(), userUUID, string(hash)); err != nil {
+	user, err := h.repo.GetUserByID(r.Context(), userUUID.String())
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	if user == nil {
+		apierr.NotFound(w, "user not found")
+		return
+	}
+
+	plaintext, err := generateCaldavPassword()
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	hash, err := HashPassword(plaintext)
+	if err != nil {
+		apierr.JSON(w, http.StatusInternalServerError, apierr.ErrorResponse{
+			Error: apierr.ErrorDetail{Code: "HASH_ERROR", Message: "Failed to hash password"},
+		})
+		return
+	}
+
+	if err := h.repo.UpdateCaldavPasswordHash(r.Context(), user.ID, hash); err != nil {
+		slog.Error("caldav: failed to store app password hash", "user_id", user.ID, "error", err)
 		apierr.JSON(w, http.StatusInternalServerError, apierr.ErrorResponse{
 			Error: apierr.ErrorDetail{Code: "DB_ERROR", Message: "Failed to store password"},
 		})
 		return
 	}
 
-	apierr.JSON(w, http.StatusOK, map[string]string{"password": plaintext})
+	// The plaintext is a credential: keep it out of caches.
+	w.Header().Set("Cache-Control", "no-store")
+	apierr.JSON(w, http.StatusOK, caldavPasswordResponse{
+		Password:  plaintext,
+		Username:  user.Email,
+		ServerURL: h.caldavServerURL(),
+	})
 }
 
 // ForgotPassword handles password reset requests. Always returns 200 to prevent email enumeration.
