@@ -2,11 +2,15 @@ package household
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/api/internal/seed"
 )
 
 // Repo provides read/write access to the households and memberships tables
@@ -70,11 +74,11 @@ func (r *Repo) GetHousehold(ctx context.Context, id uuid.UUID) (*Household, erro
 
 // Member represents a household member with user info.
 type Member struct {
-	UserID    string `json:"user_id"`
-	Email     string `json:"email"`
-	Name      string `json:"name"`
-	Role      string `json:"role"`
-	JoinedAt  string `json:"joined_at"`
+	UserID   string `json:"user_id"`
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+	JoinedAt string `json:"joined_at"`
 }
 
 // ListMembers returns all members of a household with their user info.
@@ -125,4 +129,170 @@ func (r *Repo) RemoveMember(ctx context.Context, householdID, userID uuid.UUID) 
 		return fmt.Errorf("remove member: %w", err)
 	}
 	return nil
+}
+
+// dexOnlyPasswordHash marks a user created from a Dex identity. It is not a
+// bcrypt hash, so it never matches a password: these users sign in via Dex.
+// Same sentinel as invite.Accept uses.
+const dexOnlyPasswordHash = "!dex-oidc"
+
+// Errors returned by CreateFamily.
+var (
+	// ErrAlreadyMember: the caller already belongs to a household and is not
+	// an instance admin, so onboarding is not for them.
+	ErrAlreadyMember = errors.New("user already belongs to a household")
+	// ErrUserInactive: the caller's user row is deactivated (users.active=false).
+	ErrUserInactive = errors.New("user is deactivated")
+	// ErrNoIdentity: neither a Dex subject nor an email was supplied.
+	ErrNoIdentity = errors.New("identity has no subject or email")
+)
+
+// CreatorIdentity is the verified Dex identity creating a family.
+type CreatorIdentity struct {
+	Subject string
+	Email   string
+	Name    string
+}
+
+// CreateFamilyResult describes what CreateFamily wrote.
+type CreateFamilyResult struct {
+	Household   *Household
+	UserID      uuid.UUID
+	Role        string
+	UserCreated bool
+}
+
+// CreateFamily creates a household with the caller as its owner, in a single
+// transaction:
+//
+//  1. finds the Home OS user by users.dex_sub, then lower(email) (backfilling
+//     a NULL dex_sub), or creates a Dex-only user when neither matches;
+//  2. locks that user row (FOR UPDATE) so two concurrent onboarding requests
+//     from the same user cannot both create a family;
+//  3. refuses deactivated users (ErrUserInactive) and users who already have
+//     a membership unless they are an instance admin (ErrAlreadyMember);
+//  4. inserts the household, the owner membership, and the default
+//     Family/Bills/Maintenance calendars (seed.EnsureDefaultCalendars).
+//
+// Nothing is written unless every step succeeds. name and timezone must
+// already be validated by the caller.
+func (r *Repo) CreateFamily(ctx context.Context, ident CreatorIdentity, name, timezone string) (*CreateFamilyResult, error) {
+	sub := strings.TrimSpace(ident.Subject)
+	email := strings.TrimSpace(ident.Email)
+	if sub == "" && email == "" {
+		return nil, ErrNoIdentity
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create family: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	userID, created, err := findOrCreateCreator(ctx, tx, sub, email, ident.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	var active, instanceAdmin, hasMembership bool
+	if err := tx.QueryRow(ctx,
+		`SELECT u.active, u.is_instance_admin,
+		        EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = u.id)
+		 FROM users u WHERE u.id = $1
+		 FOR UPDATE OF u`, userID,
+	).Scan(&active, &instanceAdmin, &hasMembership); err != nil {
+		return nil, fmt.Errorf("create family: lock user: %w", err)
+	}
+	if !active {
+		return nil, ErrUserInactive
+	}
+	if hasMembership && !instanceAdmin {
+		return nil, ErrAlreadyMember
+	}
+
+	hh := &Household{}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO households (name, timezone) VALUES ($1, $2)
+		 RETURNING id, name, timezone, settings, created_at, updated_at`,
+		name, timezone,
+	).Scan(&hh.ID, &hh.Name, &hh.Timezone, &hh.Settings, &hh.CreatedAt, &hh.UpdatedAt); err != nil {
+		return nil, fmt.Errorf("create family: insert household: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO memberships (household_id, user_id, role) VALUES ($1, $2, 'owner')`,
+		hh.ID, userID,
+	); err != nil {
+		return nil, fmt.Errorf("create family: insert owner membership: %w", err)
+	}
+
+	if err := seed.EnsureDefaultCalendars(ctx, tx, hh.ID.String()); err != nil {
+		return nil, fmt.Errorf("create family: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("create family: commit: %w", err)
+	}
+	return &CreateFamilyResult{Household: hh, UserID: userID, Role: "owner", UserCreated: created}, nil
+}
+
+// findOrCreateCreator resolves the identity to users.id in the same order as
+// auth.PGMemberResolver (dex_sub, then case-insensitive email with a dex_sub
+// backfill when NULL) and creates a Dex-only user when nothing matches.
+func findOrCreateCreator(ctx context.Context, tx pgx.Tx, sub, email, name string) (uuid.UUID, bool, error) {
+	var userID uuid.UUID
+	if sub != "" {
+		err := tx.QueryRow(ctx, `SELECT id FROM users WHERE dex_sub = $1`, sub).Scan(&userID)
+		if err == nil {
+			return userID, false, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, false, fmt.Errorf("create family: user by dex_sub: %w", err)
+		}
+	}
+
+	if email != "" {
+		err := tx.QueryRow(ctx,
+			`SELECT id FROM users WHERE lower(email) = lower($1)`, email,
+		).Scan(&userID)
+		if err == nil {
+			if sub != "" {
+				if _, err := tx.Exec(ctx,
+					`UPDATE users SET dex_sub = $1, updated_at = NOW()
+					 WHERE id = $2 AND dex_sub IS NULL`, sub, userID,
+				); err != nil {
+					return uuid.Nil, false, fmt.Errorf("create family: backfill dex_sub: %w", err)
+				}
+			}
+			return userID, false, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, false, fmt.Errorf("create family: user by email: %w", err)
+		}
+	}
+
+	// users.email is NOT NULL UNIQUE; a Dex identity without an email cannot
+	// get a user row.
+	if email == "" {
+		return uuid.Nil, false, ErrNoIdentity
+	}
+	if strings.TrimSpace(name) == "" {
+		name = email
+		if at := strings.IndexByte(email, '@'); at > 0 {
+			name = email[:at]
+		}
+	}
+	var dexSub *string
+	if sub != "" {
+		dexSub = &sub
+	}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO users (email, name, password_hash, dex_sub)
+		 VALUES ($1, $2, $3, $4)
+		 RETURNING id`,
+		email, strings.TrimSpace(name), dexOnlyPasswordHash, dexSub,
+	).Scan(&userID); err != nil {
+		return uuid.Nil, false, fmt.Errorf("create family: create user: %w", err)
+	}
+	return userID, true, nil
 }

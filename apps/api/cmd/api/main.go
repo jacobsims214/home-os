@@ -163,12 +163,17 @@ func main() {
 	inviteHandler := invite.NewHandler(invite.NewRepo(pool), cfg, smtpClient).WithVerifier(oidcVerifier)
 	r.Post("/api/v1/invites/accept", inviteHandler.AcceptInvite)
 
+	// Household handler. Create (onboarding) is outside RequireAuth for the
+	// same reason as invite accept: a new Dex user has no membership yet, so
+	// the handler verifies the token itself. The /me routes stay protected.
+	householdHandler := household.NewHandler(householdRepo).WithVerifier(oidcVerifier)
+	r.Post("/api/v1/households", householdHandler.Create)
+
 	// Protected endpoints (require valid JWT).
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(oidcVerifier))
 
-		// Household
-		householdHandler := household.NewHandler(householdRepo)
+		// Household (Create is registered above, outside this group).
 		r.Get("/api/v1/households/me", householdHandler.GetMe)
 		r.Get("/api/v1/households/me/members", householdHandler.ListMembers)
 		r.Patch("/api/v1/households/me/members/{userId}", householdHandler.UpdateMemberRole)
