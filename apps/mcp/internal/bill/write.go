@@ -474,6 +474,268 @@ func NewBillDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 	return "bill_delete", tool, handler
 }
 
+// lateGraceDays is how late a payment can be and still pay the due date it
+// follows. A payment more than this many days after a due date pays the next
+// one instead.
+const lateGraceDays = 7
+
+// paidBill is the bill_pay response: the bill after the payment, the due date
+// the payment covered, and the next unpaid due date. amount and due_day are
+// nullable because bills created through the API may lack them; the due-date
+// fields are null when the bill has no due_day.
+type paidBill struct {
+	ID             uuid.UUID  `json:"id"`
+	Name           string     `json:"name"`
+	Amount         *float64   `json:"amount"`
+	DueDay         *int       `json:"due_day"`
+	Category       *string    `json:"category"`
+	IsAutopay      bool       `json:"is_autopay"`
+	VendorID       *uuid.UUID `json:"vendor_id"`
+	EntityType     *string    `json:"entity_type"`
+	EntityID       *uuid.UUID `json:"entity_id"`
+	PaymentURL     *string    `json:"payment_url"`
+	Notes          *string    `json:"notes"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	PaidDate       string     `json:"paid_date"`
+	PaidForDueDate *string    `json:"paid_for_due_date"`
+	AmountPaid     *float64   `json:"amount_paid"`
+	AlreadyPaid    bool       `json:"already_paid"`
+	NextDueDate    *string    `json:"next_due_date"`
+	DaysUntilDue   *int       `json:"days_until_due"`
+}
+
+// billPayInput is the validated bill_pay arguments. paidDate is nil when the
+// caller left it to default to the household's today.
+type billPayInput struct {
+	billID   uuid.UUID
+	paidDate *time.Time
+	amount   *float64
+}
+
+// NewBillPayTool creates the bill_pay MCP tool (catalog v2 name, replacing the
+// S1 working name mark_bill_paid; see KB architecture/mcp-tool-catalog.md,
+// class U).
+//
+// It records a bill in the authenticated household as paid by setting
+// bills.paid_date (there is no payments table yet, so no history is kept and
+// amount is echoed back, not stored). paid_date defaults to today in the
+// household's timezone. The due date a payment covers is derived from
+// paid_date alone (see paidForDueDate), so paying again for a due date that is
+// already covered changes nothing and returns already_paid true.
+func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
+	tool := mcp.NewTool("bill_pay",
+		mcp.WithDescription("Record a bill as paid and move it to its next due date. "+
+			"Calling it again for the same due date changes nothing. Returns the due date paid and the next one."),
+		mcp.WithTitleAnnotation("Pay a bill"),
+		mcp.WithReadOnlyHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
+		mcp.WithString("bill_id",
+			mcp.Description("Bill ID (UUID), e.g. from list_bills"),
+			mcp.Required(),
+		),
+		mcp.WithString("paid_date",
+			mcp.Description("Date paid, YYYY-MM-DD, e.g. 2026-11-20; default today (family timezone)"),
+		),
+		mcp.WithNumber("amount",
+			mcp.Description("Amount paid in dollars, e.g. 142.50; default the bill's amount"),
+			mcp.Min(0),
+		),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		claims := server.ClaimsFromContext(ctx)
+		if claims == nil {
+			return mcp.NewToolResultError("unauthorized"), nil
+		}
+
+		in, err := parseBillPayInput(req.GetArguments())
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("pay bill: begin tx: %w", err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+		today, err := householdToday(ctx, tx, claims.HouseholdID)
+		if err != nil {
+			return nil, fmt.Errorf("pay bill: %w", err)
+		}
+		paid := today
+		if in.paidDate != nil {
+			paid = *in.paidDate
+		}
+		if paid.After(today) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"paid_date cannot be in the future (today is %s in the family's timezone)",
+				today.Format(time.DateOnly))), nil
+		}
+
+		// Lock the row so two concurrent payments can't both move it.
+		var b paidBill
+		var storedPaid *time.Time
+		err = tx.QueryRow(ctx,
+			`SELECT id, name, amount, due_day, category, COALESCE(is_autopay, false),
+			        vendor_id, entity_type, entity_id, payment_url, notes,
+			        created_at, updated_at, paid_date
+			 FROM bills
+			 WHERE id = $1 AND household_id = $2
+			 FOR UPDATE`,
+			in.billID, claims.HouseholdID,
+		).Scan(&b.ID, &b.Name, &b.Amount, &b.DueDay, &b.Category, &b.IsAutopay,
+			&b.VendorID, &b.EntityType, &b.EntityID, &b.PaymentURL, &b.Notes,
+			&b.CreatedAt, &b.UpdatedAt, &storedPaid)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return mcp.NewToolResultError("bill not found"), nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("pay bill: select: %w", err)
+		}
+
+		hasDueDay := b.DueDay != nil && *b.DueDay >= 1 && *b.DueDay <= 31
+		if storedPaid != nil {
+			if hasDueDay {
+				// Already paid when the stored payment covers this due date
+				// or a later one; coverage never moves backwards.
+				b.AlreadyPaid = !paidForDueDate(*storedPaid, *b.DueDay).Before(paidForDueDate(paid, *b.DueDay))
+			} else {
+				b.AlreadyPaid = !storedPaid.Before(paid)
+			}
+		}
+
+		effective := paid
+		if b.AlreadyPaid {
+			effective = *storedPaid
+		} else {
+			if err := tx.QueryRow(ctx,
+				`UPDATE bills SET paid_date = $3, updated_at = NOW()
+				 WHERE id = $1 AND household_id = $2
+				 RETURNING updated_at`,
+				b.ID, claims.HouseholdID, paid,
+			).Scan(&b.UpdatedAt); err != nil {
+				return nil, fmt.Errorf("pay bill: update: %w", err)
+			}
+
+			// The row changed, so write the event the API writes on any bill
+			// update; paid_date tells consumers what changed.
+			payload, err := json.Marshal(map[string]string{
+				"id": b.ID.String(), "name": b.Name, "paid_date": paid.Format(time.DateOnly),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("pay bill: marshal event: %w", err)
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO outbox_events (type, payload, household_id) VALUES ($1, $2, $3)`,
+				"bill.updated", payload, claims.HouseholdID,
+			); err != nil {
+				return nil, fmt.Errorf("pay bill: outbox event: %w", err)
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("pay bill: commit: %w", err)
+		}
+
+		b.PaidDate = effective.Format(time.DateOnly)
+		b.AmountPaid = in.amount
+		if b.AmountPaid == nil {
+			b.AmountPaid = b.Amount
+		}
+		if hasDueDay {
+			covered := paidForDueDate(effective, *b.DueDay)
+			next := dueDateInMonth(covered.Year(), covered.Month()+1, *b.DueDay)
+			coveredStr, nextStr := covered.Format(time.DateOnly), next.Format(time.DateOnly)
+			days := int(next.Sub(today).Hours() / 24)
+			b.PaidForDueDate, b.NextDueDate, b.DaysUntilDue = &coveredStr, &nextStr, &days
+		}
+
+		result, err := json.Marshal(b)
+		if err != nil {
+			return nil, fmt.Errorf("pay bill: marshal result: %w", err)
+		}
+		return mcp.NewToolResultText(string(result)), nil
+	}
+
+	return "bill_pay", tool, handler
+}
+
+// parseBillPayInput validates bill_pay arguments. The returned error message
+// is shown to the caller as the tool error.
+func parseBillPayInput(args map[string]any) (billPayInput, error) {
+	var in billPayInput
+
+	id, err := optionalUUID(args, "bill_id")
+	if err != nil {
+		return in, err
+	}
+	if id == nil {
+		return in, errors.New("bill_id is required")
+	}
+	in.billID = *id
+
+	paidDate, err := optionalString(args, "paid_date")
+	if err != nil {
+		return in, err
+	}
+	if paidDate != nil {
+		d, err := time.Parse(time.DateOnly, *paidDate)
+		if err != nil {
+			return in, errors.New("paid_date must be a date as YYYY-MM-DD, e.g. 2026-11-20")
+		}
+		in.paidDate = &d
+	}
+
+	amount, ok, err := parseAmount(args)
+	if err != nil {
+		return in, err
+	}
+	if ok {
+		in.amount = &amount
+	}
+	return in, nil
+}
+
+// householdToday returns today's date in the household's timezone, as
+// midnight UTC so it compares with dates scanned from DATE columns. An empty
+// or unknown timezone falls back to UTC, as the calendar tools do.
+func householdToday(ctx context.Context, q interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}, householdID string) (time.Time, error) {
+	var tz string
+	if err := q.QueryRow(ctx, `SELECT timezone FROM households WHERE id = $1`, householdID).Scan(&tz); err != nil {
+		return time.Time{}, fmt.Errorf("load household timezone: %w", err)
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil || tz == "" {
+		loc = time.UTC
+	}
+	y, m, d := time.Now().In(loc).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC), nil
+}
+
+// paidForDueDate returns the due date a payment made on paid pays: the most
+// recent due date (on or before paid) when the payment is at most
+// lateGraceDays late, otherwise the first due date on or after paid. It
+// depends only on paid and dueDay because bills.paid_date is the only thing
+// stored about a payment.
+func paidForDueDate(paid time.Time, dueDay int) time.Time {
+	y, m, d := paid.Date()
+	paid = time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	last := dueDateInMonth(y, m, dueDay)
+	if last.After(paid) {
+		last = dueDateInMonth(y, m-1, dueDay)
+	}
+	if paid.Sub(last) <= lateGraceDays*24*time.Hour {
+		return last
+	}
+	return nextDueDate(paid, dueDay)
+}
+
 // parseUpdateBillInput validates bill_update arguments. A field that is
 // absent or null is left unchanged. name, amount, due_day and is_autopay
 // cannot be cleared; a blank string clears the other text fields. The

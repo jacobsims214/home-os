@@ -896,3 +896,369 @@ func TestBillDelete_Validation(t *testing.T) {
 		t.Errorf("invalid calls wrote %d bill.deleted events", n)
 	}
 }
+
+// ── bill_pay ──────────────────────────────────────────────────────────────
+
+// insertPayBill inserts a bill directly so tests control amount and due_day
+// (nil leaves the column NULL, as legacy API rows can).
+func insertPayBill(t *testing.T, pool *pgxpool.Pool, householdID uuid.UUID, amount *float64, dueDay *int) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO bills (household_id, name, amount, due_day) VALUES ($1, 'Electric', $2, $3) RETURNING id`,
+		householdID, amount, dueDay,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert bill: %v", err)
+	}
+	return id
+}
+
+func storedPaidDate(t *testing.T, pool *pgxpool.Pool, id uuid.UUID) string {
+	t.Helper()
+	var d *time.Time
+	if err := pool.QueryRow(context.Background(), `SELECT paid_date FROM bills WHERE id = $1`, id).Scan(&d); err != nil {
+		t.Fatalf("select paid_date: %v", err)
+	}
+	if d == nil {
+		return ""
+	}
+	return d.Format(time.DateOnly)
+}
+
+func setHouseholdTZ(t *testing.T, pool *pgxpool.Pool, householdID uuid.UUID, tz string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `UPDATE households SET timezone = $2 WHERE id = $1`, householdID, tz); err != nil {
+		t.Fatalf("set timezone: %v", err)
+	}
+}
+
+func decodePaid(t *testing.T, text string) paidBill {
+	t.Helper()
+	var b paidBill
+	if err := json.Unmarshal([]byte(text), &b); err != nil {
+		t.Fatalf("decode %q: %v", text, err)
+	}
+	return b
+}
+
+func payBill(t *testing.T, ctx context.Context, pay toolHandler, args map[string]any) paidBill {
+	t.Helper()
+	res, text := callTool(t, ctx, pay, "bill_pay", args)
+	if res.IsError {
+		t.Fatalf("bill_pay %v returned tool error: %s", args, text)
+	}
+	return decodePaid(t, text)
+}
+
+func strOrNil(s *string) string {
+	if s == nil {
+		return "<nil>"
+	}
+	return *s
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// TestPaidForDueDate pins which due date a payment date pays: the previous
+// due date when at most lateGraceDays late, otherwise the next one, with
+// due days clamped to short months.
+func TestPaidForDueDate(t *testing.T) {
+	tests := []struct {
+		paid   string
+		dueDay int
+		want   string
+	}{
+		{"2026-01-18", 20, "2026-01-20"}, // early
+		{"2026-01-20", 20, "2026-01-20"}, // on the day
+		{"2026-01-27", 20, "2026-01-20"}, // 7 days late: still January's
+		{"2026-01-28", 20, "2026-02-20"}, // 8 days late: next one
+		{"2026-01-02", 5, "2026-01-05"},  // previous (Dec 5) is too far back
+		{"2026-01-03", 28, "2025-12-28"}, // late across the year boundary
+		{"2026-02-10", 31, "2026-02-28"}, // Jan 31 too far back; Feb clamps
+		{"2026-03-03", 31, "2026-02-28"}, // 3 days after the clamped Feb 28
+		{"2028-02-29", 30, "2028-02-29"}, // leap year clamp, on the day
+		{"2025-12-31", 31, "2025-12-31"},
+	}
+	for _, tc := range tests {
+		paid, _ := time.Parse(time.DateOnly, tc.paid)
+		if got := paidForDueDate(paid, tc.dueDay).Format(time.DateOnly); got != tc.want {
+			t.Errorf("paidForDueDate(%s, %d) = %s, want %s", tc.paid, tc.dueDay, got, tc.want)
+		}
+	}
+}
+
+// TestBillPay_SetsPaidDateAndNextDue pays a bill, checks the stored
+// paid_date, the covered and next due dates and the outbox event, then
+// checks repeats for the same due date change nothing and a payment for the
+// next due date moves it on.
+func TestBillPay_SetsPaidDateAndNextDue(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	id := insertPayBill(t, pool, hh.HouseholdID, ptr(142.5), ptr(20))
+
+	_, _, pay := NewBillPayTool(pool)
+
+	got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": "2026-01-18"})
+	if got.ID != id || got.PaidDate != "2026-01-18" || got.AlreadyPaid {
+		t.Errorf("first payment: id=%s paid_date=%s already_paid=%v", got.ID, got.PaidDate, got.AlreadyPaid)
+	}
+	if strOrNil(got.PaidForDueDate) != "2026-01-20" || strOrNil(got.NextDueDate) != "2026-02-20" {
+		t.Errorf("paid_for_due_date=%s next_due_date=%s, want 2026-01-20 / 2026-02-20",
+			strOrNil(got.PaidForDueDate), strOrNil(got.NextDueDate))
+	}
+	if got.DaysUntilDue == nil {
+		t.Error("days_until_due is nil")
+	}
+	if got.AmountPaid == nil || *got.AmountPaid != 142.5 {
+		t.Errorf("amount_paid = %v, want the bill's 142.5", got.AmountPaid)
+	}
+	if d := storedPaidDate(t, pool, id); d != "2026-01-18" {
+		t.Errorf("stored paid_date = %q, want 2026-01-18", d)
+	}
+	if n := updatedEvents(t, pool, id, hh.HouseholdID); n != 1 {
+		t.Errorf("bill.updated events = %d, want 1", n)
+	}
+	var eventPaid string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT payload->>'paid_date' FROM outbox_events WHERE type = 'bill.updated' AND payload->>'id' = $1`,
+		id.String(),
+	).Scan(&eventPaid); err != nil || eventPaid != "2026-01-18" {
+		t.Errorf("event paid_date = %q (%v), want 2026-01-18", eventPaid, err)
+	}
+	firstUpdatedAt := got.UpdatedAt
+
+	// Same call again, and a later payment for the same due date: no change.
+	for _, paidDate := range []string{"2026-01-18", "2026-01-22", "2026-01-10"} {
+		again := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": paidDate})
+		if !again.AlreadyPaid || again.PaidDate != "2026-01-18" || strOrNil(again.NextDueDate) != "2026-02-20" {
+			t.Errorf("repeat with %s: already_paid=%v paid_date=%s next=%s, want true/2026-01-18/2026-02-20",
+				paidDate, again.AlreadyPaid, again.PaidDate, strOrNil(again.NextDueDate))
+		}
+		if !again.UpdatedAt.Equal(firstUpdatedAt) {
+			t.Errorf("repeat with %s changed updated_at", paidDate)
+		}
+	}
+	if d := storedPaidDate(t, pool, id); d != "2026-01-18" {
+		t.Errorf("stored paid_date after repeats = %q, want 2026-01-18", d)
+	}
+	if n := updatedEvents(t, pool, id, hh.HouseholdID); n != 1 {
+		t.Errorf("bill.updated events after repeats = %d, want 1", n)
+	}
+
+	// Next month's payment, with an explicit amount.
+	next := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": "2026-02-15", "amount": 150.555})
+	if next.AlreadyPaid || next.PaidDate != "2026-02-15" ||
+		strOrNil(next.PaidForDueDate) != "2026-02-20" || strOrNil(next.NextDueDate) != "2026-03-20" {
+		t.Errorf("second payment: %+v", next)
+	}
+	if next.AmountPaid == nil || *next.AmountPaid != 150.56 {
+		t.Errorf("amount_paid = %v, want 150.56", next.AmountPaid)
+	}
+	if d := storedPaidDate(t, pool, id); d != "2026-02-15" {
+		t.Errorf("stored paid_date = %q, want 2026-02-15", d)
+	}
+
+	// An older payment date never moves the bill backwards.
+	old := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": "2026-01-19"})
+	if !old.AlreadyPaid || old.PaidDate != "2026-02-15" {
+		t.Errorf("older payment: already_paid=%v paid_date=%s", old.AlreadyPaid, old.PaidDate)
+	}
+	if n := updatedEvents(t, pool, id, hh.HouseholdID); n != 2 {
+		t.Errorf("bill.updated events = %d, want 2", n)
+	}
+}
+
+// TestBillPay_DefaultsToHouseholdToday checks a call without paid_date uses
+// today in the household's timezone, including zones a day ahead of and
+// behind UTC, and that an unknown timezone falls back to UTC.
+func TestBillPay_DefaultsToHouseholdToday(t *testing.T) {
+	pool := testutil.NewPool(t)
+	_, _, pay := NewBillPayTool(pool)
+
+	for _, tz := range []string{"Pacific/Kiritimati", "Pacific/Pago_Pago", "America/New_York", "UTC", "Not/A_Zone"} {
+		t.Run(tz, func(t *testing.T) {
+			ctx, hh := testutil.SeedHousehold(t, pool)
+			setHouseholdTZ(t, pool, hh.HouseholdID, tz)
+			id := insertPayBill(t, pool, hh.HouseholdID, ptr(80.0), ptr(1))
+
+			loc, err := time.LoadLocation(tz)
+			if err != nil {
+				loc = time.UTC
+			}
+			before := time.Now().In(loc).Format(time.DateOnly)
+			got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String()})
+			after := time.Now().In(loc).Format(time.DateOnly)
+
+			if got.PaidDate != before && got.PaidDate != after {
+				t.Errorf("paid_date = %s, want household-local today %s", got.PaidDate, before)
+			}
+			if d := storedPaidDate(t, pool, id); d != got.PaidDate {
+				t.Errorf("stored paid_date = %q, want %q", d, got.PaidDate)
+			}
+			if got.NextDueDate == nil || got.DaysUntilDue == nil || *got.DaysUntilDue < 0 {
+				t.Errorf("next_due_date=%s days_until_due=%v, want a date not before today",
+					strOrNil(got.NextDueDate), got.DaysUntilDue)
+			}
+			if *got.NextDueDate <= got.PaidDate {
+				t.Errorf("next_due_date %s is not after paid_date %s", *got.NextDueDate, got.PaidDate)
+			}
+		})
+	}
+}
+
+// TestBillPay_FutureDateRejected checks a paid_date after the household's
+// today is a tool error and changes nothing.
+func TestBillPay_FutureDateRejected(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	id := insertPayBill(t, pool, hh.HouseholdID, ptr(80.0), ptr(15))
+
+	_, _, pay := NewBillPayTool(pool)
+	future := time.Now().UTC().AddDate(0, 0, 2).Format(time.DateOnly)
+	res, text := callTool(t, ctx, pay, "bill_pay", map[string]any{"bill_id": id.String(), "paid_date": future})
+	if !res.IsError || !strings.Contains(text, "cannot be in the future") {
+		t.Fatalf("want future-date tool error, got %s", text)
+	}
+	if d := storedPaidDate(t, pool, id); d != "" {
+		t.Errorf("stored paid_date = %q, want NULL", d)
+	}
+}
+
+// TestBillPay_OtherHouseholdNotFound checks a bill from another household,
+// and a missing bill, are not found and left unpaid.
+func TestBillPay_OtherHouseholdNotFound(t *testing.T) {
+	pool := testutil.NewPool(t)
+	_, owner := testutil.SeedHousehold(t, pool)
+	otherCtx, other := testutil.SeedHousehold(t, pool)
+	id := insertPayBill(t, pool, owner.HouseholdID, ptr(80.0), ptr(15))
+
+	_, _, pay := NewBillPayTool(pool)
+	for _, billID := range []string{id.String(), uuid.NewString()} {
+		res, text := callTool(t, otherCtx, pay, "bill_pay", map[string]any{"bill_id": billID, "paid_date": "2026-01-10"})
+		if !res.IsError || !strings.Contains(text, "bill not found") {
+			t.Errorf("bill %s: want bill not found, got %s", billID, text)
+		}
+	}
+	if d := storedPaidDate(t, pool, id); d != "" {
+		t.Errorf("stored paid_date = %q, want NULL", d)
+	}
+	if n := updatedEvents(t, pool, id, other.HouseholdID) + updatedEvents(t, pool, id, owner.HouseholdID); n != 0 {
+		t.Errorf("bill.updated events = %d, want 0", n)
+	}
+}
+
+// TestBillPay_LegacyNullFields pays a bill without amount or due_day: the
+// paid_date is set, the due-date fields are null, and a repeat is a no-op.
+func TestBillPay_LegacyNullFields(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	var id uuid.UUID
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO bills (household_id, name, is_autopay) VALUES ($1, 'Old', NULL) RETURNING id`,
+		hh.HouseholdID,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert bill: %v", err)
+	}
+
+	_, _, pay := NewBillPayTool(pool)
+	got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": "2026-01-10"})
+	if got.AlreadyPaid || got.PaidDate != "2026-01-10" || got.Amount != nil || got.DueDay != nil ||
+		got.PaidForDueDate != nil || got.NextDueDate != nil || got.DaysUntilDue != nil || got.AmountPaid != nil {
+		t.Errorf("unexpected legacy response: %+v", got)
+	}
+	if d := storedPaidDate(t, pool, id); d != "2026-01-10" {
+		t.Errorf("stored paid_date = %q, want 2026-01-10", d)
+	}
+	again := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": "2026-01-10"})
+	if !again.AlreadyPaid {
+		t.Error("repeat payment of a legacy bill was not already_paid")
+	}
+	if n := updatedEvents(t, pool, id, hh.HouseholdID); n != 1 {
+		t.Errorf("bill.updated events = %d, want 1", n)
+	}
+}
+
+// TestBillPay_ToolDefinition pins the catalog v2 name, params and class U
+// annotations.
+func TestBillPay_ToolDefinition(t *testing.T) {
+	name, tool, _ := NewBillPayTool(nil)
+	if name != "bill_pay" || tool.Name != "bill_pay" {
+		t.Errorf("name = %q / %q, want bill_pay", name, tool.Name)
+	}
+	if len(tool.InputSchema.Required) != 1 || tool.InputSchema.Required[0] != "bill_id" {
+		t.Errorf("required = %v, want [bill_id]", tool.InputSchema.Required)
+	}
+	for _, p := range []string{"bill_id", "paid_date", "amount"} {
+		if _, ok := tool.InputSchema.Properties[p]; !ok {
+			t.Errorf("missing param %s", p)
+		}
+	}
+	if len(tool.InputSchema.Properties) != 3 {
+		t.Errorf("params = %v, want bill_id, paid_date, amount", tool.InputSchema.Properties)
+	}
+	if n := len(tool.Description); n > 200 {
+		t.Errorf("description is %d chars, max 200", n)
+	}
+	for param, schema := range tool.InputSchema.Properties {
+		if d, _ := schema.(map[string]any)["description"].(string); len(d) > 80 {
+			t.Errorf("%s description is %d chars, max 80", param, len(d))
+		}
+	}
+	a := tool.Annotations
+	if a.ReadOnlyHint == nil || *a.ReadOnlyHint || a.DestructiveHint == nil || *a.DestructiveHint ||
+		a.IdempotentHint == nil || !*a.IdempotentHint || a.OpenWorldHint == nil || *a.OpenWorldHint {
+		t.Errorf("annotations = %+v, want class U (false, false, true, false)", a)
+	}
+	if a.Title != "Pay a bill" {
+		t.Errorf("title = %q, want Pay a bill", a.Title)
+	}
+}
+
+// TestBillPay_Validation checks bad input is a tool error and changes
+// nothing.
+func TestBillPay_Validation(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	id := insertPayBill(t, pool, hh.HouseholdID, ptr(80.0), ptr(15))
+	_, _, pay := NewBillPayTool(pool)
+
+	tests := []struct {
+		name    string
+		args    map[string]any
+		wantErr string
+	}{
+		{"missing bill_id", map[string]any{}, "bill_id is required"},
+		{"blank bill_id", map[string]any{"bill_id": " "}, "bill_id is required"},
+		{"bill_id not a uuid", map[string]any{"bill_id": "abc"}, "bill_id must be a UUID"},
+		{"paid_date US format", map[string]any{"bill_id": id.String(), "paid_date": "11/20/2026"}, "paid_date must be a date as YYYY-MM-DD"},
+		{"paid_date with time", map[string]any{"bill_id": id.String(), "paid_date": "2026-01-10T10:00:00Z"}, "paid_date must be a date"},
+		{"paid_date not a string", map[string]any{"bill_id": id.String(), "paid_date": 20.0}, "paid_date must be a string"},
+		{"negative amount", map[string]any{"bill_id": id.String(), "amount": -1.0}, "amount must be between"},
+		{"amount not a number", map[string]any{"bill_id": id.String(), "amount": "ten"}, "amount must be a number"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, text := callTool(t, ctx, pay, "bill_pay", tc.args)
+			if !res.IsError {
+				t.Fatalf("want tool error, got %s", text)
+			}
+			if !strings.Contains(text, tc.wantErr) {
+				t.Errorf("error %q does not contain %q", text, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("no claims", func(t *testing.T) {
+		res, _ := callTool(t, context.Background(), pay, "bill_pay", map[string]any{"bill_id": id.String()})
+		if !res.IsError {
+			t.Fatal("want tool error without claims")
+		}
+	})
+
+	if d := storedPaidDate(t, pool, id); d != "" {
+		t.Errorf("stored paid_date = %q, want NULL", d)
+	}
+	if n := updatedEvents(t, pool, id, hh.HouseholdID); n != 0 {
+		t.Errorf("bill.updated events = %d, want 0", n)
+	}
+}
