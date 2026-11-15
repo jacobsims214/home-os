@@ -3,6 +3,7 @@ package caldav
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -807,5 +808,285 @@ func TestCalDAVOverrideStoresMasterIntegration(t *testing.T) {
 				t.Fatalf("GET body differs from PUT body:\n got: %q\nwant: %q", got, body)
 			}
 		})
+	}
+}
+
+// simpleEvent returns a minimal VCALENDAR for uid with the given SUMMARY.
+func simpleEvent(uid, summary string) string {
+	return "BEGIN:VCALENDAR\r\n" +
+		"VERSION:2.0\r\n" +
+		"PRODID:-//Test//EN\r\n" +
+		"BEGIN:VEVENT\r\n" +
+		"UID:" + uid + "\r\n" +
+		"DTSTAMP:20261115T120000Z\r\n" +
+		"DTSTART:20261120T150000Z\r\n" +
+		"DTEND:20261120T160000Z\r\n" +
+		"SUMMARY:" + summary + "\r\n" +
+		"END:VEVENT\r\n" +
+		"END:VCALENDAR\r\n"
+}
+
+// putResult is one PUT's outcome in a concurrency test.
+type putResult struct {
+	code    int
+	etag    string
+	summary string
+}
+
+// concurrentPUTs fires one PUT per summary at path at the same moment, each
+// with the given headers, and returns their results.
+func concurrentPUTs(t *testing.T, repo *db.Repo, path, hid, uid string, hdr map[string]string, summaries ...string) []putResult {
+	t.Helper()
+	results := make([]putResult, len(summaries))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, s := range summaries {
+		wg.Add(1)
+		go func(i int, s string) {
+			defer wg.Done()
+			req := davRequest(http.MethodPut, path, hid, simpleEvent(uid, s), hdr)
+			<-start
+			w := httptest.NewRecorder()
+			HandlePUT(w, req, repo, path)
+			results[i] = putResult{code: w.Code, etag: w.Header().Get("ETag"), summary: s}
+		}(i, s)
+	}
+	close(start)
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("concurrent PUTs did not finish in 30s (lock wait?)")
+	}
+	return results
+}
+
+// storedEvent returns the stored ETag, SUMMARY, SEQUENCE and raw body of uid.
+func storedEvent(t *testing.T, pool *pgxpool.Pool, calID, uid string) (etag, summary string, seq int, raw string) {
+	t.Helper()
+	var jsonData string
+	var rawp *string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT etag, ical_data, ical_raw FROM calendar_objects WHERE calendar_id = $1 AND uid = $2`,
+		calID, uid).Scan(&etag, &jsonData, &rawp); err != nil {
+		t.Fatalf("read stored %s: %v", uid, err)
+	}
+	var ev ical.CalEvent
+	if err := json.Unmarshal([]byte(jsonData), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if rawp != nil {
+		raw = *rawp
+	}
+	return etag, ev.Title, ev.Sequence, raw
+}
+
+// changeActions returns the calendar_changes actions recorded for uid, oldest first.
+func changeActions(t *testing.T, pool *pgxpool.Pool, calID, uid string) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(),
+		`SELECT action FROM calendar_changes WHERE calendar_id = $1 AND event_uid = $2 ORDER BY revision`, calID, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func calendarCTag(t *testing.T, pool *pgxpool.Pool, calID string) string {
+	t.Helper()
+	var ctag string
+	if err := pool.QueryRow(context.Background(), `SELECT ctag FROM calendars WHERE id = $1`, calID).Scan(&ctag); err != nil {
+		t.Fatal(err)
+	}
+	return ctag
+}
+
+// TestCalDAVConcurrentIfMatchIntegration: two devices save the same event at
+// the same time, both carrying the ETag they last saw. Exactly one write may
+// win; the other must get 412 so its client refetches instead of silently
+// overwriting the winner (#4660). Repeated to give the race many chances.
+func TestCalDAVConcurrentIfMatchIntegration(t *testing.T) {
+	repo, pool := testRepo(t)
+	hid, calUID, calID := seedCalendar(t, pool)
+
+	for round := 0; round < 10; round++ {
+		uid := fmt.Sprintf("evt-ifmatch-%d", round)
+		path := "/dav/" + calUID + "/" + uid + ".ics"
+
+		w := httptest.NewRecorder()
+		HandlePUT(w, davRequest(http.MethodPut, path, hid, simpleEvent(uid, "original"), nil), repo, path)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("round %d: seed PUT status = %d: %s", round, w.Code, w.Body)
+		}
+		etag := w.Header().Get("ETag")
+		ctagBefore := calendarCTag(t, pool, calID)
+
+		res := concurrentPUTs(t, repo, path, hid, uid, map[string]string{"If-Match": etag}, "phone edit", "laptop edit")
+
+		var winners, failed []putResult
+		for _, r := range res {
+			switch {
+			case r.code == http.StatusOK:
+				winners = append(winners, r)
+			case r.code == http.StatusPreconditionFailed:
+				failed = append(failed, r)
+			default:
+				t.Fatalf("round %d: unexpected status %d", round, r.code)
+			}
+		}
+		if len(winners) != 1 || len(failed) != 1 {
+			t.Fatalf("round %d: got %d x 200 and %d x 412, want exactly one of each (lost update)", round, len(winners), len(failed))
+		}
+		gotETag, gotSummary, gotSeq, gotRaw := storedEvent(t, pool, calID, uid)
+		if `"`+gotETag+`"` != winners[0].etag {
+			t.Errorf("round %d: stored etag %q, winner returned %s", round, gotETag, winners[0].etag)
+		}
+		if gotSummary != winners[0].summary || gotRaw != simpleEvent(uid, winners[0].summary) {
+			t.Errorf("round %d: stored summary %q, want winner's %q", round, gotSummary, winners[0].summary)
+		}
+		if gotSeq != 1 {
+			t.Errorf("round %d: SEQUENCE = %d, want 1 (one successful update)", round, gotSeq)
+		}
+		if got := changeActions(t, pool, calID, uid); strings.Join(got, ",") != "create,update" {
+			t.Errorf("round %d: calendar_changes = %v, want [create update]", round, got)
+		}
+		if calendarCTag(t, pool, calID) == ctagBefore {
+			t.Errorf("round %d: ctag not bumped by the winning update", round)
+		}
+
+		// The loser retries with the winner's ETag (what a client does after
+		// refetching) and succeeds; the old ETag keeps failing.
+		w = httptest.NewRecorder()
+		HandlePUT(w, davRequest(http.MethodPut, path, hid, simpleEvent(uid, "stale"), map[string]string{"If-Match": etag}), repo, path)
+		if w.Code != http.StatusPreconditionFailed {
+			t.Errorf("round %d: stale If-Match status = %d, want 412", round, w.Code)
+		}
+		w = httptest.NewRecorder()
+		HandlePUT(w, davRequest(http.MethodPut, path, hid, simpleEvent(uid, failed[0].summary), map[string]string{"If-Match": winners[0].etag}), repo, path)
+		if w.Code != http.StatusOK {
+			t.Errorf("round %d: retry with fresh If-Match status = %d, want 200", round, w.Code)
+		}
+	}
+}
+
+// TestCalDAVConcurrentIfNoneMatchIntegration: two devices create the same
+// event (If-None-Match: *) at the same time. One gets 201, the other 412, and
+// the stored event is the creator's.
+func TestCalDAVConcurrentIfNoneMatchIntegration(t *testing.T) {
+	repo, pool := testRepo(t)
+	hid, calUID, calID := seedCalendar(t, pool)
+
+	for round := 0; round < 10; round++ {
+		uid := fmt.Sprintf("evt-create-%d", round)
+		path := "/dav/" + calUID + "/" + uid + ".ics"
+
+		res := concurrentPUTs(t, repo, path, hid, uid, map[string]string{"If-None-Match": "*"}, "phone create", "laptop create")
+
+		var created, failed []putResult
+		for _, r := range res {
+			switch r.code {
+			case http.StatusCreated:
+				created = append(created, r)
+			case http.StatusPreconditionFailed:
+				failed = append(failed, r)
+			default:
+				t.Fatalf("round %d: unexpected status %d", round, r.code)
+			}
+		}
+		if len(created) != 1 || len(failed) != 1 {
+			t.Fatalf("round %d: got %d x 201 and %d x 412, want exactly one of each", round, len(created), len(failed))
+		}
+		gotETag, gotSummary, gotSeq, _ := storedEvent(t, pool, calID, uid)
+		if `"`+gotETag+`"` != created[0].etag || gotSummary != created[0].summary {
+			t.Errorf("round %d: stored (%q, %q), want creator's (%s, %q)", round, gotETag, gotSummary, created[0].etag, created[0].summary)
+		}
+		if gotSeq != 0 {
+			t.Errorf("round %d: SEQUENCE = %d, want 0 for a new event", round, gotSeq)
+		}
+		if got := changeActions(t, pool, calID, uid); strings.Join(got, ",") != "create" {
+			t.Errorf("round %d: calendar_changes = %v, want [create]", round, got)
+		}
+	}
+}
+
+// TestCalDAVUnconditionalPUTIntegration: PUTs without If-Match /
+// If-None-Match keep working: create, update, and two concurrent creates of
+// the same new event both succeed (one as a create, the other as an update
+// after it loses the insert race) instead of one failing.
+func TestCalDAVUnconditionalPUTIntegration(t *testing.T) {
+	repo, pool := testRepo(t)
+	hid, calUID, calID := seedCalendar(t, pool)
+
+	uid := "evt-plain"
+	path := "/dav/" + calUID + "/" + uid + ".ics"
+	w := httptest.NewRecorder()
+	HandlePUT(w, davRequest(http.MethodPut, path, hid, simpleEvent(uid, "first"), nil), repo, path)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create status = %d: %s", w.Code, w.Body)
+	}
+	w = httptest.NewRecorder()
+	HandlePUT(w, davRequest(http.MethodPut, path, hid, simpleEvent(uid, "second"), nil), repo, path)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update status = %d: %s", w.Code, w.Body)
+	}
+	etag, summary, seq, _ := storedEvent(t, pool, calID, uid)
+	if `"`+etag+`"` != w.Header().Get("ETag") || summary != "second" || seq != 1 {
+		t.Errorf("after update: etag %q (resp %s), summary %q, seq %d", etag, w.Header().Get("ETag"), summary, seq)
+	}
+
+	for round := 0; round < 10; round++ {
+		uid := fmt.Sprintf("evt-plain-race-%d", round)
+		path := "/dav/" + calUID + "/" + uid + ".ics"
+		res := concurrentPUTs(t, repo, path, hid, uid, nil, "a", "b")
+		codes := []int{res[0].code, res[1].code}
+		sort.Ints(codes)
+		if codes[0] != http.StatusOK || codes[1] != http.StatusCreated {
+			t.Fatalf("round %d: statuses %v, want one 200 and one 201", round, codes)
+		}
+		if got := changeActions(t, pool, calID, uid); strings.Join(got, ",") != "create,update" {
+			t.Errorf("round %d: calendar_changes = %v, want [create update]", round, got)
+		}
+	}
+
+	// A PUT to a calendar of another household is still 404.
+	otherHID, _, _ := seedCalendar(t, pool)
+	w = httptest.NewRecorder()
+	HandlePUT(w, davRequest(http.MethodPut, path, otherHID, simpleEvent(uid, "intruder"), nil), repo, path)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("cross-household PUT status = %d, want 404", w.Code)
+	}
+}
+
+// TestPutCalendarObjectPreconditionSentinel: a decide callback's
+// db.ErrPreconditionFailed aborts the write and reaches the caller, and
+// nothing is written (no row, no change row, no ctag bump).
+func TestPutCalendarObjectPreconditionSentinel(t *testing.T) {
+	repo, pool := testRepo(t)
+	hid, _, calID := seedCalendar(t, pool)
+	ctagBefore := calendarCTag(t, pool, calID)
+
+	_, _, err := repo.PutCalendarObject(context.Background(), hid, calID, "evt-sentinel",
+		func(cur *db.CalendarObject) (db.ObjectWrite, error) {
+			return db.ObjectWrite{}, &preconditionError{result: preconditionFailMissing}
+		})
+	if !errors.Is(err, db.ErrPreconditionFailed) {
+		t.Fatalf("err = %v, want ErrPreconditionFailed", err)
+	}
+	var n int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM calendar_objects WHERE calendar_id = $1`, calID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 || len(changeActions(t, pool, calID, "evt-sentinel")) != 0 || calendarCTag(t, pool, calID) != ctagBefore {
+		t.Errorf("failed precondition left side effects: rows=%d", n)
 	}
 }

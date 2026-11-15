@@ -5,6 +5,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -508,8 +509,9 @@ func incrementCalendarCTagQ(ctx context.Context, q querier, calendarID string) e
 // UpsertCalendarObjectWithCTag upserts the calendar object, records a
 // calendar_changes row, and bumps the calendar CTag inside a single pgx
 // transaction. If any operation fails the whole transaction is rolled back
-// and the error is returned. This is the operation CalDAV PUT and API
-// CreateEvent should use: a stale CTag (event written but CTag not bumped)
+// and the error is returned. It writes unconditionally: CalDAV PUT, which
+// must honour If-Match / If-None-Match, uses PutCalendarObject instead. A
+// stale CTag (event written but CTag not bumped)
 // would cause Apple Calendar to silently miss the change forever, and a
 // missing calendar_changes row would cause sync-collection to never
 // deliver the change to incremental-sync clients.
@@ -570,6 +572,200 @@ func (r *Repo) UpsertCalendarObjectWithCTag(ctx context.Context, householdID str
 		return nil, fmt.Errorf("db: commit (upsert+ctag): %w", err)
 	}
 	return obj, nil
+}
+
+// ErrPreconditionFailed is the sentinel a conditional write returns when the
+// stored state of the object does not satisfy the caller's precondition
+// (If-Match / If-None-Match). CalDAV handlers map it to 412 Precondition
+// Failed. Callbacks passed to PutCalendarObject return it (or an error that
+// wraps it) to abort the write; the transaction is rolled back.
+var ErrPreconditionFailed = errors.New("db: precondition failed")
+
+// ObjectWrite is the new state a conditional write stores for a calendar
+// object. ICALRaw and RRule may be nil (nil clears the stored value), with the
+// same meaning as in UpsertCalendarObjectWithCTag.
+type ObjectWrite struct {
+	ICALData string
+	ETag     string
+	ICALRaw  *string
+	RRule    *string
+}
+
+// maxPutAttempts bounds how often PutCalendarObject re-reads the row after
+// losing an insert race. Each retry only happens when another transaction
+// committed a row with the same (calendar_id, uid) between our locking read
+// and our INSERT, so two attempts are enough in practice; the third is slack.
+const maxPutAttempts = 3
+
+// inCalendarTx runs fn inside one transaction after checking that calendarID
+// belongs to householdID. It commits when fn returns nil and rolls back
+// otherwise, returning fn's error unchanged (so sentinels such as
+// ErrPreconditionFailed reach the caller as-is). owned is false, and fn is not
+// called, when the calendar is missing or belongs to another household:
+// callers treat that as 404.
+//
+// This is the shared shape for every conditional object write (PUT now,
+// DELETE with If-Match next): fn locks the object row with
+// lockCalendarObjectQ, evaluates the precondition against what it locked, and
+// writes, so no concurrent writer can slip between the check and the write.
+func (r *Repo) inCalendarTx(ctx context.Context, householdID string, calendarID string, fn func(tx pgx.Tx) error) (owned bool, err error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("db: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM calendars WHERE id = $1 AND household_id = $2)`,
+		calendarID, householdID,
+	).Scan(&owned); err != nil {
+		return false, fmt.Errorf("db: check calendar ownership: %w", err)
+	}
+	if !owned {
+		return false, nil
+	}
+	if err := fn(tx); err != nil {
+		return true, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return true, fmt.Errorf("db: commit: %w", err)
+	}
+	return true, nil
+}
+
+// lockCalendarObjectQ reads the (calendar_id, uid) row and locks it FOR
+// UPDATE until the transaction ends. Returns nil, nil when there is no such
+// row; in that case nothing is locked, so a create must still rely on the
+// UNIQUE (calendar_id, uid) constraint (see insertCalendarObjectIfAbsentQ).
+//
+// Under READ COMMITTED, if another transaction holds the lock, this waits for
+// it and then returns the row as that transaction committed it, so the
+// precondition is always evaluated against the latest committed state.
+func lockCalendarObjectQ(ctx context.Context, q querier, calendarID string, uid string) (*CalendarObject, error) {
+	var o CalendarObject
+	err := q.QueryRow(ctx, `
+		SELECT id, calendar_id, uid, ical_data, etag, entity_type, entity_id, created_at, updated_at, ical_raw, rrule
+		FROM calendar_objects
+		WHERE calendar_id = $1 AND uid = $2
+		FOR UPDATE
+	`, calendarID, uid).Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("db: lock calendar object: %w", err)
+	}
+	return &o, nil
+}
+
+// insertCalendarObjectIfAbsentQ inserts a new row and returns it, or returns
+// nil, nil when a row with the same (calendar_id, uid) already exists
+// (including one a concurrent transaction committed while we waited on it).
+func insertCalendarObjectIfAbsentQ(ctx context.Context, q querier, calendarID string, uid string, w ObjectWrite) (*CalendarObject, error) {
+	var o CalendarObject
+	err := q.QueryRow(ctx, `
+		INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, ical_raw, rrule)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (calendar_id, uid) DO NOTHING
+		RETURNING id, calendar_id, uid, ical_data, etag, entity_type, entity_id, created_at, updated_at, ical_raw, rrule
+	`, calendarID, uid, w.ICALData, w.ETag, w.ICALRaw, w.RRule).Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("db: insert calendar object: %w", err)
+	}
+	return &o, nil
+}
+
+// updateLockedCalendarObjectQ overwrites a row the caller has locked with
+// lockCalendarObjectQ in the same transaction.
+func updateLockedCalendarObjectQ(ctx context.Context, q querier, calendarID string, uid string, w ObjectWrite) (*CalendarObject, error) {
+	var o CalendarObject
+	err := q.QueryRow(ctx, `
+		UPDATE calendar_objects
+		SET ical_data = $3, etag = $4, ical_raw = $5, rrule = $6, updated_at = NOW()
+		WHERE calendar_id = $1 AND uid = $2
+		RETURNING id, calendar_id, uid, ical_data, etag, entity_type, entity_id, created_at, updated_at, ical_raw, rrule
+	`, calendarID, uid, w.ICALData, w.ETag, w.ICALRaw, w.RRule).Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule)
+	if err != nil {
+		return nil, fmt.Errorf("db: update calendar object: %w", err)
+	}
+	return &o, nil
+}
+
+// PutCalendarObject is the conditional create-or-update CalDAV PUT uses. In a
+// single transaction it:
+//
+//  1. checks the calendar belongs to householdID (not owned: returns
+//     nil, false, nil and the caller answers 404);
+//  2. locks the existing (calendar_id, uid) row FOR UPDATE, or finds none;
+//  3. calls decide with that row (nil when absent). decide evaluates the
+//     request's preconditions against it and returns the state to store, or
+//     an error (ErrPreconditionFailed for a failed If-Match /
+//     If-None-Match) that aborts and rolls back the write and is returned
+//     unchanged;
+//  4. updates the locked row, or inserts with ON CONFLICT DO NOTHING. When
+//     the insert finds a row a concurrent transaction just committed, it goes
+//     back to step 2 and calls decide again with that row, so a create-only
+//     PUT (If-None-Match: *) gets ErrPreconditionFailed and an unconditional
+//     PUT becomes an update instead of failing;
+//  5. records the calendar_changes row (create/update, for sync-collection)
+//     and bumps the calendar CTag, then commits.
+//
+// Because the precondition is evaluated against the locked row inside the
+// write transaction, two clients PUTting with the same If-Match cannot both
+// succeed: the second waits on the row lock, then sees the first one's new
+// ETag and fails. decide may be called more than once and must not have side
+// effects.
+//
+// created reports whether the row was inserted (201) rather than updated
+// (200).
+func (r *Repo) PutCalendarObject(ctx context.Context, householdID string, calendarID string, uid string, decide func(existing *CalendarObject) (ObjectWrite, error)) (obj *CalendarObject, created bool, err error) {
+	owned, err := r.inCalendarTx(ctx, householdID, calendarID, func(tx pgx.Tx) error {
+		for attempt := 0; attempt < maxPutAttempts; attempt++ {
+			existing, err := lockCalendarObjectQ(ctx, tx, calendarID, uid)
+			if err != nil {
+				return err
+			}
+			w, err := decide(existing)
+			if err != nil {
+				return err
+			}
+			action := ChangeUpdate
+			if existing != nil {
+				obj, err = updateLockedCalendarObjectQ(ctx, tx, calendarID, uid, w)
+				if err != nil {
+					return err
+				}
+				created = false
+			} else {
+				obj, err = insertCalendarObjectIfAbsentQ(ctx, tx, calendarID, uid, w)
+				if err != nil {
+					return err
+				}
+				if obj == nil {
+					// Lost the insert race: re-read the winner's row and
+					// re-evaluate the precondition against it.
+					continue
+				}
+				created = true
+				action = ChangeCreate
+			}
+			if err := recordChangeQ(ctx, tx, calendarID, uid, action); err != nil {
+				return err
+			}
+			return incrementCalendarCTagQ(ctx, tx, calendarID)
+		}
+		return fmt.Errorf("db: put calendar object %q: row kept changing under %d attempts", uid, maxPutAttempts)
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if !owned {
+		return nil, false, nil
+	}
+	return obj, created, nil
 }
 
 // DeleteCalendarObjectWithCTag deletes the calendar object, records a

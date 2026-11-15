@@ -3,6 +3,7 @@ package caldav
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -272,16 +273,13 @@ func HandlePUT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 		return
 	}
 
-	// Fetch the existing object BEFORE upserting. We need:
-	//   1. Its current ETag for If-Match comparison.
-	//   2. Its mere existence for If-None-Match:* (create-only) — this must
-	//      be checked BEFORE the write so a phantom event is not produced.
-	//   3. The existence flag to pick 201 Created vs 200 OK after the upsert.
-	//
-	// Doing this check up front fixes two prior bugs:
-	//   - If-None-Match:* used to be evaluated AFTER the upsert, so the
-	//     phantom event was written and then exposed to subsequent reads.
-	//   - The handler always returned 201, even for updates.
+	// Fast path: read the object outside any transaction and evaluate the
+	// preconditions, so an obviously stale If-Match (or If-None-Match: * on
+	// an existing event) is refused before the body is read or parsed. This
+	// check is advisory only: another device can write between it and our
+	// transaction. The authoritative check runs again inside the write
+	// transaction against the row locked FOR UPDATE (see decide below and
+	// db.PutCalendarObject), which is what prevents lost updates.
 	existing, err := repo.GetCalendarObjectByUID(ctx, householdID, cal.ID, eventUID)
 	if err != nil {
 		logging.Logger.Error("caldav: get existing object",
@@ -292,30 +290,11 @@ func HandlePUT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-
-	// Evaluate preconditions against the current state, before reading the
-	// body so a failing precondition is cheap and produces no side effects.
-	currentETag := ""
-	if existing != nil {
-		currentETag = existing.ETag
-	}
-	switch checkPUTPreconditions(
-		r.Header.Get("If-Match"),
-		r.Header.Get("If-None-Match"),
-		currentETag,
-		existing != nil,
-	) {
-	case preconditionFailExists:
-		http.Error(w, "Precondition Failed: If-None-Match: * but resource exists", http.StatusPreconditionFailed)
+	ifMatch := r.Header.Get("If-Match")
+	ifNoneMatch := r.Header.Get("If-None-Match")
+	if res := evalPUTPreconditions(ifMatch, ifNoneMatch, existing); res != preconditionPass {
+		writePreconditionFailed(w, res)
 		return
-	case preconditionFailMissing:
-		http.Error(w, "Precondition Failed: If-Match on missing resource", http.StatusPreconditionFailed)
-		return
-	case preconditionFailMismatch:
-		http.Error(w, "Precondition Failed: ETag mismatch", http.StatusPreconditionFailed)
-		return
-	case preconditionPass:
-		// fall through to the write path
 	}
 
 	// Read iCalendar body.
@@ -348,66 +327,48 @@ func HandlePUT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 	// Override UID with the one from the URL path (CalDAV convention:
 	// the URL resource name determines the event UID).
 	ev.UID = eventUID
-
-	// SEQUENCE revision tracking (RFC 5545 §3.8.7.4): a new event starts at
-	// SEQUENCE 0 (the struct's zero value). Each subsequent PUT to the same
-	// resource increments the existing sequence so CalDAV clients like Apple
-	// Calendar can tell which version is newer. Without this, every PUT
-	// re-stores SEQUENCE 0 and clients cannot detect revisions, forcing them
-	// to re-sync every event on every poll. We read the prior sequence from
-	// the existing stored JSON (fetched above as `existing`) before
-	// re-marshaling, so the increment survives the round-trip.
-	if existing != nil {
-		var prev ical.CalEvent
-		if err := json.Unmarshal([]byte(existing.ICALData), &prev); err == nil {
-			ev.Sequence = prev.Sequence + 1
-		} else {
-			// Could not parse the prior payload — preserve any sequence the
-			// client sent in the new body (or default to 1 to signal an
-			// update happened). Logging only; we still proceed with the PUT
-			// because failing a write over a corrupt prior row would be
-			// worse than resetting the sequence.
-			logging.Logger.Warn("caldav: parse prior event for sequence failed; starting from client-supplied sequence",
-				slog.String("event_uid", eventUID),
-				slog.String("error", err.Error()))
-			if ev.Sequence == 0 {
-				ev.Sequence = 1
-			}
-		}
-	}
-
-	// Marshal the event to JSON for storage.
-	jsonData, err := json.Marshal(ev)
-	if err != nil {
-		logging.Logger.Error("caldav: marshal event",
-			slog.String("event_uid", eventUID),
-			slog.String("error", err.Error()))
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
+	clientSequence := ev.Sequence
 
 	// Generate an ETag for the new revision.
 	etag := db.ETagGen()
 
-	// Upsert the event AND bump the calendar CTag in a single pgx
-	// transaction. This is critical: the CTag is what tells Apple Calendar
-	// that something in the collection changed and it needs to re-sync. If
-	// the write succeeded but the CTag bump failed (or vice versa), the
-	// client would silently miss the change forever. Wrapping both in one tx
-	// means either they both commit or neither does.
-	//
-	// If the calendar is not owned by the caller's household (defense-in-depth
-	// check at the DB layer), upserted will be nil and we return 404 rather
-	// than leaking that the calendar exists. The transaction is rolled back in
-	// that case.
-	//
 	// The body is also kept verbatim in ical_raw (with its RRULE in rrule) so
 	// GET/REPORT can hand it back losslessly: the JSON keeps only the fields
 	// the API and MCP tools use and drops RRULE, EXDATE, VALARM and the rest.
 	icalRaw, rrule := rawForStorage(body)
-	upserted, err := repo.UpsertCalendarObjectWithCTag(ctx, householdID, cal.ID, eventUID, string(jsonData), etag, icalRaw, rrule)
+
+	// decide runs inside the write transaction with the current row locked
+	// FOR UPDATE (nil when the event does not exist yet). It re-evaluates
+	// If-Match / If-None-Match against that row — this is the authoritative
+	// check — and derives SEQUENCE from it. It may run more than once (after
+	// a lost insert race), so it only reads its inputs.
+	decide := func(cur *db.CalendarObject) (db.ObjectWrite, error) {
+		if res := evalPUTPreconditions(ifMatch, ifNoneMatch, cur); res != preconditionPass {
+			return db.ObjectWrite{}, &preconditionError{result: res}
+		}
+		next := *ev
+		next.Sequence = nextSequence(cur, clientSequence, eventUID)
+		jsonData, err := json.Marshal(&next)
+		if err != nil {
+			return db.ObjectWrite{}, fmt.Errorf("marshal event: %w", err)
+		}
+		return db.ObjectWrite{ICALData: string(jsonData), ETag: etag, ICALRaw: icalRaw, RRule: rrule}, nil
+	}
+
+	// Write the event, its calendar_changes row and the CTag bump in one
+	// transaction (see db.PutCalendarObject). A stale CTag would make Apple
+	// Calendar miss the change forever, and a missing change row would hide
+	// it from sync-collection clients. If the calendar is not owned by the
+	// caller's household (defense-in-depth check at the DB layer), stored is
+	// nil and we return 404 rather than leaking that the calendar exists.
+	stored, created, err := repo.PutCalendarObject(ctx, householdID, cal.ID, eventUID, decide)
 	if err != nil {
-		logging.Logger.Error("caldav: upsert object + ctag (tx)",
+		var pe *preconditionError
+		if errors.As(err, &pe) {
+			writePreconditionFailed(w, pe.result)
+			return
+		}
+		logging.Logger.Error("caldav: put object + ctag (tx)",
 			slog.String("calendar_uid", calUID),
 			slog.String("event_uid", eventUID),
 			slog.String("household_id", householdID),
@@ -415,25 +376,88 @@ func HandlePUT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	if upserted == nil {
+	if stored == nil {
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
 
-	// 201 Created for a new resource, 200 OK for an update. The existence
-	// flag was captured BEFORE the upsert, so this correctly reflects whether
-	// the PUT created something new versus updated an existing object.
+	// 201 Created for a new resource, 200 OK for an update, as decided by the
+	// write itself (not the fast-path read, which a concurrent writer can
+	// make stale).
 	//
 	// RFC 7232 requires ETags to be quoted strings. Quote consistently with
 	// PROPFIND/REPORT so Apple Calendar's If-None-Match comparisons match.
 	w.Header().Set("ETag", `"`+etag+`"`)
-	if existing == nil {
+	if created {
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprintf(w, "Event created: %s", eventUID)
 	} else {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "Event updated: %s", eventUID)
 	}
+}
+
+// preconditionError carries a failed PUT precondition out of the write
+// transaction. It wraps db.ErrPreconditionFailed so callers that only care
+// about "412 or not" can use errors.Is.
+type preconditionError struct {
+	result putPreconditionResult
+}
+
+func (e *preconditionError) Error() string {
+	return fmt.Sprintf("precondition failed (%d)", e.result)
+}
+
+func (e *preconditionError) Unwrap() error { return db.ErrPreconditionFailed }
+
+// evalPUTPreconditions applies checkPUTPreconditions to a stored object
+// (nil when the resource does not exist).
+func evalPUTPreconditions(ifMatch, ifNoneMatch string, cur *db.CalendarObject) putPreconditionResult {
+	if cur == nil {
+		return checkPUTPreconditions(ifMatch, ifNoneMatch, "", false)
+	}
+	return checkPUTPreconditions(ifMatch, ifNoneMatch, cur.ETag, true)
+}
+
+// writePreconditionFailed answers 412 for a failed PUT precondition.
+func writePreconditionFailed(w http.ResponseWriter, res putPreconditionResult) {
+	msg := "Precondition Failed"
+	switch res {
+	case preconditionFailExists:
+		msg = "Precondition Failed: If-None-Match: * but resource exists"
+	case preconditionFailMissing:
+		msg = "Precondition Failed: If-Match on missing resource"
+	case preconditionFailMismatch:
+		msg = "Precondition Failed: ETag mismatch"
+	}
+	http.Error(w, msg, http.StatusPreconditionFailed)
+}
+
+// nextSequence returns the SEQUENCE (RFC 5545 §3.8.7.4) to store for a PUT.
+// A new event keeps the client's value (0 when absent). Each PUT to an
+// existing resource increments the stored sequence so CalDAV clients like
+// Apple Calendar can tell which version is newer; without it every PUT would
+// re-store the same SEQUENCE and clients would re-sync every event on every
+// poll. cur is the row locked inside the write transaction, so two concurrent
+// updates cannot both derive their increment from the same prior value.
+func nextSequence(cur *db.CalendarObject, clientSequence int, eventUID string) int {
+	if cur == nil {
+		return clientSequence
+	}
+	var prev ical.CalEvent
+	if err := json.Unmarshal([]byte(cur.ICALData), &prev); err != nil {
+		// Could not parse the prior payload: keep the client's sequence (or 1
+		// to signal an update happened). Failing a write over a corrupt prior
+		// row would be worse than resetting the sequence.
+		logging.Logger.Warn("caldav: parse prior event for sequence failed; starting from client-supplied sequence",
+			slog.String("event_uid", eventUID),
+			slog.String("error", err.Error()))
+		if clientSequence == 0 {
+			return 1
+		}
+		return clientSequence
+	}
+	return prev.Sequence + 1
 }
 
 // HandleDELETE handles DELETE /dav/{calendar-uid}/{event-uid}.ics
