@@ -28,10 +28,10 @@ const (
 
 // propfindRequest is the XML body of a PROPFIND request.
 type propfindRequest struct {
-	XMLName xml.Name       `xml:"DAV: propfind"`
-	AllProp *allProp       `xml:"DAV: allprop"`
-	Prop    *propList      `xml:"DAV: prop"`
-	PropName *propName    `xml:"DAV: propname"`
+	XMLName  xml.Name  `xml:"DAV: propfind"`
+	AllProp  *allProp  `xml:"DAV: allprop"`
+	Prop     *propList `xml:"DAV: prop"`
+	PropName *propName `xml:"DAV: propname"`
 }
 
 type allProp struct{}
@@ -93,6 +93,11 @@ func writeResponseForCalendar(w io.Writer, cal *db.Calendar, props []xmlElement)
 // object (an .ics resource) inside a calendar collection. This is what Apple
 // Calendar expects when it sends PROPFIND Depth:1 on a calendar to enumerate
 // all events.
+//
+// calendar-data and getcontentlength describe the same iCalendar text GET
+// serves (renderObjectICal), never the JSON stored in ical_data. The text is
+// rendered only when one of those two properties is requested. If rendering
+// fails, both are reported in a 500 propstat and the rest still succeed.
 func writeResponseForEvent(w io.Writer, calUID string, obj *db.CalendarObject, props []xmlElement) {
 	fmt.Fprintf(w, "  <D:response>\n")
 	fmt.Fprintf(w, "    <D:href>/dav/%s/%s.ics</D:href>\n", calUID, obj.UID)
@@ -110,23 +115,45 @@ func writeResponseForEvent(w io.Writer, calUID string, obj *db.CalendarObject, p
 		fmt.Fprintf(w, "    </D:propstat>\n")
 	} else {
 		// Return only requested properties.
-		var known, unknown []xmlElement
+		var known, unknown, failed []xmlElement
+		var icalText string
+		rendered, renderFailed := false, false
 		for _, p := range props {
-			if isKnownEventProp(p.XMLName) {
-				known = append(known, p)
-			} else {
+			if !isKnownEventProp(p.XMLName) {
 				unknown = append(unknown, p)
+				continue
 			}
+			if needsRenderedICal(p.XMLName) {
+				if !rendered && !renderFailed {
+					text, err := renderObjectICal(obj)
+					if err != nil {
+						logging.Logger.Warn("caldav: render event for propfind",
+							slog.String("event_uid", obj.UID),
+							slog.String("error", err.Error()))
+						renderFailed = true
+					} else {
+						icalText, rendered = text, true
+					}
+				}
+				if renderFailed {
+					failed = append(failed, p)
+					continue
+				}
+			}
+			known = append(known, p)
 		}
 		if len(known) > 0 {
 			fmt.Fprintf(w, "    <D:propstat>\n")
 			fmt.Fprintf(w, "      <D:prop>\n")
 			for _, p := range known {
-				writeSingleEventProp(w, p.XMLName, obj)
+				writeSingleEventProp(w, p.XMLName, obj, icalText)
 			}
 			fmt.Fprintf(w, "      </D:prop>\n")
 			fmt.Fprintf(w, "      <D:status>HTTP/1.1 200 OK</D:status>\n")
 			fmt.Fprintf(w, "    </D:propstat>\n")
+		}
+		if len(failed) > 0 {
+			writePropStatEmpty(w, failed, "HTTP/1.1 500 Internal Server Error")
 		}
 		if len(unknown) > 0 {
 			writePropStatNotFound(w, unknown)
@@ -134,6 +161,13 @@ func writeResponseForEvent(w io.Writer, calUID string, obj *db.CalendarObject, p
 	}
 
 	fmt.Fprintf(w, "  </D:response>\n")
+}
+
+// needsRenderedICal reports whether an event property's value is derived from
+// the served iCalendar text.
+func needsRenderedICal(name xml.Name) bool {
+	return (name.Space == nsDAV && name.Local == "getcontentlength") ||
+		(name.Space == nsC && name.Local == "calendar-data")
 }
 
 // isKnownEventProp returns true if the property is supported for individual
@@ -155,7 +189,9 @@ func isKnownEventProp(name xml.Name) bool {
 }
 
 // writeSingleEventProp writes a single property for an event resource.
-func writeSingleEventProp(w io.Writer, name xml.Name, obj *db.CalendarObject) {
+// icalText is the rendered iCalendar body (renderObjectICal); it is only read
+// for getcontentlength and calendar-data.
+func writeSingleEventProp(w io.Writer, name xml.Name, obj *db.CalendarObject, icalText string) {
 	switch name.Space {
 	case nsDAV:
 		switch name.Local {
@@ -168,7 +204,8 @@ func writeSingleEventProp(w io.Writer, name xml.Name, obj *db.CalendarObject) {
 		case "displayname":
 			fmt.Fprintf(w, "        <D:displayname>%s.ics</D:displayname>\n", xmlEscape(obj.UID))
 		case "getcontentlength":
-			fmt.Fprintf(w, "        <D:getcontentlength>%d</D:getcontentlength>\n", len(obj.ICALData))
+			// Octets of the GET body, which is written as-is (UTF-8).
+			fmt.Fprintf(w, "        <D:getcontentlength>%d</D:getcontentlength>\n", len(icalText))
 		case "getlastmodified":
 			fmt.Fprintf(w, "        <D:getlastmodified>%s</D:getlastmodified>\n", obj.UpdatedAt.UTC().Format(http.TimeFormat))
 		case "creationdate":
@@ -177,7 +214,10 @@ func writeSingleEventProp(w io.Writer, name xml.Name, obj *db.CalendarObject) {
 	case nsC:
 		switch name.Local {
 		case "calendar-data":
-			fmt.Fprintf(w, "        <C:calendar-data><![CDATA[%s]]></C:calendar-data>\n", obj.ICALData)
+			// A "]]>" inside client text would end the CDATA section early;
+			// split it across two sections, as writeReportResponse does.
+			fmt.Fprintf(w, "        <C:calendar-data><![CDATA[%s]]></C:calendar-data>\n",
+				strings.ReplaceAll(icalText, "]]>", "]]]]><![CDATA[>"))
 		}
 	}
 }
@@ -314,6 +354,13 @@ func writeSingleProp(w io.Writer, cal *db.Calendar, name xml.Name) {
 
 // writePropStatNotFound writes a propstat with 404 for unsupported properties.
 func writePropStatNotFound(w io.Writer, props []xmlElement) {
+	writePropStatEmpty(w, props, "HTTP/1.1 404 Not Found")
+}
+
+// writePropStatEmpty writes a propstat listing props as empty elements with
+// the given status line (e.g. 404 for unknown properties, 500 for properties
+// whose value could not be produced).
+func writePropStatEmpty(w io.Writer, props []xmlElement, status string) {
 	fmt.Fprint(w, "    <D:propstat>\n")
 	fmt.Fprint(w, "      <D:prop>\n")
 	for _, p := range props {
@@ -322,7 +369,7 @@ func writePropStatNotFound(w io.Writer, props []xmlElement) {
 			prefixForNamespace(p.XMLName.Space), p.XMLName.Space)
 	}
 	fmt.Fprint(w, "      </D:prop>\n")
-	fmt.Fprint(w, "      <D:status>HTTP/1.1 404 Not Found</D:status>\n")
+	fmt.Fprintf(w, "      <D:status>%s</D:status>\n", status)
 	fmt.Fprint(w, "    </D:propstat>\n")
 }
 
