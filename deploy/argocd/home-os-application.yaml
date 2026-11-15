@@ -1,0 +1,70 @@
+# Argo CD Application for Home OS (family hub).
+#
+# No credentials live in this manifest. The chart reads them from Secrets that
+# are pre-created in namespace home-os (see create-home-os-secrets.sh):
+#   home-os-secrets    Opaque: jwtSecret, calendarSecret, typesenseApiKey,
+#                      encryptionKey, adminEmail, adminPassword
+#   home-os-db-secret  kubernetes.io/basic-auth: username=app, password
+#                      (CNPG initdb owner secret; also used by Dex and workloads)
+# Both Secrets are annotated argocd.argoproj.io/sync-options: Prune=false and
+# carry no Argo tracking-id, so a sync never prunes or overwrites them.
+#
+# Requires a chart revision with existingSecret support (home-os #4411,
+# feat/family-hub). Manual sync only: there is no syncPolicy.automated.
+#
+# Apply: kubectl apply -f home-os-argocd.yaml  (does not trigger a sync)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: home-os
+  namespace: argocd
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: home-os
+  source:
+    repoURL: https://github.com/jacobsims214/home-os.git
+    targetRevision: main
+    path: deploy/helm/home-os
+    helm:
+      parameters:
+        - name: global.imageTag
+          value: latest
+        - name: dex.uiRedirectURI
+          value: https://homeos.simstech.cloud/api/auth/callback
+      valuesObject:
+        namespace: home-os
+        global:
+          imageRegistry: ghcr.io/jacobsims214/home-os
+          imageTag: latest
+          imagePullPolicy: Always
+        api:
+          allowRegistration: "false"
+          publicUrl: https://homeos.simstech.cloud
+        mcp:
+          replicas: 0
+        ingress:
+          enabled: true
+          className: traefik
+          host: homeos.simstech.cloud
+          tlsEnabled: true
+          tlsSecret: simstech-wildcard-tls
+          annotations: {}
+        database:
+          mode: managed
+          managed:
+            existingSecret: home-os-db-secret
+            instances: 2
+            storage: 10Gi
+            backup:
+              enabled: true
+              schedule: "0 2 * * *"
+        dex:
+          existingSecret: home-os-db-secret
+        secrets:
+          existingSecret: home-os-secrets
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
