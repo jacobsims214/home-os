@@ -25,6 +25,7 @@ import (
 	"home-os/mcp/internal/calendar"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
+	"home-os/mcp/internal/sqlutil"
 )
 
 const (
@@ -266,7 +267,7 @@ func searchArea(ctx context.Context, pool *pgxpool.Pool, a area, householdID, qu
 		LIMIT $4`,
 		"t.id", a.Title, a.OpenRef, a.Doc, a.Sort, a.From, snippetBefore, snippetLen, a.Scope)
 
-	rows, err := pool.Query(ctx, sql, householdID, likePattern(query), query, limit)
+	rows, err := pool.Query(ctx, sql, householdID, sqlutil.ContainsPattern(query), query, limit)
 	if err != nil {
 		return searchGroup{}, fmt.Errorf("query %s: %w", a.Name, err)
 	}
@@ -376,7 +377,7 @@ func searchEvents(ctx context.Context, pool *pgxpool.Pool, householdID, query st
 	args := []any{householdID}
 	if !needsJSONEscape(query) {
 		sql += ` AND co.ical_data ILIKE $2 ESCAPE '\'`
-		args = append(args, likePattern(query))
+		args = append(args, sqlutil.ContainsPattern(query))
 	}
 	sql += fmt.Sprintf(` ORDER BY co.created_at DESC LIMIT %d`, eventScanLimit)
 
@@ -576,17 +577,6 @@ func nextHints(r searchResult, limit int) []string {
 		next = append(next, r.Groups[0].Items[0].Open)
 	}
 	return next
-}
-
-// likePattern turns query into an ILIKE pattern that matches it literally
-// anywhere in the text (use with ESCAPE '\').
-func likePattern(query string) string {
-	return "%" + escapeLike(query) + "%"
-}
-
-// escapeLike escapes LIKE wildcards so query matches literally.
-func escapeLike(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
 // needsJSONEscape reports whether encoding s as a JSON string might change any

@@ -15,6 +15,7 @@ import (
 
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
+	"home-os/mcp/internal/sqlutil"
 )
 
 // toolHandler is the handler signature server.RegisterTool takes.
@@ -149,7 +150,8 @@ func NewPersonFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			add("(p.id::text = $%[1]d OR p.user_id::text = $%[1]d)", strings.ToLower(id))
 		}
 		if query != "" {
-			add("(p.display_name ILIKE '%%' || $%[1]d || '%%' OR u.email ILIKE '%%' || $%[1]d || '%%')", query)
+			// Escaped so "%" and "_" match literally, not as wildcards.
+			add(`(p.display_name ILIKE $%[1]d ESCAPE '\' OR u.email ILIKE $%[1]d ESCAPE '\')`, sqlutil.ContainsPattern(query))
 		}
 		if relationship != "" {
 			add("lower(p.relationship) = lower($%d)", relationship)

@@ -314,3 +314,61 @@ func TestPersonFind(t *testing.T) {
 		}
 	})
 }
+
+// TestPersonFindLiteralWildcards: % and _ in query match literally (#4670).
+func TestPersonFindLiteralWildcards(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	_, tool, h := NewPersonFindTool(pool)
+	rs := outputSchema(t, tool)
+
+	// viewer's email ("viewer-<hex>@test.homeos.local") and the owner's
+	// contain no % or _, so only this display name holds them.
+	viewerCtx := addMember(t, pool, hh, "viewer")
+	viewerPerson := personIDOf(t, pool, hh.HouseholdID, server.ClaimsFromContext(viewerCtx).UserID)
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE people SET display_name = 'Pat_O 100%' WHERE id = $1`, viewerPerson); err != nil {
+		t.Fatal(err)
+	}
+	ownerPerson := personIDOf(t, pool, hh.HouseholdID, hh.UserID.String())
+
+	cases := []struct {
+		query string
+		want  []string
+	}{
+		{"%", []string{viewerPerson}},   // literal % only in "100%"
+		{"_", []string{viewerPerson}},   // literal _ only in "Pat_O"
+		{"t_O", []string{viewerPerson}}, // literal match across _
+		{"0%", []string{viewerPerson}},
+		{"%%", []string{}},  // would match everyone as a wildcard
+		{"P_t", []string{}}, // "_" as a wildcard would match "Pat"
+		{"Test%Owner", []string{}},
+		{"Test Owner", []string{ownerPerson}},
+		{`\`, []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.query, func(t *testing.T) {
+			env, _ := callEnvelope(t, ctx, h, rs, map[string]any{"query": tc.query})
+			if !env.OK {
+				t.Fatalf("want ok, got %+v", env)
+			}
+			got := make([]string, len(env.Items))
+			for i, p := range env.Items {
+				got[i] = p.ID
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("query %q: ids = %v, want %v", tc.query, got, tc.want)
+			}
+		})
+	}
+
+	// With no literal % anywhere, "%" finds nobody.
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE people SET display_name = 'Pat' WHERE id = $1`, viewerPerson); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := callEnvelope(t, ctx, h, rs, map[string]any{"query": "%"})
+	if !env.OK || len(env.Items) != 0 {
+		t.Fatalf(`query "%%" with no literal %%: got %+v`, env)
+	}
+}
