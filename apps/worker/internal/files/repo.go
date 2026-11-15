@@ -231,61 +231,76 @@ func (r *Repo) UpdateOCRStatus(ctx context.Context, fileID uuid.UUID, ocrStatus 
 	return nil
 }
 
-// IndexableFile is the slice of a files row the worker needs to build a
-// Typesense FileDocument after OCR completes: the file's own identity plus the
-// polymorphic attach target and tags. extracted_text is intentionally absent —
-// the processor already has it in memory from Tika and passes it through to
-// the indexer separately, avoiding a second read of a potentially-large TEXT
-// column that the processor already wrote.
+// IndexableFile is the slice of a files row the worker needs to index the
+// file in Typesense: its identity, the polymorphic attach target, tags, the
+// OCR text, and updated_at (the version the re-index sweep tracks).
 type IndexableFile struct {
-	ID          uuid.UUID
-	HouseholdID uuid.UUID
-	Name        string
-	EntityType  string
-	EntityID    uuid.UUID
-	Tags        []string
-	CreatedAt   time.Time
+	ID            uuid.UUID
+	HouseholdID   uuid.UUID
+	Name          string
+	EntityType    string
+	EntityID      uuid.UUID
+	Tags          []string
+	ExtractedText string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
-// GetForIndex returns the metadata needed to index a file in Typesense after
-// OCR. It is NOT scoped by household_id — the worker already proved it owns
-// the row via ListPending (which scans across all households by design), and
-// re-checking household ownership here would just duplicate that trust
-// boundary.
-//
-// Returns (nil, nil) — not pgx.ErrNoRows — if the file no longer exists, so
-// the processor can treat a vanished file as "nothing to index" without a
-// special-case error branch. This mirrors the not-found contract of the API's
-// GetFile rather than the UpdateOCRStatus ErrNoRows contract, because the
-// caller is a read path, not a write path.
-func (r *Repo) GetForIndex(ctx context.Context, fileID uuid.UUID) (*IndexableFile, error) {
-	var (
-		f          IndexableFile
-		entityType *string
-		entityID   *uuid.UUID
-	)
-	err := r.pool.QueryRow(ctx,
-		`SELECT id, household_id, name, entity_type, entity_id, tags, created_at
+// IndexCursor is a position in (updated_at, id) order. The zero value is
+// before every row.
+type IndexCursor struct {
+	UpdatedAt time.Time
+	ID        uuid.UUID
+}
+
+// ListIndexable returns up to limit files with ocr_status='done' that come
+// after cursor in (updated_at, id) order, oldest first. updated_at moves on
+// every write to a files row (OCR completion, rename, tag edit), so walking
+// this order from the last indexed position finds every file whose search
+// document is stale. It is NOT scoped by household_id: the worker indexes
+// every household.
+func (r *Repo) ListIndexable(ctx context.Context, after IndexCursor, limit int) ([]IndexableFile, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, household_id, name, entity_type, entity_id, tags,
+		        COALESCE(extracted_text, ''), created_at, updated_at
 		 FROM files
-		 WHERE id = $1`,
-		fileID,
-	).Scan(&f.ID, &f.HouseholdID, &f.Name, &entityType, &entityID, &f.Tags, &f.CreatedAt)
+		 WHERE ocr_status = $1
+		   AND (updated_at > $2 OR (updated_at = $2 AND id > $3))
+		 ORDER BY updated_at, id
+		 LIMIT $4`,
+		OCRStatusDone, after.UpdatedAt, after.ID, limit,
+	)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
+		return nil, fmt.Errorf("files: list indexable: %w", err)
+	}
+	defer rows.Close()
+
+	var out []IndexableFile
+	for rows.Next() {
+		var (
+			f          IndexableFile
+			entityType *string
+			entityID   *uuid.UUID
+		)
+		if err := rows.Scan(&f.ID, &f.HouseholdID, &f.Name, &entityType, &entityID, &f.Tags,
+			&f.ExtractedText, &f.CreatedAt, &f.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("files: list indexable: scan: %w", err)
 		}
-		return nil, fmt.Errorf("files: get for index: %w", err)
+		if entityType != nil {
+			f.EntityType = *entityType
+		}
+		if entityID != nil {
+			f.EntityID = *entityID
+		}
+		if f.Tags == nil {
+			f.Tags = []string{}
+		}
+		out = append(out, f)
 	}
-	if entityType != nil {
-		f.EntityType = *entityType
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("files: list indexable: %w", err)
 	}
-	if entityID != nil {
-		f.EntityID = *entityID
-	}
-	if f.Tags == nil {
-		f.Tags = []string{}
-	}
-	return &f, nil
+	return out, nil
 }
 
 // GetEntityName resolves the human-readable name of the entity a file is

@@ -59,6 +59,13 @@ const (
 	// existing document synchronously, so this is much longer than the
 	// per-request timeout.
 	schemaTimeout = 5 * time.Minute
+
+	// filesPerPage / filesMaxResults: the worker stores a long file as
+	// several chunk documents sharing file_id (apps/worker/internal/search),
+	// so the files query fetches more hits than it returns and keeps only the
+	// best-ranked chunk of each file.
+	filesPerPage    = 50
+	filesMaxResults = 10
 )
 
 // householdEmbedFrom / filesEmbedFrom are the text fields each collection's
@@ -423,16 +430,19 @@ func (c *Client) DeleteDocument(ctx context.Context, id string) error {
 // semantic, fused by Typesense's rank fusion). Results from all collections
 // are merged and returned.
 func (c *Client) Search(ctx context.Context, householdID, query string, filters SearchFilters) ([]SearchResult, error) {
-	mainResults, err := c.searchCollection(ctx, collectionName, householdID, query, filters, "title,body,tags")
+	mainResults, err := c.searchCollection(ctx, collectionName, householdID, query, filters, "title,body,tags", 0)
 	if err != nil {
 		slog.Warn("search: household_search query failed", "error", err)
 	}
 
 	// Files use entity_type for the attached entity, not the file itself.
 	// If the user filters by entity type, we want to match files attached to that type.
-	fileResults, err := c.searchCollection(ctx, filesCollectionName, householdID, query, filters, "name,extracted_text")
+	fileResults, err := c.searchCollection(ctx, filesCollectionName, householdID, query, filters, "name,extracted_text", filesPerPage)
 	if err != nil {
 		slog.Warn("search: files query failed", "error", err)
+	}
+	if len(fileResults) > filesMaxResults {
+		fileResults = fileResults[:filesMaxResults]
 	}
 
 	results := make([]SearchResult, 0, len(mainResults)+len(fileResults))
@@ -494,17 +504,26 @@ type searchResponse struct {
 // scoping. It tries a hybrid query first and falls back to keyword-only when
 // the collection has no embedding field yet (e.g. files created by the
 // worker before the API migrated it, or a keyword-only fallback schema).
-func (c *Client) searchCollection(ctx context.Context, collName, householdID, query string, filters SearchFilters, queryBy string) ([]SearchResult, error) {
+//
+// perPage > 0 sets per_page (Typesense's default is 10).
+func (c *Client) searchCollection(ctx context.Context, collName, householdID, query string, filters SearchFilters, queryBy string, perPage int) ([]SearchResult, error) {
 	filterBy := buildFilter(householdID, filters)
 	path := "/collections/" + url.PathEscape(collName) + "/documents/search?"
+	params := func(hybrid bool) string {
+		v := searchParams(query, queryBy, filterBy, hybrid)
+		if perPage > 0 {
+			v.Set("per_page", strconv.Itoa(perPage))
+		}
+		return v.Encode()
+	}
 
 	var resp searchResponse
-	err := c.do(ctx, c.httpClient, http.MethodGet, path+searchParams(query, queryBy, filterBy, true).Encode(), nil, &resp)
+	err := c.do(ctx, c.httpClient, http.MethodGet, path+params(true), nil, &resp)
 	var se *statusError
 	if errors.As(err, &se) && !strings.Contains(se.Body, "Collection not found") {
 		slog.Debug("search: hybrid query failed, retrying keyword-only", "collection", collName, "error", err)
 		resp = searchResponse{}
-		err = c.do(ctx, c.httpClient, http.MethodGet, path+searchParams(query, queryBy, filterBy, false).Encode(), nil, &resp)
+		err = c.do(ctx, c.httpClient, http.MethodGet, path+params(false), nil, &resp)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("search %s: %w", collName, err)
@@ -513,13 +532,22 @@ func (c *Client) searchCollection(ctx context.Context, collName, householdID, qu
 }
 
 // toResults maps Typesense hits to SearchResults. Score is the rank-fusion
-// score for hybrid hits (0..1) and the text-match score otherwise.
+// score for hybrid hits (0..1) and the text-match score otherwise. Hits
+// carrying a file_id (chunks of one file in the files collection) are
+// collapsed to the first, best-ranked one, whose body is the matching chunk.
 func toResults(hits []searchHit) []SearchResult {
 	results := make([]SearchResult, 0, len(hits))
+	seenFiles := map[string]bool{}
 	for _, hit := range hits {
 		doc := hit.Document
 		if doc == nil {
 			continue
+		}
+		if fid, ok := doc["file_id"].(string); ok && fid != "" {
+			if seenFiles[fid] {
+				continue
+			}
+			seenFiles[fid] = true
 		}
 		str := func(keys ...string) string {
 			for _, k := range keys {

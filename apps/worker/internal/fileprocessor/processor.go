@@ -25,6 +25,19 @@
 // text/plain files skip Tika: the blob is already text, so it is copied
 // into extracted_text and the file is marked done on its first tick.
 //
+// Search indexing: after the OCR work, each tick runs an index sweep
+// (indexOnce). It walks done files in (updated_at, id) order from a cursor
+// and (re)indexes each one into the Typesense `files` collection, split into
+// chunks small enough for the embedding model (search.Chunk). Every write to
+// a files row bumps updated_at, so the same sweep covers OCR completion and
+// metadata edits (rename, tags via PATCH /api/v1/files/{id}); there are no
+// file outbox events to listen to. The cursor starts from the newest
+// row_version already in Typesense (search.Client.IndexWatermark), so a
+// restart neither re-embeds everything nor misses edits made while the
+// worker was down. A Typesense outage stops the sweep at the first file that
+// fails and the next tick resumes there; a file Typesense rejects outright
+// is logged and skipped.
+//
 // Graceful shutdown: Run blocks until ctx is cancelled (SIGINT/SIGTERM).
 // An in-flight processFile call is allowed to complete; the next tick
 // is not started. This bounds shutdown latency to one Tika call
@@ -83,19 +96,38 @@ type store interface {
 	ListRetryable(ctx context.Context, limit int) ([]files.RetryableFile, error)
 	GetBlob(ctx context.Context, fileID uuid.UUID) ([]byte, error)
 	UpdateOCRStatus(ctx context.Context, fileID uuid.UUID, ocrStatus string, extractedText *string, ocrError *string) error
-	GetForIndex(ctx context.Context, fileID uuid.UUID) (*files.IndexableFile, error)
+	ListIndexable(ctx context.Context, after files.IndexCursor, limit int) ([]files.IndexableFile, error)
 	GetEntityName(ctx context.Context, entityType string, entityID uuid.UUID) (string, error)
 }
+
+// indexer is the slice of search.Client the processor uses. Tests supply a
+// fake.
+type indexer interface {
+	InitCollection(ctx context.Context) error
+	IndexWatermark(ctx context.Context) (search.Watermark, error)
+	IndexFile(ctx context.Context, doc search.FileDocument, chunks []string) error
+	DeleteFile(ctx context.Context, fileID string) error
+}
+
+// DefaultIndexBatchLimit is the max number of files (re)indexed per tick.
+// Each file can be up to search.MaxChunks embeddings, so this is smaller
+// than the OCR batch.
+const DefaultIndexBatchLimit = 20
 
 // Processor runs the file OCR polling loop. Construct one with New and
 // run it with Run(ctx). A Processor is safe to run on a single goroutine
 // only; do not call Run concurrently on the same instance.
 type Processor struct {
-	repo           store
-	tikaClient     *tika.Client
-	searchClient   *search.Client // nil = indexing disabled (graceful degradation)
-	interval       time.Duration
-	batchLimit     int
+	repo         store
+	tikaClient   *tika.Client
+	searchClient indexer // nil = indexing disabled (graceful degradation)
+	interval     time.Duration
+	batchLimit   int
+	indexBatch   int
+	// indexCursor is where the next index sweep starts; indexReady reports
+	// whether it has been loaded from Typesense yet.
+	indexCursor    files.IndexCursor
+	indexReady     bool
 	maxRetries     int
 	retryBaseDelay time.Duration
 	now            func() time.Time
@@ -149,7 +181,18 @@ func WithRetryBaseDelay(d time.Duration) Option {
 // is unavailable or not yet configured.
 func WithSearchClient(c *search.Client) Option {
 	return func(p *Processor) {
-		p.searchClient = c
+		if c != nil {
+			p.searchClient = c
+		}
+	}
+}
+
+// WithIndexBatchLimit overrides the max files indexed per tick.
+func WithIndexBatchLimit(n int) Option {
+	return func(p *Processor) {
+		if n > 0 {
+			p.indexBatch = n
+		}
 	}
 }
 
@@ -163,6 +206,7 @@ func New(repo *files.Repo, tikaClient *tika.Client, opts ...Option) *Processor {
 		tikaClient:     tikaClient,
 		interval:       DefaultInterval,
 		batchLimit:     DefaultBatchLimit,
+		indexBatch:     DefaultIndexBatchLimit,
 		maxRetries:     DefaultMaxRetries,
 		retryBaseDelay: DefaultRetryBaseDelay,
 		now:            time.Now,
@@ -201,12 +245,25 @@ func (p *Processor) Run(ctx context.Context) error {
 	}
 }
 
-// processOnce runs a single polling tick: process pending files first,
-// then failed files whose retry is due, up to batchLimit files in all.
-// Returns an error only if a listing query fails (a DB problem);
-// per-file failures are logged and recorded on the row but do not
-// propagate.
+// processOnce runs a single polling tick: the OCR work (ocrOnce), then
+// the search index sweep (indexOnce), so a file OCR'd in this tick is
+// searchable by the end of it.
 func (p *Processor) processOnce(ctx context.Context) error {
+	ocrErr := p.ocrOnce(ctx)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err := p.indexOnce(ctx); err != nil {
+		return errors.Join(ocrErr, err)
+	}
+	return ocrErr
+}
+
+// ocrOnce processes pending files first, then failed files whose retry is
+// due, up to batchLimit files in all. Returns an error only if a listing
+// query fails (a DB problem); per-file failures are logged and recorded
+// on the row but do not propagate.
+func (p *Processor) ocrOnce(ctx context.Context) error {
 	pending, err := p.repo.ListPending(ctx, p.batchLimit)
 	if err != nil {
 		return fmt.Errorf("list pending files: %w", err)
@@ -317,79 +374,114 @@ func (p *Processor) processFile(ctx context.Context, f files.PendingFile, priorF
 	p.markDone(ctx, f.ID, text, logger)
 }
 
-// markDone writes extracted_text, sets ocr_status=done (clearing any
-// earlier error or retry marker) and then indexes the file.
+// markDone writes extracted_text and sets ocr_status=done (clearing any
+// earlier error or retry marker). The write bumps updated_at, so the index
+// sweep at the end of this tick indexes the file.
 func (p *Processor) markDone(ctx context.Context, fileID uuid.UUID, text string, logger *slog.Logger) {
 	if err := p.repo.UpdateOCRStatus(ctx, fileID, files.OCRStatusDone, ptrString(text), nil); err != nil {
 		logger.Error("failed to mark file done", "error", err)
 		return
 	}
 	logger.Info("file processed", "text_bytes", len(text))
-
-	// Index the file in Typesense now that OCR is done. Indexing is a
-	// best-effort side-effect of OCR completion: a Typesense failure does
-	// NOT roll back the OCR done status (the file's extracted_text is the
-	// source of truth in Postgres and a re-index job can catch up later).
-	// We log and move on so one bad index call can't stall the batch.
-	if p.searchClient == nil {
-		return
-	}
-	if err := p.indexFile(ctx, fileID, text, logger); err != nil {
-		logger.Error("failed to index file in typesense (ocr_status stays done)", "error", err)
-	}
 }
 
-// indexFile builds a FileDocument from the file row plus the just-extracted
-// text and upserts it into Typesense. It performs two extra reads: one to
-// fetch the file's metadata (name, entity_type, entity_id, tags, created_at)
-// and one to denormalize the attached entity's name. Both reads are
-// per-file; the cost is acceptable because OCR (a 60s Tika call) dominates.
-func (p *Processor) indexFile(ctx context.Context, fileID uuid.UUID, extractedText string, logger *slog.Logger) error {
-	meta, err := p.repo.GetForIndex(ctx, fileID)
-	if err != nil {
-		return fmt.Errorf("fetch file metadata: %w", err)
-	}
-	if meta == nil {
-		// File was deleted between OCR and indexing — nothing to index.
-		// The delete path should have already removed it from Typesense.
-		logger.Info("file disappeared before typesense indexing; skipping")
+// indexOnce runs one index sweep: it (re)indexes up to indexBatch done
+// files changed since the cursor. Indexing is a best-effort side effect:
+// Postgres stays the source of truth, and a Typesense failure never
+// changes a file's OCR status. It returns an error only if listing files
+// fails.
+func (p *Processor) indexOnce(ctx context.Context) error {
+	if p.searchClient == nil {
 		return nil
 	}
+	if !p.indexReady {
+		// Create or migrate the collection first: it may not exist if
+		// Typesense was down when the worker started.
+		if err := p.searchClient.InitCollection(ctx); err != nil {
+			slog.Warn("search index sweep: collection init failed; will retry", "error", err)
+			return nil
+		}
+		wm, err := p.searchClient.IndexWatermark(ctx)
+		if err != nil {
+			slog.Warn("search index sweep: cannot read index watermark; will retry", "error", err)
+			return nil
+		}
+		p.indexCursor = cursorFromWatermark(wm)
+		p.indexReady = true
+		slog.Info("search index sweep: resuming", "after_updated_at", p.indexCursor.UpdatedAt, "after_file_id", p.indexCursor.ID)
+	}
 
-	entityName, err := p.repo.GetEntityName(ctx, meta.EntityType, meta.EntityID)
+	batch, err := p.repo.ListIndexable(ctx, p.indexCursor, p.indexBatch)
 	if err != nil {
-		// GetEntityName never returns an error for unknown/deleted entities
-		// (it returns "" in those cases), so an error here is a real DB
-		// problem. Log it but still index — the file is searchable by name
-		// and extracted_text without entity_name.
+		return fmt.Errorf("list files to index: %w", err)
+	}
+	for _, f := range batch {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		logger := slog.With("file_id", f.ID, "household_id", f.HouseholdID)
+		if err := p.indexFile(ctx, f, logger); err != nil {
+			if !search.IsPermanent(err) {
+				// Typesense down or busy: stop here and resume from this
+				// file on the next tick.
+				logger.Error("failed to index file in typesense; will retry next tick", "error", err)
+				return nil
+			}
+			logger.Error("typesense rejected file; skipping it until it changes", "error", err)
+		}
+		p.indexCursor = files.IndexCursor{UpdatedAt: f.UpdatedAt, ID: f.ID}
+	}
+	return nil
+}
+
+// cursorFromWatermark converts the index watermark (row_version in unix
+// micros) back to a files cursor. Postgres timestamps have microsecond
+// precision, so the round trip is exact.
+func cursorFromWatermark(wm search.Watermark) files.IndexCursor {
+	if wm.RowVersion <= 0 {
+		return files.IndexCursor{}
+	}
+	id, _ := uuid.Parse(wm.FileID) // a bad id leaves uuid.Nil: re-index ties
+	return files.IndexCursor{UpdatedAt: time.UnixMicro(wm.RowVersion).UTC(), ID: id}
+}
+
+// indexFile chunks one file's text and upserts it into Typesense, with the
+// attached entity's name denormalized onto every chunk.
+func (p *Processor) indexFile(ctx context.Context, f files.IndexableFile, logger *slog.Logger) error {
+	entityName, err := p.repo.GetEntityName(ctx, f.EntityType, f.EntityID)
+	if err != nil {
+		// GetEntityName returns "" (not an error) for unknown or deleted
+		// entities, so this is a real DB problem. Index without it; the
+		// file is still searchable by name and text.
 		logger.Error("failed to resolve entity_name; indexing without it", "error", err)
 		entityName = ""
 	}
 
 	doc := search.FileDocument{
-		ID:            meta.ID.String(),
-		HouseholdID:   meta.HouseholdID.String(),
-		Name:          meta.Name,
-		ExtractedText: extractedText,
-		EntityType:    meta.EntityType,
-		EntityID:      meta.EntityID.String(),
-		EntityName:    entityName,
-		Tags:          meta.Tags,
-		CreatedAt:     meta.CreatedAt.UnixMilli(),
+		ID:          f.ID.String(),
+		HouseholdID: f.HouseholdID.String(),
+		Name:        f.Name,
+		EntityName:  entityName,
+		Tags:        f.Tags,
+		CreatedAt:   f.CreatedAt.UnixMilli(),
+		RowVersion:  f.UpdatedAt.UnixMicro(),
 	}
-	// An empty EntityType / EntityID should not appear in the JSON payload
-	// so Typesense stores them as missing rather than empty strings — the
-	// schema marks both optional, and an empty entity_id would be a
-	// misleading "00000…" uuid.Nil string.
-	if meta.EntityType == "" {
-		doc.EntityType = ""
-		doc.EntityID = ""
+	// An unattached file has no entity_type/entity_id in Typesense (both
+	// optional) rather than "" and a misleading uuid.Nil string.
+	if f.EntityType != "" {
+		doc.EntityType = f.EntityType
+		doc.EntityID = f.EntityID.String()
 	}
 
-	if err := p.searchClient.IndexFile(ctx, doc); err != nil {
+	chunks, truncated := search.Chunk(f.ExtractedText)
+	if truncated {
+		logger.Warn("extracted text exceeds the chunk cap; indexing only the beginning",
+			"text_bytes", len(f.ExtractedText), "max_chunks", search.MaxChunks)
+	}
+	if err := p.searchClient.IndexFile(ctx, doc, chunks); err != nil {
 		return err
 	}
-	logger.Info("file indexed in typesense", "entity_type", meta.EntityType, "entity_name", entityName)
+	logger.Info("file indexed in typesense", "chunks", max(len(chunks), 1), "entity_type", f.EntityType)
 	return nil
 }
 

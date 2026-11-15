@@ -137,7 +137,7 @@ func TestTypesenseHybridIntegration(t *testing.T) {
 	}
 	file := map[string]any{"id": "f1", "household_id": "h1", "name": "scan-0042.pdf",
 		"extracted_text": "Homeowners insurance declarations page. Dwelling coverage and liability limits.",
-		"entity_type": "property", "entity_id": "p1", "tags": []string{}, "created_at": 1}
+		"entity_type":    "property", "entity_id": "p1", "tags": []string{}, "created_at": 1}
 	require.NoError(t, c.do(ctx, c.httpClient, http.MethodPost,
 		"/collections/files/documents?action=upsert", file, nil))
 
@@ -185,4 +185,29 @@ func TestTypesenseHybridIntegration(t *testing.T) {
 	require.NoError(t, c.do(ctx, c.httpClient, http.MethodGet,
 		"/collections/household_search/documents/search?"+q.Encode(), nil, &count))
 	assert.Equal(t, 1, count.Found, "reindexed document is embedded")
+}
+
+// Chunks of one file (worker-side chunking, shared file_id) collapse to the
+// best-ranked one; household docs (no file_id) are never collapsed.
+func TestToResultsCollapsesFileChunks(t *testing.T) {
+	hit := func(doc map[string]any, score float64) searchHit {
+		h := searchHit{Document: doc}
+		h.HybridSearchInfo = &struct {
+			RankFusionScore float64 `json:"rank_fusion_score"`
+		}{score}
+		return h
+	}
+	got := toResults([]searchHit{
+		hit(map[string]any{"file_id": "f1", "name": "Policy.pdf", "extracted_text": "burst pipe clause"}, 0.9),
+		hit(map[string]any{"file_id": "f2", "name": "Rex.txt", "extracted_text": "vaccination"}, 0.8),
+		hit(map[string]any{"file_id": "f1", "name": "Policy.pdf", "extracted_text": "premiums"}, 0.7),
+		hit(map[string]any{"title": "Note A", "body": "x"}, 0.6),
+		hit(map[string]any{"title": "Note B", "body": "y"}, 0.5),
+	})
+	if assert.Len(t, got, 4) {
+		assert.Equal(t, "burst pipe clause", got[0].Body)
+		assert.Equal(t, "Rex.txt", got[1].Title)
+		assert.Equal(t, "Note A", got[2].Title)
+		assert.Equal(t, "Note B", got[3].Title)
+	}
 }

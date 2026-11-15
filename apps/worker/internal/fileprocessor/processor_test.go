@@ -1,11 +1,13 @@
 package fileprocessor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -27,6 +29,9 @@ type fakeRow struct {
 	status        string
 	extractedText *string
 	ocrError      *string
+	name          string
+	tags          []string
+	updatedAt     time.Time
 }
 
 // fakeStore implements store in memory. ListRetryable mirrors the SQL
@@ -35,6 +40,13 @@ type fakeStore struct {
 	rows  map[uuid.UUID]*fakeRow
 	order []uuid.UUID
 	now   func() time.Time
+	seq   int // makes updated_at strictly increase, like distinct transactions
+}
+
+// touch bumps a row's updated_at, as every UPDATE of files does.
+func (s *fakeStore) touch(r *fakeRow) {
+	s.seq++
+	r.updatedAt = s.now().Add(time.Duration(s.seq) * time.Microsecond).UTC().Truncate(time.Microsecond)
 }
 
 func newFakeStore(now func() time.Time) *fakeStore {
@@ -43,7 +55,9 @@ func newFakeStore(now func() time.Time) *fakeStore {
 
 func (s *fakeStore) add(contentType string, blob []byte) uuid.UUID {
 	id := uuid.New()
-	s.rows[id] = &fakeRow{householdID: uuid.New(), contentType: contentType, blob: blob, status: files.OCRStatusPending}
+	r := &fakeRow{householdID: uuid.New(), contentType: contentType, blob: blob, status: files.OCRStatusPending, name: "file-" + id.String()[:8]}
+	s.touch(r)
+	s.rows[id] = r
 	s.order = append(s.order, id)
 	return id
 }
@@ -103,11 +117,37 @@ func (s *fakeStore) UpdateOCRStatus(_ context.Context, id uuid.UUID, status stri
 		r.extractedText = text
 	}
 	r.ocrError = ocrErr
+	s.touch(r)
 	return nil
 }
 
-func (s *fakeStore) GetForIndex(context.Context, uuid.UUID) (*files.IndexableFile, error) {
-	return nil, nil
+// ListIndexable mirrors files.Repo.ListIndexable: done rows after the
+// cursor in (updated_at, id) order.
+func (s *fakeStore) ListIndexable(_ context.Context, after files.IndexCursor, limit int) ([]files.IndexableFile, error) {
+	var out []files.IndexableFile
+	for _, id := range s.order {
+		r := s.rows[id]
+		if r.status != files.OCRStatusDone {
+			continue
+		}
+		if r.updatedAt.Before(after.UpdatedAt) || (r.updatedAt.Equal(after.UpdatedAt) && bytes.Compare(id[:], after.ID[:]) <= 0) {
+			continue
+		}
+		out = append(out, files.IndexableFile{
+			ID: id, HouseholdID: r.householdID, Name: r.name, Tags: r.tags,
+			ExtractedText: strOrNil(r.extractedText), CreatedAt: s.now(), UpdatedAt: r.updatedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].UpdatedAt.Before(out[j].UpdatedAt)
+		}
+		return bytes.Compare(out[i].ID[:], out[j].ID[:]) < 0
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (s *fakeStore) GetEntityName(context.Context, string, uuid.UUID) (string, error) {
