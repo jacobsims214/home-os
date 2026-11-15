@@ -2,6 +2,8 @@ package calendar
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -25,20 +27,20 @@ type Calendar struct {
 
 // Event is a calendar event stored as structured JSON inside ical_data.
 type Event struct {
-	ID          string     `json:"id"`
-	CalendarID  string     `json:"calendar_id"`
-	EventType   string     `json:"event_type"`
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	Start       time.Time  `json:"start"`
-	End         time.Time  `json:"end"`
-	AllDay      bool       `json:"all_day"`
-	Location    string     `json:"location"`
-	Color       string     `json:"color"`
-	EntityType  string     `json:"entity_type,omitempty"`
-	EntityID    string     `json:"entity_id,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID          string    `json:"id"`
+	CalendarID  string    `json:"calendar_id"`
+	EventType   string    `json:"event_type"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	Start       time.Time `json:"start"`
+	End         time.Time `json:"end"`
+	AllDay      bool      `json:"all_day"`
+	Location    string    `json:"location"`
+	Color       string    `json:"color"`
+	EntityType  string    `json:"entity_type,omitempty"`
+	EntityID    string    `json:"entity_id,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Repo handles calendar database operations.
@@ -347,98 +349,178 @@ func (r *Repo) DeleteEvent(ctx context.Context, eventID uuid.UUID) error {
 	return nil
 }
 
-// UpsertMaintenanceEvent creates or updates a calendar event linked to a
-// maintenance task. If a calendar_object with entity_type='maintenance_task' and
-// entity_id=<taskID> already exists, it's updated; otherwise a new one is
-// created. This is called by the maintenance handler when a task with a
-// due_date is created or updated.
-func (r *Repo) UpsertMaintenanceEvent(ctx context.Context, householdID uuid.UUID, taskID uuid.UUID, propertyID *uuid.UUID, title, description string, dueDate time.Time) error {
-	// Find the household's first calendar (all events go on the first calendar).
-	cals, err := r.ListCalendars(ctx, householdID)
-	if err != nil || len(cals) == 0 {
-		return fmt.Errorf("upsert maintenance event: no calendar: %w", err)
-	}
-	calendarID := cals[0].ID
+// ─────────────────────────────────────────────
+// Maintenance sync. A maintenance task with a due date is an ALL-DAY event on
+// the family's Maintenance calendar (fallback: the family's first calendar;
+// no calendar: no event), calendar_objects entity_type 'maintenance_task',
+// entity_id = task id. Every create/update/delete records a calendar_changes
+// row and bumps the calendar ctag so phones sync.
+//
+// This mirrors apps/mcp/internal/maintenance/task.go (syncEvent,
+// recordChange, maintenance_delete) exactly; the two modules cannot share a
+// package, so a change to one must be made to the other. Both have mirrored
+// integration tests (maintenance_sync_test.go here, tools_test.go there).
+//
+// Deleting a maintenance event deletes its task through the 027 trigger
+// (AFTER DELETE since 038); deleting a task deletes its event through the
+// 038 rehome trigger.
+// ─────────────────────────────────────────────
 
-	// Build the event JSON (same format as seed data).
-	// Set start to noon UTC on the due date so it displays on the correct
-	// calendar day regardless of the user's timezone (midnight UTC would
-	// show as the previous day in US timezones).
-	startTime := time.Date(dueDate.Year(), dueDate.Month(), dueDate.Day(), 12, 0, 0, 0, time.UTC)
+// maintenanceCivil returns t's calendar date as midnight UTC, the way pgx
+// scans a DATE column.
+func maintenanceCivil(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+}
 
-	ev := &Event{
-		ID:          taskID.String(),
-		CalendarID:  calendarID,
-		EventType:   "maintenance",
-		Title:       title,
-		Description: description,
-		Start:       startTime,
-		End:         startTime.Add(time.Hour),
-		EntityType:  "maintenance_task",
-		EntityID:    taskID.String(),
+// UpsertMaintenanceEvent creates or updates the calendar event of a
+// maintenance task with a due date, in one transaction. An existing event
+// stays on its calendar and keeps keys this package doesn't model (the CalDAV
+// service's `sequence`, which is bumped). A new event goes on the Maintenance
+// calendar, or the first calendar; a family with no calendar gets no event
+// and no error.
+func (r *Repo) UpsertMaintenanceEvent(ctx context.Context, householdID, taskID uuid.UUID, title, description string, dueDate time.Time) error {
+	start := maintenanceCivil(dueDate)
+	fields := map[string]any{
+		"title":       title,
+		"description": description,
+		"start":       start.Format(time.RFC3339),
+		"end":         start.AddDate(0, 0, 1).Format(time.RFC3339),
+		"all_day":     true,
+		"event_type":  "maintenance",
 	}
-	icalData, err := marshalEventJSON(ev)
+
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return fmt.Errorf("upsert maintenance event: marshal: %w", err)
+		return fmt.Errorf("upsert maintenance event: begin tx: %w", err)
 	}
-	etag := uuid.New().String()
+	defer tx.Rollback(ctx)
 
-	// Try to find an existing calendar_object for this maintenance task.
-	var existingID string
-	err = r.pool.QueryRow(ctx,
-		`SELECT id FROM calendar_objects WHERE entity_type = 'maintenance_task' AND entity_id = $1`,
-		taskID,
-	).Scan(&existingID)
-
-	if err == nil {
-		// Update existing.
-		_, err = r.pool.Exec(ctx,
-			`UPDATE calendar_objects SET ical_data = $1, etag = $2, updated_at = NOW() WHERE id = $3`,
-			icalData, etag, existingID,
-		)
-		if err != nil {
+	var eventID, calendarID, uid, icalData string
+	err = tx.QueryRow(ctx,
+		`SELECT co.id::text, co.calendar_id::text, co.uid, co.ical_data
+		   FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
+		  WHERE c.household_id = $1 AND co.entity_id = $2
+		    AND co.entity_type IN ('maintenance', 'maintenance_task')
+		  ORDER BY co.created_at LIMIT 1
+		  FOR UPDATE OF co`, householdID, taskID,
+	).Scan(&eventID, &calendarID, &uid, &icalData)
+	switch {
+	case err == nil:
+		merged := map[string]any{}
+		if jerr := json.Unmarshal([]byte(icalData), &merged); jerr != nil {
+			merged = map[string]any{}
+		}
+		if seq, ok := merged["sequence"].(float64); ok {
+			merged["sequence"] = seq + 1
+		}
+		for k, v := range fields {
+			merged[k] = v
+		}
+		b, _ := json.Marshal(merged)
+		if _, err := tx.Exec(ctx,
+			`UPDATE calendar_objects SET ical_data = $1, etag = $2, event_type = 'maintenance',
+			        entity_type = 'maintenance_task', updated_at = NOW()
+			  WHERE id = $3`, string(b), uuid.NewString(), eventID); err != nil {
 			return fmt.Errorf("upsert maintenance event: update: %w", err)
 		}
-		// Bump CTag.
-		_, _ = r.pool.Exec(ctx, `UPDATE calendars SET ctag = gen_random_uuid()::text, updated_at = NOW() WHERE id = $1`, calendarID)
+		if err := recordMaintenanceChange(ctx, tx, calendarID, uid, "update"); err != nil {
+			return fmt.Errorf("upsert maintenance event: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("upsert maintenance event: commit: %w", err)
+		}
+		return nil
+	case errors.Is(err, pgx.ErrNoRows):
+	default:
+		return fmt.Errorf("upsert maintenance event: find event: %w", err)
+	}
+
+	err = tx.QueryRow(ctx,
+		`SELECT id::text FROM calendars WHERE household_id = $1
+		  ORDER BY (type = 'maintenance') DESC, created_at, id LIMIT 1`, householdID,
+	).Scan(&calendarID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
-
-	if err != pgx.ErrNoRows {
-		return fmt.Errorf("upsert maintenance event: query: %w", err)
-	}
-
-	// Create new.
-	ev.ID = uuid.New().String()
-	icalData, err = marshalEventJSON(ev)
 	if err != nil {
-		return fmt.Errorf("upsert maintenance event: marshal new: %w", err)
+		return fmt.Errorf("upsert maintenance event: find calendar: %w", err)
 	}
-	etag = uuid.New().String()
-
-	_, err = r.pool.Exec(ctx,
+	eventID = uuid.NewString()
+	b, _ := json.Marshal(fields)
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO calendar_objects (id, calendar_id, uid, ical_data, etag, event_type, entity_type, entity_id)
 		 VALUES ($1, $2, $3, $4, $5, 'maintenance', 'maintenance_task', $6)`,
-		ev.ID, calendarID, ev.ID, icalData, etag, taskID,
-	)
-	if err != nil {
+		eventID, calendarID, eventID, string(b), uuid.NewString(), taskID); err != nil {
 		return fmt.Errorf("upsert maintenance event: insert: %w", err)
 	}
-	// Bump CTag.
-	_, _ = r.pool.Exec(ctx, `UPDATE calendars SET ctag = gen_random_uuid()::text, updated_at = NOW() WHERE id = $1`, calendarID)
+	if err := recordMaintenanceChange(ctx, tx, calendarID, eventID, "create"); err != nil {
+		return fmt.Errorf("upsert maintenance event: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("upsert maintenance event: commit: %w", err)
+	}
 	return nil
 }
 
-// DeleteMaintenanceEvent removes the calendar event linked to a maintenance
-// task. Called when a maintenance task is deleted. The DB trigger also handles
-// the reverse direction (calendar delete → maintenance delete).
-func (r *Repo) DeleteMaintenanceEvent(ctx context.Context, taskID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx,
-		`DELETE FROM calendar_objects WHERE entity_type = 'maintenance_task' AND entity_id = $1`,
-		taskID,
-	)
+// DeleteMaintenanceEvent deletes a maintenance task's calendar events (scoped
+// to the household) and records a delete change for each, in one
+// transaction. The 027 trigger deletes the task with its event, so callers
+// use this to delete the task itself; a task with no event is left alone and
+// the caller deletes it directly. A repeat call deletes nothing and records
+// nothing.
+func (r *Repo) DeleteMaintenanceEvent(ctx context.Context, householdID, taskID uuid.UUID) error {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("delete maintenance event: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx,
+		`DELETE FROM calendar_objects co USING calendars c
+		  WHERE c.id = co.calendar_id AND c.household_id = $1
+		    AND co.entity_id = $2 AND co.entity_type IN ('maintenance', 'maintenance_task')
+		  RETURNING co.calendar_id::text, co.uid`, householdID, taskID)
 	if err != nil {
 		return fmt.Errorf("delete maintenance event: %w", err)
+	}
+	type deleted struct{ calendarID, uid string }
+	var events []deleted
+	for rows.Next() {
+		var e deleted
+		if err := rows.Scan(&e.calendarID, &e.uid); err != nil {
+			rows.Close()
+			return fmt.Errorf("delete maintenance event: scan: %w", err)
+		}
+		events = append(events, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("delete maintenance event: %w", err)
+	}
+	for _, e := range events {
+		if err := recordMaintenanceChange(ctx, tx, e.calendarID, e.uid, "delete"); err != nil {
+			return fmt.Errorf("delete maintenance event: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("delete maintenance event: commit: %w", err)
+	}
+	return nil
+}
+
+// recordMaintenanceChange adds a calendar_changes row and bumps the
+// calendar's ctag (MCP: recordChange).
+func recordMaintenanceChange(ctx context.Context, tx pgx.Tx, calendarID, uid, action string) error {
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO calendar_changes (calendar_id, event_uid, action) VALUES ($1, $2, $3)`,
+		calendarID, uid, action); err != nil {
+		return fmt.Errorf("record calendar change: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE calendars SET ctag = gen_random_uuid()::text, updated_at = NOW() WHERE id = $1`,
+		calendarID); err != nil {
+		return fmt.Errorf("bump calendar ctag: %w", err)
 	}
 	return nil
 }

@@ -24,8 +24,8 @@ type searchIndexer interface {
 
 // calendarSyncer is the subset of calendar.Repo needed for maintenance sync.
 type calendarSyncer interface {
-	UpsertMaintenanceEvent(ctx context.Context, householdID uuid.UUID, taskID uuid.UUID, propertyID *uuid.UUID, title, description string, dueDate time.Time) error
-	DeleteMaintenanceEvent(ctx context.Context, taskID uuid.UUID) error
+	UpsertMaintenanceEvent(ctx context.Context, householdID, taskID uuid.UUID, title, description string, dueDate time.Time) error
+	DeleteMaintenanceEvent(ctx context.Context, householdID, taskID uuid.UUID) error
 }
 
 // Handler holds the dependencies needed by maintenance HTTP handlers.
@@ -51,58 +51,112 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexTask(ctx context.Context, t *Task) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search indexing", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("maintenance: panic during search indexing", "panic", r)
+		}
+	}()
 	body := ""
-	if t.Description != nil { body = *t.Description }
-	if t.Status != "" { body += " " + string(t.Status) }
-	if t.Cost != nil { body += " " + *t.Cost }
+	if t.Description != nil {
+		body = *t.Description
+	}
+	if t.Status != "" {
+		body += " " + string(t.Status)
+	}
+	if t.Cost != nil {
+		body += " " + *t.Cost
+	}
 	doc := search.SearchDocument{
 		ID: "maintenance-task-" + t.ID.String(), HouseholdID: t.HouseholdID.String(),
 		EntityType: "maintenance_task", EntityID: t.ID.String(),
 		Title: t.Name, Body: body,
 		CreatedAt: t.CreatedAt.Unix(), UpdatedAt: t.UpdatedAt.Unix(),
 	}
-	if t.PropertyID != nil { pid := t.PropertyID.String(); doc.PropertyID = &pid }
-	if t.AssetID != nil { aid := t.AssetID.String(); doc.Tags = append(doc.Tags, "asset:"+aid) }
-	if t.VehicleID != nil { vid := t.VehicleID.String(); doc.Tags = append(doc.Tags, "vehicle:"+vid) }
+	if t.PropertyID != nil {
+		pid := t.PropertyID.String()
+		doc.PropertyID = &pid
+	}
+	if t.AssetID != nil {
+		aid := t.AssetID.String()
+		doc.Tags = append(doc.Tags, "asset:"+aid)
+	}
+	if t.VehicleID != nil {
+		vid := t.VehicleID.String()
+		doc.Tags = append(doc.Tags, "vehicle:"+vid)
+	}
 	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
 		slog.Warn("maintenance: failed to index task", "id", t.ID, "error", err)
 	}
 }
 
 func (h *Handler) deleteTaskIndex(ctx context.Context, id string) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search deletion", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("maintenance: panic during search deletion", "panic", r)
+		}
+	}()
 	if err := h.search.DeleteDocument(context.Background(), "maintenance-task-"+id); err != nil {
 		slog.Warn("maintenance: failed to delete task from search", "id", id, "error", err)
 	}
 }
 
 func (h *Handler) indexSchedule(ctx context.Context, s *Schedule) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search indexing", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("maintenance: panic during search indexing", "panic", r)
+		}
+	}()
 	body := ""
-	if s.Description != nil { body = *s.Description }
-	if s.EstimatedCost != nil { body += " " + *s.EstimatedCost }
-	if s.RRule != "" { body += " " + s.RRule }
+	if s.Description != nil {
+		body = *s.Description
+	}
+	if s.EstimatedCost != nil {
+		body += " " + *s.EstimatedCost
+	}
+	if s.RRule != "" {
+		body += " " + s.RRule
+	}
 	doc := search.SearchDocument{
 		ID: "maintenance-schedule-" + s.ID.String(), HouseholdID: s.HouseholdID.String(),
 		EntityType: "maintenance_schedule", EntityID: s.ID.String(),
 		Title: s.Name, Body: body,
 		CreatedAt: s.CreatedAt.Unix(), UpdatedAt: s.UpdatedAt.Unix(),
 	}
-	if s.PropertyID != nil { pid := s.PropertyID.String(); doc.PropertyID = &pid }
-	if s.AssetID != nil { aid := s.AssetID.String(); doc.Tags = append(doc.Tags, "asset:"+aid) }
-	if s.VehicleID != nil { vid := s.VehicleID.String(); doc.Tags = append(doc.Tags, "vehicle:"+vid) }
+	if s.PropertyID != nil {
+		pid := s.PropertyID.String()
+		doc.PropertyID = &pid
+	}
+	if s.AssetID != nil {
+		aid := s.AssetID.String()
+		doc.Tags = append(doc.Tags, "asset:"+aid)
+	}
+	if s.VehicleID != nil {
+		vid := s.VehicleID.String()
+		doc.Tags = append(doc.Tags, "vehicle:"+vid)
+	}
 	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
 		slog.Warn("maintenance: failed to index schedule", "id", s.ID, "error", err)
 	}
 }
 
 func (h *Handler) deleteScheduleIndex(ctx context.Context, id string) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search deletion", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("maintenance: panic during search deletion", "panic", r)
+		}
+	}()
 	if err := h.search.DeleteDocument(context.Background(), "maintenance-schedule-"+id); err != nil {
 		slog.Warn("maintenance: failed to delete schedule from search", "id", id, "error", err)
 	}
@@ -116,9 +170,9 @@ type createTaskRequest struct {
 	DueDate     *string `json:"due_date,omitempty"` // RFC3339 date
 	ScheduleID  *string `json:"schedule_id,omitempty"`
 	subject.Fields
-	Cost        *string `json:"cost,omitempty"`
-	VendorID    *string `json:"vendor_id,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
+	Cost     *string `json:"cost,omitempty"`
+	VendorID *string `json:"vendor_id,omitempty"`
+	Notes    *string `json:"notes,omitempty"`
 }
 
 type updateTaskRequest struct {
@@ -129,9 +183,9 @@ type updateTaskRequest struct {
 	CompletedAt *string `json:"completed_at,omitempty"`
 	ScheduleID  *string `json:"schedule_id,omitempty"`
 	subject.Fields
-	Cost        *string `json:"cost,omitempty"`
-	VendorID    *string `json:"vendor_id,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
+	Cost     *string `json:"cost,omitempty"`
+	VendorID *string `json:"vendor_id,omitempty"`
+	Notes    *string `json:"notes,omitempty"`
 }
 
 type taskResponse struct {
@@ -140,7 +194,7 @@ type taskResponse struct {
 	ScheduleID  *string `json:"schedule_id,omitempty"`
 	PropertyID  *string `json:"property_id,omitempty"`
 	AssetID     *string `json:"asset_id,omitempty"`
-	VehicleID    *string `json:"vehicle_id,omitempty"`
+	VehicleID   *string `json:"vehicle_id,omitempty"`
 	Name        string  `json:"name"`
 	Description *string `json:"description,omitempty"`
 	Status      string  `json:"status"`
@@ -161,7 +215,7 @@ type createScheduleRequest struct {
 	RRule         string  `json:"rrule"`
 	EstimatedCost *string `json:"estimated_cost,omitempty"`
 	subject.Fields
-	VendorID      *string `json:"vendor_id,omitempty"`
+	VendorID *string `json:"vendor_id,omitempty"`
 }
 
 type scheduleResponse struct {
@@ -261,14 +315,14 @@ func toTaskResponse(t *Task) taskResponse {
 
 func toScheduleResponse(s *Schedule) scheduleResponse {
 	resp := scheduleResponse{
-		ID:          s.ID.String(),
-		HouseholdID: s.HouseholdID.String(),
-		Name:        s.Name,
-		Description: s.Description,
-		RRule:       s.RRule,
+		ID:            s.ID.String(),
+		HouseholdID:   s.HouseholdID.String(),
+		Name:          s.Name,
+		Description:   s.Description,
+		RRule:         s.RRule,
 		EstimatedCost: s.EstimatedCost,
-		CreatedAt:   timePtr(s.CreatedAt),
-		UpdatedAt:   timePtr(s.UpdatedAt),
+		CreatedAt:     timePtr(s.CreatedAt),
+		UpdatedAt:     timePtr(s.UpdatedAt),
 	}
 	if s.PropertyID != nil {
 		v := s.PropertyID.String()
@@ -566,16 +620,20 @@ func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Delete the calendar event first so phones get a delete change; the 027
+	// trigger deletes the task with it. repo.DeleteTask then removes a task
+	// that had no event (and is a no-op otherwise). If the calendar step
+	// fails, deleting the task still removes the event via the 038 rehome
+	// trigger, only without the change row.
+	if h.calSync != nil {
+		if err := h.calSync.DeleteMaintenanceEvent(r.Context(), householdID, taskID); err != nil {
+			slog.Warn("maintenance: failed to delete calendar event", "task_id", taskID, "error", err)
+		}
+	}
+
 	if err := h.repo.DeleteTask(r.Context(), taskID, householdID); err != nil {
 		apierr.InternalError(w, err)
 		return
-	}
-
-	// Delete the linked calendar event (if any).
-	if h.calSync != nil {
-		if err := h.calSync.DeleteMaintenanceEvent(r.Context(), taskID); err != nil {
-			slog.Warn("maintenance: failed to delete calendar event", "task_id", taskID, "error", err)
-		}
 	}
 
 	// Delete from search index
@@ -584,26 +642,21 @@ func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// syncToCalendar creates or updates a calendar event for a maintenance task
-// that has a due date. If the task has no due date, any existing calendar
-// event is deleted. Errors are logged but never fail the request — calendar
-// sync is best-effort.
+// syncToCalendar creates or updates the all-day calendar event of a
+// maintenance task that has a due date (see calendar.Repo
+// UpsertMaintenanceEvent; mirrors the MCP's syncEvent). A task without a due
+// date has no event and nothing is done: deleting an event would delete the
+// task too (027 trigger), and a due date can't be cleared once set. Errors
+// are logged but never fail the request — calendar sync is best-effort.
 func (h *Handler) syncToCalendar(ctx context.Context, householdID uuid.UUID, task *Task) {
-	if h.calSync == nil {
-		return
-	}
-	if task.DueDate == nil {
-		// Task has no due date — remove any existing calendar event.
-		if err := h.calSync.DeleteMaintenanceEvent(ctx, task.ID); err != nil {
-			slog.Warn("maintenance: failed to delete calendar event for task without due date", "task_id", task.ID, "error", err)
-		}
+	if h.calSync == nil || task.DueDate == nil {
 		return
 	}
 	desc := ""
 	if task.Description != nil {
 		desc = *task.Description
 	}
-	if err := h.calSync.UpsertMaintenanceEvent(ctx, householdID, task.ID, task.PropertyID, task.Name, desc, *task.DueDate); err != nil {
+	if err := h.calSync.UpsertMaintenanceEvent(ctx, householdID, task.ID, task.Name, desc, *task.DueDate); err != nil {
 		slog.Warn("maintenance: failed to sync calendar event", "task_id", task.ID, "error", err)
 	}
 }

@@ -162,6 +162,9 @@ func (r taskRow) about() string {
 // entity_id = task id), as the api's UpsertMaintenanceEvent does. Writes
 // record calendar_changes and bump the calendar ctag so phones sync.
 // Deleting the task deletes the event through the 038 rehome trigger.
+// Mirrored in apps/api/internal/calendar/repo.go (separate module, no
+// shared package): change both, and both mirrored tests
+// (apps/api/internal/calendar/maintenance_sync_test.go).
 // ─────────────────────────────────────────────
 
 // syncEvent creates or updates the task's calendar event inside tx and
