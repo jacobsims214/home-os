@@ -95,10 +95,14 @@ dex:
   image: dex
   port: 5556
   grpcPort: 5557
-  # Database password for Dex's Postgres storage backend.
-  # Must be set at deploy time. For production, use --set or a secure values file.
-  # WARNING: The original password was committed to git; rotate it as part of this fix.
-  dbPassword: ""
+  # Dex's Postgres password is never rendered into the ConfigMap: the Deployment
+  # reads it from a Secret into DEX_DB_PASSWORD and Dex expands it at startup.
+  # existingSecret: Secret holding the password; empty = the chart's
+  #   home-os-db-secret (the `app` user password from secrets.dbPassword).
+  # existingSecretPasswordKey: key in that Secret; empty = "password".
+  # (dex.dbPassword was removed; setting it fails the render.)
+  existingSecret: ""
+  existingSecretPasswordKey: password
 
 database:
   mode: managed

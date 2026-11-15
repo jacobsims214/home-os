@@ -12,6 +12,8 @@ spec:
     metadata:
       labels:
         app: home-os-dex
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/dex/configmap.yaml") . | sha256sum }}
     spec:
       containers:
       - name: dex
@@ -22,6 +24,15 @@ spec:
           name: http
         - containerPort: 5557
           name: grpc
+        env:
+        # Dex expands $VARS in config.yaml (storage section) when this is true.
+        - name: DEX_EXPAND_ENV
+          value: "true"
+        - name: DEX_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.dex.existingSecret | default "home-os-db-secret" }}
+              key: {{ .Values.dex.existingSecretPasswordKey | default "password" }}
         volumeMounts:
         - name: config
           mountPath: /etc/dex

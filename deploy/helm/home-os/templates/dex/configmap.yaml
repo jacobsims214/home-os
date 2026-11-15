@@ -1,3 +1,6 @@
+{{- if .Values.dex.dbPassword }}
+{{- fail "dex.dbPassword was removed: Dex reads its DB password from a Secret. Put it in a Secret and set dex.existingSecret (and dex.existingSecretPasswordKey), or leave both unset to use home-os-db-secret." }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,9 +17,9 @@ data:
         port: 5432
         database: dex
         user: app
-        # Password supplied at deploy time via .Values.dex.dbPassword.
-        # Set via --set dex.dbPassword=<password> or a secure values file.
-        password: {{ .Values.dex.dbPassword }}
+        # Expanded by Dex at startup from the DEX_DB_PASSWORD env var, which the
+        # Deployment sources from a Secret (dex.existingSecret). Never inline it here.
+        password: $DEX_DB_PASSWORD
         ssl:
           # SSL mode is "disable" because the CNPG cluster does not currently
           # configure TLS for client connections. Revisit if TLS is enabled
