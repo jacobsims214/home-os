@@ -44,6 +44,15 @@ data:
                       timeout: 0s
                   - match: { prefix: "/.well-known/" }
                     route: { cluster: calendar_cluster }
+                  # The MCP transport is stateless POST at exactly /mcp (no
+                  # SSE). A "/mcp/" prefix does not match the bare path, so it
+                  # needs its own exact route or it falls through to the UI.
+                  - match: { path: "/mcp" }
+                    route:
+                      cluster: mcp_cluster
+                      timeout: 0s
+                      idle_timeout: 0s
+                  # /mcp/health and /mcp/.well-known/oauth-protected-resource.
                   - match: { prefix: "/mcp/" }
                     route:
                       cluster: mcp_cluster
