@@ -4,15 +4,13 @@ import (
 	"home-os/mcp/internal/server"
 )
 
-// Register adds the file tools to srv. cmd/mcp calls it once at startup,
-// so changes to these tools stay inside this package.
+// Register adds the document tools (catalog v2: document_find, document_get,
+// document_upload) to srv. cmd/mcp calls it once at startup, so changes to
+// these tools stay inside this package. The package takes no search indexer:
+// the worker indexes documents (#4444), so there is no typed-nil indexer to
+// guard against here (the bug #4368 fixed in asset).
 func Register(srv *server.Server, deps server.Deps) {
-	fileListName, fileListTool, fileListHandler := NewListFilesTool(deps.Pool)
-	srv.RegisterTool(fileListName, fileListTool, fileListHandler)
-	fileUploadName, fileUploadTool, fileUploadHandler := NewUploadFileTool(deps.Pool)
-	srv.RegisterTool(fileUploadName, fileUploadTool, fileUploadHandler)
-	fileGetName, fileGetTool, fileGetHandler := NewGetFileTool(deps.Pool)
-	srv.RegisterTool(fileGetName, fileGetTool, fileGetHandler)
-	fileSearchName, fileSearchTool, fileSearchHandler := NewSearchFilesTool(deps.Pool)
-	srv.RegisterTool(fileSearchName, fileSearchTool, fileSearchHandler)
+	srv.RegisterTool(NewDocumentFindTool(deps.Pool))
+	srv.RegisterTool(NewDocumentGetTool(deps.Pool))
+	srv.RegisterTool(NewDocumentUploadTool(deps.Pool))
 }
