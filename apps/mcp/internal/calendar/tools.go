@@ -1,5 +1,5 @@
 // Package calendar provides the MCP calendar tools (v2 catalog: calendar_find,
-// event_find, event_create, event_update, event_delete,
+// calendar_create, event_find, event_create, event_update, event_delete,
 // calendar_find_free_time, agenda_get). Results are built with
 // internal/respond.
 //

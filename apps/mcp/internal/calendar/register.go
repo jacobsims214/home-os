@@ -12,6 +12,9 @@ func Register(srv *server.Server, deps server.Deps) {
 	calTool, calHandler := NewCalendarFindTool(deps.Pool)
 	srv.RegisterTool(calTool.Name, calTool, calHandler)
 
+	calCreateTool, calCreateHandler := NewCalendarCreateTool(deps.Pool)
+	srv.RegisterTool(calCreateTool.Name, calCreateTool, calCreateHandler)
+
 	findTool, findHandler := NewEventFindTool(deps.Pool)
 	srv.RegisterTool(findTool.Name, findTool, findHandler)
 
