@@ -1,67 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 
 /**
- * BFF session route handler — manages the httpOnly JWT cookie.
+ * Session restore route handler.
  *
- * POST   /api/auth  — store the JWT in an httpOnly, secure, same-site cookie.
- * DELETE /api/auth  — clear the session cookie.
- * GET    /api/auth  — return decoded user info from the cookie (for session restore on page load).
+ * GET /api/auth — return decoded user info from the httpOnly session cookie.
  *
- * The browser never directly holds the JWT. The BFF reads it from the cookie
- * and injects it as an Authorization header when proxying to the Go API.
+ * This route never creates or clears a session. Sessions are created only by
+ * the Dex callback (app/api/auth/callback) and ended by POST /api/auth/logout,
+ * which clears both home-os-token and home-os-refresh.
  */
 
 const COOKIE_NAME = "home-os-token";
-const COOKIE_MAX_AGE = 60 * 60 * 24; // 24 hours — matches JWT expiry
-
-function setTokenCookie(response: NextResponse, token: string) {
-  response.cookies.set(COOKIE_NAME, token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: COOKIE_MAX_AGE,
-  });
-}
-
-function clearTokenCookie(response: NextResponse) {
-  response.cookies.set(COOKIE_NAME, "", {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: 0, // expire immediately
-  });
-}
-
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { token } = body;
-
-    if (!token || typeof token !== "string") {
-      return NextResponse.json(
-        { error: "Token is required" },
-        { status: 400 },
-      );
-    }
-
-    const response = NextResponse.json({ ok: true });
-    setTokenCookie(response, token);
-    return response;
-  } catch {
-    return NextResponse.json(
-      { error: "Invalid request body" },
-      { status: 400 },
-    );
-  }
-}
-
-export async function DELETE() {
-  const response = NextResponse.json({ ok: true });
-  clearTokenCookie(response);
-  return response;
-}
 
 export async function GET(request: NextRequest) {
   const token = request.cookies.get(COOKIE_NAME)?.value;

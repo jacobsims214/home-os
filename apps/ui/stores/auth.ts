@@ -21,7 +21,6 @@ interface AuthState {
 
 interface AuthActions {
   setUser: (user: User | null) => void;
-  logout: () => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState & AuthActions>()(
@@ -29,15 +28,6 @@ export const useAuthStore = create<AuthState & AuthActions>()(
     (set) => ({
       user: null,
       setUser: (user: User | null) => set({ user }),
-      logout: async () => {
-        // Clear the session cookie via the auth route handler.
-        try {
-          await fetch("/api/auth", { method: "DELETE" });
-        } catch {
-          // Ignore errors — cookie may already be gone
-        }
-        set({ user: null });
-      },
     }),
     {
       name: "home-os-auth",
