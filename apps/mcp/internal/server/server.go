@@ -34,10 +34,10 @@ type Server struct {
 	// httpServer serves the Streamable HTTP transport (MCP 2025-03-26+) at
 	// /mcp; the legacy SSE transport stays at /mcp/sse for older clients.
 	httpServer *server.StreamableHTTPServer
-	cfg       *config.Config
-	pool      *pgxpool.Pool
-	verifier  *auth.Verifier
-	toolCount int
+	cfg        *config.Config
+	pool       *pgxpool.Pool
+	verifier   *auth.Verifier
+	toolCount  int
 }
 
 // NewServer creates a new MCP server with the given configuration, database pool, and token verifier.
@@ -76,7 +76,19 @@ func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) 
 		}),
 	)
 
-	s.httpServer = server.NewStreamableHTTPServer(s.mcpServer,
+	s.httpServer = server.NewStreamableHTTPServer(s.mcpServer, s.StreamableHTTPOptions()...)
+
+	return s
+}
+
+// StreamableHTTPOptions returns the options the /mcp Streamable HTTP
+// transport is built with: stateless (mcp-go v1.x serves both the 2026-07-28
+// stateless protocol and legacy initialize-handshake clients on each request)
+// and a context func that copies the AuthMiddleware claims into the tool
+// handler context. Tests pass these to servertest so they exercise the same
+// transport configuration as production.
+func (s *Server) StreamableHTTPOptions() []server.StreamableHTTPOption {
+	return []server.StreamableHTTPOption{
 		server.WithEndpointPath("/mcp"),
 		server.WithStateLess(true),
 		server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
@@ -85,9 +97,18 @@ func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) 
 			}
 			return ctx
 		}),
-	)
+	}
+}
 
-	return s
+// MCPServer returns the underlying mcp-go server with every registered tool,
+// prompt and resource. Tests use it with mcp-go's server/servertest helpers.
+func (s *Server) MCPServer() *server.MCPServer {
+	return s.mcpServer
+}
+
+// ToolCount returns how many tools have been registered via RegisterTool.
+func (s *Server) ToolCount() int {
+	return s.toolCount
 }
 
 // RegisterTool registers a new tool with the MCP server.
