@@ -2,13 +2,9 @@ package middleware
 
 import (
 	"context"
-	"errors"
-	"log/slog"
 	"net/http"
-	"strings"
 
 	"home-os/api/internal/auth"
-	"home-os/api/pkg/apierr"
 )
 
 // claimsCtxKey is an unexported type used for context keys to prevent
@@ -30,7 +26,7 @@ const claimsKey claimsCtxKey = "claims"
 //   - 401 if the Authorization header is missing or malformed, or the token is
 //     expired, tampered, or otherwise invalid.
 //   - 403 FORBIDDEN if the token is valid but the identity is not a member of
-//     any household.
+//     any household, or the user is deactivated (users.active = false).
 //   - 500 if the membership lookup itself fails.
 func RequireAuth(verifier *auth.Verifier) func(http.Handler) http.Handler {
 	return requireToken(verifier)
@@ -55,42 +51,17 @@ func requireToken(verifier *auth.Verifier) func(http.Handler) http.Handler {
 				return
 			}
 
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				unauthorized(w, "missing authorization header")
+			tokenStr, errMsg := auth.BearerToken(r)
+			if errMsg != "" {
+				auth.WriteUnauthorized(w, errMsg)
 				return
 			}
 
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-				unauthorized(w, "invalid authorization header format")
-				return
-			}
-
-			claims, err := verifier.VerifyToken(r.Context(), parts[1])
-			switch {
-			case err == nil:
-			case errors.Is(err, auth.ErrNoMembership):
-				slog.Warn("auth middleware: authenticated identity has no household membership", "error", err)
-				apierr.JSON(w, http.StatusForbidden, apierr.ErrorResponse{
-					Error: apierr.ErrorDetail{
-						Code:    "FORBIDDEN",
-						Message: "authenticated, but this account is not a member of any household",
-					},
-				})
-				return
-			case errors.Is(err, auth.ErrMemberLookup):
-				slog.Error("auth middleware: membership lookup failed", "error", err)
-				apierr.JSON(w, http.StatusInternalServerError, apierr.ErrorResponse{
-					Error: apierr.ErrorDetail{
-						Code:    "INTERNAL_ERROR",
-						Message: "could not resolve household membership",
-					},
-				})
-				return
-			default:
-				slog.Warn("auth middleware: token verification failed", "error", err)
-				unauthorized(w, "invalid or expired token")
+			claims, err := verifier.VerifyToken(r.Context(), tokenStr)
+			if err != nil {
+				// One shared mapping: 401 bad token, 403 non-member or
+				// deactivated, 500 membership lookup failure.
+				auth.WriteVerifyError(w, err)
 				return
 			}
 
@@ -98,12 +69,6 @@ func requireToken(verifier *auth.Verifier) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
-}
-
-func unauthorized(w http.ResponseWriter, msg string) {
-	apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
-		Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: msg},
-	})
 }
 
 // ClaimsFromContext extracts the *auth.Claims that were injected by the

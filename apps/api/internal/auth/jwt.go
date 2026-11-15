@@ -121,8 +121,9 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Identity, erro
 //
 // When a MemberResolver is attached (WithResolver), the returned Claims carry
 // the Home OS users.id as UserID plus HouseholdID and Role; a verified token
-// with no membership returns an error wrapping ErrNoMembership, and a database
-// failure one wrapping ErrMemberLookup. Without a resolver, UserID is the raw
+// with no membership returns an error wrapping ErrNoMembership, a deactivated
+// user one wrapping ErrUserDeactivated, and a database failure one wrapping
+// ErrMemberLookup (see WriteVerifyError for the HTTP mapping). Without a resolver, UserID is the raw
 // Dex sub and HouseholdID/Role are empty.
 func (v *Verifier) VerifyToken(ctx context.Context, tokenStr string) (*Claims, error) {
 	if !v.enabled {

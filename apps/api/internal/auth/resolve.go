@@ -20,6 +20,12 @@ var ErrNoMembership = errors.New("no household membership for this identity")
 // Callers should answer 500 rather than treating it as a bad token.
 var ErrMemberLookup = errors.New("membership lookup failed")
 
+// ErrUserDeactivated is returned when a token verifies and maps to a Home OS
+// user whose users.active is false (migration 037). Callers should answer 403
+// Forbidden, like ErrNoMembership: the caller is authenticated but may not use
+// the API.
+var ErrUserDeactivated = errors.New("user account is deactivated")
+
 // ResolvedMember is the Home OS identity a Dex subject resolves to.
 type ResolvedMember struct {
 	UserID      string
@@ -41,6 +47,8 @@ type MemberResolver interface {
 //  2. lower(users.email) = lower(email); when found and users.dex_sub is NULL,
 //     the sub is stored in users.dex_sub so later requests take path 1.
 //
+// Deactivated users (users.active = false) fail with ErrUserDeactivated.
+//
 // Users with several memberships resolve deterministically to their OLDEST
 // membership (memberships.created_at, then memberships.id).
 type PGMemberResolver struct {
@@ -56,10 +64,11 @@ func NewMemberResolver(pool *pgxpool.Pool) *PGMemberResolver {
 func (r *PGMemberResolver) Resolve(ctx context.Context, sub, email string) (*ResolvedMember, error) {
 	var userID string
 	var storedSub *string
+	var active bool
 
 	err := r.pool.QueryRow(ctx,
-		`SELECT id::text FROM users WHERE dex_sub = $1`, sub,
-	).Scan(&userID)
+		`SELECT id::text, active FROM users WHERE dex_sub = $1`, sub,
+	).Scan(&userID, &active)
 	switch {
 	case err == nil:
 	case errors.Is(err, pgx.ErrNoRows):
@@ -68,17 +77,23 @@ func (r *PGMemberResolver) Resolve(ctx context.Context, sub, email string) (*Res
 			return nil, ErrNoMembership
 		}
 		err = r.pool.QueryRow(ctx,
-			`SELECT id::text, dex_sub FROM users WHERE lower(email) = lower($1)`, email,
-		).Scan(&userID, &storedSub)
+			`SELECT id::text, dex_sub, active FROM users WHERE lower(email) = lower($1)`, email,
+		).Scan(&userID, &storedSub, &active)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNoMembership
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%w: user by email: %w", ErrMemberLookup, err)
 		}
+		if !active {
+			return nil, ErrUserDeactivated
+		}
 		r.backfillSub(ctx, userID, sub, storedSub)
 	default:
 		return nil, fmt.Errorf("%w: user by dex_sub: %w", ErrMemberLookup, err)
+	}
+	if !active {
+		return nil, ErrUserDeactivated
 	}
 
 	m := ResolvedMember{UserID: userID}

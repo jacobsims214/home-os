@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -158,8 +160,118 @@ func TestGenerateCaldavPassword_Member(t *testing.T) {
 	assert.True(t, caldavAuthenticates(t, pool, otherEmail, other.Password),
 		"another member's password must survive the caller's regeneration")
 
-	t.Run("verified token without membership is refused", func(t *testing.T) {
+	t.Run("verified token without membership is forbidden", func(t *testing.T) {
 		rec := postCaldavPassword(h, signer.token(t, uniq("CiQnobody"), uniq("nobody")+"@example.com"))
-		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	})
+
+	t.Run("deactivated member is forbidden", func(t *testing.T) {
+		goneSub := uniq("CiQgone")
+		goneEmail := uniq("gone") + "@example.com"
+		goneUID := insertUser(t, pool, goneEmail, &goneSub)
+		insertMembership(t, pool, goneUID, "family_member", time.Now())
+		_, err := pool.Exec(context.Background(), `UPDATE users SET active = false WHERE id = $1`, goneUID)
+		require.NoError(t, err)
+
+		rec := postCaldavPassword(h, signer.token(t, goneSub, goneEmail))
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		rec = getMe(h, signer.token(t, goneSub, goneEmail))
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	})
+}
+
+// stubResolver returns a fixed error (or member) so handler tests can drive
+// every VerifyToken error kind without a database.
+type stubResolver struct {
+	m   *ResolvedMember
+	err error
+}
+
+func (s stubResolver) Resolve(context.Context, string, string) (*ResolvedMember, error) {
+	return s.m, s.err
+}
+
+func getMe(h *Handler, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	h.Me(rec, req)
+	return rec
+}
+
+// TestSelfVerifyingHandlers_ErrorMapping checks that Me and
+// GenerateCaldavPassword, which verify tokens themselves outside RequireAuth,
+// answer exactly like middleware.RequireAuth: 401 for a missing/malformed
+// header or a bad/expired token, 403 for a non-member or deactivated user, and
+// 500 when the membership lookup itself fails.
+func TestSelfVerifyingHandlers_ErrorMapping(t *testing.T) {
+	signer := newDexTokenSigner(t)
+	other := newDexTokenSigner(t)
+
+	expired := func(t *testing.T) string {
+		tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+			"iss": handlerTestIssuer, "aud": "home-os-ui", "sub": "CiQold", "email": "old@example.com",
+			"iat": time.Now().Add(-2 * time.Hour).Unix(), "exp": time.Now().Add(-time.Hour).Unix(),
+		})
+		str, err := tok.SignedString(signer.key)
+		require.NoError(t, err)
+		return str
+	}
+
+	dbErr := fmt.Errorf("resolve: %w: user by dex_sub: %w", ErrMemberLookup, errors.New("connection refused"))
+
+	tests := []struct {
+		name     string
+		header   string // full Authorization header; "" sends none
+		resolver MemberResolver
+		want     int
+		code     string
+		message  string
+	}{
+		{"missing header", "", stubResolver{}, http.StatusUnauthorized, "UNAUTHORIZED", "missing authorization header"},
+		{"non-bearer scheme", "Basic dXNlcjpwYXNz", stubResolver{}, http.StatusUnauthorized, "UNAUTHORIZED", "invalid authorization header format"},
+		{"bearer without token", "Bearer", stubResolver{}, http.StatusUnauthorized, "UNAUTHORIZED", "invalid authorization header format"},
+		{"garbage token", "Bearer not-a-jwt", stubResolver{}, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token"},
+		{"token signed by another key", "Bearer " + other.token(t, "CiQx", "x@example.com"), stubResolver{}, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token"},
+		{"expired token", "Bearer " + expired(t), stubResolver{}, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired token"},
+		{"non-member", "Bearer " + signer.token(t, "CiQx", "x@example.com"), stubResolver{err: ErrNoMembership}, http.StatusForbidden, "FORBIDDEN", "authenticated, but this account is not a member of any household"},
+		{"deactivated user", "Bearer " + signer.token(t, "CiQx", "x@example.com"), stubResolver{err: ErrUserDeactivated}, http.StatusForbidden, "FORBIDDEN", "this account has been deactivated"},
+		{"membership lookup DB error", "Bearer " + signer.token(t, "CiQx", "x@example.com"), stubResolver{err: dbErr}, http.StatusInternalServerError, "INTERNAL_ERROR", "could not resolve household membership"},
+	}
+
+	handlers := []struct {
+		name   string
+		method string
+		path   string
+		serve  func(h *Handler) http.HandlerFunc
+	}{
+		{"Me", http.MethodGet, "/api/v1/auth/me", func(h *Handler) http.HandlerFunc { return h.Me }},
+		{"GenerateCaldavPassword", http.MethodPost, "/api/v1/auth/caldav-password", func(h *Handler) http.HandlerFunc { return h.GenerateCaldavPassword }},
+	}
+
+	for _, hd := range handlers {
+		for _, tc := range tests {
+			t.Run(hd.name+"/"+tc.name, func(t *testing.T) {
+				// repo is nil: every case must be answered before the handler
+				// touches the database.
+				h := NewHandler(nil, nil, &config.Config{}, nil, nil, signer.verifier().WithResolver(tc.resolver))
+				req := httptest.NewRequest(hd.method, hd.path, nil)
+				if tc.header != "" {
+					req.Header.Set("Authorization", tc.header)
+				}
+				rec := httptest.NewRecorder()
+				hd.serve(h)(rec, req)
+
+				assert.Equal(t, tc.want, rec.Code, rec.Body.String())
+				var body struct {
+					Error struct{ Code, Message string } `json:"error"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				assert.Equal(t, tc.code, body.Error.Code)
+				assert.Equal(t, tc.message, body.Error.Message)
+			})
+		}
+	}
 }

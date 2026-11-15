@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,6 +143,20 @@ func TestPGMemberResolver_Resolve(t *testing.T) {
 	t.Run("unknown sub and empty email", func(t *testing.T) {
 		_, err := r.Resolve(ctx, uniq("CiQnoemail"), "")
 		assert.ErrorIs(t, err, ErrNoMembership)
+	})
+
+	t.Run("deactivated user is refused by dex_sub and by email", func(t *testing.T) {
+		sub := uniq("CiQgone")
+		email := uniq("gone") + "@example.com"
+		uid := insertUser(t, pool, email, &sub)
+		insertMembership(t, pool, uid, "family_member", now)
+		_, err := pool.Exec(ctx, `UPDATE users SET active = false WHERE id = $1`, uid)
+		require.NoError(t, err)
+
+		_, err = r.Resolve(ctx, sub, email)
+		assert.ErrorIs(t, err, ErrUserDeactivated)
+		_, err = r.Resolve(ctx, uniq("CiQnewsub"), strings.ToUpper(email))
+		assert.ErrorIs(t, err, ErrUserDeactivated)
 	})
 }
 

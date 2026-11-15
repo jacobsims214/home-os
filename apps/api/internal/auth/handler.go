@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -41,6 +42,77 @@ func NewHandler(repo *Repo, householdRepo HouseholdCreator, cfg *config.Config, 
 	return &Handler{repo: repo, householdRepo: householdRepo, cfg: cfg, smtpClient: smtpClient, dexClient: dexClient, verifier: verifier}
 }
 
+// --- token verification for handlers outside RequireAuth ---
+
+// WriteVerifyError writes the response for a failed Verifier.VerifyToken. It
+// is the one mapping shared by middleware.RequireAuth and the handlers that
+// verify tokens themselves, so clients see the same status everywhere:
+//   - ErrNoMembership: 403 FORBIDDEN (authenticated, not a household member)
+//   - ErrUserDeactivated: 403 FORBIDDEN (authenticated, account deactivated)
+//   - ErrMemberLookup: 500 INTERNAL_ERROR (database failure, not a bad token)
+//   - anything else (bad signature, wrong audience, expired): 401 UNAUTHORIZED
+func WriteVerifyError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrNoMembership):
+		slog.Warn("auth: authenticated identity has no household membership", "error", err)
+		writeAuthError(w, http.StatusForbidden, "FORBIDDEN",
+			"authenticated, but this account is not a member of any household")
+	case errors.Is(err, ErrUserDeactivated):
+		slog.Warn("auth: authenticated identity is deactivated", "error", err)
+		writeAuthError(w, http.StatusForbidden, "FORBIDDEN", "this account has been deactivated")
+	case errors.Is(err, ErrMemberLookup):
+		slog.Error("auth: membership lookup failed", "error", err)
+		writeAuthError(w, http.StatusInternalServerError, "INTERNAL_ERROR",
+			"could not resolve household membership")
+	default:
+		slog.Warn("auth: token verification failed", "error", err)
+		WriteUnauthorized(w, "invalid or expired token")
+	}
+}
+
+// WriteUnauthorized writes a 401 UNAUTHORIZED error with msg.
+func WriteUnauthorized(w http.ResponseWriter, msg string) {
+	writeAuthError(w, http.StatusUnauthorized, "UNAUTHORIZED", msg)
+}
+
+func writeAuthError(w http.ResponseWriter, status int, code, msg string) {
+	apierr.JSON(w, status, apierr.ErrorResponse{
+		Error: apierr.ErrorDetail{Code: code, Message: msg},
+	})
+}
+
+// BearerToken extracts the token from an "Authorization: Bearer <token>"
+// header (scheme matched case-insensitively). On failure it returns the 401
+// message to send.
+func BearerToken(r *http.Request) (token, errMsg string) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return "", "missing authorization header"
+	}
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
+		return "", "invalid authorization header format"
+	}
+	return parts[1], ""
+}
+
+// authenticate verifies the request's Bearer token for handlers registered
+// outside RequireAuth. On failure it has already written the response
+// (401/403/500, as RequireAuth would) and returns nil.
+func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) *Claims {
+	tokenStr, errMsg := BearerToken(r)
+	if errMsg != "" {
+		WriteUnauthorized(w, errMsg)
+		return nil
+	}
+	claims, err := h.verifier.VerifyToken(r.Context(), tokenStr)
+	if err != nil {
+		WriteVerifyError(w, err)
+		return nil
+	}
+	return claims
+}
+
 // --- request / response types ---
 
 type userResponse struct {
@@ -69,20 +141,8 @@ type adminCreateUserResponse struct {
 // AdminCreateUser creates a new user, a household, and an owner membership.
 // Requires a valid JWT with role "owner". POST /api/v1/admin/users.
 func (h *Handler) AdminCreateUser(w http.ResponseWriter, r *http.Request) {
-	// Verify JWT from Authorization header.
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
-			Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: "Not authenticated"},
-		})
-		return
-	}
-	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-	claims, err := h.verifier.VerifyToken(r.Context(), tokenStr)
-	if err != nil {
-		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
-			Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: "Invalid or expired token"},
-		})
+	claims := h.authenticate(w, r)
+	if claims == nil {
 		return
 	}
 
@@ -173,21 +233,8 @@ func (h *Handler) AdminCreateUser(w http.ResponseWriter, r *http.Request) {
 // Me returns the currently authenticated user based on the Bearer token.
 // GET /api/v1/auth/me.
 func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		apierr.Forbidden(w, "missing authorization header")
-		return
-	}
-
-	tokenStr, ok := strings.CutPrefix(authHeader, "Bearer ")
-	if !ok {
-		apierr.Forbidden(w, "invalid authorization header format")
-		return
-	}
-
-	claims, err := h.verifier.VerifyToken(r.Context(), tokenStr)
-	if err != nil {
-		apierr.Forbidden(w, "invalid or expired token")
+	claims := h.authenticate(w, r)
+	if claims == nil {
 		return
 	}
 
@@ -261,19 +308,8 @@ func (h *Handler) caldavServerURL() string {
 func (h *Handler) GenerateCaldavPassword(w http.ResponseWriter, r *http.Request) {
 	// Extract and verify the Dex token. The verifier's member resolver maps
 	// the Dex identity to the Home OS user, so claims.UserID is users.id.
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
-			Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: "Not authenticated"},
-		})
-		return
-	}
-	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-	claims, err := h.verifier.VerifyToken(r.Context(), tokenStr)
-	if err != nil {
-		apierr.JSON(w, http.StatusUnauthorized, apierr.ErrorResponse{
-			Error: apierr.ErrorDetail{Code: "UNAUTHORIZED", Message: "Invalid or expired token"},
-		})
+	claims := h.authenticate(w, r)
+	if claims == nil {
 		return
 	}
 
