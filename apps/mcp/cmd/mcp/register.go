@@ -28,7 +28,6 @@ import (
 // tools, prompts or resource templates in its own register.go, so changing a
 // tool never touches this file. Add a package here once, when it is created.
 var registrars = []func(*server.Server, server.Deps){
-	server.RegisterPing,
 	file.Register,
 	note.Register,
 	search.Register,

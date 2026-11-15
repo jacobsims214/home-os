@@ -22,6 +22,26 @@ import (
 	"home-os/mcp/internal/testutil"
 )
 
+// wantTools is the exact tools/list the server serves, in name order: the
+// catalog v2 names as built (architecture/mcp-tool-catalog.md). Add a tool's
+// name here in the ticket that registers it.
+var wantTools = []string{
+	"agenda_get",
+	"asset_create", "asset_delete", "asset_find", "asset_update",
+	"bill_create", "bill_delete", "bill_find", "bill_pay", "bill_update",
+	"budget_summary",
+	"calendar_create", "calendar_find", "calendar_find_free_time",
+	"contact_find",
+	"document_find", "document_get", "document_upload",
+	"event_create", "event_delete", "event_find", "event_update",
+	"family_overview", "family_update",
+	"loan_create", "loan_delete", "loan_find", "loan_update",
+	"maintenance_complete", "maintenance_create", "maintenance_delete", "maintenance_find", "maintenance_update",
+	"note_create", "note_delete", "note_find", "note_get", "note_update",
+	"notification_find", "notification_mark_read",
+	"person_find", "pet_find", "property_find", "search_all", "vehicle_find",
+}
+
 // TestLegacyInitializeClient proves that a pre-2026-07-28 client (one that
 // opens with the initialize handshake, as moltis does) can still list and
 // call every tool on the stateless Streamable HTTP transport after the
@@ -102,10 +122,13 @@ func TestLegacyInitializeClient(t *testing.T) {
 				t.Fatalf("tools/list returned %d tools, %d registered", len(seen), srv.ToolCount())
 			}
 			t.Logf("tools/list over protocol %s returned %d tools", version, len(seen))
-			for _, name := range []string{"family_overview", "person_find", "note_find", "note_create", "event_create", "calendar_create", "budget_summary", "bill_find", "bill_create", "bill_update", "bill_delete", "bill_pay", "note_get", "note_update", "note_delete", "family_update", "search_all", "loan_find", "loan_create", "loan_update", "loan_delete", "maintenance_find", "maintenance_create", "maintenance_update", "maintenance_complete", "maintenance_delete", "property_find", "asset_find", "asset_create", "asset_update", "asset_delete", "vehicle_find", "pet_find", "contact_find", "notification_find", "notification_mark_read", "document_find", "document_get", "document_upload"} {
+			for _, name := range wantTools {
 				if !seen[name] {
 					t.Errorf("tools/list is missing %q", name)
 				}
+			}
+			if len(seen) != len(wantTools) {
+				t.Errorf("tools/list returned %d tools, want exactly the %d in wantTools", len(seen), len(wantTools))
 			}
 
 			type callResult struct {
@@ -207,6 +230,9 @@ func TestModernStatelessClient(t *testing.T) {
 	}
 	if !slices.IsSorted(names(first)) {
 		t.Errorf("tools/list is not in name order: %v", names(first))
+	}
+	if !slices.Equal(names(first), wantTools) {
+		t.Errorf("tools/list = %v, want %v", names(first), wantTools)
 	}
 	if !slices.Equal(names(first), names(second)) {
 		t.Errorf("tools/list order differs between calls")
