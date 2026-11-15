@@ -16,6 +16,15 @@ spec:
       owner: app
       secret:
         name: {{ include "home-os.dbSecretName" . }}
+      # Dex stores its state in a separate `dex` database (templates/dex/configmap.yaml),
+      # which it connects to as `app`. initdb only creates `app`, so create `dex` here.
+      # CNPG runs this as the postgres superuser, inside the `app` database, once, at
+      # the end of initdb. CREATE DATABASE has to run outside a transaction; CNPG runs
+      # each statement as its own autocommit Exec, so that works.
+      # Clusters that already exist never run the bootstrap again, so adding this
+      # leaves their existing dex database alone (no drop, no recreate, no ALTER).
+      postInitApplicationSQL:
+        - CREATE DATABASE dex OWNER app
   managed:
     roles:
     - name: app
