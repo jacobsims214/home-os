@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1286,9 +1287,9 @@ func upcomingOccurrences(obj *icalx.Object, hh *time.Location) []icalx.Occurrenc
 }
 
 // seriesConflicts returns other events overlapping any of the series' next
-// occurrences (8 weeks, at most 20), deduplicated, sorted by start. Other
-// repeating events are compared by their stored first occurrence until
-// event_find expands recurrences (#4483).
+// occurrences (8 weeks, at most 20), sorted by start. Other repeating events
+// are expanded (findConflicts reads occurrences, #4483), and each is
+// reported once, at its first occurrence that overlaps.
 func seriesConflicts(ctx context.Context, q querier, householdID string, hh *time.Location, obj *icalx.Object, excludeIDs ...string) ([]ConflictEvent, string) {
 	occs := upcomingOccurrences(obj, hh)
 	if len(occs) == 0 {
@@ -1308,14 +1309,9 @@ func seriesConflicts(ctx context.Context, q querier, householdID string, hh *tim
 		return []ConflictEvent{}, "The overlap check failed; check with event_find from/to."
 	}
 	out := make([]ConflictEvent, 0)
+	seen := map[string]bool{}
 	for _, c := range candidates {
-		skip := false
-		for _, id := range excludeIDs {
-			if c.ID == id {
-				skip = true
-			}
-		}
-		if skip {
+		if seen[c.ID] || slices.Contains(excludeIDs, c.ID) {
 			continue
 		}
 		cs, ce, err := parseEventTime(Event{Start: c.Start, End: c.End})
@@ -1329,6 +1325,7 @@ func seriesConflicts(ctx context.Context, q querier, householdID string, hh *tim
 			}
 			if cs.Before(e) && ce.After(s) {
 				out = append(out, c)
+				seen[c.ID] = true
 				break
 			}
 		}

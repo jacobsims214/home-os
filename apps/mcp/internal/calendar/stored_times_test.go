@@ -60,7 +60,7 @@ func TestQueryEventsStoredTimes(t *testing.T) {
 	}
 
 	// event_find over the same week: the malformed row doesn't fail it, and
-	// the exact Go check still applies to the series master (no expansion).
+	// the series shows as its one occurrence in the week (#4483).
 	text, isErr := callTool(t, bind(t, NewEventFindTool, pool), ctx, map[string]any{"from": "2026-11-16", "to": "2026-11-22"})
 	if isErr {
 		t.Fatalf("event_find failed: %s", text)
@@ -69,8 +69,8 @@ func TestQueryEventsStoredTimes(t *testing.T) {
 	for _, ev := range eventItems(t, text) {
 		titles = append(titles, ev.Title)
 	}
-	if !slices.Equal(titles, []string{"Bill", "Dentist"}) {
-		t.Errorf("event_find titles = %v, want [Bill Dentist]", titles)
+	if !slices.Equal(titles, []string{"Bill", "Swim", "Dentist"}) {
+		t.Errorf("event_find titles = %v, want [Bill Swim Dentist]", titles)
 	}
 
 	// Moving an event (ical_data rewrite) moves it in range queries too.

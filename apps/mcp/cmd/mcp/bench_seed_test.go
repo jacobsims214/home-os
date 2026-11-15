@@ -87,13 +87,17 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 		        LATERAL (SELECT date_trunc('week', now()) - interval '26 weeks' + w * interval '1 week'
 		                        + a.dow * interval '1 day' + a.hr * interval '1 hour' AS ts) x`,
 
-		// A few true RRULE series.
+		// A few true RRULE series, weekly and daily, some started months
+		// ago: range reads expand them into occurrences (#4483).
 		`INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, event_type, rrule)
 		 SELECT (SELECT id FROM calendars WHERE household_id = $1 AND name = 'Family'), gen_random_uuid()::text,
-		        json_build_object('title', t, 'start', to_char((date_trunc('week', now()) + interval '8 hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-		            'end', to_char((date_trunc('week', now()) + interval '9 hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), 'all_day', false)::text,
-		        'etag-0', 'event', 'FREQ=WEEKLY;BYDAY=' || d
-		   FROM (VALUES ('Trash day', 'TU'), ('Church', 'SU'), ('Grocery run', 'SA'), ('Allowance', 'FR')) v(t, d)`,
+		        json_build_object('title', t, 'start', to_char((date_trunc('week', now()) - ago + interval '8 hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+		            'end', to_char((date_trunc('week', now()) - ago + interval '9 hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), 'all_day', false)::text,
+		        'etag-0', 'event', r
+		   FROM (VALUES ('Trash day', 'FREQ=WEEKLY;BYDAY=TU', interval '0'), ('Church', 'FREQ=WEEKLY;BYDAY=SU', interval '0'),
+		                ('Grocery run', 'FREQ=WEEKLY;BYDAY=SA', interval '0'), ('Allowance', 'FREQ=WEEKLY;BYDAY=FR', interval '0'),
+		                ('Medication', 'FREQ=DAILY', interval '26 weeks'), ('Dog walk', 'FREQ=DAILY', interval '0'),
+		                ('School run', 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR', interval '10 weeks')) v(t, r, ago)`,
 
 		// Properties and rooms.
 		`INSERT INTO properties (household_id, name, address, property_type, purchase_price, current_value)

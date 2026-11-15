@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -220,9 +221,18 @@ type eventRow struct {
 // as household-local midnights (see localizeAllDay) and timed events in the
 // household's offset, so every tool shows the same local times.
 func parseEventFromRow(row eventRow, loc *time.Location) (*Event, error) {
+	ev, _, err := parseRow(row, loc)
+	return ev, err
+}
+
+// parseRow is parseEventFromRow plus the stored object the event was read
+// from (nil obj for rows without rrule/ical_raw), so range reads can expand
+// a series into its occurrences without parsing the raw twice.
+func parseRow(row eventRow, loc *time.Location) (*Event, storedSeries, error) {
+	var series storedSeries
 	var ej eventJSON
 	if err := json.Unmarshal([]byte(row.IcalData), &ej); err != nil {
-		return nil, fmt.Errorf("parse ical_data: %w", err)
+		return nil, series, fmt.Errorf("parse ical_data: %w", err)
 	}
 	ev := &Event{
 		ID:           row.ID,
@@ -238,7 +248,7 @@ func parseEventFromRow(row eventRow, loc *time.Location) (*Event, error) {
 		CalendarName: row.CalendarName,
 	}
 	if row.Rrule != nil || row.IcalRaw != nil {
-		series := loadSeries(ej, row.ID, row.Rrule, row.IcalRaw)
+		series = loadSeries(ej, row.ID, row.Rrule, row.IcalRaw)
 		ev.Recurring = series.recurring() || (series.locked && isRecurringEvent(row.Rrule, row.IcalRaw))
 		var doc map[string]json.RawMessage
 		_ = json.Unmarshal([]byte(row.IcalData), &doc)
@@ -260,7 +270,7 @@ func parseEventFromRow(row eventRow, loc *time.Location) (*Event, error) {
 		}
 	}
 	setLocalDay(ev, loc)
-	return ev, nil
+	return ev, series, nil
 }
 
 // ─────────────────────────────────────────────
@@ -507,7 +517,22 @@ func scanEventRow(row pgx.Row) (eventRow, error) {
 	return r, err
 }
 
+// queryEvents returns the household's events in [startDate, endDate) with
+// repeating series expanded into their occurrences (see expandSeries); see
+// queryOccurrences.
 func queryEvents(ctx context.Context, pool querier, householdID string, loc *time.Location, calendarIDs []string, startDate, endDate time.Time) ([]Event, error) {
+	events, _, err := queryOccurrences(ctx, pool, householdID, loc, calendarIDs, startDate, endDate)
+	return events, err
+}
+
+// queryOccurrences reads the events that may overlap [startDate, endDate)
+// and expands every repeating series into one Event per occurrence in that
+// range (skipped dates left out, moved occurrences at their new time). The
+// SQL window is a superset: callers keep eventOverlapsRange as the exact
+// check. truncated names the series that had more than maxSeriesOccurrences
+// occurrences in the range, of which only the first ones are returned. With
+// a zero range, series come back unexpanded.
+func queryOccurrences(ctx context.Context, pool querier, householdID string, loc *time.Location, calendarIDs []string, startDate, endDate time.Time) (events []Event, truncated []string, err error) {
 	// Base query: join calendar_objects with calendars for household scoping
 	query := `SELECT ` + eventColumns + `
 		FROM calendar_objects co
@@ -550,30 +575,38 @@ func queryEvents(ctx context.Context, pool querier, householdID string, loc *tim
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query events: %w", err)
+		return nil, nil, fmt.Errorf("query events: %w", err)
 	}
 	defer rows.Close()
 
-	var events []Event
+	expand := !startDate.IsZero() && !endDate.IsZero()
 	for rows.Next() {
 		row, err := scanEventRow(rows)
 		if err != nil {
 			slog.Warn("calendar: query events: scan error", "error", err)
 			continue
 		}
-		ev, err := parseEventFromRow(row, loc)
+		ev, series, err := parseRow(row, loc)
 		if err != nil {
 			slog.Warn("calendar: query events: parse error", "event_id", row.ID, "error", err)
 			continue
 		}
-		events = append(events, *ev)
+		if !expand || !series.recurring() {
+			events = append(events, *ev)
+			continue
+		}
+		occs, cut := expandSeries(*ev, series, startDate, endDate, loc)
+		events = append(events, occs...)
+		if cut {
+			truncated = append(truncated, ev.Title)
+		}
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate events: %w", err)
+		return nil, nil, fmt.Errorf("iterate events: %w", err)
 	}
 
-	return events, nil
+	return events, truncated, nil
 }
 
 // findConflicts returns the household's events (optionally limited to
@@ -943,7 +976,7 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			calendarIDs = []string{cal.ID}
 		}
 
-		events, err := queryEvents(ctx, pool, claims.HouseholdID, loc, calendarIDs, from, to)
+		events, truncated, err := queryOccurrences(ctx, pool, claims.HouseholdID, loc, calendarIDs, from, to)
 		if err != nil {
 			slog.Error("event_find: query error", "error", err)
 			return respond.Failed("find events", err), nil
@@ -991,6 +1024,9 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			p.NextCursor = respond.EncodeCursor(hi)
 			p.Narrow = fmt.Sprintf("%d more. Pass next_cursor as cursor with the same filters, or narrow from/to, query or calendar_id.", total-hi)
 		}
+		if len(truncated) > 0 {
+			summary += " " + truncatedNote(truncated)
+		}
 		if len(page) > 0 {
 			next = append(next, eventHints(page[0])...)
 		} else {
@@ -999,6 +1035,17 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		return respond.List(summary, page, p, next...), nil
 	}
 	return tool, handler
+}
+
+// truncatedNote tells the caller which series were cut at
+// maxSeriesOccurrences occurrences.
+func truncatedNote(titles []string) string {
+	quoted := make([]string, len(titles))
+	for i, t := range titles {
+		quoted[i] = strconv.Quote(t)
+	}
+	return fmt.Sprintf("%s %s more than %d times in this range; only the first %d are listed, so ask for a shorter range to see the rest.",
+		strings.Join(quoted, ", "), plural(len(titles), "repeats", "repeat"), maxSeriesOccurrences, maxSeriesOccurrences)
 }
 
 // matchesQuery reports whether every word of q appears (case-insensitive)
@@ -1489,11 +1536,14 @@ func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		dayStart := days[0]
 		dayEnd := time.Date(last.Year(), last.Month(), last.Day()+1, 0, 0, 0, 0, loc) // DST-safe
 		if want["events"] {
-			events, err := queryEvents(ctx, pool, claims.HouseholdID, loc, nil, dayStart, dayEnd)
+			events, truncated, err := queryOccurrences(ctx, pool, claims.HouseholdID, loc, nil, dayStart, dayEnd)
 			if err != nil {
 				slog.Error("agenda_get: query events error", "error", err)
 				res.Warnings = append(res.Warnings, "Could not load events; do not assume the days are free.")
 			} else {
+				if len(truncated) > 0 {
+					res.Warnings = append(res.Warnings, truncatedNote(truncated))
+				}
 				for _, ev := range events {
 					if eventOverlapsRange(ev, dayStart, dayEnd) {
 						res.Events = append(res.Events, ev)

@@ -75,7 +75,7 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 	static := func(m map[string]any) func(int) map[string]any { return func(int) map[string]any { return m } }
 
 	return []benchCase{
-		{"agenda_get", static(map[string]any{"from": day(0), "to": day(6)})},
+		{"agenda_get", static(map[string]any{"from": day(0), "to": day(30)})},
 		{"asset_create", func(i int) map[string]any {
 			return map[string]any{"name": fmt.Sprintf("Bench blender %d", i), "category": "appliance", "property_id": f.Property, "purchase_price": 49.99}
 		}},
