@@ -463,9 +463,9 @@ func loadHouseholdLocation(ctx context.Context, pool *pgxpool.Pool, householdID 
 
 // ─────────────────────────────────────────────
 // Helper: query events for a household, optionally filtered by calendar IDs
-// and date range. Date filtering is done in SQL via JSONB extraction of
-// ical_data.start/end timestamps. Callers may still use eventOverlapsRange
-// as a correctness backstop.
+// and date range. Date filtering is done in SQL on calendar_objects.starts_at
+// / ends_at (035). Callers may still use eventOverlapsRange as a correctness
+// backstop.
 // ─────────────────────────────────────────────
 
 // eventColumns selects an eventRow from calendar_objects co JOIN calendars c;
@@ -498,16 +498,21 @@ func queryEvents(ctx context.Context, pool querier, householdID string, loc *tim
 		query += fmt.Sprintf(" AND co.calendar_id IN (%s)", strings.Join(placeholders, ","))
 	}
 
-	// Filter by date range using JSONB extraction from ical_data.
+	// Filter by date range on the stored instants (migration 035:
+	// starts_at/ends_at, trigger-maintained from ical_data's start/end, NULL
+	// when unparseable), served by idx_calendar_objects_calendar_starts.
 	// Overlap condition: event start < range end AND event end > range start.
 	// This narrows the result set in SQL; callers keep Go-side filtering as
 	// the exact check. The window is widened by allDaySlack because all-day
-	// events are stored as UTC midnights but compared as local days.
+	// events are stored as UTC midnights but compared as local days. A
+	// recurring series (rrule set) is kept whenever it starts before the
+	// range end: starts_at is the series start, and its later occurrences can
+	// fall in the range even though the first one ended long ago.
 	if !startDate.IsZero() && !endDate.IsZero() {
-		query += fmt.Sprintf(" AND (co.ical_data::jsonb->>'start')::timestamptz < $%d", argIdx)
+		query += fmt.Sprintf(" AND co.starts_at < $%d", argIdx)
 		args = append(args, endDate.Add(allDaySlack))
 		argIdx++
-		query += fmt.Sprintf(" AND (co.ical_data::jsonb->>'end')::timestamptz > $%d", argIdx)
+		query += fmt.Sprintf(" AND (co.ends_at > $%d OR co.rrule IS NOT NULL)", argIdx)
 		args = append(args, startDate.Add(-allDaySlack))
 		argIdx++
 	}
@@ -1215,8 +1220,8 @@ func recentDuplicate(ctx context.Context, q querier, calendarID, title, start, e
 		  WHERE co.calendar_id = $1
 		    AND co.created_at > NOW() - $6::interval
 		    AND co.ical_data::jsonb->>'title' = $2
-		    AND (co.ical_data::jsonb->>'start')::timestamptz = $3::timestamptz
-		    AND (co.ical_data::jsonb->>'end')::timestamptz = $4::timestamptz
+		    AND co.starts_at = $3::timestamptz
+		    AND co.ends_at = $4::timestamptz
 		    AND COALESCE((co.ical_data::jsonb->>'all_day')::boolean, false) = $5
 		  ORDER BY co.created_at DESC LIMIT 1`,
 		calendarID, title, start, end, allDay, duplicateWindow))
