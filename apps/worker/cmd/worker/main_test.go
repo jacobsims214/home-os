@@ -304,6 +304,87 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 		}
 	})
 
+	t.Run("maintenance: today in the household timezone", func(t *testing.T) {
+		// 03:00 UTC Nov 10 is 21:00 Nov 9 in Chicago: the 7-day window is
+		// Nov 9..16 there and Nov 10..17 in UTC.
+		now := time.Date(2026, 11, 10, 3, 0, 0, 0, time.UTC)
+		tests := []struct {
+			name string
+			tz   string
+			due  string
+			want bool
+		}{
+			{"Chicago: Nov 16 is the window's last day", "America/Chicago", "2026-11-16", true},
+			{"Chicago: Nov 17 is 8 days out", "America/Chicago", "2026-11-17", false},
+			{"Chicago: Nov 9 is today", "America/Chicago", "2026-11-09", true},
+			{"UTC: Nov 17 is the window's last day", "UTC", "2026-11-17", true},
+			{"UTC: Nov 9 was yesterday", "UTC", "2026-11-09", false},
+			{"UTC: Nov 18 is 8 days out", "UTC", "2026-11-18", false},
+			{"Auckland (16:00 Nov 10): Nov 17 is the last day", "Pacific/Auckland", "2026-11-17", true},
+			{"unknown timezone falls back to UTC: Nov 17 in", "Not/AZone", "2026-11-17", true},
+			{"unknown timezone falls back to UTC: Nov 9 out", "Not/AZone", "2026-11-09", false},
+			{"empty timezone falls back to UTC", "", "2026-11-17", true},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				if _, err := pool.Exec(ctx, `TRUNCATE notifications, bills, maintenance_tasks CASCADE`); err != nil {
+					t.Fatal(err)
+				}
+				hh := seedHousehold(t, pool)
+				if _, err := pool.Exec(ctx, `UPDATE households SET timezone = $2 WHERE id = $1`, hh, tc.tz); err != nil {
+					t.Fatal(err)
+				}
+				taskID := seedTask(t, pool, hh, "Furnace", "pending", tc.due)
+
+				got, err := insertDueNotifications(ctx, pool, now)
+				if err != nil {
+					t.Fatalf("insertDueNotifications: %v", err)
+				}
+				if tc.want != (len(got) == 1) || len(got) > 1 {
+					t.Fatalf("got %d notifications, want created=%v: %+v", len(got), tc.want, got)
+				}
+				if !tc.want {
+					return
+				}
+				if n := got[0]; n.Type != "maintenance_due" || n.HouseholdID != hh || n.Title != "Furnace due soon" {
+					t.Errorf("unexpected notification %+v", n)
+				}
+				if c := notifiedEntities(t, pool, "maintenance_due")[taskID]; c != 1 {
+					t.Errorf("entity_id %s has %d maintenance_due rows, want 1", taskID, c)
+				}
+			})
+		}
+	})
+
+	t.Run("maintenance: households in different timezones in one run", func(t *testing.T) {
+		ctx := context.Background()
+		if _, err := pool.Exec(ctx, `TRUNCATE notifications, bills, maintenance_tasks CASCADE`); err != nil {
+			t.Fatal(err)
+		}
+		chicago := seedHousehold(t, pool)
+		utc := seedHousehold(t, pool)
+		bad := seedHousehold(t, pool)
+		for hh, tz := range map[string]string{chicago: "America/Chicago", utc: "UTC", bad: "Mars/Olympus"} {
+			if _, err := pool.Exec(ctx, `UPDATE households SET timezone = $2 WHERE id = $1`, hh, tz); err != nil {
+				t.Fatal(err)
+			}
+		}
+		chi16 := seedTask(t, pool, chicago, "Chicago 16", "pending", "2026-11-16")
+		seedTask(t, pool, chicago, "Chicago 17", "pending", "2026-11-17")
+		utc17 := seedTask(t, pool, utc, "UTC 17", "pending", "2026-11-17")
+		bad17 := seedTask(t, pool, bad, "Bad 17", "pending", "2026-11-17")
+
+		now := time.Date(2026, 11, 10, 3, 0, 0, 0, time.UTC)
+		if err := generateNotifications(ctx, pool, nil, now); err != nil {
+			t.Fatalf("generateNotifications: %v", err)
+		}
+		maint := notifiedEntities(t, pool, "maintenance_due")
+		if len(maint) != 3 || maint[chi16] != 1 || maint[utc17] != 1 || maint[bad17] != 1 {
+			t.Errorf("maintenance_due = %v, want one each for %s, %s, %s", maint, chi16, utc17, bad17)
+		}
+	})
+
 	t.Run("dedupe within 24h and maintenance window", func(t *testing.T) {
 		ctx := context.Background()
 		if _, err := pool.Exec(ctx, `TRUNCATE notifications, bills, maintenance_tasks CASCADE`); err != nil {

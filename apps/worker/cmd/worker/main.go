@@ -224,18 +224,40 @@ func dueBills(now time.Time, candidates []billCandidate, windowDays int) (ids []
 	return ids, dueDates
 }
 
-// maintenanceDueSQL inserts a maintenance_due notification for every pending
-// task whose due_date falls within [today, today + $2 days]. due_date is a
-// DATE, so the window is in dates: comparing it with NOW() would skip tasks
-// due today (midnight is earlier than NOW()).
+// maintenanceCandidatesSQL lists pending maintenance tasks with no
+// maintenance_due notification in the last 24 hours, with their household's
+// timezone. Which of them are due within the window is decided in Go by
+// dueTasks, with today from households.timezone and the same fallback to UTC
+// as bill_due (AT TIME ZONE in SQL would fail the whole query on a bad
+// timezone). $1 is now's UTC date and $2 the window: every timezone's local
+// date is within a day of the UTC date, so due dates outside
+// [$1 - 1, $1 + $2 + 1] can never be in any household's window and are not
+// fetched.
+const maintenanceCandidatesSQL = `
+	SELECT mt.id::text, h.timezone, mt.due_date
+	FROM maintenance_tasks mt
+	JOIN households h ON h.id = mt.household_id
+	WHERE mt.status = 'pending'
+	AND mt.due_date BETWEEN $1::date - 1 AND $1::date + $2::int + 1
+	AND NOT EXISTS (
+		SELECT 1 FROM notifications n
+		WHERE n.entity_id = mt.id AND n.type = 'maintenance_due'
+		AND n.created_at > NOW() - INTERVAL '24 hours'
+	)
+`
+
+// maintenanceDueSQL inserts a maintenance_due notification for each task id
+// in $1 chosen by dueTasks. The status and NOT EXISTS checks are repeated so
+// a task completed meanwhile is skipped and two overlapping runs still keep
+// one maintenance_due per task per 24 hours.
 const maintenanceDueSQL = `
 	INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
 	SELECT mt.household_id, 'maintenance_due', mt.name || ' due soon',
 	       COALESCE(mt.description, ''),
 	       'maintenance_task', mt.id
-	FROM maintenance_tasks mt
+	FROM unnest($1::uuid[]) AS d(task_id)
+	JOIN maintenance_tasks mt ON mt.id = d.task_id
 	WHERE mt.status = 'pending'
-	AND mt.due_date BETWEEN $1::date AND $1::date + $2::int
 	AND NOT EXISTS (
 		SELECT 1 FROM notifications n
 		WHERE n.entity_id = mt.id AND n.type = 'maintenance_due'
@@ -243,6 +265,30 @@ const maintenanceDueSQL = `
 	)
 	RETURNING id, household_id, type, title, body
 `
+
+// maintenanceCandidate is one row of maintenanceCandidatesSQL.
+type maintenanceCandidate struct {
+	ID       string
+	Timezone string
+	DueDate  time.Time
+}
+
+// dueTasks returns the ids of the candidates whose due_date falls within
+// [today, today + windowDays], where today is now's date in each task's
+// household timezone (householdToday, UTC for an unknown zone). due_date is a
+// DATE, so the window is in whole dates and a task due today is included.
+func dueTasks(now time.Time, candidates []maintenanceCandidate, windowDays int) []string {
+	var ids []string
+	for _, c := range candidates {
+		today := householdToday(now, c.Timezone)
+		y, m, d := c.DueDate.Date()
+		due := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+		if !due.Before(today) && !due.After(today.AddDate(0, 0, windowDays)) {
+			ids = append(ids, c.ID)
+		}
+	}
+	return ids
+}
 
 // generateNotifications inserts due-soon notifications for bills and
 // maintenance tasks as of now (see insertDueNotifications), then emails them.
@@ -260,9 +306,10 @@ func generateNotifications(ctx context.Context, pool *pgxpool.Pool, smtpClient *
 	return nil
 }
 
-// insertDueNotifications inserts bill_due notifications (today per household
-// timezone, see dueBills) and maintenance_due notifications (the calendar day
-// of now in now's location) and returns the inserted rows.
+// insertDueNotifications inserts bill_due notifications (see dueBills) and
+// maintenance_due notifications (see dueTasks), both with today taken from
+// now in each household's timezone (households.timezone, UTC when unknown),
+// and returns the inserted rows.
 func insertDueNotifications(ctx context.Context, pool *pgxpool.Pool, now time.Time) ([]notif, error) {
 	rows, err := pool.Query(ctx, billCandidatesSQL)
 	if err != nil {
@@ -285,8 +332,20 @@ func insertDueNotifications(ctx context.Context, pool *pgxpool.Pool, now time.Ti
 		}
 	}
 
-	today := now.Format(time.DateOnly)
-	rows, err = pool.Query(ctx, maintenanceDueSQL, today, maintenanceDueWindowDays)
+	rows, err = pool.Query(ctx, maintenanceCandidatesSQL,
+		now.UTC().Format(time.DateOnly), maintenanceDueWindowDays)
+	if err != nil {
+		return nil, fmt.Errorf("maintenance notifications: %w", err)
+	}
+	tasks, err := pgx.CollectRows(rows, pgx.RowToStructByPos[maintenanceCandidate])
+	if err != nil {
+		return nil, fmt.Errorf("maintenance notifications: %w", err)
+	}
+	ids := dueTasks(now, tasks, maintenanceDueWindowDays)
+	if len(ids) == 0 {
+		return allNotifs, nil
+	}
+	rows, err = pool.Query(ctx, maintenanceDueSQL, ids)
 	if err != nil {
 		return nil, fmt.Errorf("maintenance notifications: %w", err)
 	}
