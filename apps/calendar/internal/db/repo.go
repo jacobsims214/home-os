@@ -43,19 +43,23 @@ type CalDAVUser struct {
 	ID                 string
 	Email              string
 	CalDAVPasswordHash *string
+	// Active mirrors users.active. A deactivated user (Active=false) must be
+	// rejected by CalDAV auth even with a valid app password. The zero value
+	// is false so a CalDAVUser built without it fails closed.
+	Active bool
 }
 
 // GetUserByEmailForCalDAV looks up a user by email for CalDAV Basic Auth.
 // Returns nil, nil if the user is not found.
 func (r *Repo) GetUserByEmailForCalDAV(ctx context.Context, email string) (*CalDAVUser, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT id, email, caldav_password_hash
+		SELECT id, email, caldav_password_hash, active
 		FROM users
 		WHERE email = $1
 	`, email)
 
 	var u CalDAVUser
-	err := row.Scan(&u.ID, &u.Email, &u.CalDAVPasswordHash)
+	err := row.Scan(&u.ID, &u.Email, &u.CalDAVPasswordHash, &u.Active)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil

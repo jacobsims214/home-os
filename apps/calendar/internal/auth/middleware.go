@@ -59,6 +59,10 @@ const householdsPrefix = "/dav/households/"
 // password). On success, the middleware injects household_id and user_id
 // into the request context.
 //
+// Deactivated users (users.active = false) get 401 on every authenticated
+// path, including /dav/households/<id>/..., even with a previously valid app
+// password. The response is identical to an unknown email's.
+//
 // Households: a user's default household is their oldest membership (see
 // db.ListHouseholdIDsForUser), so the same user always lands in the same
 // household. Users in several families can address any of them with
@@ -203,6 +207,22 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 						slog.String("email", email),
 						slog.Int("failures", count))
 				}
+				w.Header().Set("WWW-Authenticate", `Basic realm="Home OS CalDAV"`)
+				http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+				return
+			}
+			if !user.Active {
+				// Deactivated accounts are rejected before the password
+				// check, with exactly the same response as an unknown email
+				// (same body, no bcrypt), so a client can't tell whether the
+				// account exists, is deactivated, or has an app password.
+				// Previously issued app passwords stop working immediately.
+				count := limiter.recordFailure(ip)
+				metrics.RecordAuthFailure("inactive_user")
+				logging.Logger.Warn("caldav auth: deactivated user",
+					slog.String("ip", ip),
+					slog.String("email", email),
+					slog.Int("failures", count))
 				w.Header().Set("WWW-Authenticate", `Basic realm="Home OS CalDAV"`)
 				http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 				return

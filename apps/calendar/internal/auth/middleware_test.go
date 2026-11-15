@@ -239,7 +239,7 @@ func doAuth(t *testing.T, mw func(http.Handler) http.Handler, authHeader string)
 
 // TestAuthMiddleware_RecordsEachFailureReason verifies that every auth-failure
 // branch in the middleware increments calendar_auth_failures_total with the
-// expected stable reason label. We exercise all 8 credential-rejection paths
+// expected stable reason label. We exercise all 9 credential-rejection paths
 // and confirm the matching reason counter went up by exactly 1 while no other
 // reason label was touched. Rate-limit (429) and DB-error (500) paths are NOT
 // expected to record an auth failure — those are covered by separate cases
@@ -304,6 +304,7 @@ func TestAuthMiddleware_RecordsEachFailureReason(t *testing.T) {
 				ID:                 "u-1",
 				Email:              "user@example.com",
 				CalDAVPasswordHash: nil,
+				Active:             true,
 			},
 			wantCode: http.StatusUnauthorized,
 			want:     "no_caldav_password",
@@ -315,9 +316,23 @@ func TestAuthMiddleware_RecordsEachFailureReason(t *testing.T) {
 				ID:                 "u-1",
 				Email:              "user@example.com",
 				CalDAVPasswordHash: &hashStr,
+				Active:             true,
 			},
 			wantCode: http.StatusUnauthorized,
 			want:     "bad_password",
+		},
+		{
+			// Correct app password, but the account is deactivated.
+			name:    "deactivated user",
+			authHdr: basicAuth(t, "user@example.com", "correct-horse-battery-staple"),
+			repoUser: &db.CalDAVUser{
+				ID:                 "u-1",
+				Email:              "user@example.com",
+				CalDAVPasswordHash: &hashStr,
+				Active:             false,
+			},
+			wantCode: http.StatusUnauthorized,
+			want:     "inactive_user",
 		},
 	}
 
@@ -349,6 +364,7 @@ func TestAuthMiddleware_RecordsEachFailureReason(t *testing.T) {
 			for _, other := range []string{
 				"missing_header", "non_basic", "bad_base64", "malformed_credentials",
 				"empty_credentials", "unknown_user", "no_caldav_password", "bad_password",
+				"inactive_user",
 			} {
 				if other == tc.want {
 					continue
@@ -412,6 +428,7 @@ func TestAuthMiddleware_DBErrorDoesNotRecordAuthFailure(t *testing.T) {
 	for _, reason := range []string{
 		"missing_header", "non_basic", "bad_base64", "malformed_credentials",
 		"empty_credentials", "unknown_user", "no_caldav_password", "bad_password",
+		"inactive_user",
 	} {
 		if got := testutil.ToFloat64(metrics.AuthFailuresTotal.WithLabelValues(reason)); got != 0 {
 			t.Fatalf("DB error path incremented reason %q: got %v, want 0", reason, got)
@@ -436,6 +453,7 @@ func TestAuthMiddleware_SuccessDoesNotRecordAuthFailure(t *testing.T) {
 			ID:                 "u-1",
 			Email:              "user@example.com",
 			CalDAVPasswordHash: &hashStr,
+			Active:             true,
 		},
 		householdIDs: []string{"h-1"},
 	}
@@ -448,6 +466,7 @@ func TestAuthMiddleware_SuccessDoesNotRecordAuthFailure(t *testing.T) {
 	for _, reason := range []string{
 		"missing_header", "non_basic", "bad_base64", "malformed_credentials",
 		"empty_credentials", "unknown_user", "no_caldav_password", "bad_password",
+		"inactive_user",
 	} {
 		if got := testutil.ToFloat64(metrics.AuthFailuresTotal.WithLabelValues(reason)); got != 0 {
 			t.Fatalf("successful auth incremented reason %q: got %v, want 0", reason, got)
@@ -464,7 +483,7 @@ func authedUser(t *testing.T) (*db.CalDAVUser, string) {
 		t.Fatalf("bcrypt hash: %v", err)
 	}
 	h := string(hash)
-	return &db.CalDAVUser{ID: "u-1", Email: "user@example.com", CalDAVPasswordHash: &h},
+	return &db.CalDAVUser{ID: "u-1", Email: "user@example.com", CalDAVPasswordHash: &h, Active: true},
 		basicAuth(t, "user@example.com", "pw-123")
 }
 
@@ -575,4 +594,74 @@ func TestAuthMiddleware_DefaultHouseholdIsStable(t *testing.T) {
 			t.Fatalf("request %d: household = %q, want h-a", i, got.household)
 		}
 	}
+}
+
+// TestAuthMiddleware_DeactivatedUserRejectedEverywhere: a deactivated user's
+// valid app password gets 401 on every authenticated path, including
+// household-scoped ones, and the response can't be told apart from an
+// unknown email's (same status, header and body; next handler never runs).
+func TestAuthMiddleware_DeactivatedUserRejectedEverywhere(t *testing.T) {
+	user, header := authedUser(t)
+	user.Active = false
+	inactive := &fakeRepo{user: user, householdIDs: []string{"h-1", "h-2"}}
+	unknown := &fakeRepo{}
+
+	paths := []string{
+		"/dav/",
+		"/dav/calendars/",
+		"/dav/households/h-1/",
+		"/dav/households/h-2/calendars/",
+		"/dav/cal-uid/",
+		"/dav/cal-uid/event.ics",
+	}
+	for _, method := range []string{"PROPFIND", http.MethodGet, http.MethodPut, "REPORT", http.MethodDelete} {
+		for _, p := range paths {
+			// Fresh middleware per request so the per-IP limiter never
+			// turns a 401 into a 429.
+			got := serveOnce(t, inactive, method, p, header)
+			want := serveOnce(t, unknown, method, p, header)
+			if got.called {
+				t.Fatalf("%s %s: next handler ran for a deactivated user", method, p)
+			}
+			if got.rec.Code != http.StatusUnauthorized {
+				t.Fatalf("%s %s = %d, want 401", method, p, got.rec.Code)
+			}
+			if got.rec.Body.String() != want.rec.Body.String() ||
+				got.rec.Header().Get("WWW-Authenticate") != want.rec.Header().Get("WWW-Authenticate") {
+				t.Fatalf("%s %s: deactivated response (%q) differs from unknown-user response (%q)",
+					method, p, got.rec.Body.String(), want.rec.Body.String())
+			}
+		}
+	}
+	if inactive.calendarLookups != 0 {
+		t.Fatalf("calendar lookups for a deactivated user = %d, want 0", inactive.calendarLookups)
+	}
+
+	// No app password set doesn't change the answer either.
+	user.CalDAVPasswordHash = nil
+	got := serveOnce(t, inactive, "PROPFIND", "/dav/", header)
+	want := serveOnce(t, unknown, "PROPFIND", "/dav/", header)
+	if got.rec.Code != http.StatusUnauthorized || got.rec.Body.String() != want.rec.Body.String() {
+		t.Fatalf("deactivated user without app password = %d %q, want 401 %q",
+			got.rec.Code, got.rec.Body.String(), want.rec.Body.String())
+	}
+}
+
+type onceResult struct {
+	rec    *httptest.ResponseRecorder
+	called bool
+}
+
+func serveOnce(t *testing.T, repo *fakeRepo, method, path, header string) onceResult {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	req.RemoteAddr = "192.0.2.77:1234"
+	req.Header.Set("Authorization", header)
+	rec := httptest.NewRecorder()
+	called := false
+	AuthMiddleware(repo)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(rec, req)
+	return onceResult{rec: rec, called: called}
 }
