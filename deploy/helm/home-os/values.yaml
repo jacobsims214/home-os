@@ -42,6 +42,23 @@ calendar:
   replicas: 1
   image: calendar
   port: 8081
+  # CalDAV Basic-auth rate limiting (apps/calendar/internal/auth/ratelimit.go).
+  # Limited requests get 429 + Retry-After before any bcrypt work.
+  auth:
+    # Networks of the reverse proxies in front of calendar. X-Forwarded-For is
+    # only believed when the TCP peer is in one of these, and then the
+    # rightmost hop outside them is the client. Must cover Envoy and the
+    # ingress controller (Traefik), i.e. the cluster pod CIDR (Talos default
+    # 10.244.0.0/16). Don't add LAN ranges: a client in a trusted range could
+    # then pick its own rate-limit key. Empty list = use the TCP peer only.
+    trustedProxies:
+      - 10.244.0.0/16
+    # Requests per client IP per minute through the credential check (burst = half).
+    requestsPerMinute: 120
+    # Failed password checks per client IP per minute (burst = same).
+    failuresPerMinute: 10
+    # Failed password checks per account email per hour, across IPs (burst = same).
+    accountFailuresPerHour: 30
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }

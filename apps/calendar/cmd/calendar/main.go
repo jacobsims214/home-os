@@ -65,7 +65,7 @@ func main() {
 	mux.HandleFunc("GET /.well-known/caldav", caldav.RedirectToWellKnown)
 
 	// CalDAV endpoints (with auth middleware)
-	caldavRouter := auth.AuthMiddleware(repo)(caldavHandler)
+	caldavRouter := auth.AuthMiddlewareWithConfig(repo, cfg.AuthRateLimit)(caldavHandler)
 	mux.Handle("/dav/", caldavRouter)
 
 	// Apply request body size limits

@@ -3,10 +3,13 @@ package auth
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,175 +30,6 @@ func TestMain(m *testing.M) {
 	}
 	dummyHash = func() []byte { return cheap }
 	os.Exit(m.Run())
-}
-
-// TestClientIP verifies IP extraction from X-Forwarded-For (single hop,
-// multi-hop with proxies, whitespace) and the RemoteAddr fallback (with and
-// without a port). The calendar service runs behind ingress-nginx in
-// production, so the X-Forwarded-For path is the hot one.
-func TestClientIP(t *testing.T) {
-	cases := []struct {
-		name   string
-		xff    string
-		remote string
-		want   string
-	}{
-		{
-			name:   "xff single hop",
-			xff:    "203.0.113.5",
-			remote: "10.0.0.1:54321",
-			want:   "203.0.113.5",
-		},
-		{
-			name:   "xff multi hop takes leftmost",
-			xff:    "203.0.113.5, 10.0.0.1, 10.0.0.2",
-			remote: "10.0.0.99:1234",
-			want:   "203.0.113.5",
-		},
-		{
-			name:   "xff with surrounding whitespace",
-			xff:    "  203.0.113.5  , 10.0.0.1",
-			remote: "10.0.0.99:1234",
-			want:   "203.0.113.5",
-		},
-		{
-			name:   "no xff falls back to remote addr host",
-			xff:    "",
-			remote: "198.51.100.7:40000",
-			want:   "198.51.100.7",
-		},
-		{
-			name:   "no xff and no port returns remote as-is",
-			xff:    "",
-			remote: "192.0.2.3",
-			want:   "192.0.2.3",
-		},
-		{
-			name:   "ipv6 remote addr",
-			xff:    "",
-			remote: "[2001:db8::1]:443",
-			want:   "2001:db8::1",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/dav/", nil)
-			req.RemoteAddr = tc.remote
-			if tc.xff != "" {
-				req.Header.Set("X-Forwarded-For", tc.xff)
-			}
-			got := clientIP(req)
-			if got != tc.want {
-				t.Fatalf("clientIP = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestIPRateLimiter_Allow verifies that a fresh limiter admits exactly the
-// burst number of requests and then starts rejecting until the bucket
-// refills. We construct a dedicated limiter (not the global one) so the test
-// is deterministic and does not depend on shared state.
-func TestIPRateLimiter_Allow(t *testing.T) {
-	rl := &ipRateLimiter{}
-	// No cleanup goroutine for this test — we don't need eviction.
-
-	ip := "203.0.113.99"
-	for i := 0; i < authRateBurst; i++ {
-		if !rl.allow(ip) {
-			t.Fatalf("attempt %d/%d was rejected but burst should have allowed it", i+1, authRateBurst)
-		}
-	}
-	// The (burst+1)-th attempt must be rejected — the bucket is empty and
-	// no time has passed, so no token has refilled.
-	if rl.allow(ip) {
-		t.Fatalf("attempt beyond burst was allowed; rate limiter should have rejected it")
-	}
-}
-
-// TestIPRateLimiter_PerIPBuckets verifies that two different IPs get
-// independent token buckets — throttling one IP must not affect another.
-func TestIPRateLimiter_PerIPBuckets(t *testing.T) {
-	rl := &ipRateLimiter{}
-
-	ipA := "198.51.100.10"
-	ipB := "198.51.100.20"
-
-	// Exhaust IP A's bucket.
-	for i := 0; i < authRateBurst; i++ {
-		if !rl.allow(ipA) {
-			t.Fatalf("ipA attempt %d rejected within burst", i+1)
-		}
-	}
-	if rl.allow(ipA) {
-		t.Fatalf("ipA should be throttled after burst")
-	}
-
-	// IP B must still have its full bucket — it has never been seen.
-	for i := 0; i < authRateBurst; i++ {
-		if !rl.allow(ipB) {
-			t.Fatalf("ipB attempt %d rejected within burst (independent bucket not respected)", i+1)
-		}
-	}
-}
-
-// TestIPRateLimiter_FailureCounterAndReset verifies the consecutive-failure
-// counter increments and is reset to 0 on recordSuccess — the "reset counter
-// on success" acceptance criterion.
-func TestIPRateLimiter_FailureCounterAndReset(t *testing.T) {
-	rl := &ipRateLimiter{}
-	ip := "192.0.2.50"
-
-	if got := rl.recordFailure(ip); got != 1 {
-		t.Fatalf("after 1st failure, count = %d, want 1", got)
-	}
-	if got := rl.recordFailure(ip); got != 2 {
-		t.Fatalf("after 2nd failure, count = %d, want 2", got)
-	}
-	if got := rl.recordFailure(ip); got != 3 {
-		t.Fatalf("after 3rd failure, count = %d, want 3", got)
-	}
-
-	// Successful auth resets the counter to 0.
-	rl.recordSuccess(ip)
-
-	if got := rl.recordFailure(ip); got != 1 {
-		t.Fatalf("after reset + 1 failure, count = %d, want 1", got)
-	}
-}
-
-// TestIPRateLimiter_Refill verifies that the token bucket refills over time.
-// After exhausting the burst, waiting one refill period (time.Minute /
-// authRatePerMinute = 6s) restores one token. We use a limiter constructed
-// with the production constants but a short artificial wait — to keep the
-// test fast, we instead construct a fast limiter directly via rate.NewLimiter
-// and exercise allow() through a limiter whose refill period is tiny.
-//
-// This test uses a real (very short) refill interval so it runs in well
-// under a second rather than waiting 6s.
-func TestIPRateLimiter_Refill(t *testing.T) {
-	rl := &ipRateLimiter{}
-	ip := "203.0.113.7"
-
-	// Exhaust the bucket.
-	for i := 0; i < authRateBurst; i++ {
-		rl.allow(ip)
-	}
-	if rl.allow(ip) {
-		t.Fatalf("bucket should be empty")
-	}
-
-	// Wait long enough for at least one token to refill. The production
-	// rate is 10/min (one token every 6s). Waiting 6s in a unit test is
-	// acceptable here because it is the only way to exercise the real
-	// rate.Limiter refill path with production constants; the rest of the
-	// suite is fast.
-	time.Sleep(6 * time.Second)
-
-	if !rl.allow(ip) {
-		t.Fatalf("after one refill period, at least one token should be available")
-	}
 }
 
 // fakeRepo is an in-memory caldavRepo used by the middleware tests. It avoids
@@ -400,11 +234,10 @@ func TestAuthMiddleware_RateLimitDoesNotRecordAuthFailure(t *testing.T) {
 	repo := &fakeRepo{}
 	mw := AuthMiddleware(repo)
 
-	// Exhaust the burst bucket for our IP so the next request is throttled.
-	// We send OPTIONS-free GET /dav/ requests with no auth header; the
-	// missing-header branch is reached on the first `burst` requests, but
-	// on the (burst+1)-th the limiter rejects before credential parsing.
-	for i := 0; i < authRateBurst; i++ {
+	// Exhaust the per-IP request bucket so the next request is throttled.
+	// Missing-header requests don't spend failed-login tokens, so it is the
+	// request bucket (burst DefaultRequestBurst) that runs out.
+	for i := 0; i < DefaultRequestBurst; i++ {
 		doAuth(t, mw, "")
 	}
 
@@ -419,8 +252,8 @@ func TestAuthMiddleware_RateLimitDoesNotRecordAuthFailure(t *testing.T) {
 	// requests. The 429 response must not have added another. Verify the
 	// count equals burst exactly.
 	got := testutil.ToFloat64(metrics.AuthFailuresTotal.WithLabelValues("missing_header"))
-	if got != float64(authRateBurst) {
-		t.Fatalf("missing_header count = %v, want %d (no extra increment from the 429)", got, authRateBurst)
+	if got != float64(DefaultRequestBurst) {
+		t.Fatalf("missing_header count = %v, want %d (no extra increment from the 429)", got, DefaultRequestBurst)
 	}
 }
 
@@ -817,5 +650,303 @@ func TestAuthMiddleware_EveryCredentialRejectionRunsOneBcrypt(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0].hash != *user.CalDAVPasswordHash {
 		t.Fatalf("successful login compares = %+v, want one against the user's hash", calls)
+	}
+}
+
+// ---- Rate limiting and client IP ----
+
+// podCIDR is the trusted proxy network used by these tests, matching the
+// cluster's pod CIDR (Traefik and Envoy both run there).
+var podCIDR = []netip.Prefix{netip.MustParsePrefix("10.244.0.0/16")}
+
+// envoyAddr is a RemoteAddr inside podCIDR: the request came via Envoy.
+const envoyAddr = "10.244.3.17:41234"
+
+// TestClientIP covers the trusted-proxy rules: X-Forwarded-For is ignored
+// unless the TCP peer is a trusted proxy, and then the rightmost untrusted hop
+// is the client; the client-supplied leftmost entries are never used.
+func TestClientIP(t *testing.T) {
+	cases := []struct {
+		name    string
+		xff     []string // one entry per header line
+		remote  string
+		trusted []netip.Prefix
+		want    string
+	}{
+		{"no xff uses remote addr host", nil, "198.51.100.7:40000", podCIDR, "198.51.100.7"},
+		{"no xff, no trusted proxies", nil, "198.51.100.7:40000", nil, "198.51.100.7"},
+		{"no xff and no port returns remote as-is", nil, "192.0.2.3", nil, "192.0.2.3"},
+		{"ipv4-mapped remote is unmapped", nil, "[::ffff:192.0.2.9]:80", nil, "192.0.2.9"},
+		{"ipv6 remote keyed by /64", nil, "[2001:db8:1:2:aaaa::1]:443", nil, "2001:db8:1:2::/64"},
+		{"xff ignored when peer untrusted", []string{"203.0.113.5"}, "198.51.100.7:1", podCIDR, "198.51.100.7"},
+		{"xff ignored when no trusted proxies", []string{"203.0.113.5"}, envoyAddr, nil, "10.244.3.17"},
+		{"trusted peer, single hop", []string{"203.0.113.5"}, envoyAddr, podCIDR, "203.0.113.5"},
+		{"spoofed leftmost entries ignored", []string{"1.2.3.4, 5.6.7.8, 203.0.113.5"}, envoyAddr, podCIDR, "203.0.113.5"},
+		{"trusted hops skipped from the right", []string{"9.9.9.9, 203.0.113.5, 10.244.1.4"}, envoyAddr, podCIDR, "203.0.113.5"},
+		{"repeated headers read in order", []string{"9.9.9.9", "203.0.113.5"}, envoyAddr, podCIDR, "203.0.113.5"},
+		{"whitespace trimmed", []string{"  9.9.9.9 ,  203.0.113.5  "}, envoyAddr, podCIDR, "203.0.113.5"},
+		{"all hops trusted gives leftmost", []string{"10.244.9.9, 10.244.1.4"}, envoyAddr, podCIDR, "10.244.9.9"},
+		{"garbage stops at last trusted hop", []string{"203.0.113.5, not-an-ip"}, envoyAddr, podCIDR, "10.244.3.17"},
+		{"ipv6 client in xff keyed by /64", []string{"2001:db8:5:6::99"}, envoyAddr, podCIDR, "2001:db8:5:6::/64"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/dav/", nil)
+			req.RemoteAddr = tc.remote
+			for _, v := range tc.xff {
+				req.Header.Add("X-Forwarded-For", v)
+			}
+			if got := clientIP(req, tc.trusted); got != tc.want {
+				t.Fatalf("clientIP = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseTrustedProxies(t *testing.T) {
+	got, err := ParseTrustedProxies(" 10.244.0.0/16, 192.0.2.7 ,2001:db8::/32,, 10.1.2.3/8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []netip.Prefix{
+		netip.MustParsePrefix("10.244.0.0/16"),
+		netip.MustParsePrefix("192.0.2.7/32"),
+		netip.MustParsePrefix("2001:db8::/32"),
+		netip.MustParsePrefix("10.0.0.0/8"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if got, err := ParseTrustedProxies(""); err != nil || len(got) != 0 {
+		t.Fatalf("empty input = %v, %v; want none", got, err)
+	}
+	for _, bad := range []string{"10.244.0.0/99", "nope", "10.0.0.1/"} {
+		if _, err := ParseTrustedProxies(bad); err == nil {
+			t.Fatalf("ParseTrustedProxies(%q) accepted invalid input", bad)
+		}
+	}
+}
+
+// TestKeyedLimiter_TakeRefillAndRetryAfter: the bucket admits burst requests,
+// then rejects with the time until the next token, and refills at the rate.
+func TestKeyedLimiter_TakeRefillAndRetryAfter(t *testing.T) {
+	l := newAuthLimiter(DefaultRateLimitConfig()).requests // 120/min: one token per 500ms
+	now := time.Now()
+	for i := 0; i < DefaultRequestBurst; i++ {
+		if ok, _ := l.take("a", now); !ok {
+			t.Fatalf("request %d rejected within burst", i+1)
+		}
+	}
+	ok, wait := l.take("a", now)
+	if ok {
+		t.Fatal("request beyond burst allowed")
+	}
+	if wait <= 0 || wait > 500*time.Millisecond {
+		t.Fatalf("retry after = %v, want (0, 500ms]", wait)
+	}
+	if ok, _ := l.take("b", now); !ok {
+		t.Fatal("another key shares the exhausted bucket")
+	}
+	if ok, _ := l.take("a", now.Add(500*time.Millisecond)); !ok {
+		t.Fatal("no token after one refill period")
+	}
+}
+
+// TestKeyedLimiter_EvictOnlyRefilledEntries: idle eviction must not drop a
+// bucket that is still draining, or waiting out the idle TTL would reset it.
+func TestKeyedLimiter_EvictOnlyRefilledEntries(t *testing.T) {
+	l := newAuthLimiter(DefaultRateLimitConfig())
+	start := time.Now()
+	for i := 0; i < DefaultAccountFailureBurst; i++ {
+		l.accountFailures.fail("victim@example.com", start)
+	}
+	l.accountFailures.fail("other@example.com", start)
+
+	// 10 minutes later both are idle; "other" has refilled its one token
+	// (one every 2 minutes); "victim" has 5 of 30 back.
+	later := start.Add(10 * time.Minute)
+	l.evictIdle(later)
+	if _, ok := l.accountFailures.entries.Load("victim@example.com"); !ok {
+		t.Fatal("draining account bucket was evicted (attempts reset by waiting out the idle TTL)")
+	}
+	if _, ok := l.accountFailures.entries.Load("other@example.com"); ok {
+		t.Fatal("refilled idle entry was not evicted")
+	}
+}
+
+func TestRetryAfterSeconds(t *testing.T) {
+	for d, want := range map[time.Duration]int{0: 1, time.Millisecond: 1, time.Second: 1, 5500 * time.Millisecond: 6, 2 * time.Minute: 120} {
+		if got := retryAfterSeconds(d); got != want {
+			t.Fatalf("retryAfterSeconds(%v) = %d, want %d", d, got, want)
+		}
+	}
+}
+
+// limitedRequest is one request through mw from RemoteAddr remote with the
+// given X-Forwarded-For (empty = none) and Authorization header.
+func limitedRequest(mw http.Handler, remote, xff, header string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("PROPFIND", "/dav/", nil)
+	req.RemoteAddr = remote
+	if xff != "" {
+		req.Header.Set("X-Forwarded-For", xff)
+	}
+	if header != "" {
+		req.Header.Set("Authorization", header)
+	}
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, req)
+	return rec
+}
+
+func okHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+}
+
+// countBcrypt replaces compareHash with a counting wrapper for the test.
+func countBcrypt(t *testing.T) *int {
+	t.Helper()
+	n := 0
+	orig := compareHash
+	t.Cleanup(func() { compareHash = orig })
+	compareHash = func(hash, pw []byte) error {
+		n++
+		return orig(hash, pw)
+	}
+	return &n
+}
+
+// TestAuthMiddleware_SpoofedXFFSharesOneBucket is the regression test for the
+// bypass: every request carries a different, attacker-chosen leftmost
+// X-Forwarded-For, but the same address appended by the trusted proxy. They
+// must share one failed-login bucket and get 429 (with Retry-After and no
+// bcrypt) once the burst is spent. A different real client is unaffected.
+func TestAuthMiddleware_SpoofedXFFSharesOneBucket(t *testing.T) {
+	cfg := DefaultRateLimitConfig()
+	cfg.TrustedProxies = podCIDR
+	mw := AuthMiddlewareWithConfig(&fakeRepo{}, cfg)(okHandler())
+	bcrypts := countBcrypt(t)
+
+	const attacker = "203.0.113.66"
+	for i := 0; i < DefaultIPFailureBurst; i++ {
+		// A different victim email each time, so only the IP bucket can stop it.
+		header := basicAuth(t, fmt.Sprintf("victim%d@example.com", i), "guess")
+		xff := fmt.Sprintf("198.18.%d.%d, %s", i/250, i%250+1, attacker)
+		if rec := limitedRequest(mw, envoyAddr, xff, header); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status %d, want 401", i+1, rec.Code)
+		}
+	}
+	if *bcrypts != DefaultIPFailureBurst {
+		t.Fatalf("bcrypt compares = %d, want %d", *bcrypts, DefaultIPFailureBurst)
+	}
+
+	rec := limitedRequest(mw, envoyAddr, "100.64.0.1, "+attacker, basicAuth(t, "fresh@example.com", "guess"))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("attempt after burst with a new spoofed XFF: status %d, want 429", rec.Code)
+	}
+	// 10 failures/min: the next token is 6s away.
+	if got := rec.Header().Get("Retry-After"); got != "6" {
+		t.Fatalf("Retry-After = %q, want \"6\"", got)
+	}
+	if *bcrypts != DefaultIPFailureBurst {
+		t.Fatalf("a rate-limited request ran bcrypt (compares = %d)", *bcrypts)
+	}
+
+	if rec := limitedRequest(mw, envoyAddr, attacker+", 203.0.113.67", basicAuth(t, "a@example.com", "pw")); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("other client behind the same proxy: status %d, want 401", rec.Code)
+	}
+}
+
+// TestAuthMiddleware_UntrustedPeerXFFIgnored: a client connecting directly
+// can't pick its bucket with X-Forwarded-For; its RemoteAddr host is the key.
+func TestAuthMiddleware_UntrustedPeerXFFIgnored(t *testing.T) {
+	cfg := DefaultRateLimitConfig()
+	cfg.TrustedProxies = podCIDR
+	mw := AuthMiddlewareWithConfig(&fakeRepo{}, cfg)(okHandler())
+
+	for i := 0; i < DefaultIPFailureBurst; i++ {
+		limitedRequest(mw, "198.51.100.9:5000", fmt.Sprintf("192.0.2.%d", i+1), basicAuth(t, "x@example.com"+fmt.Sprint(i), "guess"))
+	}
+	// No XFF at all: the same RemoteAddr host (any port) is the same bucket.
+	if rec := limitedRequest(mw, "198.51.100.9:6000", "", basicAuth(t, "y@example.com", "guess")); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status %d, want 429 (RemoteAddr host is the key)", rec.Code)
+	}
+	if rec := limitedRequest(mw, "198.51.100.10:5000", "", basicAuth(t, "y@example.com", "guess")); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("different RemoteAddr: status %d, want 401", rec.Code)
+	}
+}
+
+// TestAuthMiddleware_AccountFailureLimit: guesses at one account from many
+// IPs are bounded per account, before the lookup or bcrypt; a different
+// account is unaffected; a successful login refills the account's bucket.
+func TestAuthMiddleware_AccountFailureLimit(t *testing.T) {
+	user, okHeader := authedUser(t)
+	repo := &fakeRepo{user: user, householdIDs: []string{"h-1"}}
+	cfg := DefaultRateLimitConfig()
+	cfg.AccountFailureBurst = 3
+	mw := AuthMiddlewareWithConfig(repo, cfg)(okHandler())
+	bcrypts := countBcrypt(t)
+
+	bad := basicAuth(t, user.Email, "wrong")
+	for i := 0; i < 2; i++ {
+		if rec := limitedRequest(mw, fmt.Sprintf("192.0.2.%d:1", i+1), "", bad); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d: status %d, want 401", i+1, rec.Code)
+		}
+	}
+	// The right password still works and refills the bucket.
+	if rec := limitedRequest(mw, "192.0.2.50:1", "", okHeader); rec.Code != http.StatusOK {
+		t.Fatalf("valid login: status %d, want 200", rec.Code)
+	}
+	for i := 0; i < 3; i++ {
+		if rec := limitedRequest(mw, fmt.Sprintf("192.0.2.%d:1", i+10), "", bad); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d after refill: status %d, want 401", i+1, rec.Code)
+		}
+	}
+	before := *bcrypts
+	// Case and spaces don't make a new bucket.
+	rec := limitedRequest(mw, "192.0.2.99:1", "", basicAuth(t, " "+strings.ToUpper(user.Email), "wrong"))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("account over its limit from a new IP: status %d, want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("429 without Retry-After")
+	}
+	if *bcrypts != before {
+		t.Fatal("account-limited request ran bcrypt")
+	}
+	if rec := limitedRequest(mw, "192.0.2.99:1", "", basicAuth(t, "someone-else@example.com", "wrong")); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("other account: status %d, want 401", rec.Code)
+	}
+}
+
+// TestAuthMiddleware_HeaderFailuresDontSpendLoginTokens: the unauthenticated
+// challenge request CalDAV clients send first (and other header failures,
+// which run no bcrypt) must not use up the failed-login budget.
+func TestAuthMiddleware_HeaderFailuresDontSpendLoginTokens(t *testing.T) {
+	user, okHeader := authedUser(t)
+	mw := AuthMiddleware(&fakeRepo{user: user, householdIDs: []string{"h-1"}})(okHandler())
+	for i := 0; i < 3*DefaultIPFailureBurst; i++ {
+		if rec := limitedRequest(mw, "192.0.2.1:1", "", ""); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("challenge %d: status %d, want 401", i+1, rec.Code)
+		}
+	}
+	if rec := limitedRequest(mw, "192.0.2.1:1", "", okHeader); rec.Code != http.StatusOK {
+		t.Fatalf("login after challenges: status %d, want 200", rec.Code)
+	}
+}
+
+// TestAuthMiddleware_SuccessDoesNotRefillIPFailures: a valid login must not
+// buy an IP more guesses at other accounts.
+func TestAuthMiddleware_SuccessDoesNotRefillIPFailures(t *testing.T) {
+	user, okHeader := authedUser(t)
+	mw := AuthMiddleware(&fakeRepo{user: user, householdIDs: []string{"h-1"}})(okHandler())
+	for i := 0; i < DefaultIPFailureBurst-1; i++ {
+		limitedRequest(mw, "192.0.2.1:1", "", basicAuth(t, fmt.Sprintf("v%d@example.com", i), "guess"))
+	}
+	if rec := limitedRequest(mw, "192.0.2.1:1", "", okHeader); rec.Code != http.StatusOK {
+		t.Fatalf("valid login: status %d", rec.Code)
+	}
+	limitedRequest(mw, "192.0.2.1:1", "", basicAuth(t, "last@example.com", "guess"))
+	if rec := limitedRequest(mw, "192.0.2.1:1", "", basicAuth(t, "more@example.com", "guess")); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status %d, want 429 (success must not refill the IP bucket)", rec.Code)
 	}
 }

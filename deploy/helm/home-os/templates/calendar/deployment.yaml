@@ -29,6 +29,16 @@ spec:
         {{- include "home-os.databaseEnv" . | nindent 8 }}
         - name: LOG_LEVEL
           value: "info"
+        {{- with .Values.calendar.auth }}
+        - name: CALDAV_TRUSTED_PROXIES
+          value: {{ join "," (.trustedProxies | default list) | quote }}
+        - name: CALDAV_AUTH_REQUESTS_PER_MINUTE
+          value: {{ .requestsPerMinute | default 120 | quote }}
+        - name: CALDAV_AUTH_FAILURES_PER_MINUTE
+          value: {{ .failuresPerMinute | default 10 | quote }}
+        - name: CALDAV_AUTH_ACCOUNT_FAILURES_PER_HOUR
+          value: {{ .accountFailuresPerHour | default 30 | quote }}
+        {{- end }}
         volumeMounts:
         {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         resources:

@@ -10,8 +10,10 @@ import (
 	"encoding/base64"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"home-os/calendar/internal/db"
 	"home-os/calendar/internal/logging"
@@ -125,12 +127,21 @@ const householdsPrefix = "/dav/households/"
 // runs, and the full membership list is available via HouseholdIDsFromContext
 // so discovery can list every household's calendars.
 //
-// Per-IP rate limiting (10 attempts per minute, golang.org/x/time/rate) is
-// applied to every request that reaches the credential check. Bypass paths
-// (health, .well-known, OPTIONS) skip both auth and the rate limiter.
-// Consecutive failures are logged with the source IP and supplied email; a
-// successful authentication resets the failure counter for that IP. See
-// ratelimit.go for the limiter implementation.
+// Rate limiting (golang.org/x/time/rate, see ratelimit.go) runs before any
+// bcrypt work. With DefaultRateLimitConfig: each client IP gets 120 requests
+// per minute (burst 60) through the credential check, 10 failed password
+// checks per minute (burst 10), and each account email 30 failed password
+// checks per hour (burst 30) across all IPs. An exhausted bucket gets 429
+// with Retry-After, without a user lookup or bcrypt compare. Only failures
+// that ran bcrypt (unknown email, deactivated, no app password, wrong
+// password) spend failure tokens; a missing or malformed header does not. A
+// successful login refills that account's failure bucket and resets the IP's
+// consecutive-failure count (used for log severity), but not the IP's
+// failure bucket. Bypass paths (health, .well-known, OPTIONS) skip both auth
+// and the limiter. The client IP is the TCP peer unless the peer is in
+// RateLimitConfig.TrustedProxies; then it is the rightmost untrusted
+// X-Forwarded-For hop (see clientIP), never the client-supplied leftmost
+// entry.
 //
 // Every rejected credential is also recorded via metrics.RecordAuthFailure with
 // a stable snake_case reason string (e.g. "missing_header", "bad_password").
@@ -138,12 +149,22 @@ const householdsPrefix = "/dav/households/"
 // those are not credential rejections. Reason strings become Prometheus label
 // series, so new reasons must be added deliberately to keep cardinality bounded.
 func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
-	// The rate limiter is constructed once per server lifetime (AuthMiddleware
-	// is called exactly once in main.go). Each request that reaches the auth
-	// check consults the same ipRateLimiter instance, so per-IP token buckets
-	// persist across requests. A background goroutine inside the limiter
-	// evicts idle entries — see ratelimit.go.
-	limiter := newIPRateLimiter()
+	return AuthMiddlewareWithConfig(repo, DefaultRateLimitConfig())
+}
+
+// tooManyAttempts writes the 429 for a rate-limited request.
+func tooManyAttempts(w http.ResponseWriter, wait time.Duration) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(wait)))
+	http.Error(w, "Too many auth attempts", http.StatusTooManyRequests)
+}
+
+// AuthMiddlewareWithConfig is AuthMiddleware with explicit rate limits and
+// trusted proxies.
+func AuthMiddlewareWithConfig(repo caldavRepo, cfg RateLimitConfig) func(http.Handler) http.Handler {
+	// The limiter is built once per server lifetime (the middleware is built
+	// once in main.go), so buckets persist across requests. Its cleanup
+	// goroutine evicts idle, refilled entries — see ratelimit.go.
+	limiter := startAuthLimiter(cfg)
 	// Build the dummy hash now (~250 ms once per process) so the first
 	// rejected login doesn't pay for it and stand out.
 	dummyHash()
@@ -163,24 +184,28 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Per-IP rate limit: 10 auth attempts per minute (burst 10).
-			// Bypass paths above (health, well-known, OPTIONS) do not
-			// consume tokens — they don't reach here. This prevents a
-			// flood of bad credentials from running bcrypt on every
-			// request.
-			ip := clientIP(r)
-			if !limiter.allow(ip) {
-				logging.Logger.Warn("caldav auth: rate limit exceeded",
+			// Rate limits, checked before any credential work. Bypass
+			// paths above (health, well-known, OPTIONS) never get here.
+			now := time.Now()
+			ip := clientIP(r, limiter.trusted)
+			if ok, wait := limiter.requests.take(ip, now); !ok {
+				logging.Logger.Warn("caldav auth: request rate limit exceeded",
 					slog.String("ip", ip),
 					slog.String("path", r.URL.Path))
-				w.Header().Set("Retry-After", "6")
-				http.Error(w, "Too many auth attempts", http.StatusTooManyRequests)
+				tooManyAttempts(w, wait)
+				return
+			}
+			if blocked, wait := limiter.ipFailures.blocked(ip, now); blocked {
+				logging.Logger.Warn("caldav auth: failed-login rate limit exceeded for ip",
+					slog.String("ip", ip),
+					slog.String("path", r.URL.Path))
+				tooManyAttempts(w, wait)
 				return
 			}
 
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
-				count := limiter.recordFailure(ip)
+				count := limiter.ipFailures.countFailure(ip, now)
 				metrics.RecordAuthFailure("missing_header")
 				logging.Logger.Warn("caldav auth: missing authorization header",
 					slog.String("ip", ip),
@@ -192,7 +217,7 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 
 			// Parse Basic Auth header.
 			if !strings.HasPrefix(authHeader, "Basic ") {
-				count := limiter.recordFailure(ip)
+				count := limiter.ipFailures.countFailure(ip, now)
 				metrics.RecordAuthFailure("non_basic")
 				logging.Logger.Warn("caldav auth: non-basic authorization header",
 					slog.String("ip", ip),
@@ -205,7 +230,7 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 			encoded := strings.TrimPrefix(authHeader, "Basic ")
 			decoded, err := base64.StdEncoding.DecodeString(encoded)
 			if err != nil {
-				count := limiter.recordFailure(ip)
+				count := limiter.ipFailures.countFailure(ip, now)
 				metrics.RecordAuthFailure("bad_base64")
 				logging.Logger.Warn("caldav auth: invalid base64 in authorization header",
 					slog.String("ip", ip),
@@ -217,7 +242,7 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 
 			credentials := strings.SplitN(string(decoded), ":", 2)
 			if len(credentials) != 2 {
-				count := limiter.recordFailure(ip)
+				count := limiter.ipFailures.countFailure(ip, now)
 				metrics.RecordAuthFailure("malformed_credentials")
 				logging.Logger.Warn("caldav auth: malformed credentials",
 					slog.String("ip", ip),
@@ -231,7 +256,7 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 			password := credentials[1]
 
 			if email == "" || password == "" {
-				count := limiter.recordFailure(ip)
+				count := limiter.ipFailures.countFailure(ip, now)
 				metrics.RecordAuthFailure("empty_credentials")
 				logging.Logger.Warn("caldav auth: empty email or password",
 					slog.String("ip", ip),
@@ -239,6 +264,22 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Home OS CalDAV"`)
 				http.Error(w, "Email and password required", http.StatusUnauthorized)
 				return
+			}
+
+			// Per-account failed-login limit, before the lookup and bcrypt.
+			acct := accountKey(email)
+			if blocked, wait := limiter.accountFailures.blocked(acct, now); blocked {
+				logging.Logger.Warn("caldav auth: failed-login rate limit exceeded for account",
+					slog.String("ip", ip),
+					slog.String("email", email))
+				tooManyAttempts(w, wait)
+				return
+			}
+			// passwordFailure records a failed password check (one that ran
+			// bcrypt) against both the IP and the account.
+			passwordFailure := func() int {
+				limiter.accountFailures.fail(acct, now)
+				return limiter.ipFailures.fail(ip, now)
 			}
 
 			// Look up user by email.
@@ -253,7 +294,7 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 			}
 			if user == nil {
 				_ = compareHash(dummyHash(), []byte(password))
-				count := limiter.recordFailure(ip)
+				count := passwordFailure()
 				metrics.RecordAuthFailure("unknown_user")
 				if count >= failureLogThreshold {
 					logging.Logger.Warn("caldav auth: repeated failures — unknown email",
@@ -276,7 +317,7 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 				// this indistinguishable from an unknown email or a wrong
 				// password.
 				_ = compareHash(dummyHash(), []byte(password))
-				count := limiter.recordFailure(ip)
+				count := passwordFailure()
 				metrics.RecordAuthFailure("inactive_user")
 				logging.Logger.Warn("caldav auth: deactivated user",
 					slog.String("ip", ip),
@@ -289,7 +330,7 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 				// Same cost and response as a wrong password: a distinct
 				// message here would confirm the email is an active account.
 				_ = compareHash(dummyHash(), []byte(password))
-				count := limiter.recordFailure(ip)
+				count := passwordFailure()
 				metrics.RecordAuthFailure("no_caldav_password")
 				logging.Logger.Warn("caldav auth: no caldav password set",
 					slog.String("ip", ip),
@@ -301,7 +342,7 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 
 			// Compare password against stored caldav_password_hash.
 			if err := compareHash([]byte(*user.CalDAVPasswordHash), []byte(password)); err != nil {
-				count := limiter.recordFailure(ip)
+				count := passwordFailure()
 				metrics.RecordAuthFailure("bad_password")
 				if count >= failureLogThreshold {
 					logging.Logger.Warn("caldav auth: repeated password failures",
@@ -318,10 +359,13 @@ func AuthMiddleware(repo caldavRepo) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Successful authentication: reset the consecutive-failure
-			// counter for this IP so a user who fat-fingered their
-			// password a few times is back to a clean slate.
-			limiter.recordSuccess(ip)
+			// Successful authentication: refill the account's failure
+			// bucket and reset the IP's consecutive-failure count, so a
+			// user who fat-fingered their password is back to a clean
+			// slate. The IP's failure bucket is left alone: a valid login
+			// must not buy more guesses at other accounts.
+			limiter.accountFailures.forget(acct)
+			limiter.ipFailures.resetCount(ip)
 
 			// Load every household the user belongs to. The list is ordered
 			// oldest membership first, so its first element is a stable
