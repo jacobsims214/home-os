@@ -1,15 +1,65 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+// Session cookies. All are httpOnly: no token is ever readable by client JS.
+// home-os-token is read by the BFF (app/bff/[...path]/route.ts) and middleware.
 const COOKIE_NAME = "home-os-token";
-const COOKIE_MAX_AGE = 60 * 60 * 24;
+// Dex refresh token (granted for the offline_access scope). Used by the BFF
+// refresh flow; never sent to the Go API.
+const REFRESH_COOKIE = "home-os-refresh";
+// Removed in #4412: older builds set this JS-readable copy of the id token.
+// We still expire it so browsers that have one drop it on next login.
+const LEGACY_CLIENT_COOKIE = "home-os-token-client";
+// Fallback when neither the id_token exp nor expires_in is usable (Dex default
+// idTokens expiry is 24h).
+const DEFAULT_TOKEN_MAX_AGE = 60 * 60 * 24;
+// Dex does not report refresh-token lifetime. Its default config never expires
+// them, so cap the cookie at 30 days; a rejected refresh just means re-login.
+const REFRESH_MAX_AGE = 60 * 60 * 24 * 30;
 // Set by app/api/auth/login/route.ts as "<state>.<code_verifier>".
 const PKCE_COOKIE = "home-os-pkce";
 const PKCE_COOKIE_PATH = "/api/auth";
 
+const baseCookie = () => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "lax" as const,
+  path: "/",
+});
+
+// Seconds until the JWT's exp claim, or null if it has none / can't be parsed.
+// The signature is not checked here: this only sizes the cookie, the Go API
+// validates the token on every request.
+function secondsUntilExp(jwt: string): number | null {
+  const payload = jwt.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (typeof claims.exp !== "number") return null;
+    return Math.floor(claims.exp - Date.now() / 1000);
+  } catch {
+    return null;
+  }
+}
+
+function tokenMaxAge(idToken: string, expiresIn: unknown): number {
+  const fromExp = secondsUntilExp(idToken);
+  if (fromExp !== null) return fromExp;
+  if (typeof expiresIn === "number" && Number.isFinite(expiresIn)) return Math.floor(expiresIn);
+  return DEFAULT_TOKEN_MAX_AGE;
+}
+
 // Redirect and always drop the one-time PKCE cookie.
 function redirectClearingPkce(url: URL): NextResponse {
   const response = NextResponse.redirect(url);
-  response.cookies.set(PKCE_COOKIE, "", { path: PKCE_COOKIE_PATH, maxAge: 0 });
+  response.headers.set("Cache-Control", "no-store");
+  response.cookies.set(PKCE_COOKIE, "", {
+    ...baseCookie(),
+    path: PKCE_COOKIE_PATH,
+    maxAge: 0,
+  });
   return response;
 }
 
@@ -55,42 +105,43 @@ export async function GET(request: NextRequest) {
         client_id: "home-os-ui",
         code_verifier: codeVerifier,
       }),
+      cache: "no-store",
     });
 
     if (!tokenResponse.ok) {
+      // Dex error bodies are {error, error_description}; they carry no tokens.
       const errorText = await tokenResponse.text();
-      console.error("Token exchange failed:", errorText);
+      console.error("Token exchange failed:", tokenResponse.status, errorText);
       return redirectClearingPkce(new URL("/login?error=token_exchange_failed", publicOrigin));
     }
 
     const tokens = await tokenResponse.json();
-    const idToken = tokens.id_token;
+    const idToken: unknown = tokens.id_token;
+    const refreshToken: unknown = tokens.refresh_token;
 
-    if (!idToken) {
+    if (typeof idToken !== "string" || !idToken) {
       return redirectClearingPkce(new URL("/login?error=no_id_token", publicOrigin));
     }
 
-    // Store the token in an httpOnly cookie (for server-side/BFF reads)
+    const maxAge = tokenMaxAge(idToken, tokens.expires_in);
+    if (maxAge <= 0) {
+      return redirectClearingPkce(new URL("/login?error=token_expired", publicOrigin));
+    }
+
     const response = redirectClearingPkce(new URL("/dashboard", publicOrigin));
-    response.cookies.set(COOKIE_NAME, idToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: COOKIE_MAX_AGE,
-    });
-    // Also set a non-httpOnly cookie so client-side JS (apiFetch) can read it
-    response.cookies.set("home-os-token-client", idToken, {
-      httpOnly: false,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: COOKIE_MAX_AGE,
-    });
+    // Session token for the BFF; expires with the id token.
+    response.cookies.set(COOKIE_NAME, idToken, { ...baseCookie(), maxAge });
+    if (typeof refreshToken === "string" && refreshToken) {
+      response.cookies.set(REFRESH_COOKIE, refreshToken, { ...baseCookie(), maxAge: REFRESH_MAX_AGE });
+    } else {
+      // No refresh token this time: drop any stale one from an earlier session.
+      response.cookies.set(REFRESH_COOKIE, "", { ...baseCookie(), maxAge: 0 });
+    }
+    response.cookies.set(LEGACY_CLIENT_COOKIE, "", { ...baseCookie(), maxAge: 0 });
 
     return response;
   } catch (error) {
-    console.error("Callback error:", error);
+    console.error("Callback error:", error instanceof Error ? error.message : "unknown");
     return redirectClearingPkce(new URL("/login?error=callback_error", publicOrigin));
   }
 }

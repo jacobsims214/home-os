@@ -30,7 +30,7 @@ export async function GET(request: NextRequest) {
     response_type: "code",
     client_id: "home-os-ui",
     redirect_uri: `${publicOrigin}/api/auth/callback`,
-    scope: "openid email profile",
+    scope: "openid email profile offline_access",
     state,
     code_challenge: challenge,
     code_challenge_method: "S256",
