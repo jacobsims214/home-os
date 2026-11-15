@@ -262,6 +262,13 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 	}
 }
 
+// ContextWithClaims returns a copy of ctx carrying claims, in the shape
+// ClaimsFromContext reads. Middleware uses the same key; tests use this to
+// call tool handlers directly as an authenticated household member.
+func ContextWithClaims(ctx context.Context, claims *auth.Claims) context.Context {
+	return context.WithValue(ctx, claimsKey, claims)
+}
+
 // ClaimsFromContext extracts the *auth.Claims that were injected by the
 // AuthMiddleware middleware. Returns nil if the middleware was not used.
 func ClaimsFromContext(ctx context.Context) *auth.Claims {
