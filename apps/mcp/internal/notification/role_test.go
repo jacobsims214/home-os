@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-
 	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/testutil"
@@ -56,20 +54,24 @@ func TestNotificationReadFollowsCurrentRole(t *testing.T) {
 
 	// Written while Amber was a family member (as 054/061 and the worker write them).
 	n := map[string]string{
-		"secret":      notify(t, pool, h, amber, "item_changed", `Dana updated secret "Bank login"`, "secret", secret, 9*time.Hour),
-		"secretNote":  notify(t, pool, h, amber, "item_changed", `Dana updated note "pin hint"`, "note", secretNote, 8*time.Hour),
-		"secretFile":  notify(t, pool, h, amber, "item_changed", `Dana updated file "scan.pdf"`, "file", secretFile, 7*time.Hour),
-		"linkedFile":  notify(t, pool, h, amber, "item_changed", `Dana updated file "scan.pdf"`, "file", linkedFile, 6*time.Hour),
-		"deleted":     notify(t, pool, h, amber, "item_changed", `Dana deleted secret "Old login"`, "", nil, 5*time.Hour),
-		"bill":        notify(t, pool, h, "", "bill_due", "Electric due soon", "bill", bill, 4*time.Hour),
-		"plainFile":   notify(t, pool, h, amber, "item_changed", `Dana updated file "scan.pdf"`, "file", plainFile, 3*time.Hour),
-		"familyNote":  notify(t, pool, h, amber, "item_changed", `Dana updated note "wifi"`, "note", familyNote, 2*time.Hour),
-		"event":       notify(t, pool, h, amber, "calendar_alarm", "Dentist in 30 minutes", "calendar_event", event, time.Hour),
-		"groceries":   notify(t, pool, h, amber, "item_changed", `Dana deleted list item "milk"`, "list", groceries, 50*time.Minute),
-		"carList":     notify(t, pool, h, amber, "item_changed", `Dana deleted list item "jack"`, "list", carList, 40*time.Minute),
-		"unknownKind": notify(t, pool, h, amber, "item_changed", "Dana updated widget", "widget", uuid.NewString(), 30*time.Minute),
+		"secret":     notify(t, pool, h, amber, "item_changed", `Dana updated secret "Bank login"`, "secret", secret, 9*time.Hour),
+		"secretNote": notify(t, pool, h, amber, "item_changed", `Dana updated note "pin hint"`, "note", secretNote, 8*time.Hour),
+		"secretFile": notify(t, pool, h, amber, "item_changed", `Dana updated file "scan.pdf"`, "file", secretFile, 7*time.Hour),
+		"linkedFile": notify(t, pool, h, amber, "item_changed", `Dana updated file "scan.pdf"`, "file", linkedFile, 6*time.Hour),
+		"deleted":    notify(t, pool, h, amber, "item_changed", `Dana deleted secret "Old login"`, "", nil, 5*time.Hour),
+		"bill":       notify(t, pool, h, "", "bill_due", "Electric due soon", "bill", bill, 4*time.Hour),
+		"plainFile":  notify(t, pool, h, amber, "item_changed", `Dana updated file "scan.pdf"`, "file", plainFile, 3*time.Hour),
+		"familyNote": notify(t, pool, h, amber, "item_changed", `Dana updated note "wifi"`, "note", familyNote, 2*time.Hour),
+		"event":      notify(t, pool, h, amber, "calendar_alarm", "Dentist in 30 minutes", "calendar_event", event, time.Hour),
+		"groceries":  notify(t, pool, h, amber, "item_changed", `Dana deleted list item "milk"`, "list", groceries, 50*time.Minute),
+		"carList":    notify(t, pool, h, amber, "item_changed", `Dana deleted list item "jack"`, "list", carList, 40*time.Minute),
 	}
-	all := []string{"secret", "secretNote", "secretFile", "linkedFile", "deleted", "bill", "plainFile", "familyNote", "event", "groceries", "carList", "unknownKind"}
+	// No row here has an unregistered kind: notifications.entity_type is
+	// entity_kind since migration 070, so one cannot be stored. The fail-closed
+	// branch for a kind the reader may not see is still covered by "deleted",
+	// whose entity_type is NULL (the record is gone), which role_can_see_entity
+	// refuses to viewer and housesitter.
+	all := []string{"secret", "secretNote", "secretFile", "linkedFile", "deleted", "bill", "plainFile", "familyNote", "event", "groceries", "carList"}
 
 	setRole := func(role string) {
 		t.Helper()
@@ -134,11 +136,11 @@ func TestNotificationReadFollowsCurrentRole(t *testing.T) {
 	}
 	var stillUnread int
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM notifications WHERE id = ANY($1::uuid[]) AND read_at IS NULL`,
-		[]string{n["secret"], n["secretNote"], n["secretFile"], n["linkedFile"], n["deleted"], n["unknownKind"]}).Scan(&stillUnread); err != nil {
+		[]string{n["secret"], n["secretNote"], n["secretFile"], n["linkedFile"], n["deleted"]}).Scan(&stillUnread); err != nil {
 		t.Fatal(err)
 	}
-	if stillUnread != 6 {
-		t.Fatalf("mark all touched %d hidden notices", 6-stillUnread)
+	if stillUnread != 5 {
+		t.Fatalf("mark all touched %d hidden notices", 5-stillUnread)
 	}
 	check("viewer", viewerSees)
 

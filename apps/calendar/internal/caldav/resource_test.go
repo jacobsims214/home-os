@@ -1252,8 +1252,11 @@ func TestCalDAVDeleteIfMatchIntegration(t *testing.T) {
 			`INSERT INTO maintenance_tasks (household_id, name) VALUES ($1, 'Replace filter') RETURNING id::text`, hid).Scan(&taskID); err != nil {
 			t.Fatalf("insert task: %v", err)
 		}
+		// 'maintenance_task', not the pre-039 'maintenance' literal: since
+		// migration 070 calendar_objects.entity_type is entity_kind and refuses
+		// the unregistered value (070 up renamed the existing rows).
 		if _, err := pool.Exec(ctx,
-			`UPDATE calendar_objects SET entity_type = 'maintenance', entity_id = $3 WHERE calendar_id = $1 AND uid = $2`,
+			`UPDATE calendar_objects SET entity_type = 'maintenance_task', entity_id = $3 WHERE calendar_id = $1 AND uid = $2`,
 			calID, uid, taskID); err != nil {
 			t.Fatalf("link task: %v", err)
 		}

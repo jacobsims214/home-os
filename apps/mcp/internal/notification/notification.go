@@ -78,6 +78,10 @@ var aboutKinds = map[string]struct{ about, open string }{
 	"vendor":           {"contact", "contact_find id=%s"},
 	"note":             {"note", "note_get note_id=%s"},
 	"person":           {"person", "person_find id=%s"},
+	// item_changed rows for a list item point at its list (migration 070:
+	// list_item is not an entity kind); meal ratings point at the meal plan
+	// and person preferences at the person.
+	"list": {"list", "list_get list_id=%s"},
 	// calendar_alarm reminders (worker, #4443) and item_changed rows for
 	// events (migration 054) point at the calendar object. The alarm's
 	// per-firing dedupe key lives in notifications.dedupe_key (056).

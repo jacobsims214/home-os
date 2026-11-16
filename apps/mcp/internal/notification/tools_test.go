@@ -275,7 +275,9 @@ func TestNotificationFind(t *testing.T) {
 	}
 
 	bill := insertID(t, pool, `INSERT INTO bills (household_id, name, amount, due_day) VALUES ($1, 'Electric', 142.50, 20) RETURNING id`, hh.HouseholdID)
-	task := uuid.NewString()
+	// A real task: notifications.entity_type is entity_kind with an owner
+	// check since migration 070, so a made-up id is refused.
+	task := insertID(t, pool, `INSERT INTO maintenance_tasks (household_id, name) VALUES ($1, 'Furnace filter') RETURNING id`, hh.HouseholdID)
 	cal := insertID(t, pool, `INSERT INTO calendars (household_id, name, type, caldav_uid) VALUES ($1, 'Family', 'family', gen_random_uuid()::text) RETURNING id`, hh.HouseholdID)
 	event := insertID(t, pool, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag) VALUES ($1, 'dentist', '{}', 'e') RETURNING id`, cal)
 	billN := notify(t, pool, hh.HouseholdID, "", "bill_due", "Electric due soon", "bill", bill, 4*time.Hour)

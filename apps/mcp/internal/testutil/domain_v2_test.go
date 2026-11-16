@@ -205,7 +205,7 @@ func TestDomainV2_DeleteRehomesReferences(t *testing.T) {
 		task := insertID(t, pool, `INSERT INTO maintenance_tasks (household_id, name) VALUES ($1, 'Gutters') RETURNING id`, f.household)
 		pet := insertID(t, pool, `INSERT INTO pets (household_id, name) VALUES ($1, 'Rex') RETURNING id`, f.household)
 		cal := insertID(t, pool, `INSERT INTO calendars (household_id, name, type, caldav_uid) VALUES ($1, 'Maintenance', 'maintenance', gen_random_uuid()::text) RETURNING id`, f.household)
-		taskEv := insertID(t, pool, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, entity_type, entity_id) VALUES ($1, 'u1', '{}', 'e', 'maintenance', $2) RETURNING id`, cal, task)
+		taskEv := insertID(t, pool, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, entity_type, entity_id) VALUES ($1, 'u1', '{}', 'e', 'maintenance_task', $2) RETURNING id`, cal, task)
 		petEv := insertID(t, pool, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, entity_type, entity_id) VALUES ($1, 'u2', '{}', 'e', 'pet', $2) RETURNING id`, cal, pet)
 		mustExec(t, pool, `DELETE FROM maintenance_tasks WHERE id = $1`, task)
 		if exists("calendar_objects", taskEv) {
@@ -222,16 +222,15 @@ func TestDomainV2_DeleteRehomesReferences(t *testing.T) {
 	t.Run("deleting a maintenance event still deletes its task (027)", func(t *testing.T) {
 		task := insertID(t, pool, `INSERT INTO maintenance_tasks (household_id, name) VALUES ($1, 'Filters') RETURNING id`, f.household)
 		cal := insertID(t, pool, `INSERT INTO calendars (household_id, name, type, caldav_uid) VALUES ($1, 'Maint 2', 'maintenance', gen_random_uuid()::text) RETURNING id`, f.household)
-		for i, kind := range []string{"maintenance_task", "maintenance"} {
-			if i == 1 {
-				task = insertID(t, pool, `INSERT INTO maintenance_tasks (household_id, name) VALUES ($1, 'Legacy') RETURNING id`, f.household)
-			}
-			ev := insertID(t, pool, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, entity_type, entity_id) VALUES ($1, $2, '{}', 'e', $3, $4) RETURNING id`, cal, uuid.NewString(), kind, task)
-			mustExec(t, pool, `DELETE FROM calendar_objects WHERE id = $1`, ev)
-			if exists("maintenance_tasks", task) {
-				t.Errorf("%s event delete left its task", kind)
-			}
+		ev := insertID(t, pool, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, entity_type, entity_id) VALUES ($1, $2, '{}', 'e', 'maintenance_task', $3) RETURNING id`, cal, uuid.NewString(), task)
+		mustExec(t, pool, `DELETE FROM calendar_objects WHERE id = $1`, ev)
+		if exists("maintenance_tasks", task) {
+			t.Error("maintenance_task event delete left its task")
 		}
+		// calendar_objects.entity_type is entity_kind since 070: the legacy
+		// 'maintenance' literal is refused (070 up renamed existing rows).
+		_, err := pool.Exec(ctx, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, entity_type, entity_id) VALUES ($1, $2, '{}', 'e', 'maintenance', $3)`, cal, uuid.NewString(), task)
+		wantSQLState(t, err, "23514")
 	})
 
 	t.Run("vehicle delete clears notifications, cascades maintenance, nulls bills", func(t *testing.T) {
@@ -420,6 +419,7 @@ func TestDomainV2_Backfill039(t *testing.T) {
 	// secret_keys and 052 one bills column; they are undone first to keep the
 	// chain strictly newest-first. 056 drops the legacy bill/loan/vendor
 	// columns that 038 down and the legacy inserts below need back.
+	apply("070_entity_kind_notifications.down.sql")  // newest first: notifications/calendar_objects entity_type back to VARCHAR
 	apply("069_drop_finance_columns.down.sql")       // newest first: restores the property/vehicle finance columns
 	apply("068_guide_revision_change_note.down.sql") // newest first: drops guide_revisions.change_note
 	apply("067_invitation_vendor_link.down.sql")     // newest first: 067's invitations FK needs 043's vendors key

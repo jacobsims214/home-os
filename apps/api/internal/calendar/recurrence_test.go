@@ -543,3 +543,48 @@ func TestMaintenanceSync_UpdateClearsRaw(t *testing.T) {
 		t.Fatalf("raw not cleared on maintenance update")
 	}
 }
+
+// Create-event accepts only a registered entity kind of the caller's family
+// (migration 070, #4708); a legacy 'maintenance' or another family's record
+// is refused and nothing is stored.
+func TestCreateEvent_EntityReference(t *testing.T) {
+	f := newRecurrenceFixture(t, "UTC")
+	var hh uuid.UUID
+	if err := f.pool.QueryRow(f.ctx, `SELECT household_id FROM calendars WHERE id = $1`, f.calendar).Scan(&hh); err != nil {
+		t.Fatal(err)
+	}
+	other := mustID(t, f.pool, `INSERT INTO households (name) VALUES ('Other '||gen_random_uuid()) RETURNING id`)
+	t.Cleanup(func() { _, _ = f.pool.Exec(context.Background(), `DELETE FROM households WHERE id = $1`, other) })
+	ownPet := mustID(t, f.pool, `INSERT INTO pets (household_id, name) VALUES ($1, 'Rex') RETURNING id`, hh)
+	otherPet := mustID(t, f.pool, `INSERT INTO pets (household_id, name) VALUES ($1, 'Fido') RETURNING id`, other)
+
+	ev := func(kind, id string) map[string]any {
+		return map[string]any{"title": "Vet", "start": "2026-11-02T09:00:00Z", "entity_type": kind, "entity_id": id}
+	}
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+		want int
+	}{
+		{"legacy maintenance", ev("maintenance", uuid.NewString()), http.StatusBadRequest},
+		{"unknown kind", ev("calendar_alarm", uuid.NewString()), http.StatusBadRequest},
+		{"type without id", ev("pet", ""), http.StatusBadRequest},
+		{"id not a uuid", ev("pet", "rex"), http.StatusBadRequest},
+		{"other family's pet", ev("pet", otherPet.String()), http.StatusNotFound},
+		{"missing pet", ev("pet", uuid.NewString()), http.StatusNotFound},
+	} {
+		if code, body := f.do(t, http.MethodPost, f.eventsPath(), tc.body); code != tc.want {
+			t.Errorf("%s: %d %s; want %d", tc.name, code, body, tc.want)
+		}
+	}
+	if n := countOf(t, f.pool, `SELECT count(*) FROM calendar_objects WHERE calendar_id = $1`, f.calendar); n != 0 {
+		t.Fatalf("rejected creates stored %d rows", n)
+	}
+	code, body := f.do(t, http.MethodPost, f.eventsPath(), ev("pet", ownPet.String()))
+	if code != http.StatusCreated {
+		t.Fatalf("own pet: %d %s", code, body)
+	}
+	if got := decodeOne(t, body); got.EntityType != "pet" || got.EntityID != ownPet.String() {
+		t.Errorf("own pet: stored (%s, %s)", got.EntityType, got.EntityID)
+	}
+}

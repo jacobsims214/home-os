@@ -270,6 +270,10 @@ func TestChangeNotifications054_UpdatesDedupeAndText(t *testing.T) {
 // up/down/up: down stops notifications and keeps the ones already written.
 func TestChangeNotifications054_Reversible(t *testing.T) {
 	pool := NewPool(t)
+	// Newest first: 054 up's notify_entity_creator links a deleted pet to
+	// itself, which 070's owner check on notifications refuses. Done before
+	// any query, so no cached plan sees entity_type change type.
+	applyMigration(t, pool, "070_entity_kind_notifications.down.sql")
 	f := seedV2Family(t, pool)
 	bob := newMember(t, pool, f.household, "Bob")
 	amber := newMember(t, pool, f.household, "Amber")
