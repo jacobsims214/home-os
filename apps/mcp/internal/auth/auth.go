@@ -56,20 +56,28 @@ const (
 	ScopeWrite = "write"
 )
 
-// readOnlyRoles may not change household data through the MCP (household
-// role policy, #4689; the API's policy is apps/api/internal/auth/roles.go).
-// The API lets a housesitter check off list items and add pet notes and a
-// vendor update a maintenance task's status; the MCP has no tool narrow
-// enough for that yet, so it refuses every write tool to these roles.
+// readOnlyRoles are the roles that may not change household data broadly
+// through the MCP (household role policy, #4689; the API's policy is
+// apps/api/internal/auth/roles.go). Since #4717 the narrow writes the role
+// policy allows are reachable through the MCP too (a housesitter adds and
+// checks off list items and adds notes on pets, a vendor updates a
+// maintenance task's status): those are decided per tool by
+// auth.ToolPolicy, not here. CanWrite answers the broader question "may this
+// caller change anything it likes", which is what hints and agent-token
+// scopes need.
 var readOnlyRoles = map[string]bool{"viewer": true, "housesitter": true, "vendor": true}
 
-// RoleIsReadOnly reports whether role may only read through the MCP.
+// RoleIsReadOnly reports whether role is not a broad writer through the MCP.
+// It is not the per-tool answer: ask auth.RequirementFor(tool).Allows(role)
+// for that.
 func RoleIsReadOnly(role string) bool { return readOnlyRoles[role] }
 
-// CanWrite reports whether the caller may call tools that change data. The
-// member's role (re-read from memberships on every request, for Dex
-// sessions and agent tokens alike) must not be read-only; then a Dex
-// session can, and an agent token needs ScopeWrite.
+// CanWrite reports whether the caller may call tools that change data
+// without a narrower grant. The member's role (re-read from memberships on
+// every request, for Dex sessions and agent tokens alike) must not be
+// read-only; then a Dex session can, and an agent token needs ScopeWrite.
+// A narrow write (list_check_items for a housesitter) is allowed by the role
+// policy even when this is false; see server.requirePolicy.
 func (c *Claims) CanWrite() bool {
 	if c == nil {
 		return false

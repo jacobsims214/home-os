@@ -311,3 +311,21 @@ func addMonths(d time.Time, n int) time.Time {
 	}
 	return time.Date(first.Year(), first.Month(), day, 0, 0, 0, 0, time.UTC)
 }
+
+// normStatus normalises a status the maintenance_update status argument
+// accepts (pending, in_progress, done, skipped) to its stored value. ok is
+// false for anything else, so a typo is a corrective error rather than a
+// silent no-op.
+func normStatus(s string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case statusPending, "not started", "open":
+		return statusPending, true
+	case statusInProgress, "in progress", "started":
+		return statusInProgress, true
+	case statusDone, "complete", "completed", "finished":
+		return statusDone, true
+	case statusSkipped, "skip":
+		return statusSkipped, true
+	}
+	return "", false
+}

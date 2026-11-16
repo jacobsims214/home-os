@@ -38,6 +38,18 @@ func testConfig() *config.Config {
 
 const wantResourceMetadata = `resource_metadata="https://mcp.test/.well-known/oauth-protected-resource/mcp"`
 
+// classifyAll gives every tool registered on s a policy entry, so the tests
+// below can register synthetic tools without editing the shared catalog
+// table. whoami and purge are open to everyone; add_note stands in for a
+// family-only write, so the role-policy tests can demote the member and see
+// the gate refuse it. A test that cares about a different rule sets its own
+// requirement with SetToolPolicy.
+func classifyAll(s *server.Server) {
+	s.SetToolPolicy("whoami", auth.Requirement{})
+	s.SetToolPolicy("purge", auth.Requirement{})
+	s.SetToolPolicy("add_note", auth.Requirement{Any: []auth.Grant{{Resource: auth.ResNotes, Action: auth.ActWrite}}})
+}
+
 // TestAuthMiddleware_StatusCodes checks the HTTP mapping: member 200 (claims
 // injected), non-member 403, any invalid token 401 with the RFC 9728
 // challenge, database failure 500.
@@ -235,6 +247,7 @@ func TestAuth_ClaimsReachTools(t *testing.T) {
 
 	s := server.NewServer(testConfig(), pool, iss.Verifier(pool))
 	calls := 0
+	classifyAll(s)
 	s.RegisterTool("whoami", mcp.NewTool("whoami",
 		mcp.WithDescription("Return the caller's household and role."),
 		mcp.WithReadOnlyHintAnnotation(true),
@@ -402,6 +415,7 @@ func TestAgentTokens_EndToEnd(t *testing.T) {
 
 	s := server.NewServer(testConfig(), pool, iss.Verifier(pool))
 	whoamiCalls, writeCalls := 0, 0
+	classifyAll(s)
 	s.RegisterTool("whoami", mcp.NewTool("whoami",
 		mcp.WithDescription("Return the caller's claims."),
 		mcp.WithReadOnlyHintAnnotation(true),
@@ -523,8 +537,8 @@ func TestAgentTokens_EndToEnd(t *testing.T) {
 			if resp.StatusCode != http.StatusForbidden {
 				t.Fatalf("status = %d, want 403: %s", resp.StatusCode, body)
 			}
-			if !strings.Contains(string(body), "the "+role+" role is read-only") {
-				t.Fatalf("403 body %s lacks the role message", body)
+			if !strings.Contains(string(body), "the "+role+" role cannot use add_note") {
+				t.Fatalf("403 body %s lacks the role policy message", body)
 			}
 			if writeCalls != before {
 				t.Fatal("write tool ran for a read-only role")
@@ -584,6 +598,7 @@ func TestAgentTokens_EndToEnd(t *testing.T) {
 // write tool returns a tool error and the handler never runs.
 func TestRequireWriteScope_Backstop(t *testing.T) {
 	s := server.NewServer(testConfig(), nil, testutil.NewTokenIssuer(t).Verifier(nil))
+	classifyAll(s)
 	ran := false
 	s.RegisterTool("add_note", mcp.NewTool("add_note", mcp.WithDescription("w")),
 		func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -624,6 +639,7 @@ func TestAuth_DeactivatedUser(t *testing.T) {
 
 	s := server.NewServer(testConfig(), pool, iss.Verifier(pool))
 	calls := 0
+	classifyAll(s)
 	s.RegisterTool("whoami", mcp.NewTool("whoami",
 		mcp.WithDescription("Return the caller's claims."),
 		mcp.WithReadOnlyHintAnnotation(true),
@@ -697,12 +713,13 @@ func TestAuth_DeactivatedUser(t *testing.T) {
 }
 
 // TestRequireWriteScope_ReadOnlyRoles: a Dex session (no agent token) of a
-// viewer, housesitter or vendor cannot run a write tool (#4689); the tool
-// error names the role.
+// viewer, housesitter or vendor cannot run a family-only write tool (#4689,
+// #4717); the tool error names the role and what it cannot do.
 func TestRequireWriteScope_ReadOnlyRoles(t *testing.T) {
 	for _, role := range []string{"viewer", "housesitter", "vendor"} {
 		t.Run(role, func(t *testing.T) {
 			s := server.NewServer(testConfig(), nil, testutil.NewTokenIssuer(t).Verifier(nil))
+			classifyAll(s)
 			ran := false
 			s.RegisterTool("add_note", mcp.NewTool("add_note", mcp.WithDescription("w")),
 				func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -718,8 +735,8 @@ func TestRequireWriteScope_ReadOnlyRoles(t *testing.T) {
 			if ran {
 				t.Fatal("write tool ran for a read-only role")
 			}
-			if !strings.Contains(string(out), "the "+role+" role is read-only") {
-				t.Fatalf("response %s lacks the role message", out)
+			if !strings.Contains(string(out), "the "+role+" role cannot use add_note") {
+				t.Fatalf("response %s lacks the role policy message", out)
 			}
 		})
 	}

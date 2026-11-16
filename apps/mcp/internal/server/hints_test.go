@@ -43,6 +43,9 @@ func TestDropWriteHints(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s := server.NewServer(testConfig(), nil, testutil.NewTokenIssuer(t).Verifier(nil))
+			for _, name := range []string{"thing_get", "thing_find", "thing_create", "thing_delete"} {
+				s.SetToolPolicy(name, auth.Requirement{})
+			}
 			s.RegisterTool("thing_get", readOnly("thing_get"), func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 				return respond.OK("Thing 1.", map[string]any{"id": "1"}, all...), nil
 			})

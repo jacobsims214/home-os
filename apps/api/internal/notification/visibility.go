@@ -38,6 +38,20 @@ import "strings"
 // roleSeesSQL is the condition on notifications n that the role, an SQL
 // expression such as "$3::text", may see what n is about.
 func roleSeesSQL(role string) string {
+	// ownJob limits a maintenance_task notice to the caller's own jobs when
+	// they are a vendor linked to a vendors row (memberships.vendor_id,
+	// #4799): maintenance_due is family-wide, so without it every linked
+	// vendor would read the name and description of every job in the family.
+	// It hides a notice only when the task exists and belongs to another
+	// vendor, so a notice about a task that has since been deleted stays as
+	// visible as it was. The condition is self-contained ($2 is the caller's
+	// user id, NULL for a caller without one) so the API and the MCP keep
+	// identical SQL.
+	ownJob := `NOT EXISTS (SELECT 1 FROM maintenance_tasks p
+			JOIN memberships m ON m.household_id = n.household_id AND m.user_id = $2
+			  AND m.role = 'vendor' AND m.vendor_id IS NOT NULL
+			WHERE p.id = n.entity_id AND p.household_id = n.household_id
+			  AND p.vendor_id IS DISTINCT FROM m.vendor_id)`
 	parent := `(p.entity_type::text = 'household' OR role_can_see_entity(ROLE, p.entity_type::text))`
 	noteParent := `role_can_see_entity(ROLE, p.entity_type::text)`
 	return strings.ReplaceAll(`(role_can_see_entity(ROLE, n.entity_type::text) AND CASE n.entity_type::text
@@ -54,6 +68,7 @@ func roleSeesSQL(role string) string {
 				SELECT 1 FROM document_links sl
 				 WHERE sl.household_id = p.household_id AND sl.link_type = 'file'
 				   AND sl.link_id = p.id::text AND sl.entity_type::text = 'secret')))
+		WHEN 'maintenance_task' THEN `+ownJob+`
 		ELSE true
 	END)`, "ROLE", role)
 }

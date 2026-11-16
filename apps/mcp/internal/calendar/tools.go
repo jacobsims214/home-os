@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -1554,6 +1555,15 @@ func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 				map[string]any{"from": first.Format(dateLayout), "to": first.AddDate(0, 0, 6).Format(dateLayout)}), nil
 		}
 
+		// The household role policy (#4717): agenda_get answers every role,
+		// so the money section and the maintenance section are trimmed to
+		// what the caller may see, and a linked vendor sees only their own
+		// jobs (#4799). Role and link are re-read from memberships, so a
+		// demotion applies at once.
+		view, bad := agendaViewFor(ctx, pool, claims)
+		if bad != nil {
+			return bad, nil
+		}
 		want := map[string]bool{}
 		res := agendaResult{
 			From: first.Format(dateLayout), To: last.Format(dateLayout), Timezone: loc.String(),
@@ -1587,6 +1597,15 @@ func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		dayStart := days[0]
 		dayEnd := time.Date(last.Year(), last.Month(), last.Day()+1, 0, 0, 0, 0, loc) // DST-safe
 		if want["events"] {
+			if !view.events {
+				res.Areas = slices.DeleteFunc(res.Areas, func(a string) bool { return a == "events" })
+				delete(want, "events")
+				if explicitAreas {
+					res.Warnings = append(res.Warnings, "The calendar is not shared with your role.")
+				}
+			}
+		}
+		if want["events"] {
 			events, truncated, err := queryOccurrences(ctx, pool, claims.HouseholdID, loc, nil, dayStart, dayEnd)
 			if err != nil {
 				slog.Error("agenda_get: query events error", "error", err)
@@ -1604,21 +1623,40 @@ func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			}
 		}
 		if want["bills"] {
-			bills, err := billsDueBetween(ctx, pool, claims.HouseholdID, days)
-			if err != nil {
-				slog.Error("agenda_get: query bills error", "error", err)
-				res.Warnings = append(res.Warnings, "Could not load bills; do not assume none are due.")
+			if !view.bills {
+				// Money is not shared with this role: drop the area rather
+				// than answer with an empty list (which would say "nothing is
+				// due"). An explicit request says why.
+				res.Areas = slices.DeleteFunc(res.Areas, func(a string) bool { return a == "bills" })
+				delete(want, "bills")
+				if explicitAreas {
+					res.Warnings = append(res.Warnings, "Bills are not shared with your role.")
+				}
 			} else {
-				res.Bills = bills
+				bills, err := billsDueBetween(ctx, pool, claims.HouseholdID, days)
+				if err != nil {
+					slog.Error("agenda_get: query bills error", "error", err)
+					res.Warnings = append(res.Warnings, "Could not load bills; do not assume none are due.")
+				} else {
+					res.Bills = bills
+				}
 			}
 		}
 		if want["maintenance"] {
-			tasks, err := maintenanceDueBetween(ctx, pool, claims.HouseholdID, first, last)
-			if err != nil {
-				slog.Error("agenda_get: query maintenance error", "error", err)
-				res.Warnings = append(res.Warnings, "Could not load maintenance tasks; do not assume none are due.")
+			if !view.maintenance {
+				res.Areas = slices.DeleteFunc(res.Areas, func(a string) bool { return a == "maintenance" })
+				delete(want, "maintenance")
+				if explicitAreas {
+					res.Warnings = append(res.Warnings, "Upkeep is not shared with your role.")
+				}
 			} else {
-				res.Maintenance = tasks
+				tasks, err := maintenanceDueBetween(ctx, pool, claims.HouseholdID, first, last, view.ownJobs)
+				if err != nil {
+					slog.Error("agenda_get: query maintenance error", "error", err)
+					res.Warnings = append(res.Warnings, "Could not load maintenance tasks; do not assume none are due.")
+				} else {
+					res.Maintenance = tasks
+				}
 			}
 		}
 		if want["meals"] {
@@ -1640,6 +1678,13 @@ func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 				// An allergy saved as text nobody can read matches nothing;
 				// say so rather than let the warning quietly disappear (#4802).
 				res.MealChecks = mealChecks
+			}
+		}
+		if want["lists"] && !view.lists {
+			res.Areas = slices.DeleteFunc(res.Areas, func(a string) bool { return a == "lists" })
+			delete(want, "lists")
+			if explicitAreas {
+				res.Warnings = append(res.Warnings, "Lists are not shared with your role.")
 			}
 		}
 		if want["lists"] {
@@ -1819,7 +1864,11 @@ func billsDueBetween(ctx context.Context, pool querier, householdID string, days
 
 // maintenanceDueBetween returns the household's maintenance tasks due on a
 // local day from first to last inclusive, by date then name.
-func maintenanceDueBetween(ctx context.Context, pool querier, householdID string, first, last time.Time) ([]AgendaTask, error) {
+// maintenanceDueBetween returns the agenda's maintenance section. ownJobs
+// limits it to one vendor's own jobs (#4799), the rule maintenance_find,
+// search_all, the API and CalDAV apply.
+func maintenanceDueBetween(ctx context.Context, pool querier, householdID string, first, last time.Time,
+	ownJobs *uuid.UUID) ([]AgendaTask, error) {
 	civil := func(t time.Time) time.Time {
 		y, m, d := t.Date()
 		return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
@@ -1828,8 +1877,9 @@ func maintenanceDueBetween(ctx context.Context, pool querier, householdID string
 		`SELECT id::text, name, COALESCE(description, ''), status::text, due_date, property_id::text
 		 FROM maintenance_tasks
 		 WHERE household_id = $1 AND due_date BETWEEN $2 AND $3
+		   AND ($4::uuid IS NULL OR vendor_id = $4::uuid)
 		 ORDER BY due_date, name`,
-		householdID, civil(first), civil(last),
+		householdID, civil(first), civil(last), ownJobs,
 	)
 	if err != nil {
 		return nil, err

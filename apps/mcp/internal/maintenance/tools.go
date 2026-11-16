@@ -389,6 +389,9 @@ func NewMaintenanceUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc
 		mcp.WithString("asset_id", mcp.Description(descAssetID)),
 		mcp.WithString("vehicle_id", mcp.Description(descVehicleID)),
 		mcp.WithString("contact_id", mcp.Description(descContactID)),
+		mcp.WithString("status", mcp.Description("New status: pending, in_progress, done or skipped"),
+			mcp.Enum(statusPending, statusInProgress, statusDone, statusSkipped)),
+		mcp.WithString("notes", mcp.Description("Notes about the job; replaces them when given")),
 		respond.Schema[taskData](),
 	)...)
 
@@ -400,6 +403,15 @@ func NewMaintenanceUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc
 		args := req.GetArguments()
 		loc := location(ctx, pool, claims.HouseholdID)
 		today := todayIn(loc)
+		// A linked vendor sees and changes only their own jobs (#4799); a
+		// role with only the narrow grant (a vendor) may change status,
+		// completion and notes and nothing else (#4717). Role and link are
+		// read together, so both decisions come from one reading.
+		role, ownJobs, fail := callerAccess(ctx, pool, claims)
+		if fail != nil {
+			return fail, nil
+		}
+		narrow := statusOnly(role)
 
 		rawID := firstStr(args, "task_id", "id")
 		if rawID == "" {
@@ -413,38 +425,71 @@ func NewMaintenanceUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc
 		example := map[string]any{"task_id": id.String(), "due_date": today.AddDate(0, 0, 7).Format(time.DateOnly)}
 
 		var changed []string
-		var name, description *string
+		var name, description, notes *string
 		var due *time.Time
-		if s := str(args, "name"); s != "" {
-			n, bad := taskName(s, example)
+		var status *string
+		var subj subject
+		var contact *uuid.UUID
+		// A role with only the narrow grant may change status and notes; any
+		// other field it names is refused rather than silently ignored, so
+		// the model tells the user instead of believing it changed the job.
+		if narrow {
+			for _, f := range []string{"name", "due_date", "description", "property_id", "asset_id", "vehicle_id", "contact_id"} {
+				if str(args, f) != "" {
+					return cannotChangeMessage(role, f), nil
+				}
+			}
+			if st := str(args, "status"); st != "" {
+				norm, ok := normStatus(st)
+				if !ok {
+					return respond.Invalid("status", fmt.Sprintf("status %q is not one of pending, in_progress, done, skipped.", st),
+						"Pass status pending, in_progress, done or skipped.", map[string]any{"task_id": id.String(), "status": "in_progress"}), nil
+				}
+				status, changed = &norm, append(changed, "status")
+			}
+			if s := str(args, "notes"); s != "" {
+				notes, changed = &s, append(changed, "notes")
+			}
+			if len(changed) == 0 {
+				return respond.Invalid("", "Nothing to change: pass status or notes.",
+					"Pass status (pending, in_progress, done, skipped) or notes to record what you found.", map[string]any{"task_id": id.String(), "status": "in_progress"}), nil
+			}
+		} else {
+			if s := str(args, "name"); s != "" {
+				n, bad := taskName(s, example)
+				if bad != nil {
+					return bad, nil
+				}
+				name, changed = &n, append(changed, "name")
+			}
+			if s := str(args, "due_date"); s != "" {
+				d, bad := parseDate("due_date", s, loc)
+				if bad != nil {
+					return bad, nil
+				}
+				due, changed = &d, append(changed, "due_date")
+			}
+			if s := str(args, "description"); s != "" {
+				description, changed = &s, append(changed, "description")
+			}
+			if s := str(args, "notes"); s != "" {
+				notes, changed = &s, append(changed, "notes")
+			}
+			var bad *mcp.CallToolResult
+			subj, bad = readSubject(ctx, pool, claims.HouseholdID, args)
 			if bad != nil {
 				return bad, nil
 			}
-			name, changed = &n, append(changed, "name")
-		}
-		if s := str(args, "due_date"); s != "" {
-			d, bad := parseDate("due_date", s, loc)
+			if subj.given() {
+				changed = append(changed, "what it's for")
+			}
+			contact, bad = readContact(ctx, pool, claims.HouseholdID, args)
 			if bad != nil {
 				return bad, nil
 			}
-			due, changed = &d, append(changed, "due_date")
-		}
-		if s := str(args, "description"); s != "" {
-			description, changed = &s, append(changed, "description")
-		}
-		subj, bad := readSubject(ctx, pool, claims.HouseholdID, args)
-		if bad != nil {
-			return bad, nil
-		}
-		if subj.given() {
-			changed = append(changed, "what it's for")
-		}
-		contact, bad := readContact(ctx, pool, claims.HouseholdID, args)
-		if bad != nil {
-			return bad, nil
-		}
-		if contact != nil {
-			changed = append(changed, "contact")
+			if contact != nil {
+				changed = append(changed, "contact")
+			}
 		}
 		if len(changed) == 0 {
 			return respond.Invalid("", "Nothing to change: pass at least one field besides task_id.",
@@ -463,6 +508,14 @@ func NewMaintenanceUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc
 		if err != nil {
 			return respond.Failed("load the task", err), nil
 		}
+		// A linked vendor may only change their own jobs; anyone else's task
+		// is treated as absent, the same record-level denial the API and
+		// maintenance_find apply (#4799).
+		if ownJobs != nil && (cur.VendorID == nil || *cur.VendorID != *ownJobs) {
+			return respond.NotFound("upkeep task", rawID, "Call maintenance_find to see the jobs assigned to you."), nil
+		}
+		// Status done sets completed_at, and a status back to open clears it,
+		// so the two columns cannot disagree.
 		if _, err := tx.Exec(ctx,
 			`UPDATE maintenance_tasks SET
 			        name = COALESCE($3, name),
@@ -472,10 +525,16 @@ func NewMaintenanceUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc
 			        asset_id = CASE WHEN $6 THEN $8 ELSE asset_id END,
 			        vehicle_id = CASE WHEN $6 THEN $9 ELSE vehicle_id END,
 			        vendor_id = COALESCE($10, vendor_id),
+			        notes = COALESCE($11, notes),
+			        status = COALESCE($12::task_status, status),
+			        completed_at = CASE
+			            WHEN $12::task_status = 'done' AND completed_at IS NULL THEN NOW()
+			            WHEN $12::task_status IN ('pending', 'in_progress') THEN NULL
+			            ELSE completed_at END,
 			        updated_at = NOW()
 			  WHERE id = $1 AND household_id = $2`,
 			id, claims.HouseholdID, name, due, description,
-			subj.given(), subj.PropertyID, subj.AssetID, subj.VehicleID, contact,
+			subj.given(), subj.PropertyID, subj.AssetID, subj.VehicleID, contact, notes, status,
 		); err != nil {
 			return respond.Failed("update the task", err), nil
 		}
@@ -531,6 +590,12 @@ func NewMaintenanceCompleteTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFu
 		args := req.GetArguments()
 		loc := location(ctx, pool, claims.HouseholdID)
 		today := todayIn(loc)
+		// A vendor linked to a vendors row completes only their own jobs
+		// (#4799); another vendor's task is treated as absent.
+		ownJobs, fail := vendorScope(ctx, pool, claims)
+		if fail != nil {
+			return fail, nil
+		}
 
 		rawID := firstStr(args, "task_id", "id")
 		if rawID == "" {
@@ -582,6 +647,9 @@ func NewMaintenanceCompleteTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFu
 		}
 		if err != nil {
 			return respond.Failed("load the task", err), nil
+		}
+		if ownJobs != nil && (cur.VendorID == nil || *cur.VendorID != *ownJobs) {
+			return respond.NotFound("upkeep task", rawID, "Call maintenance_find to see the jobs assigned to you."), nil
 		}
 		if cur.Status == statusDone {
 			d := cur.data(today, loc)

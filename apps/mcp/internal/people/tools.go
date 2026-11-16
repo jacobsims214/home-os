@@ -47,6 +47,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 )
@@ -255,21 +256,16 @@ func callerOf(ctx context.Context, pool *pgxpool.Pool) (caller, *mcp.CallToolRes
 // canManage reports whether role may create, update and delete any person.
 func canManage(role string) bool { return role == "owner" || role == "family_manager" }
 
-// readsFull reports whether role may read people in full.
-func readsFull(role string) bool {
-	return canManage(role) || role == "family_member" || role == "viewer"
-}
+// readsFull reports whether role may read people in full (auth ResPeople
+// read). Unknown roles may not, so a new role fails closed.
+func readsFull(role string) bool { return auth.Can(role, auth.ResPeople, auth.ActRead) }
 
 // readsBasic reports whether role may read names, relationships and
-// allergies. Unknown roles may not, so a new role fails closed.
-func readsBasic(role string) bool { return readsFull(role) || role == "housesitter" }
+// allergies (auth ResPeople read_basic), which includes a housesitter.
+func readsBasic(role string) bool { return auth.Can(role, auth.ResPeople, auth.ActReadBasic) }
 
-func roleLabel(role string) string {
-	if role == "" {
-		return "current"
-	}
-	return role
-}
+// roleLabel names the role in a message.
+func roleLabel(role string) string { return auth.RoleLabel(role) }
 
 // noPeopleAccess is the refusal for roles that may not see people (vendor).
 func noPeopleAccess(role string) *mcp.CallToolResult {

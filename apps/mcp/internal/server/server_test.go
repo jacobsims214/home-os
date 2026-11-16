@@ -27,6 +27,7 @@ func newTestRouter(t *testing.T) *httptest.Server {
 		t.Fatalf("NewVerifier: %v", err)
 	}
 	s := NewServer(&config.Config{PublicBaseURL: testPublicBaseURL}, nil, verifier)
+	s.SetToolPolicy("echo", auth.Requirement{})
 	s.RegisterTool("echo", mcp.NewTool("echo",
 		mcp.WithDescription("Echo back who is calling."),
 		mcp.WithReadOnlyHintAnnotation(true),

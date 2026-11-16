@@ -73,13 +73,15 @@ func CanModifyMember(actorRole, targetCurrent string) bool {
 //     dropped from search, links, notes and the activity feed. Agent tokens
 //     are read-scoped only.
 //   - housesitter: read pets, properties/rooms/assets, guides, vendors
-//     (contacts), calendar, lists and meals; check off and add list items;
-//     add notes on pets. People: names and allergies only. No money,
-//     vehicles, files/documents, credentials, preferences, activity feed,
-//     search or agent tokens.
-//   - vendor: read properties/rooms/assets and maintenance tasks/schedules;
+//     (contacts), calendar, lists, meals and notes; check off and add list
+//     items; add notes on pets. People: names and allergies only. No money,
+//     vehicles, files/documents, credentials, preferences, activity feed or
+//     agent tokens. Search is allowed but returns only the areas above.
+//   - vendor: read properties/rooms/assets and maintenance tasks/schedules
+//     (their own jobs when the membership is linked to a vendors row);
 //     update a maintenance task's status and notes. Nothing else (no people,
-//     pets, money, documents, credentials, calendar, activity, agent tokens).
+//     pets, money, documents, credentials, calendar, lists, notes, activity,
+//     agent tokens). Search is allowed but returns only the areas above.
 //
 // Denials: a route the role may not use answers 403 with a message naming
 // the role, action and resource. A record the role may use the route for but
@@ -219,7 +221,11 @@ var policy = map[Resource]map[Action][]string{
 	ResFiles:   {ActRead: rolesReaders, ActWrite: rolesFamily},
 	ResSecrets: {ActRead: rolesFamily, ActWrite: rolesFamily},
 	ResLinks:   {ActRead: rolesReaders, ActWrite: rolesFamily},
-	ResSearch:  {ActRead: rolesReaders},
+	// Search is allowed to every role, including a housesitter and a vendor
+	// (#4717): the handler and the MCP's search_all return only the areas the
+	// caller may read (auth.CanSeeEntity per hit), which is narrower than
+	// "no search at all" and matches what the MCP has served since #4696.
+	ResSearch: {ActRead: rolesEveryone},
 
 	ResPeople:      {ActRead: rolesReaders, ActReadBasic: rolesSitter, ActWrite: rolesFamily},
 	ResPreferences: {ActRead: rolesReaders, ActWrite: rolesFamily},

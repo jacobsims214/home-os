@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/sqlutil"
@@ -117,14 +118,15 @@ func NewPersonFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		// Household role policy (#4689, same as the API's people routes): a
 		// vendor sees no people; a housesitter sees names and relationships
-		// but not ages (birthdates), emails or roles.
-		if claims.Role == "vendor" {
+		// but not ages (birthdates), emails or roles. The rule comes from the
+		// shared table (internal/auth), so it cannot drift from person_get.
+		if !auth.Can(claims.Role, auth.ResPeople, auth.ActReadBasic) {
 			return respond.Fail(respond.Error{
-				Message: "Members with the vendor role can't see the family's people.",
+				Message: fmt.Sprintf("Members with the %s role can't see the family's people.", auth.RoleLabel(claims.Role)),
 				Fix:     "Tell the user to ask an owner or family manager; retrying will not help.",
 			}), nil
 		}
-		basicOnly := claims.Role == "housesitter"
+		basicOnly := !auth.Can(claims.Role, auth.ResPeople, auth.ActRead)
 		args := req.GetArguments()
 		id := strings.TrimSpace(str(args, "id"))
 		query := strings.TrimSpace(str(args, "query"))

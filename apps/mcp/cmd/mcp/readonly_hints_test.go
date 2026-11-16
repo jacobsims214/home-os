@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/config"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/testutil"
@@ -101,6 +102,12 @@ func TestReadOnlyRolesGetNoWriteHints(t *testing.T) {
 			}
 			c := &benchClient{t: t, url: ts.URL + "/mcp", token: iss.Token("hints-"+role, email)}
 			for _, bc := range reads {
+				// #4717: a read tool the role policy refuses is answered 403
+				// before the handler runs, so it has no hints to leak. Only
+				// the tools this role may actually call are checked.
+				if req, ok := auth.RequirementFor(bc.tool); !ok || !req.Allows(role) {
+					continue
+				}
 				for _, h := range call(c, bc.tool, bc.args(0)) {
 					if w := writeToolsIn(h); len(w) > 0 {
 						t.Errorf("%s %s: next hint %q names write tool(s) %s", role, bc.tool, h, strings.Join(w, ", "))

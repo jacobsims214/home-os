@@ -159,7 +159,7 @@ var expectedAccess = map[string][]string{
 	"PUT /api/v1/bills/{id}":    family,
 	"DELETE /api/v1/bills/{id}": family,
 
-	"GET /api/v1/search": readers,
+	"GET /api/v1/search": everyone, // #4717: every role, filtered per hit by the handler
 
 	"GET /api/v1/notes":         sitters, // housesitter: notes on visible records only (handler)
 	"POST /api/v1/notes":        sitterEdit,

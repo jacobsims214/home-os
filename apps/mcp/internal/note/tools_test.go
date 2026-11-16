@@ -306,6 +306,8 @@ func seedRow(t *testing.T, pool interface {
 		sql = `INSERT INTO vendors (household_id, name) VALUES ($1, 'Test plumber') RETURNING id`
 	case "people":
 		sql = `INSERT INTO people (household_id, display_name) VALUES ($1, 'Nora') RETURNING id`
+	case "pets":
+		sql = `INSERT INTO pets (household_id, name, species) VALUES ($1, 'Bella', 'dog') RETURNING id`
 	default:
 		t.Fatalf("seedRow: unsupported table %q", table)
 	}
