@@ -40,9 +40,12 @@ type fakeRepo struct {
 	user *db.CalDAVUser
 	// err, when non-nil, is returned instead of user (simulates a DB error).
 	err error
-	// householdIDs is returned by ListHouseholdIDsForUser (already in the
+	// householdIDs is returned by ListMembershipsForUser (already in the
 	// repo's deterministic order: oldest membership first).
 	householdIDs []string
+	// roles maps household_id -> role for ListMembershipsForUser (default
+	// owner).
+	roles map[string]string
 	// calendarOwners maps caldav_uid -> household_id for GetCalendarHouseholdID.
 	calendarOwners map[string]string
 	// calendarLookups counts GetCalendarHouseholdID calls.
@@ -53,8 +56,16 @@ func (f *fakeRepo) GetUserByEmailForCalDAV(_ context.Context, _ string) (*db.Cal
 	return f.user, f.err
 }
 
-func (f *fakeRepo) ListHouseholdIDsForUser(_ context.Context, _ string) ([]string, error) {
-	return f.householdIDs, nil
+func (f *fakeRepo) ListMembershipsForUser(_ context.Context, _ string) ([]db.Membership, error) {
+	var out []db.Membership
+	for _, id := range f.householdIDs {
+		role := f.roles[id]
+		if role == "" {
+			role = "owner"
+		}
+		out = append(out, db.Membership{HouseholdID: id, Role: role})
+	}
+	return out, nil
 }
 
 func (f *fakeRepo) GetCalendarHouseholdID(_ context.Context, uid string) (string, error) {

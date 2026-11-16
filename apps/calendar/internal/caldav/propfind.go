@@ -266,17 +266,27 @@ func writePropStatOK(w io.Writer, cal *db.Calendar, includeHomeSet bool) {
 	fmt.Fprint(w, "          <D:supported-report><D:report><D:sync-collection/></D:report></D:supported-report>\n")
 	fmt.Fprint(w, "        </D:supported-report-set>\n")
 	fmt.Fprint(w, "        <C:supported-calendar-data><C:calendar-data content-type=\"text/calendar\" version=\"2.0\"/></C:supported-calendar-data>\n")
-	fmt.Fprint(w, "        <D:current-user-privilege-set>\n")
-	fmt.Fprint(w, "          <D:privilege><D:read/></D:privilege>\n")
-	fmt.Fprint(w, "          <D:privilege><D:read-current-user-privilege-set/></D:privilege>\n")
-	fmt.Fprint(w, "          <D:privilege><D:write/></D:privilege>\n")
-	fmt.Fprint(w, "        </D:current-user-privilege-set>\n")
+	writeCalendarPrivilegeSet(w, cal)
 	if includeHomeSet {
 		fmt.Fprint(w, "        <C:calendar-home-set><D:href>/dav/calendars/</D:href></C:calendar-home-set>\n")
 	}
 	fmt.Fprint(w, "      </D:prop>\n")
 	fmt.Fprintf(w, "      <D:status>HTTP/1.1 200 OK</D:status>\n")
 	fmt.Fprint(w, "    </D:propstat>\n")
+}
+
+// writeCalendarPrivilegeSet writes the calendar's current-user-privilege-set.
+// Read-only roles (cal.Writable false, role policy #4718) get read only, so
+// phones show the calendar as read-only instead of letting the member edit
+// and then failing with 403.
+func writeCalendarPrivilegeSet(w io.Writer, cal *db.Calendar) {
+	fmt.Fprint(w, "        <D:current-user-privilege-set>\n")
+	fmt.Fprint(w, "          <D:privilege><D:read/></D:privilege>\n")
+	fmt.Fprint(w, "          <D:privilege><D:read-current-user-privilege-set/></D:privilege>\n")
+	if cal.Writable {
+		fmt.Fprint(w, "          <D:privilege><D:write/></D:privilege>\n")
+	}
+	fmt.Fprint(w, "        </D:current-user-privilege-set>\n")
 }
 
 // writePropStatForProps writes a propstat with only the requested properties.
@@ -319,11 +329,7 @@ func writeSingleProp(w io.Writer, cal *db.Calendar, name xml.Name) {
 		case "getetag":
 			fmt.Fprintf(w, "        <D:getetag>%s</D:getetag>\n", xmlEscape(cal.CTag))
 		case "current-user-privilege-set":
-			fmt.Fprint(w, "        <D:current-user-privilege-set>\n")
-			fmt.Fprint(w, "          <D:privilege><D:read/></D:privilege>\n")
-			fmt.Fprint(w, "          <D:privilege><D:read-current-user-privilege-set/></D:privilege>\n")
-			fmt.Fprint(w, "          <D:privilege><D:write/></D:privilege>\n")
-			fmt.Fprint(w, "        </D:current-user-privilege-set>\n")
+			writeCalendarPrivilegeSet(w, cal)
 		}
 	case nsC:
 		switch name.Local {
@@ -728,7 +734,7 @@ func HandlePROPFIND(w http.ResponseWriter, r *http.Request, repo *db.Repo, path 
 		}
 
 		householdID := auth.HouseholdIDFromContext(ctx)
-		cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, uid)
+		cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, uid, auth.AccessFor(ctx, householdID))
 		if err != nil {
 			logging.Logger.Error("caldav: get calendar",
 				slog.String("path", path),
@@ -756,7 +762,7 @@ func HandlePROPFIND(w http.ResponseWriter, r *http.Request, repo *db.Repo, path 
 		// Apple Calendar uses PROPFIND Depth:1 to list all events in a calendar
 		// before fetching their bodies via REPORT calendar-multiget.
 		if depth != "0" {
-			objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID)
+			objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID, auth.AccessFor(ctx, householdID))
 			if err != nil {
 				logging.Logger.Error("caldav: list calendar objects",
 					slog.String("calendar_uid", uid),
@@ -786,11 +792,11 @@ func HandlePROPFIND(w http.ResponseWriter, r *http.Request, repo *db.Repo, path 
 func listDiscoveryCalendars(ctx context.Context, repo *db.Repo) ([]db.Calendar, error) {
 	householdIDs := auth.HouseholdIDsFromContext(ctx)
 	if auth.HouseholdScopeFromContext(ctx) != "" || len(householdIDs) == 0 {
-		return repo.ListCalendars(ctx, auth.HouseholdIDFromContext(ctx))
+		return repo.ListCalendars(ctx, auth.HouseholdIDFromContext(ctx), auth.Access(ctx))
 	}
 	var all []db.Calendar
 	for _, hid := range householdIDs {
-		cals, err := repo.ListCalendars(ctx, hid)
+		cals, err := repo.ListCalendars(ctx, hid, auth.AccessFor(ctx, hid))
 		if err != nil {
 			return nil, err
 		}

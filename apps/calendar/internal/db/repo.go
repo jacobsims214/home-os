@@ -168,6 +168,10 @@ type Calendar struct {
 	CTag        string    `json:"ctag"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// Writable is whether the caller's role may change this calendar and
+	// its events (Access.CanWrite). It drives the advertised
+	// current-user-privilege-set, so phones show read-only calendars as such.
+	Writable bool `json:"-"`
 }
 
 // CalendarObject represents a row from the calendar_objects table.
@@ -212,12 +216,12 @@ const (
 // globally-monotonic revision. The sync-collection REPORT (RFC 6578) uses
 // these rows to compute the delta since a client's last sync-token.
 type CalendarChange struct {
-	ID         int64               `json:"id"`
-	CalendarID string              `json:"calendar_id"`
-	EventUID   string              `json:"event_uid"`
+	ID         int64                `json:"id"`
+	CalendarID string               `json:"calendar_id"`
+	EventUID   string               `json:"event_uid"`
 	Action     CalendarChangeAction `json:"action"`
-	Revision   int64               `json:"revision"`
-	CreatedAt  time.Time           `json:"created_at"`
+	Revision   int64                `json:"revision"`
+	CreatedAt  time.Time            `json:"created_at"`
 }
 
 // Repo provides database operations for the calendar service.
@@ -258,13 +262,16 @@ func (r *Repo) Ping(ctx context.Context) error {
 // by it so a CalDAV credential from one household can never see another's
 // calendars. An empty householdID returns no rows (defensive — should never
 // happen because auth middleware rejects unauthenticated requests).
-func (r *Repo) ListCalendars(ctx context.Context, householdID string) ([]Calendar, error) {
+//
+// Only calendars acc's role may read are returned (see access.go); the rest
+// are absent from discovery.
+func (r *Repo) ListCalendars(ctx context.Context, householdID string, acc Access) ([]Calendar, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, household_id, name, type, color, caldav_uid, ctag, created_at, updated_at
-		FROM calendars
-		WHERE household_id = $1
+		FROM calendars c
+		WHERE household_id = $1 AND `+calendarVisibleSQL("$2")+`
 		ORDER BY created_at ASC
-	`, householdID)
+	`, householdID, acc.Role)
 	if err != nil {
 		return nil, fmt.Errorf("db: list calendars: %w", err)
 	}
@@ -276,6 +283,7 @@ func (r *Repo) ListCalendars(ctx context.Context, householdID string) ([]Calenda
 		if err := rows.Scan(&c.ID, &c.HouseholdID, &c.Name, &c.Type, &c.Color, &c.CalDAVUID, &c.CTag, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("db: scan calendar: %w", err)
 		}
+		c.Writable = acc.CanWrite()
 		calendars = append(calendars, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -290,13 +298,14 @@ func (r *Repo) ListCalendars(ctx context.Context, householdID string) ([]Calenda
 // a calendar owned by household B.
 // Returns nil, nil if not found OR if the calendar belongs to a different
 // household — callers treat both the same (404), which avoids leaking the
-// existence of cross-tenant calendars.
-func (r *Repo) GetCalendarByCalDAVUID(ctx context.Context, householdID string, uid string) (*Calendar, error) {
+// existence of cross-tenant calendars. A calendar acc's role may not read is
+// likewise nil, nil (absent, not forbidden).
+func (r *Repo) GetCalendarByCalDAVUID(ctx context.Context, householdID string, uid string, acc Access) (*Calendar, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, household_id, name, type, color, caldav_uid, ctag, created_at, updated_at
-		FROM calendars
-		WHERE caldav_uid = $1 AND household_id = $2
-	`, uid, householdID)
+		FROM calendars c
+		WHERE caldav_uid = $1 AND household_id = $2 AND `+calendarVisibleSQL("$3")+`
+	`, uid, householdID, acc.Role)
 
 	var c Calendar
 	err := row.Scan(&c.ID, &c.HouseholdID, &c.Name, &c.Type, &c.Color, &c.CalDAVUID, &c.CTag, &c.CreatedAt, &c.UpdatedAt)
@@ -306,21 +315,24 @@ func (r *Repo) GetCalendarByCalDAVUID(ctx context.Context, householdID string, u
 		}
 		return nil, fmt.Errorf("db: get calendar by uid: %w", err)
 	}
+	c.Writable = acc.CanWrite()
 	return &c, nil
 }
 
 // ListCalendarObjects returns all calendar objects for a given calendar ID,
 // but only if that calendar belongs to the given household. The household
 // check is enforced via an INNER JOIN with calendars — if the calendar is
-// owned by a different household, the join yields no rows.
-func (r *Repo) ListCalendarObjects(ctx context.Context, householdID string, calendarID string) ([]CalendarObject, error) {
+// owned by a different household, the join yields no rows. Events acc may not
+// read are left out (see access.go).
+func (r *Repo) ListCalendarObjects(ctx context.Context, householdID string, calendarID string, acc Access) ([]CalendarObject, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at, o.ical_raw, o.rrule
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND c.household_id = $2
+		  AND `+calendarVisibleSQL("$3")+` AND `+objectVisibleSQL("$3", "$4")+`
 		ORDER BY o.created_at ASC
-	`, calendarID, householdID)
+	`, calendarID, householdID, acc.Role, acc.vendorArg())
 	if err != nil {
 		return nil, fmt.Errorf("db: list calendar objects: %w", err)
 	}
@@ -344,14 +356,15 @@ func (r *Repo) ListCalendarObjects(ctx context.Context, householdID string, cale
 // and UID, but only if the calendar belongs to the given household. The
 // household check is enforced via an INNER JOIN with calendars.
 // Returns nil, nil if not found OR if the calendar belongs to a different
-// household.
-func (r *Repo) GetCalendarObjectByUID(ctx context.Context, householdID string, calendarID string, uid string) (*CalendarObject, error) {
+// household, or if acc may not read the event (see access.go).
+func (r *Repo) GetCalendarObjectByUID(ctx context.Context, householdID string, calendarID string, uid string, acc Access) (*CalendarObject, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at, o.ical_raw, o.rrule
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND o.uid = $2 AND c.household_id = $3
-	`, calendarID, uid, householdID)
+		  AND `+calendarVisibleSQL("$4")+` AND `+objectVisibleSQL("$4", "$5")+`
+	`, calendarID, uid, householdID, acc.Role, acc.vendorArg())
 
 	var o CalendarObject
 	err := row.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule)
@@ -913,14 +926,16 @@ func (r *Repo) UpdateCalendarProps(ctx context.Context, householdID string, cale
 // filtering is done in-app since events are stored as serialized JSON in the
 // ical_data column. For a home OS with typical volumes (<1000 events), this is
 // acceptable. The household check is enforced via an INNER JOIN with calendars.
-func (r *Repo) ListCalendarObjectsInRange(ctx context.Context, householdID string, calendarID string) ([]CalendarObject, error) {
+// Events acc may not read are left out (see access.go).
+func (r *Repo) ListCalendarObjectsInRange(ctx context.Context, householdID string, calendarID string, acc Access) ([]CalendarObject, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at, o.ical_raw, o.rrule
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND c.household_id = $2
+		  AND `+calendarVisibleSQL("$3")+` AND `+objectVisibleSQL("$3", "$4")+`
 		ORDER BY o.created_at ASC
-	`, calendarID, householdID)
+	`, calendarID, householdID, acc.Role, acc.vendorArg())
 	if err != nil {
 		return nil, fmt.Errorf("db: list calendar objects in range: %w", err)
 	}

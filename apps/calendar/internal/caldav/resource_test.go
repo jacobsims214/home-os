@@ -592,7 +592,11 @@ func davRequest(method, path, householdID, body string, hdr map[string]string) *
 	for k, v := range hdr {
 		r.Header.Set(k, v)
 	}
-	return r.WithContext(context.WithValue(r.Context(), auth.HouseholdIDKey, householdID))
+	// Handlers called directly (not through AuthMiddleware) run as the
+	// household's owner; role_policy_test.go covers the other roles.
+	ctx := context.WithValue(r.Context(), auth.HouseholdIDKey, householdID)
+	ctx = auth.WithAccess(ctx, map[string]db.Access{householdID: {Role: "owner"}})
+	return r.WithContext(ctx)
 }
 
 func TestCalDAVRawRoundTripIntegration(t *testing.T) {

@@ -150,7 +150,7 @@ func handleSyncCollection(w http.ResponseWriter, r *http.Request, repo *db.Repo,
 		return
 	}
 
-	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID)
+	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: sync-collection: get calendar",
 			slog.String("calendar_uid", calUID),
@@ -238,7 +238,7 @@ func handleSyncCollection(w http.ResponseWriter, r *http.Request, repo *db.Repo,
 // current event in the calendar. Used for the no-token initial sync and for
 // the unparseable-token fallback.
 func writeSyncInitialResponses(ctx context.Context, buf *strings.Builder, repo *db.Repo, householdID string, cal *db.Calendar) error {
-	objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID)
+	objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		return fmt.Errorf("list objects: %w", err)
 	}
@@ -282,7 +282,7 @@ func writeSyncIncrementalResponses(ctx context.Context, buf *strings.Builder, re
 
 	// Fetch all current objects once and index by UID so create/update
 	// responses can include the latest data without a per-change lookup.
-	objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID)
+	objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		return fmt.Errorf("list objects: %w", err)
 	}
@@ -319,11 +319,14 @@ func writeSyncIncrementalResponses(ctx context.Context, buf *strings.Builder, re
 		case db.ChangeCreate, db.ChangeUpdate:
 			obj, ok := objByUID[ch.EventUID]
 			if !ok {
-				// The final action is create/update but the object is gone.
-				// This should not happen (a delete would have superseded it
-				// with a higher revision); skip defensively rather than emit
-				// a response with no data.
-				logging.Logger.Warn("caldav: sync-collection: change recorded but object missing, skipping",
+				// The final action is create/update but the object is not
+				// in the caller's list: an event the caller's role may not
+				// read (role policy, #4718: e.g. a bill mirror on a
+				// housesitter's view, an ad-hoc event on a vendor's
+				// Maintenance calendar), or, defensively, a row that is gone
+				// (a delete would normally have superseded it). Skip it:
+				// emitting anything would expose the hidden event's UID.
+				logging.Logger.Debug("caldav: sync-collection: change for an event not visible to the caller, skipping",
 					slog.String("event_uid", ch.EventUID),
 					slog.String("action", string(ch.Action)))
 				continue
@@ -425,7 +428,7 @@ func handleCalendarQuery(w http.ResponseWriter, r *http.Request, repo *db.Repo, 
 	}
 
 	// Resolve calendar UID to calendar ID.
-	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID)
+	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: get calendar",
 			slog.String("calendar_uid", calUID),
@@ -445,7 +448,7 @@ func handleCalendarQuery(w http.ResponseWriter, r *http.Request, repo *db.Repo, 
 	expandStart, expandEnd, wantExpand := extractExpandRange(body)
 
 	// Fetch all objects for this calendar.
-	objects, err := repo.ListCalendarObjectsInRange(ctx, householdID, cal.ID)
+	objects, err := repo.ListCalendarObjectsInRange(ctx, householdID, cal.ID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: list objects",
 			slog.String("calendar", cal.Name),
@@ -511,7 +514,7 @@ func handleCalendarMultiget(w http.ResponseWriter, r *http.Request, repo *db.Rep
 		return
 	}
 
-	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID)
+	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: get calendar",
 			slog.String("calendar_uid", calUID),
@@ -542,7 +545,7 @@ func handleCalendarMultiget(w http.ResponseWriter, r *http.Request, repo *db.Rep
 			continue
 		}
 
-		obj, err := repo.GetCalendarObjectByUID(ctx, householdID, cal.ID, eventUID)
+		obj, err := repo.GetCalendarObjectByUID(ctx, householdID, cal.ID, eventUID, auth.AccessFor(ctx, householdID))
 		if err != nil {
 			// A real DB error (connection failure, query error, etc.) MUST NOT be
 			// conflated with "not found". Logging it leaves a server-side trace and

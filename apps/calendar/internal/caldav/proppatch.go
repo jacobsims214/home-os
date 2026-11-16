@@ -307,7 +307,7 @@ func HandlePROPPATCH(w http.ResponseWriter, r *http.Request, repo *db.Repo, path
 	// A 404 here is identical regardless of whether the calendar is missing or
 	// owned by another household — this prevents a cross-tenant calendar from
 	// being patched (and prevents information leak about its existence).
-	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, uid)
+	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, uid, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: proppatch: get calendar",
 			slog.String("calendar_uid", uid),

@@ -1,6 +1,7 @@
 package caldav
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -37,6 +38,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// If path is just /dav/ with no calendar UID, this is a PROPFIND on root
 	// or a request that needs root handling.
+
+	// Role policy (#4718): only family roles change calendars. Read-only
+	// roles (viewer, housesitter, vendor) get 403 on every write method
+	// before the path is resolved, so the answer is the same whether or not
+	// the target calendar exists or is visible to them.
+	if isWriteMethod(r.Method) {
+		if acc := auth.Access(r.Context()); !acc.CanWrite() {
+			forbidReadOnly(w, acc.Role)
+			return
+		}
+	}
 
 	switch r.Method {
 	case http.MethodOptions:
@@ -87,4 +99,27 @@ func HandleREPORT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path st
 // RedirectToWellKnown handles the GET /.well-known/caldav redirect.
 func RedirectToWellKnown(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/dav/", http.StatusMovedPermanently)
+}
+
+// isWriteMethod reports whether a CalDAV method changes calendars or events.
+func isWriteMethod(method string) bool {
+	switch method {
+	case http.MethodPut, http.MethodDelete, "PROPPATCH", "MKCALENDAR", "MOVE", "COPY":
+		return true
+	}
+	return false
+}
+
+// forbidReadOnly writes the 403 a read-only role gets for a write: a DAV
+// error with need-privileges (RFC 3744 §7.1.1), so clients see a permission
+// problem rather than a server fault.
+func forbidReadOnly(w http.ResponseWriter, role string) {
+	if role == "" {
+		role = "non-member"
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.WriteHeader(http.StatusForbidden)
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?>
+<D:error xmlns:D="DAV:"><D:need-privileges/><D:responsedescription>the %s role is read-only on calendars</D:responsedescription></D:error>
+`, xmlEscape(role))
 }

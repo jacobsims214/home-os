@@ -28,7 +28,7 @@ import (
 // so the production call site in main.go is unchanged.
 type caldavRepo interface {
 	GetUserByEmailForCalDAV(ctx context.Context, email string) (*db.CalDAVUser, error)
-	ListHouseholdIDsForUser(ctx context.Context, userID string) ([]string, error)
+	ListMembershipsForUser(ctx context.Context, userID string) ([]db.Membership, error)
 	GetCalendarHouseholdID(ctx context.Context, caldavUID string) (string, error)
 }
 
@@ -91,6 +91,10 @@ const (
 	// HouseholdScopeKey is the context key for the household named in a
 	// /dav/households/<id>/ request path. Empty for unscoped requests.
 	HouseholdScopeKey contextKey = "household_scope"
+	// MembershipsKey is the context key for the user's memberships
+	// (map household_id -> db.Access), read from memberships on every
+	// request so a role change applies to the next request.
+	MembershipsKey contextKey = "memberships"
 )
 
 // householdsPrefix is the path prefix for household-scoped CalDAV URLs:
@@ -367,10 +371,11 @@ func AuthMiddlewareWithConfig(repo caldavRepo, cfg RateLimitConfig) func(http.Ha
 			limiter.accountFailures.forget(acct)
 			limiter.ipFailures.resetCount(ip)
 
-			// Load every household the user belongs to. The list is ordered
-			// oldest membership first, so its first element is a stable
-			// default household for unscoped requests.
-			householdIDs, err := repo.ListHouseholdIDsForUser(r.Context(), user.ID)
+			// Load every household the user belongs to, with the role
+			// there (role policy, #4718). The list is ordered oldest
+			// membership first, so its first element is a stable default
+			// household for unscoped requests.
+			memberships, err := repo.ListMembershipsForUser(r.Context(), user.ID)
 			if err != nil {
 				logging.Logger.Error("caldav auth: household lookup error",
 					slog.String("user_id", user.ID),
@@ -379,6 +384,12 @@ func AuthMiddlewareWithConfig(repo caldavRepo, cfg RateLimitConfig) func(http.Ha
 					slog.String("error", err.Error()))
 				http.Error(w, "Internal server error", http.StatusInternalServerError)
 				return
+			}
+			householdIDs := make([]string, 0, len(memberships))
+			access := make(map[string]db.Access, len(memberships))
+			for _, m := range memberships {
+				householdIDs = append(householdIDs, m.HouseholdID)
+				access[m.HouseholdID] = m.Access()
 			}
 
 			householdID, scope, path, ok, err := resolveHousehold(r.Context(), repo, r.URL.Path, householdIDs)
@@ -401,6 +412,7 @@ func AuthMiddlewareWithConfig(repo caldavRepo, cfg RateLimitConfig) func(http.Ha
 			ctx := context.WithValue(r.Context(), HouseholdIDKey, householdID)
 			ctx = context.WithValue(ctx, HouseholdIDsKey, householdIDs)
 			ctx = context.WithValue(ctx, HouseholdScopeKey, scope)
+			ctx = WithAccess(ctx, access)
 			ctx = context.WithValue(ctx, UserIDKey, user.ID)
 			ctx = context.WithValue(ctx, EmailKey, email)
 			r2 := r.WithContext(ctx)
@@ -476,6 +488,27 @@ func containsString(list []string, s string) bool {
 func HouseholdIDsFromContext(ctx context.Context) []string {
 	v, _ := ctx.Value(HouseholdIDsKey).([]string)
 	return v
+}
+
+// WithAccess returns ctx carrying the caller's access per household
+// (household_id -> db.Access). AuthMiddleware sets it; tests that call the
+// CalDAV handlers directly set it themselves.
+func WithAccess(ctx context.Context, access map[string]db.Access) context.Context {
+	return context.WithValue(ctx, MembershipsKey, access)
+}
+
+// AccessFor returns the caller's access in the given household. A household
+// the caller is not a member of (or a request without memberships in its
+// context) gets the zero db.Access, which sees nothing and writes nothing.
+func AccessFor(ctx context.Context, householdID string) db.Access {
+	m, _ := ctx.Value(MembershipsKey).(map[string]db.Access)
+	return m[householdID]
+}
+
+// Access returns the caller's access in the request's household
+// (HouseholdIDFromContext).
+func Access(ctx context.Context) db.Access {
+	return AccessFor(ctx, HouseholdIDFromContext(ctx))
 }
 
 // HouseholdScopeFromContext returns the household ID from a

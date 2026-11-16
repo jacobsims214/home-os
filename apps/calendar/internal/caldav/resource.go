@@ -73,7 +73,7 @@ func HandleGET(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 	householdID := auth.HouseholdIDFromContext(ctx)
 
 	// Resolve calendar UID to calendar ID.
-	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID)
+	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: get calendar",
 			slog.String("calendar_uid", calUID),
@@ -88,7 +88,7 @@ func HandleGET(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 	}
 
 	// Look up the event.
-	obj, err := repo.GetCalendarObjectByUID(ctx, householdID, cal.ID, eventUID)
+	obj, err := repo.GetCalendarObjectByUID(ctx, householdID, cal.ID, eventUID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: get object",
 			slog.String("calendar_uid", calUID),
@@ -260,7 +260,7 @@ func HandlePUT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 	householdID := auth.HouseholdIDFromContext(ctx)
 
 	// Resolve calendar UID to calendar ID.
-	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID)
+	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: get calendar",
 			slog.String("calendar_uid", calUID),
@@ -281,7 +281,7 @@ func HandlePUT(w http.ResponseWriter, r *http.Request, repo *db.Repo, path strin
 	// transaction. The authoritative check runs again inside the write
 	// transaction against the row locked FOR UPDATE (see decide below and
 	// db.PutCalendarObject), which is what prevents lost updates.
-	existing, err := repo.GetCalendarObjectByUID(ctx, householdID, cal.ID, eventUID)
+	existing, err := repo.GetCalendarObjectByUID(ctx, householdID, cal.ID, eventUID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: get existing object",
 			slog.String("calendar_uid", calUID),
@@ -496,7 +496,7 @@ func HandleDELETE(w http.ResponseWriter, r *http.Request, repo *db.Repo, path st
 	householdID := auth.HouseholdIDFromContext(ctx)
 
 	// Resolve calendar UID to calendar ID.
-	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID)
+	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: get calendar",
 			slog.String("calendar_uid", calUID),
