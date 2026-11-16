@@ -177,7 +177,13 @@ var (
 // policy is the household role policy: resource -> action -> roles allowed.
 // A missing resource or action means nobody may do it.
 var policy = map[Resource]map[Action][]string{
-	ResHousehold: {ActRead: rolesEveryone},
+	// The household record itself: everyone reads it (its name and timezone
+	// describe the family everyone in it lives in), but only owner and
+	// family_manager may change its name or timezone. Renaming the family
+	// and especially changing its timezone changes what every date means for
+	// every member and every agent, so it is a management act, not an
+	// ordinary write (#4820).
+	ResHousehold: {ActRead: rolesEveryone, ActWrite: rolesManagers},
 	ResMembers:   {ActRead: rolesSitter, ActWrite: rolesManagers},
 	ResInvites:   {ActRead: rolesManagers, ActWrite: rolesManagers},
 	ResAgentTokens: {

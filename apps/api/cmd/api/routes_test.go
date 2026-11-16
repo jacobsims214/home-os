@@ -87,6 +87,7 @@ var (
 var expectedAccess = map[string][]string{
 	"GET /api/v1/me/households":                     everyone,
 	"GET /api/v1/households/me":                     everyone,
+	"PATCH /api/v1/households/{id}":                 managers,
 	"GET /api/v1/households/me/members":             sitters,
 	"PATCH /api/v1/households/me/members/{userId}":  managers,
 	"DELETE /api/v1/households/me/members/{userId}": managers,

@@ -75,6 +75,78 @@ func (r *Repo) GetHousehold(ctx context.Context, id uuid.UUID) (*Household, erro
 	return hh, nil
 }
 
+// Errors returned by UpdateHousehold.
+var (
+	// ErrHouseholdNotFound: no such household, or the actor is not a member
+	// of it. A household the actor cannot see is reported as absent, so a
+	// caller cannot probe another family's ids.
+	ErrHouseholdNotFound = errors.New("household not found")
+	// ErrNotHouseholdManager: the actor is a member but the household role
+	// policy does not let them change the household (only owner and
+	// family_manager may; auth.Can(role, ResHousehold, ActWrite)).
+	ErrNotHouseholdManager = errors.New("not allowed to change this household")
+)
+
+// HouseholdUpdate is a change to a household's name and/or timezone. A nil
+// field is left unchanged; both nil changes nothing.
+type HouseholdUpdate struct {
+	Name     *string
+	Timezone *string
+}
+
+// UpdateHousehold applies u to householdID on behalf of actorID and returns
+// the updated household.
+//
+// Authorization is decided here from memberships, never from request claims:
+// the actor must be a member of householdID (otherwise
+// ErrHouseholdNotFound, the same answer as an unknown id) and their role
+// there must pass auth.Can(role, ResHousehold, ActWrite) — owner and
+// family_manager only (otherwise ErrNotHouseholdManager). A caller with
+// several families therefore edits exactly the one it is a member of with a
+// managing role; memberships.role is read from the row, so a demotion takes
+// effect on the next request.
+//
+// name and timezone must already be validated by the caller (non-empty,
+// within the column limits, timezone a real IANA zone name).
+func (r *Repo) UpdateHousehold(ctx context.Context, householdID, actorID uuid.UUID, u HouseholdUpdate) (*Household, error) {
+	// No transaction and no row lock: a name or timezone is last-write-wins,
+	// and the UPDATE's WHERE clause plus the membership check are the whole
+	// decision. The role comes from the memberships row on every call, so a
+	// demotion applies on the next request.
+	var actorRole string
+	err := r.pool.QueryRow(ctx,
+		`SELECT role::text FROM memberships WHERE household_id = $1 AND user_id = $2`,
+		householdID, actorID,
+	).Scan(&actorRole)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrHouseholdNotFound // not a member: treated as absent
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update household: actor role: %w", err)
+	}
+	if !auth.Can(actorRole, auth.ResHousehold, auth.ActWrite) {
+		return nil, ErrNotHouseholdManager
+	}
+
+	hh := &Household{}
+	err = r.pool.QueryRow(ctx,
+		`UPDATE households
+		 SET name = COALESCE($2, name),
+		     timezone = COALESCE($3, timezone),
+		     updated_at = NOW()
+		 WHERE id = $1
+		 RETURNING id, name, timezone, settings, created_at, updated_at`,
+		householdID, u.Name, u.Timezone,
+	).Scan(&hh.ID, &hh.Name, &hh.Timezone, &hh.Settings, &hh.CreatedAt, &hh.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrHouseholdNotFound // deleted between the two queries
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update household: %w", err)
+	}
+	return hh, nil
+}
+
 // UserHousehold is one household the caller belongs to, with their role.
 type UserHousehold struct {
 	ID       string    `json:"id"`

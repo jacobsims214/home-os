@@ -39,6 +39,7 @@ var routeRules = map[string]RouteRule{
 	// Household and members.
 	"GET /api/v1/me/households":                     rr(auth.ResHousehold, auth.ActRead),
 	"GET /api/v1/households/me":                     rr(auth.ResHousehold, auth.ActRead),
+	"PATCH /api/v1/households/{id}":                 rr(auth.ResHousehold, auth.ActWrite),
 	"GET /api/v1/households/me/members":             rr(auth.ResMembers, auth.ActRead),
 	"PATCH /api/v1/households/me/members/{userId}":  rr(auth.ResMembers, auth.ActWrite),
 	"DELETE /api/v1/households/me/members/{userId}": rr(auth.ResMembers, auth.ActWrite),

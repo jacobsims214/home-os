@@ -130,21 +130,73 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
+// errBadTimezone is the one 400 message for a timezone that is not an IANA
+// zone name. It names a real example so a client can correct itself.
+var errBadTimezone = errors.New("timezone must be an IANA time zone name, e.g. America/Chicago")
+
 // validateTimezone returns the trimmed IANA zone name, or an error suitable
-// for a 400. "Local" and "" are rejected: time.LoadLocation accepts them but
-// they are not zone names.
+// for a 400. It is used both when a family is created and when its timezone
+// is changed (PATCH /api/v1/households/{id}).
+//
+// A wrong zone does not fail loudly downstream: every consumer that loads the
+// stored name (the API, the MCP's date words in meal_set/agenda, the worker)
+// falls back to UTC when LoadLocation fails, so a bad value silently shifts
+// every date the family sees (#4513 war game P1 #6/#8). Hence all four checks:
+//
+//  1. not empty after trimming, and within households.timezone (VARCHAR(100));
+//  2. LoadLocation accepts it, which rules out junk like "Mars/Olympus_Mons"
+//     and path-like names ("../etc/passwd" is an invalid location name);
+//  3. it is written the way the tz database writes it — every "/"-separated
+//     segment starts with an uppercase ASCII letter or a digit, and segments
+//     hold only [A-Za-z0-9_+-]. This rejects "america/chicago" and
+//     "posixrules": Go's LoadLocation resolves those from the HOST zoneinfo
+//     files (case-insensitive on macOS), so they pass on a developer machine
+//     but fail on the case-sensitive filesystem of a Linux container, where
+//     every consumer then silently uses UTC;
+//  4. it is not one of the two names that load but are not family places:
+//     "Local" (the SERVER's zone, which would follow the container) and
+//     "Factory" (tzdata's fixed-UTC test placeholder).
 func validateTimezone(raw string) (string, error) {
 	tz := strings.TrimSpace(raw)
 	if tz == "" {
 		return "", errors.New("timezone is required")
 	}
-	if len(tz) > maxTimezone || tz == "Local" {
-		return "", errors.New("timezone must be an IANA time zone name, e.g. America/Chicago")
+	if len(tz) > maxTimezone || tz == "Local" || tz == "Factory" {
+		return "", errBadTimezone
+	}
+	if !canonicalZoneName(tz) {
+		return "", errBadTimezone
 	}
 	if _, err := time.LoadLocation(tz); err != nil {
-		return "", errors.New("timezone must be an IANA time zone name, e.g. America/Chicago")
+		return "", errBadTimezone
 	}
 	return tz, nil
+}
+
+// canonicalZoneName reports whether name is written the way the IANA tz
+// database writes a zone: "/"-separated segments that each start with an
+// uppercase ASCII letter or a digit (America/Chicago, Etc/GMT+5, EST5EDT,
+// US/Eastern) and contain only zone-name characters. It rejects the case
+// variants a case-insensitive filesystem would otherwise resolve.
+func canonicalZoneName(name string) bool {
+	for _, seg := range strings.Split(name, "/") {
+		if seg == "" {
+			return false
+		}
+		if c := seg[0]; !(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9') {
+			return false
+		}
+		for i := 0; i < len(seg); i++ {
+			c := seg[i]
+			switch {
+			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			case c == '_' || c == '+' || c == '-':
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // creatorIdentity returns the verified Dex identity of the caller, writing a
@@ -242,6 +294,147 @@ func (h *Handler) GetMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": hh})
+}
+
+// writeHouseholdError maps UpdateHousehold errors to responses.
+func writeHouseholdError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrNotHouseholdManager):
+		apierr.Forbidden(w, "only owners and family managers can change the household")
+	case errors.Is(err, ErrHouseholdNotFound):
+		apierr.NotFound(w, "household not found")
+	default:
+		apierr.InternalError(w, err)
+	}
+}
+
+// Update PATCH /api/v1/households/{id} — rename a family and/or set its time
+// zone. Body: {"name"?, "timezone"?}; at least one, and a field that is sent
+// must be valid (a null or "" name/timezone is refused, not ignored, so a UI
+// bug never silently drops the user's edit).
+//
+// Who may: owner and family_manager of that household only (the household
+// role policy's household/write grant, decisions/2026-11-15-role-policy.md).
+// family_member, viewer, housesitter and vendor answer 403; this is the
+// conservative reading of the policy — renaming the family and, above all,
+// changing its time zone changes what every date means for everybody, so it
+// sits with the roles that manage members rather than with every writer.
+// The role is read from memberships by the repo, inside the request, so a
+// demotion applies at once and an instance admin gets no extra rights.
+//
+// {id} must be one of the caller's own households. Another family's id — or
+// an unknown one — answers 404, the same as a household that does not exist,
+// so ids cannot be probed. In practice a caller reaches this route with the
+// id it got from GET /api/v1/me/households; the /me routes (households/me)
+// remain the shorthand for "the household this request resolved to".
+//
+// timezone must be a real IANA zone name (see validateTimezone): a wrong zone
+// silently shifts every date the family sees (#4513 war game P1 #6/#8), so
+// junk is a 400 with nothing written.
+//
+// Responses: 200 {"data": {id, name, timezone, created_at, updated_at}};
+// 400 bad body, {id} or timezone; 403 not a manager; 404 not one of the
+// caller's households.
+func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.ClaimsFromContext(r.Context())
+	if claims == nil {
+		apierr.Forbidden(w, "missing auth")
+		return
+	}
+	// A malformed {id} can never name a household, so it is a 400 rather than
+	// a 404: it leaks nothing, and it tells a client that guessed
+	// "households/me" (a GET-only shorthand) what to send instead.
+	householdID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		apierr.BadRequest(w, "id must be a household UUID, from GET /api/v1/me/households")
+		return
+	}
+	// A caller without a users.id (auth-disabled local dev) has no
+	// membership, so it cannot be a manager of any household.
+	actorID, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		apierr.Forbidden(w, "only owners and family managers can change the household")
+		return
+	}
+
+	// RawMessage keeps "field absent" (leave it unchanged) apart from "field
+	// sent null" (refused): a null decodes into a *string as nil, which would
+	// quietly drop the client's edit. Unknown keys are ignored, so a client
+	// may PATCH back the whole household object it read; a body with only a
+	// misspelt key still fails the "at least one field" check below.
+	var req struct {
+		Name     json.RawMessage `json:"name"`
+		Timezone json.RawMessage `json:"timezone"`
+	}
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&req); err != nil {
+		apierr.BadRequest(w, "invalid body")
+		return
+	}
+	if len(req.Name) == 0 && len(req.Timezone) == 0 {
+		apierr.BadRequest(w, "name or timezone is required")
+		return
+	}
+	upd := HouseholdUpdate{}
+	if len(req.Name) > 0 {
+		var raw string
+		if string(req.Name) == "null" || json.Unmarshal(req.Name, &raw) != nil {
+			apierr.BadRequest(w, "name must be a string")
+			return
+		}
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			apierr.BadRequest(w, "name is required")
+			return
+		}
+		if utf8.RuneCountInString(name) > maxHouseholdName {
+			apierr.BadRequest(w, "name must be at most 255 characters")
+			return
+		}
+		upd.Name = &name
+	}
+	if len(req.Timezone) > 0 {
+		var raw string
+		if string(req.Timezone) == "null" || json.Unmarshal(req.Timezone, &raw) != nil {
+			apierr.BadRequest(w, errBadTimezone.Error())
+			return
+		}
+		tz, err := validateTimezone(raw)
+		if err != nil {
+			apierr.BadRequest(w, err.Error())
+			return
+		}
+		upd.Timezone = &tz
+	}
+
+	hh, err := h.repo.UpdateHousehold(r.Context(), householdID, actorID, upd)
+	if err != nil {
+		writeHouseholdError(w, err)
+		return
+	}
+	slog.Info("household: updated", "household_id", hh.ID, "user_id", actorID,
+		"name_changed", upd.Name != nil, "timezone_changed", upd.Timezone != nil,
+		"timezone", hh.Timezone)
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": householdResponse{
+		ID:        hh.ID.String(),
+		Name:      hh.Name,
+		Timezone:  hh.Timezone,
+		CreatedAt: hh.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt: hh.UpdatedAt.UTC().Format(time.RFC3339),
+	}})
+}
+
+// householdResponse is the body of PATCH /api/v1/households/{id}: lowercase
+// keys like every other payload this API adds (UserHousehold, Member), so the
+// Settings screen can read data.name and data.timezone directly. (GET
+// /api/v1/households/me predates that convention and still serialises the
+// Household struct's own field names.)
+type householdResponse struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Timezone  string `json:"timezone"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // ListMembers GET /api/v1/households/me/members

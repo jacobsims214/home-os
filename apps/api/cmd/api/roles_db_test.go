@@ -103,6 +103,9 @@ func TestRolePolicy_Records(t *testing.T) {
 	secretNote := create("/api/v1/notes", map[string]any{"entity_type": "secret", "entity_id": secretID, "body": "router label"})
 
 	family := map[string]bool{auth.RoleOwner: true, auth.RoleFamilyManager: true, auth.RoleFamilyMember: true}
+	// familyThatManages is the narrower set: roles that may change the
+	// household record itself (name, timezone), which is a management act.
+	familyThatManages := map[string]bool{auth.RoleOwner: true, auth.RoleFamilyManager: true}
 
 	t.Run("bills and secrets", func(t *testing.T) {
 		for _, role := range auth.AllRoles {
@@ -241,6 +244,30 @@ func TestRolePolicy_Records(t *testing.T) {
 		vw := as[auth.RoleViewer]
 		rec = f.do(t, http.MethodPatch, "/api/v1/lists/"+l.ID+"/items/"+item, map[string]any{"checked": false}, &vw)
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	})
+
+	t.Run("household name and timezone: managers only", func(t *testing.T) {
+		// #4820: the whole route, through RequireAuth + RequirePolicy, for
+		// every role. The body is valid, so a refusal can only be the role.
+		body := map[string]any{"name": "Role Check", "timezone": "America/Chicago"}
+		for _, role := range auth.AllRoles {
+			m := as[role]
+			rec := f.do(t, http.MethodPatch, "/api/v1/households/"+hh, body, &m)
+			if familyThatManages[role] {
+				assert.Equal(t, http.StatusOK, rec.Code, "%s: %s", role, rec.Body.String())
+			} else {
+				assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", role, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), "the "+role+" role cannot write household", role)
+			}
+		}
+
+		// A bad timezone is a 400 for an owner, and the stored zone is kept.
+		rec := f.do(t, http.MethodPatch, "/api/v1/households/"+hh,
+			map[string]any{"timezone": "Mars/Olympus_Mons"}, &owner)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		var tz string
+		require.NoError(t, f.pool.QueryRow(ctx, `SELECT timezone FROM households WHERE id = $1`, hh).Scan(&tz))
+		assert.Equal(t, "America/Chicago", tz, "the refused zone was never written")
 	})
 
 	t.Run("agent tokens", func(t *testing.T) {

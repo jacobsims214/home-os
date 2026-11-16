@@ -29,6 +29,37 @@ func TestRoleRules(t *testing.T) {
 	}
 }
 
+// TestPolicy_HouseholdWrite: everyone reads the household record, but only
+// owner and family_manager may change it (#4820). Renaming the family and
+// changing its timezone decides what every date means for every member and
+// agent, so it is a management act, not an ordinary family write: a
+// family_member, viewer, housesitter and vendor are refused, and so is an
+// unknown role.
+func TestPolicy_HouseholdWrite(t *testing.T) {
+	for _, role := range AllRoles {
+		manages := role == RoleOwner || role == RoleFamilyManager
+		if got := Can(role, ResHousehold, ActWrite); got != manages {
+			t.Errorf("Can(%s, household, write) = %v, want %v", role, got, manages)
+		}
+		if !Can(role, ResHousehold, ActRead) {
+			t.Errorf("Can(%s, household, read) = false: every member reads its own family", role)
+		}
+	}
+	for _, bad := range []string{"", "admin", "OWNER", "instance_admin"} {
+		if Can(bad, ResHousehold, ActWrite) {
+			t.Errorf("unknown role %q may write the household", bad)
+		}
+	}
+	// The grant is a management one: every role that may change the household
+	// may also manage members, which a family_member (who may write every
+	// other family record) may not.
+	for _, role := range AllRoles {
+		if Can(role, ResHousehold, ActWrite) && !CanManageMembers(role) {
+			t.Errorf("%s may write the household but not manage members", role)
+		}
+	}
+}
+
 // TestPolicy_Entities checks the record-level helpers of the household role
 // policy (#4689).
 func TestPolicy_Entities(t *testing.T) {

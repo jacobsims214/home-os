@@ -55,6 +55,9 @@ func registerProtectedRoutes(r chi.Router, d protectedDeps) {
 	// request in this group picks one (see middleware.RequireAuth).
 	r.Get("/api/v1/me/households", d.householdHandler.ListMine)
 	r.Get("/api/v1/households/me", d.householdHandler.GetMe)
+	// Rename a family and/or set its time zone (owner/family_manager only,
+	// checked against memberships in the repo).
+	r.Patch("/api/v1/households/{id}", d.householdHandler.Update)
 	r.Get("/api/v1/households/me/members", d.householdHandler.ListMembers)
 	r.Patch("/api/v1/households/me/members/{userId}", d.householdHandler.UpdateMemberRole)
 	r.Delete("/api/v1/households/me/members/{userId}", d.householdHandler.RemoveMember)
