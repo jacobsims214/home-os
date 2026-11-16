@@ -80,7 +80,9 @@ func (h *Handler) CreateCalendar(w http.ResponseWriter, r *http.Request) {
 	}
 	cal, err := h.repo.CreateCalendar(r.Context(), hid, req.Name, req.Type, req.Color, propertyID)
 	if err != nil {
-		apierr.InternalError(w, err)
+		// calendars.property_id is a same-family FK (migration 058): another
+		// family's or a missing property is a 23503, answered as 404.
+		apierr.DB(w, err)
 		return
 	}
 	apierr.JSON(w, http.StatusCreated, map[string]any{"data": cal})

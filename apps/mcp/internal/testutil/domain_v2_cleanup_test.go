@@ -156,6 +156,7 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	pet := insertID(t, pool, `INSERT INTO pets (household_id, name) VALUES ($1, 'Rex') RETURNING id`, f.household)
 	asset := insertID(t, pool, `INSERT INTO assets (household_id, room_id, name) VALUES ($1, $2, 'Fridge') RETURNING id`, f.household, f.room)
 
+	applyMigration(t, pool, "058_same_family_fks.down.sql") // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql")
 
 	billVehicle := insertID(t, pool, `INSERT INTO bills (household_id, name, entity_type, entity_id) VALUES ($1, 'Car wash', 'vehicle', $2) RETURNING id`, f.household, f.vehicle)
@@ -235,6 +236,7 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	before := countAll()
 
 	// Down: the legacy columns come back, filled from the typed FKs.
+	applyMigration(t, pool, "058_same_family_fks.down.sql") // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql")
 	legacy := func(table string, id uuid.UUID) (kind *string, entity *uuid.UUID) {
 		t.Helper()

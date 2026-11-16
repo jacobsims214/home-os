@@ -34,7 +34,7 @@ const taskSelect = `SELECT t.id, t.name, t.description, t.status::text, t.due_da
 	LEFT JOIN properties p ON p.id = t.property_id
 	LEFT JOIN assets a ON a.id = t.asset_id
 	LEFT JOIN vehicles v ON v.id = t.vehicle_id
-	LEFT JOIN vendors ve ON ve.id = t.vendor_id`
+	LEFT JOIN vendors ve ON ve.id = t.vendor_id AND ve.household_id = t.household_id`
 
 // taskRow is a maintenance_tasks row as the tools load it.
 type taskRow struct {

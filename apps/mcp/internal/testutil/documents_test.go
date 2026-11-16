@@ -19,6 +19,7 @@ func TestDocuments048_Reversible(t *testing.T) {
 	f := seedV2Family(t, pool)
 	blob := insertID(t, pool, `INSERT INTO file_blobs (data, size) VALUES ('x', 1) RETURNING id`)
 
+	applyMigration(t, pool, "058_same_family_fks.down.sql")   // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql") // newest first: 056 sits on top of 038-054
 	applyMigration(t, pool, "055_activity_event_titles.down.sql")
 	applyMigration(t, pool, "054_change_notifications.down.sql") // its trigger is on 050's activity_log

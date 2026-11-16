@@ -29,6 +29,7 @@ func TestMeals047_Reversible(t *testing.T) {
 
 	// 049 replaces entity_household() on top of 047, and 050 adds authorship
 	// on top of both; undo them first.
+	applyMigration(t, pool, "058_same_family_fks.down.sql")   // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql") // newest first: 056 sits on top of 038-054
 	applyMigration(t, pool, "055_activity_event_titles.down.sql")
 	applyMigration(t, pool, "054_change_notifications.down.sql") // its trigger is on 050's activity_log

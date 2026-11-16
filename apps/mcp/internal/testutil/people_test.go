@@ -50,6 +50,7 @@ func TestPeople041_BackfillAndReversible(t *testing.T) {
 	// 046 list_items, 047 meal_feedback and 048 files.person_id reference
 	// people, 049 replaces entity_household() on top of 047, and 050 adds
 	// authorship to all of them; undo them first (newest first).
+	applyMigration(t, pool, "058_same_family_fks.down.sql")   // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql") // newest first: 056 sits on top of 038-054
 	applyMigration(t, pool, "055_activity_event_titles.down.sql")
 	applyMigration(t, pool, "054_change_notifications.down.sql")
@@ -191,6 +192,7 @@ func TestPeople041_EntityKindPerson(t *testing.T) {
 	// Down re-homes refs to remaining people and narrows entity_kind again.
 	kid2 := insertID(t, pool, `INSERT INTO people (household_id, display_name) VALUES ($1, 'Jo') RETURNING id`, f.household)
 	file2 := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'y.pdf', 1, 'person', $3) RETURNING id`, f.household, blob, kid2)
+	applyMigration(t, pool, "058_same_family_fks.down.sql")   // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql") // newest first: 056 sits on top of 038-054
 	applyMigration(t, pool, "055_activity_event_titles.down.sql")
 	applyMigration(t, pool, "054_change_notifications.down.sql")
