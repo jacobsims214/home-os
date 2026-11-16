@@ -17,8 +17,14 @@ jobs:
   # calendar, mcp and worker tests start their own Postgres through
   # testcontainers (Docker is on the runner). mcp's latency-sensitive tests
   # are flaky at default package parallelism, so they run with -p 4.
+  # apps/mcp also gets a Typesense for its semantic search tests, which run
+  # in their own step (matrix.typesense_tests) and are skipped in the main run.
   go-build:
     runs-on: ubuntu-latest
+    env:
+      TYPESENSE_TEST_ADDR: ${{ matrix.typesense_tests && '127.0.0.1:8108' || '' }}
+      TYPESENSE_TEST_KEY: ${{ matrix.typesense_tests && 'homeos-ci-test-key' || '' }}
+      TYPESENSE_TESTS: ${{ matrix.typesense_tests }}
     strategy:
       fail-fast: false
       matrix:
@@ -27,6 +33,7 @@ jobs:
             parallel: ""
           - module: apps/mcp
             parallel: "-p 4"
+            typesense_tests: "TestDocumentSemanticSearch|TestGuideFindByMeaning"
           - module: apps/worker
             parallel: ""
     steps:
@@ -39,11 +46,59 @@ jobs:
         working-directory: ${{ matrix.module }}
       - run: go vet ./...
         working-directory: ${{ matrix.module }}
-      - run: go test ${{ matrix.parallel }} ./...
+      # Typesense (the stack's pinned 30.2) for the hybrid/semantic search
+      # tests. Started with docker run rather than a services: block so the
+      # embedding model cache below is restored into its data dir before the
+      # server starts. TYPESENSE_TEST_KEY is a throwaway test value, not a
+      # secret. The warm-up collection makes Typesense load (and on a cache
+      # miss download, ~130 MB) ts/all-MiniLM-L12-v2 here, with its own
+      # timeout, instead of inside the first test.
+      - name: Restore Typesense embedding model cache
+        if: matrix.typesense_tests != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/typesense/models
+          key: typesense-30.2-models-all-MiniLM-L12-v2
+      - name: Start Typesense and load the embedding model
+        if: matrix.typesense_tests != ''
+        timeout-minutes: 10
+        run: |
+          mkdir -p "$RUNNER_TEMP/typesense"
+          docker run -d --name typesense --user "$(id -u):$(id -g)" \
+            -p 127.0.0.1:8108:8108 -v "$RUNNER_TEMP/typesense:/data" \
+            typesense/typesense:30.2 --api-key="$TYPESENSE_TEST_KEY" --data-dir=/data
+          for i in $(seq 1 60); do
+            if curl -fsS "http://$TYPESENSE_TEST_ADDR/health" 2>/dev/null | grep -q '"ok":true'; then break; fi
+            if [ "$i" = 60 ]; then echo "Typesense not healthy after 120 s"; docker logs typesense; exit 1; fi
+            sleep 2
+          done
+          echo "Typesense healthy; loading ts/all-MiniLM-L12-v2"
+          start=$(date +%s)
+          curl -fsS -m 540 -X POST "http://$TYPESENSE_TEST_ADDR/collections" \
+            -H "X-TYPESENSE-API-KEY: $TYPESENSE_TEST_KEY" -H 'Content-Type: application/json' \
+            -d '{"name":"ci_warmup","fields":[{"name":"t","type":"string"},{"name":"e","type":"float[]","embed":{"from":["t"],"model_config":{"model_name":"ts/all-MiniLM-L12-v2"}}}]}' \
+            >/dev/null || { docker logs typesense 2>&1 | tail -50; exit 1; }
+          curl -fsS -X DELETE "http://$TYPESENSE_TEST_ADDR/collections/ci_warmup" \
+            -H "X-TYPESENSE-API-KEY: $TYPESENSE_TEST_KEY" >/dev/null
+          echo "Embedding model ready in $(( $(date +%s) - start )) s"
+      - run: go test ${{ matrix.parallel }} ${TYPESENSE_TESTS:+-skip "^($TYPESENSE_TESTS)\$"} ./...
         working-directory: ${{ matrix.module }}
+      # Fails if any Typesense test does not PASS, so a lost env var or a
+      # down Typesense cannot turn them into silent SKIPs.
+      - name: Typesense search tests (must PASS, not SKIP)
+        if: matrix.typesense_tests != ''
+        working-directory: ${{ matrix.module }}
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run "^($TYPESENSE_TESTS)$" ./internal/file ./internal/guides | tee "$RUNNER_TEMP/typesense-tests.log"
+          for t in ${TYPESENSE_TESTS//|/ }; do
+            grep -q -- "--- PASS: $t " "$RUNNER_TEMP/typesense-tests.log" || { echo "::error::$t did not PASS (skipped or missing)"; exit 1; }
+          done
 
   # apps/api integration tests read TEST_DATABASE_URL (a migrated database)
-  # and share it, so packages run one at a time (-p 1).
+  # and share it, so packages run one at a time (-p 1). The Typesense tests
+  # (per-test collections, #4773) run in their own step against a real
+  # Typesense and are skipped in the main run.
   api:
     runs-on: ubuntu-latest
     services:
@@ -62,6 +117,9 @@ jobs:
           --health-retries 20
     env:
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/homeos_test?sslmode=disable
+      TYPESENSE_TEST_ADDR: 127.0.0.1:8108
+      TYPESENSE_TEST_KEY: homeos-ci-test-key
+      TYPESENSE_TESTS: TestDocumentHybridSearch|TestGuideHybridSearchIntegration|TestTypesenseHybridIntegration
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -79,8 +137,51 @@ jobs:
         working-directory: apps/api
       - run: go vet ./...
         working-directory: apps/api
-      - run: go test -p 1 ./...
+      # Typesense (the stack's pinned 30.2) for the hybrid/semantic search
+      # tests. Started with docker run rather than a services: block so the
+      # embedding model cache below is restored into its data dir before the
+      # server starts. TYPESENSE_TEST_KEY is a throwaway test value, not a
+      # secret. The warm-up collection makes Typesense load (and on a cache
+      # miss download, ~130 MB) ts/all-MiniLM-L12-v2 here, with its own
+      # timeout, instead of inside the first test.
+      - name: Restore Typesense embedding model cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/typesense/models
+          key: typesense-30.2-models-all-MiniLM-L12-v2
+      - name: Start Typesense and load the embedding model
+        timeout-minutes: 10
+        run: |
+          mkdir -p "$RUNNER_TEMP/typesense"
+          docker run -d --name typesense --user "$(id -u):$(id -g)" \
+            -p 127.0.0.1:8108:8108 -v "$RUNNER_TEMP/typesense:/data" \
+            typesense/typesense:30.2 --api-key="$TYPESENSE_TEST_KEY" --data-dir=/data
+          for i in $(seq 1 60); do
+            if curl -fsS "http://$TYPESENSE_TEST_ADDR/health" 2>/dev/null | grep -q '"ok":true'; then break; fi
+            if [ "$i" = 60 ]; then echo "Typesense not healthy after 120 s"; docker logs typesense; exit 1; fi
+            sleep 2
+          done
+          echo "Typesense healthy; loading ts/all-MiniLM-L12-v2"
+          start=$(date +%s)
+          curl -fsS -m 540 -X POST "http://$TYPESENSE_TEST_ADDR/collections" \
+            -H "X-TYPESENSE-API-KEY: $TYPESENSE_TEST_KEY" -H 'Content-Type: application/json' \
+            -d '{"name":"ci_warmup","fields":[{"name":"t","type":"string"},{"name":"e","type":"float[]","embed":{"from":["t"],"model_config":{"model_name":"ts/all-MiniLM-L12-v2"}}}]}' \
+            >/dev/null || { docker logs typesense 2>&1 | tail -50; exit 1; }
+          curl -fsS -X DELETE "http://$TYPESENSE_TEST_ADDR/collections/ci_warmup" \
+            -H "X-TYPESENSE-API-KEY: $TYPESENSE_TEST_KEY" >/dev/null
+          echo "Embedding model ready in $(( $(date +%s) - start )) s"
+      - run: go test -p 1 -skip "^($TYPESENSE_TESTS)$" ./...
         working-directory: apps/api
+      # Fails if any Typesense test does not PASS, so a lost env var or a
+      # down Typesense cannot turn them into silent SKIPs.
+      - name: Typesense search tests (must PASS, not SKIP)
+        working-directory: apps/api
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run "^($TYPESENSE_TESTS)$" ./internal/file ./internal/guides ./internal/search | tee "$RUNNER_TEMP/typesense-tests.log"
+          for t in ${TYPESENSE_TESTS//|/ }; do
+            grep -q -- "--- PASS: $t " "$RUNNER_TEMP/typesense-tests.log" || { echo "::error::$t did not PASS (skipped or missing)"; exit 1; }
+          done
 
   ui-build:
     runs-on: ubuntu-latest
