@@ -23,13 +23,12 @@ import { useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, Modal, Skeleton, Stack, Table, Group } from "@mantine/core";
-import { useMediaQuery } from "@mantine/hooks";
+import { Button, Skeleton, Stack, Table } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { IconAlertTriangle, IconChevronRight, IconPlus } from "@tabler/icons-react";
 import { apiFetch } from "@/lib/api";
 import { propertyKeys } from "@/lib/query-keys";
-import { Select, TextInput } from "@/components/ui";
+import { ResponsiveModal, ResponsiveModalActions, Select, TextInput } from "@/components/ui";
 import type { Property } from "@/lib/types/api";
 import {
   buildCreatePayload,
@@ -58,9 +57,9 @@ interface EntityListProps {
   createFields?: CreateField[];
 }
 
-const PHONE_QUERY = "(max-width: 47.99em)";
 // On phones, Mantine inputs get a 44 px height and 16 px text (no iOS zoom on
 // focus); Mantine's size prop can't be responsive. Same as EntityDetail.
+// (Inside ResponsiveModal this is built in.)
 const PHONE_INPUTS = "max-md:[&_.mantine-Input-input]:min-h-11 max-md:[&_.mantine-Input-input]:text-base";
 
 const usd = (n: number) => n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
@@ -110,13 +109,13 @@ function CreateEntityModal({
 }) {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const isPhone = useMediaQuery(PHONE_QUERY);
   const [values, setValues] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const reset = () => {
     setValues({});
     setErrors({});
+    create.reset();
   };
   const close = () => {
     reset();
@@ -129,9 +128,11 @@ function CreateEntityModal({
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: [entityType] });
       notifications.show({ message: `${entityType[0].toUpperCase()}${entityType.slice(1)} added`, color: "teal" });
-      close();
       const id = res?.data?.id;
-      if (id) router.push(`/dashboard/${entityType}s/${id}`);
+      if (!id) return close();
+      // Navigate without closing first: replace swaps out the modal's history
+      // entry, and closing would pop it and cancel this navigation (#4532).
+      router.replace(`/dashboard/${entityType}s/${id}`);
     },
   });
 
@@ -161,9 +162,11 @@ function CreateEntityModal({
   };
 
   return (
-    <Modal opened={opened} onClose={close} title={`Add ${entityType}`} fullScreen={!!isPhone} centered>
+    // Bottom sheet on phones, centred dialog from 768 px (#4532); it also gives
+    // phone inputs 44 px / 16 px text and keeps the actions above the keyboard.
+    <ResponsiveModal opened={opened} onClose={close} title={`Add ${entityType}`}>
       <form onSubmit={submit} noValidate>
-        <Stack gap="sm" className={PHONE_INPUTS}>
+        <Stack gap="sm">
           {fields.map((field) => {
             const common = {
               label: field.label,
@@ -203,17 +206,17 @@ function CreateEntityModal({
               Couldn&apos;t add the {entityType}: {create.error instanceof Error ? create.error.message : "try again"}
             </p>
           )}
-          <Group justify="flex-end" gap="sm" mt="xs" className="max-md:[&_button]:min-h-11 max-md:[&_button]:flex-1">
-            <Button variant="default" onClick={close} type="button">
-              Cancel
-            </Button>
-            <Button type="submit" loading={create.isPending}>
-              Add {entityType}
-            </Button>
-          </Group>
         </Stack>
+        <ResponsiveModalActions>
+          <Button variant="default" onClick={close} type="button">
+            Cancel
+          </Button>
+          <Button type="submit" loading={create.isPending || create.isSuccess}>
+            Add {entityType}
+          </Button>
+        </ResponsiveModalActions>
       </form>
-    </Modal>
+    </ResponsiveModal>
   );
 }
 

@@ -1,0 +1,155 @@
+/*
+ * ResponsiveModal (#4532). Theme tokens only (app/globals.css, #4529);
+ * sizes and radii from KB design/app-shell.md (artifact #75 v1).
+ *
+ * >= 768 px: a centred dialog. < 768 px: a full-height bottom sheet that is
+ * sized to the visual viewport (--rm-vv-h / --rm-vv-top, set from
+ * window.visualViewport while open), so when the iOS keyboard opens the sheet
+ * shrinks to the space above it and the focused input and the actions stay
+ * visible. The breakpoint is CSS only, so nothing depends on JS media queries.
+ */
+
+.overlay {
+  background: var(--scrim) !important;
+}
+
+.content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--raised);
+  color: var(--ink);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+  /* The body scrolls, the header and actions stay put. */
+  overflow: hidden !important;
+}
+
+.content:focus,
+.content:focus-visible {
+  outline: none;
+}
+
+.header {
+  position: relative;
+  flex: none;
+  min-height: 0;
+  gap: 8px;
+  padding: 16px 12px 8px 20px;
+  background: var(--raised);
+}
+
+.title {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--ink);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.close {
+  flex: none;
+  color: var(--ink-2);
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 20px 0 !important;
+  /* Focused fields scroll clear of the sticky actions bar. */
+  scroll-padding-block: 16px 96px;
+}
+
+/* Bottom padding lives on the wrapper, not the scroll container, so the
+   sticky actions bar can cover it with a negative margin. */
+.wrap {
+  padding-bottom: 20px;
+}
+
+.handle {
+  display: none;
+}
+
+/* Sticky action row (ResponsiveModalActions): always visible at the bottom
+   of the body, including above the keyboard on phones. */
+.actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 8px -20px -20px;
+  padding: 12px 20px 20px;
+  background: var(--raised);
+  border-top: 1px solid var(--line);
+}
+
+/* ---------- phone: bottom sheet ---------- */
+@media (max-width: 47.99em) {
+  .inner {
+    /* Track the visual viewport (keyboard-safe). Falls back to the full
+       dynamic viewport where visualViewport isn't available. */
+    top: var(--rm-vv-top, 0px) !important;
+    bottom: auto !important;
+    height: var(--rm-vv-h, 100dvh) !important;
+    align-items: flex-end !important;
+    padding: 0 !important;
+  }
+
+  .content {
+    flex: 0 0 100% !important;
+    width: 100%;
+    max-width: 100% !important;
+    height: calc(100% - 12px - env(safe-area-inset-top, 0px)) !important;
+    max-height: calc(100% - 12px - env(safe-area-inset-top, 0px)) !important;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+  }
+
+  .header {
+    padding: 20px 8px 4px 16px;
+  }
+
+  .handle {
+    display: block;
+    position: absolute;
+    z-index: 1001; /* above Mantine's sticky header */
+    top: 6px;
+    left: 50%;
+    width: 36px;
+    height: 4px;
+    margin-left: -18px;
+    border-radius: 2px;
+    background: var(--line);
+  }
+
+  .body {
+    padding: 4px 16px 0 !important;
+  }
+
+  .wrap {
+    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .actions {
+    margin: 8px -16px calc(-16px - env(safe-area-inset-bottom, 0px));
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* 44 px buttons sharing the row. */
+  .actions > * {
+    flex: 1 1 0;
+    min-height: 44px;
+  }
+
+  /* 44 px fields with 16 px text: no iOS zoom on focus. Mantine's size prop
+     can't be responsive, so it's done here for every form in a sheet. */
+  .body :global(.mantine-Input-input) {
+    min-height: 44px;
+    font-size: 16px;
+  }
+}
