@@ -610,3 +610,51 @@ func TestMealSuggestRoles(t *testing.T) {
 		t.Errorf("me = %v, want %s", r.Eating, name)
 	}
 }
+
+// TestMealSuggestCompoundIngredients is #4805's end-to-end case: the one the
+// wave check found. A recipe called "Blackened Catfish" whose ingredient says
+// "catfish fillets" was suggested to a fish-allergic eater with no warning,
+// because every group word was wrapped in \b...\b and "catfish" is one word.
+// It is the same story for cornbread (gluten, corn) and cheesecake (dairy).
+func TestMealSuggestCompoundIngredients(t *testing.T) {
+	t.Parallel()
+	k := newKitchen(t)
+	k.person("Nora", "fish allergy")
+	k.person("Sam", "gluten") // a preference-style entry
+	k.person("Ada", "dairy")  // ...
+	k.pref(k.person("Leo"), "dietary", "corn allergy", "")
+
+	k.recipe("Blackened Catfish", 25, nil, "catfish fillets", "cayenne", "butter")
+	k.recipe("Cornbread", 35, nil, "cornmeal", "buttermilk", "eggs")
+	k.recipe("Cheesecake", 60, nil, "cream cheese", "sugar", "eggs")
+	k.recipe("Veggie Tray", 5, nil, "carrots", "cucumber")
+
+	st := suggestTool(k.pool)
+	r := st.run(t, k.ctx, map[string]any{"count": 10}).suggest(t)
+	for _, bad := range []string{"Blackened Catfish", "Cornbread", "Cheesecake"} {
+		if slices.Contains(suggested(r), bad) {
+			t.Errorf("suggested %s, which has a compound allergen: %v", bad, suggested(r))
+		}
+		if !slices.Contains(excludedNames(r), bad) {
+			t.Errorf("%s not listed in excluded: %+v", bad, r.Excluded)
+		}
+	}
+	if !slices.Contains(suggested(r), "Veggie Tray") {
+		t.Errorf("the safe recipe was left out: %v", suggested(r))
+	}
+	reasons := map[string]string{}
+	for _, e := range r.Excluded {
+		reasons[e.Name] = e.Reason
+	}
+	// The warning names the person, the allergen as saved, and the ingredient
+	// text that matched (the compound word, not the whole line).
+	for name, want := range map[string]string{
+		"Blackened Catfish": "Nora (fish): catfish fillets",
+		"Cornbread":         "Leo (corn): cornmeal",
+		"Cheesecake":        "Ada (dairy): cream cheese",
+	} {
+		if !strings.Contains(reasons[name], want) {
+			t.Errorf("%s reason %q lacks %q", name, reasons[name], want)
+		}
+	}
+}

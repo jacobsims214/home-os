@@ -399,6 +399,178 @@ func anyMatch(allergy, item string) bool {
 	return false
 }
 
+// TestCompoundIngredients is #4805's acceptance test: an allergen group word
+// that sits inside a one-word ingredient still matches. Before it, every word
+// was wrapped in \b...\b, so "catfish fillets" carried no fish, "cornbread" no
+// bread and "cheesecake" no cheese: a fish-allergic eater could be offered
+// Blackened Catfish with no warning at all.
+//
+// It goes through anyMatch, the path a stored allergy takes, so it only passes
+// when the whole chain agrees: allergensIn, the group key, the group word and
+// the compiled compound regex.
+func TestCompoundIngredients(t *testing.T) {
+	for _, tc := range []struct {
+		allergy, item string
+		want          bool
+		why           string
+	}{
+		// -- the ticket's four, end to end --
+		{"fish", "catfish fillets", true, "catfish"},
+		{"fish", "swordfish steaks", true, "swordfish"},
+		{"gluten", "cornbread", true, "cornbread"},
+		{"dairy", "cheesecake", true, "cheesecake"},
+
+		// -- suffix words: fish, bread, and what they catch --
+		{"fish", "catfish", true, "catfish"},
+		{"fish", "monkfish", true, "monkfish"},
+		{"fish", "whitefish", true, "whitefish"},
+		{"fish", "blackened catfish", true, "an adjective, then the compound"},
+		{"Seafood allergy", "catfish fillets", true, "seafood alias -> fish group"},
+		{"shellfish", "shellfish", true, "the word itself still matches"},
+		{"gluten", "cornbread stuffing", true, "cornbread"},
+		{"gluten", "shortbread", true, "shortbread"},
+		{"gluten", "flatbread", true, "flatbread"},
+		{"celiac", "cornbread", true, "celiac is a gluten allergy"},
+		{"wheat", "cornbread", true, "wheat gets the grain group too"},
+		{"gluten", "breaded chicken", true, "breaded is bread on the head"},
+		{"gluten", "breadsticks", true, "breadstick"},
+		{"gluten", "breadcrumbs", true, "breadcrumb"},
+
+		// -- prefix words: cheese, egg, milk, butter, corn --
+		{"dairy", "cheesecake", true, "cheesecake"},
+		{"dairy", "cheeseburger", true, "cheeseburger"},
+		{"dairy", "cheesesteak", true, "cheesesteak"},
+		{"milk allergy", "cheesecake", true, "milk -> dairy -> cheese"},
+		{"lactose intolerance", "cheesecake", true, "lactose -> dairy -> cheese"},
+		{"dairy products", "cheesecake", true, "dairy products alias"},
+		{"egg", "eggnog", true, "eggnog"},
+		{"egg", "egg rolls", true, "egg roll (the space form already worked)"},
+		{"milk", "milkshake", true, "milkshake"},
+		{"dairy", "butterscotch", true, "butterscotch"},
+		{"dairy", "buttercream", true, "buttercream"},
+		{"dairy", "buttermilk", true, "buttermilk"},
+		{"corn", "cornbread", true, "cornbread carries corn"},
+		{"corn", "popcorn", true, "popcorn"},
+		{"corn", "cornstarch", true, "cornstarch"},
+		{"corn allergy", "cornbread", true, "the worded form"},
+		{"corn-free", "cornbread", true, "a corn-free diet"},
+
+		// -- the negatives: a compound must not turn a word into a match --
+		{"egg", "eggplant", false, "eggplant is not egg"},
+		{"fish", "goldfish crackers", false, "goldfish crackers are not fish"},
+		{"fish", "jellyfish", false, "a jellyfish is not a fish"},
+		{"fish", "starfish", false, "a starfish is not a fish"},
+		{"nut", "coconut", false, "coconut is not a nut, compound or not"},
+		{"nut", "nutmeg", false, "nutmeg is not a nut"},
+		{"nut", "doughnut", false, "doughnut is not a nut"},
+		{"nut", "butternut squash", false, "butternut is not a nut"},
+		{"tree nuts", "coconut milk", false, "coconut is still not a tree nut"},
+		{"dairy", "peanut butter", false, "peanut butter is not dairy"},
+		{"dairy", "butterfly pasta", false, "butterfly is not butter"},
+		{"dairy", "butternut squash", false, "butternut is not butter"},
+		{"dairy", "cheesecloth", false, "cheesecloth is cloth"},
+		{"milk", "milkfish", false, "milkfish is a fish, not milk"},
+		{"gluten", "breadfruit", false, "breadfruit carries no gluten"},
+		{"corn", "unicorn cookies", false, "unicorn is not corn"},
+		{"gluten", "root beer", false, "an exception still wins"},
+		{"dairy", "almond milk", false, "an exception still wins"},
+		{"fish", "chicken thighs", false, "chicken is not fish"},
+		{"dairy", "chicken thighs", false, "chicken is not dairy"},
+
+		// -- and an allergy's own word is never compound-matched --
+		{"catfish", "catfish fillets", true, "the allergy's own word"},
+		{"catfish", "swordfish steaks", false, "catfish is not a swordfish"},
+		{"cheese", "cheesecake", false, "the own word is whole-word only"},
+	} {
+		if got := anyMatch(tc.allergy, tc.item); got != tc.want {
+			t.Errorf("%s: allergy %q vs %q = %v, want %v", tc.why, tc.allergy, tc.item, got, tc.want)
+		}
+	}
+}
+
+// TestCompoundWordsAreGroupWordsOnly pins the boundary of #4805: compound
+// matching is for allergenGroups and diet words. An allergy's own word keeps
+// the whole-word rule, and so do the exceptions, so "nut" cannot start
+// matching "doughnut" while its group stays unchanged.
+func TestCompoundWordsAreGroupWordsOnly(t *testing.T) {
+	// The own word is compiled by phrasePatterns, not groupPatterns.
+	if _, ok := groupPatterns("catfish"); !ok {
+		t.Fatal("groupPatterns(catfish) gave no regex")
+	}
+	for _, w := range []string{"fish", "bread", "cheese", "egg", "milk", "butter", "corn"} {
+		goRe, ok := groupPatterns(w)
+		if !ok {
+			t.Fatalf("groupPatterns(%q) gave no regex", w)
+		}
+		if _, whole, _ := phrasePatterns(w); goRe == whole {
+			t.Errorf("%q: groupPatterns did not widen phrasePatterns", w)
+		}
+	}
+	// Not curated: nut (the ticket's explicit exclusion) and every other word.
+	for _, w := range []string{"nut", "almond", "walnut", "shrimp", "cream", "cake", "flour", "tahini", "sea bass"} {
+		goRe, ok := groupPatterns(w)
+		if !ok {
+			t.Fatalf("groupPatterns(%q) gave no regex", w)
+		}
+		if _, whole, _ := phrasePatterns(w); goRe != whole {
+			t.Errorf("%q got a compound form (%q); only compoundWords may", w, goRe)
+		}
+	}
+	// Every curated word must still be a group word somewhere, or the pattern
+	// is dead weight.
+	for w := range compoundWords {
+		found := false
+		for _, members := range allergenGroups {
+			for _, m := range members {
+				if singular(strings.ToLower(m)) == w {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("compoundWords has %q, which no allergen group lists", w)
+		}
+	}
+}
+
+// TestRecipeFindIngredientFilterUnchanged documents and pins the #4805
+// decision about recipe_find: its query and ingredient filters are built with
+// phrasePatterns, not groupPatterns, so searching for an ingredient still
+// matches whole words only. Compound matching is for allergen warnings and
+// diets; it is not a recipe search widening.
+func TestRecipeFindIngredientFilterUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		phrase, text string
+		want         bool
+		why          string
+	}{
+		{"cod", "cod fillets", true, "an ingredient term matches the whole word"},
+		{"cod", "codfish", false, "recipe_find does not compound-match"},
+		{"bread", "cornbread", false, "recipe_find does not compound-match"},
+		{"cheese", "cheesecake", false, "recipe_find does not compound-match"},
+		{"fish", "catfish", false, "recipe_find does not compound-match"},
+		{"tomato", "tomatoes, diced", true, "singular/plural still works"},
+	} {
+		pg, goRe, ok := phrasePatterns(tc.phrase)
+		if !ok {
+			t.Fatalf("%q gave no pattern", tc.phrase)
+		}
+		if got := mustMatch(goRe, tc.text); got != tc.want {
+			t.Errorf("%s: phrasePatterns(%q) vs %q = %v, want %v", tc.why, tc.phrase, tc.text, got, tc.want)
+		}
+		// The Postgres form is what recipe_find actually sends; it has the
+		// same shape, so the two agree.
+		if !strings.HasPrefix(pg, `\m`) || !strings.HasSuffix(pg, `\M`) || strings.Contains(pg, `\w*`) {
+			t.Errorf("phrasePatterns(%q) Postgres form = %q, want a plain \\m...\\M", tc.phrase, pg)
+		}
+	}
+	// A group word compiled for matching is NOT what the filter uses: this is
+	// the assertion that keeps a future edit from pointing both at one helper.
+	if goRe, _ := groupPatterns("fish"); goRe == func() string { _, r, _ := phrasePatterns("fish"); return r }() {
+		t.Error("groupPatterns(fish) and phrasePatterns(fish) agree; the filter and the warnings would be the same pattern")
+	}
+}
+
 // TestAllergenGroupVocabulary is #4804's acceptance test: every synonym and
 // every group member the ticket named matches the ingredient it named. The
 // data is what changed, so there is a row per pair: a shortened group shows
@@ -531,6 +703,18 @@ func TestAllergenGroupVocabulary(t *testing.T) {
 		{"almond", "almond flour", true, "the allergy's own word always matches"},
 		{"nut", "almond flour", true, "almond flour is still nuts"},
 		{"milk", "coconut milk", true, "the allergy's own word always matches"},
+
+		// -- #4805: compounds in the groups this table already covers --
+		{"fish", "catfish fillets", true, "#4805 fish -> catfish"},
+		{"fish", "monkfish", true, "#4805 fish -> monkfish"},
+		{"fish", "goldfish crackers", false, "#4805 goldfish is not fish"},
+		{"gluten", "cornbread", true, "#4805 gluten -> cornbread"},
+		{"celiac", "cornbread", true, "#4805 celiac -> cornbread"},
+		{"dairy", "cheesecake", true, "#4805 dairy -> cheesecake"},
+		{"egg", "eggnog", true, "#4805 egg -> eggnog"},
+		{"egg", "eggplant", false, "#4805 eggplant is still not egg"},
+		{"nut", "coconut", false, "#4805 coconut is still not a nut"},
+		{"nut", "doughnut", false, "#4805 doughnut is still not a nut"},
 	} {
 		if got := anyMatch(tc.allergy, tc.item); got != tc.want {
 			t.Errorf("%s: allergy %q vs %q = %v, want %v", tc.why, tc.allergy, tc.item, got, tc.want)
@@ -562,6 +746,17 @@ func TestDietUsesWidenedGroups(t *testing.T) {
 		{"no sesame seeds", "tahini", true},
 		{"no gluten", "beer", true},
 		{"no gluten", "ginger beer", false},
+		// #4805: diets go through compileGroupPhrases too, so the compound
+		// forms reach them. A vegan offered catfish is the same bug.
+		{"vegan", "catfish fillets", true},
+		{"vegetarian", "swordfish steaks", true},
+		{"gluten-free", "cornbread", true},
+		{"dairy-free", "cheesecake", true},
+		{"dairy free", "peanut butter", false},
+		{"egg-free", "eggnog", true},
+		{"egg free", "eggplant", false},
+		{"corn-free", "cornbread", true},
+		{"no fish", "catfish fillets", true},
 	} {
 		rules, ok := dietRules(eater{id: "p", name: "Nora"}, tc.diet)
 		if !ok {
