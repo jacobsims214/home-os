@@ -45,6 +45,13 @@ spec:
           value: {{ include "home-os.publicUrl" . | quote }}
         - name: DEX_ISSUER
           value: {{ include "home-os.dexIssuer" . | quote }}
+        {{- with .Values.mcp.acceptedClientIDs }}
+        {{- if has "home-os-ui" . }}
+        {{- fail "mcp.acceptedClientIDs must not contain home-os-ui: the MCP accepts only tokens issued for itself (#4692)" }}
+        {{- end }}
+        - name: MCP_ACCEPTED_AUDIENCES
+          value: {{ join "," . | quote }}
+        {{- end }}
         {{- with .Values.mcp.registerRateLimit }}
         - name: MCP_REGISTER_PER_MINUTE
           value: {{ .perMinute | default 5 | quote }}

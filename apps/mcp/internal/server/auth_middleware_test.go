@@ -18,6 +18,7 @@ import (
 
 	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/config"
+	"home-os/mcp/internal/metadata"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/testutil"
 )
@@ -127,6 +128,98 @@ func TestAuthMiddleware_StatusCodes(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", rec.Code)
+		}
+	})
+}
+
+// productionVerifier builds the verifier exactly as cmd/mcp does with the
+// default config: config.DefaultAcceptedAudiences plus the resource URL, and
+// the DCR client prefix.
+func productionVerifier(iss *testutil.TokenIssuer, pool *pgxpool.Pool, cfg *config.Config) *auth.Verifier {
+	auds := append(append([]string{}, config.DefaultAcceptedAudiences...), cfg.ResourceURL)
+	return iss.Verifier(pool,
+		auth.WithAudiences(auds...),
+		auth.WithAudiencePrefixes(metadata.DynamicClientIDPrefix),
+	)
+}
+
+// TestAuth_AudiencePolicy checks #4692 with the production audience wiring:
+// tokens issued to the Home OS UI's Dex client (home-os-ui), directly or as a
+// cross-client token, get 401 invalid_token at /mcp. Tokens for home-os-mcp,
+// the resource URL and mcp-<uuid> DCR clients pass, and the OAuth client id
+// (azp) reaches the request context.
+func TestAuth_AudiencePolicy(t *testing.T) {
+	pool := testutil.NewPool(t)
+	_, h := testutil.SeedHousehold(t, pool)
+	iss := testutil.NewTokenIssuer(t)
+	cfg := testConfig()
+	cfg.AcceptedAudiences = append([]string(nil), config.DefaultAcceptedAudiences...)
+	s := server.NewServer(cfg, pool, productionVerifier(iss, pool, cfg))
+
+	const dcr = "mcp-019a8b7c-1d2e-7f00-8a1b-2c3d4e5f6a7b"
+	tests := []struct {
+		name       string
+		claims     map[string]any
+		want       int
+		wantClient string
+	}{
+		{"home-os-mcp", map[string]any{"aud": "home-os-mcp"}, http.StatusOK, "home-os-mcp"},
+		{"resource URL", map[string]any{"aud": cfg.ResourceURL}, http.StatusOK, cfg.ResourceURL},
+		{"DCR client", map[string]any{"aud": dcr}, http.StatusOK, dcr},
+		{"DCR client with azp", map[string]any{"aud": []string{dcr, cfg.ResourceURL}, "azp": dcr}, http.StatusOK, dcr},
+		{"home-os-ui", map[string]any{"aud": "home-os-ui"}, http.StatusUnauthorized, ""},
+		{"home-os-ui cross-client for the MCP", map[string]any{"aud": []string{"home-os-mcp", "home-os-ui"}, "azp": "home-os-ui"}, http.StatusUnauthorized, ""},
+		{"home-os-ui with MCP audience, no azp", map[string]any{"aud": []string{"home-os-mcp", "home-os-ui"}}, http.StatusUnauthorized, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotClient string
+			reached := false
+			handler := s.AuthMiddleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				if c := server.ClaimsFromContext(r.Context()); c != nil {
+					gotClient = c.ClientID
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+			req.Header.Set("Authorization", "Bearer "+iss.TokenWith("sub-owner", h.Email, tc.claims))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tc.want, rec.Body.String())
+			}
+			if tc.want == http.StatusUnauthorized {
+				if reached {
+					t.Fatal("a refused token reached the handler")
+				}
+				if ch := rec.Header().Get("WWW-Authenticate"); !strings.Contains(ch, `error="invalid_token"`) {
+					t.Fatalf("WWW-Authenticate = %q, want error=\"invalid_token\"", ch)
+				}
+				return
+			}
+			if gotClient != tc.wantClient {
+				t.Fatalf("ClientID in context = %q, want %q", gotClient, tc.wantClient)
+			}
+		})
+	}
+
+	t.Run("agent token still accepted, no client id", func(t *testing.T) {
+		tok, _ := seedAgentToken(t, pool, h, []string{auth.ScopeRead}, nil)
+		var got *auth.Claims
+		handler := s.AuthMiddleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = server.ClaimsFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}))
+		req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || got == nil {
+			t.Fatalf("status = %d, claims %v (body %s)", rec.Code, got, rec.Body.String())
+		}
+		if got.AgentTokenID == "" || got.ClientID != "" {
+			t.Fatalf("claims = %+v, want agent token id and empty ClientID", got)
 		}
 	})
 }

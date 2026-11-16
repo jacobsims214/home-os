@@ -12,9 +12,14 @@
 //	                        http://localhost:8000. A trailing slash is trimmed.
 //	MCP_RESOURCE_URL        Canonical URI of this MCP server (RFC 8707 resource,
 //	                        RFC 9728 "resource"). Default <PUBLIC_BASE_URL>/mcp.
-//	MCP_ACCEPTED_AUDIENCES  Comma-separated token audiences the server accepts.
-//	                        Dex sets aud to the OAuth client_id, so the default is
-//	                        home-os-ui,home-os-mcp.
+//	MCP_ACCEPTED_AUDIENCES  Comma-separated Dex client ids whose tokens the server
+//	                        accepts (Dex sets aud, and azp for cross-client
+//	                        tokens, to the OAuth client_id). Default home-os-mcp.
+//	                        The resource URL and the mcp- prefix of dynamically
+//	                        registered clients are always added in cmd/mcp. Only
+//	                        list clients that exist to call the MCP: the UI's
+//	                        client (home-os-ui) is deliberately not accepted
+//	                        (MCP spec: tokens must be issued for this server).
 //	DEX_ISSUER              OIDC issuer; must equal the token iss claim. Default
 //	                        <PUBLIC_BASE_URL>/dex.
 //	DEX_JWKS_URL            JWKS endpoint used to verify token signatures. Default
@@ -49,8 +54,14 @@ import (
 )
 
 // DefaultAcceptedAudiences are the Dex client IDs whose tokens the MCP accepts.
-// Dex puts the client_id in the aud claim.
-var DefaultAcceptedAudiences = []string{"home-os-ui", "home-os-mcp"}
+// Dex puts the client_id in the aud claim. home-os-ui is not here on purpose:
+// the web UI's tokens are for the API, and the MCP spec forbids a resource
+// server from accepting tokens issued for another service (#4692).
+var DefaultAcceptedAudiences = []string{"home-os-mcp"}
+
+// UIClientID is the Home OS web UI's Dex client. The MCP warns at startup if
+// it is configured as an accepted audience.
+const UIClientID = "home-os-ui"
 
 // Defaults for the dynamic client registration (/register) limits.
 const (

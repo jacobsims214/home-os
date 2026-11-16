@@ -59,7 +59,7 @@ func TestLoadDefaults(t *testing.T) {
 	equal(t, "8083", cfg.MetadataPort)
 	equal(t, "http://localhost:8000", cfg.PublicBaseURL)
 	equal(t, "http://localhost:8000/mcp", cfg.ResourceURL)
-	equal(t, []string{"home-os-ui", "home-os-mcp"}, cfg.AcceptedAudiences)
+	equal(t, []string{"home-os-mcp"}, cfg.AcceptedAudiences)
 	equal(t, "http://localhost:8000/dex", cfg.DexIssuer)
 	equal(t, "http://home-os-envoy.home-os.svc.cluster.local:8000/dex/keys", cfg.DexJWKSURL)
 	equal(t, []string{"http://localhost:8000"}, cfg.AllowedOrigins)

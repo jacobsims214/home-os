@@ -26,33 +26,45 @@ const testResource = "https://home.example.test/mcp"
 func TestVerify_ResourceServerChecks(t *testing.T) {
 	iss := testutil.NewTokenIssuer(t)
 	other := testutil.NewTokenIssuer(t)
+	// Configured like production (cmd/mcp): the MCP's own client, the
+	// resource URI and the DCR prefix. home-os-ui is NOT accepted (#4692).
 	v := iss.Verifier(nil,
-		auth.WithAudiences("home-os-ui", testutil.TestAudience, testResource),
+		auth.WithAudiences(testutil.TestAudience, testResource),
 		auth.WithAudiencePrefixes("mcp-"),
 	)
 	expired := time.Now().Add(-time.Hour).Unix()
+	const dcr = "mcp-019a8b7c-1d2e-7f00-8a1b-2c3d4e5f6a7b"
+	tok := func(claims map[string]any) string { return iss.TokenWith("sub-1", "a@test.local", claims) }
 
 	tests := []struct {
-		name    string
-		token   string
-		wantErr bool
-		wantAud bool // error must be ErrInvalidAudience
+		name       string
+		token      string
+		wantErr    bool
+		wantAud    bool   // error must be ErrInvalidAudience
+		wantClient string // Identity.ClientID on success
 	}{
-		{"valid client-id audience", iss.Token("sub-1", "a@test.local"), false, false},
-		{"valid ui audience", iss.TokenWith("sub-1", "a@test.local", map[string]any{"aud": "home-os-ui"}), false, false},
-		{"resource URI audience (RFC 8707)", iss.TokenWith("sub-1", "a@test.local", map[string]any{"aud": testResource}), false, false},
-		{"audience list containing an accepted value", iss.TokenWith("sub-1", "a@test.local", map[string]any{"aud": []string{"other-api", testutil.TestAudience}}), false, false},
-		{"dynamically registered client", iss.TokenWith("sub-1", "a@test.local", map[string]any{"aud": "mcp-0f8e2c4a"}), false, false},
-		{"wrong audience", iss.TokenWith("sub-1", "a@test.local", map[string]any{"aud": "home-os-api"}), true, true},
-		{"audience list without an accepted value", iss.TokenWith("sub-1", "a@test.local", map[string]any{"aud": []string{"other-api", "billing"}}), true, true},
-		{"resource URI of another server", iss.TokenWith("sub-1", "a@test.local", map[string]any{"aud": "https://other.example.test/mcp"}), true, true},
-		{"no audience", iss.TokenWith("sub-1", "a@test.local", map[string]any{"aud": nil}), true, true},
-		{"expired", iss.TokenWith("sub-1", "a@test.local", map[string]any{"exp": expired}), true, false},
-		{"wrong issuer", iss.TokenWith("sub-1", "a@test.local", map[string]any{"iss": "https://evil.example/dex"}), true, false},
-		{"unsigned (alg none)", iss.UnsignedToken("sub-1", "a@test.local"), true, false},
-		{"signed by another key", other.Token("sub-1", "a@test.local"), true, false},
-		{"empty sub", iss.Token("", "a@test.local"), true, false},
-		{"garbage", "not-a-jwt", true, false},
+		{"valid client-id audience", iss.Token("sub-1", "a@test.local"), false, false, testutil.TestAudience},
+		{"resource URI audience (RFC 8707)", tok(map[string]any{"aud": testResource}), false, false, testResource},
+		{"dynamically registered client", tok(map[string]any{"aud": dcr}), false, false, dcr},
+		{"dynamically registered client with azp", tok(map[string]any{"aud": dcr, "azp": dcr}), false, false, dcr},
+		{"audience list, all accepted, no azp", tok(map[string]any{"aud": []string{dcr, testResource}}), false, false, dcr},
+		{"audience list with foreign value, azp accepted", tok(map[string]any{"aud": []string{"other-api", testutil.TestAudience}, "azp": testutil.TestAudience}), false, false, testutil.TestAudience},
+		{"UI token (aud home-os-ui)", tok(map[string]any{"aud": "home-os-ui"}), true, true, ""},
+		{"UI token with azp home-os-ui", tok(map[string]any{"aud": "home-os-ui", "azp": "home-os-ui"}), true, true, ""},
+		{"UI cross-client token for the MCP (azp home-os-ui)", tok(map[string]any{"aud": []string{testutil.TestAudience, "home-os-ui"}, "azp": "home-os-ui"}), true, true, ""},
+		{"audience list with foreign value, no azp", tok(map[string]any{"aud": []string{"other-api", testutil.TestAudience}}), true, true, ""},
+		{"accepted aud, foreign azp", tok(map[string]any{"aud": dcr, "azp": "home-os-api"}), true, true, ""},
+		{"prefix look-alike client", tok(map[string]any{"aud": "xmcp-1"}), true, true, ""},
+		{"wrong audience", tok(map[string]any{"aud": "home-os-api"}), true, true, ""},
+		{"audience list without an accepted value", tok(map[string]any{"aud": []string{"other-api", "billing"}}), true, true, ""},
+		{"resource URI of another server", tok(map[string]any{"aud": "https://other.example.test/mcp"}), true, true, ""},
+		{"no audience", tok(map[string]any{"aud": nil}), true, true, ""},
+		{"expired", tok(map[string]any{"exp": expired}), true, false, ""},
+		{"wrong issuer", tok(map[string]any{"iss": "https://evil.example/dex"}), true, false, ""},
+		{"unsigned (alg none)", iss.UnsignedToken("sub-1", "a@test.local"), true, false, ""},
+		{"signed by another key", other.Token("sub-1", "a@test.local"), true, false, ""},
+		{"empty sub", iss.Token("", "a@test.local"), true, false, ""},
+		{"garbage", "not-a-jwt", true, false, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,6 +75,9 @@ func TestVerify_ResourceServerChecks(t *testing.T) {
 				}
 				if ident.Subject != "sub-1" || ident.Email != "a@test.local" {
 					t.Fatalf("identity = %+v", ident)
+				}
+				if ident.ClientID != tc.wantClient {
+					t.Fatalf("ClientID = %q, want %q", ident.ClientID, tc.wantClient)
 				}
 				return
 			}

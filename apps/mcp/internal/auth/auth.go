@@ -25,6 +25,13 @@ type Identity struct {
 	Subject string `json:"sub"`
 	Email   string `json:"email"`
 	Name    string `json:"name"`
+	// ClientID is the OAuth client the Dex token was issued to: the azp
+	// claim, or the audience when the token has no azp (Dex sets azp only
+	// for cross-client tokens). It is always a client this server accepts
+	// (home-os-mcp, an mcp-<uuid> DCR client, or another configured MCP
+	// client id). Empty for agent tokens (see Claims.AgentTokenID) and in
+	// local-dev mode. The audit log records it for interactive sessions.
+	ClientID string `json:"client_id,omitempty"`
 }
 
 // Claims represents the enriched claims used across the application.
@@ -70,9 +77,14 @@ func (c *Claims) CanWrite() bool {
 //
 // An enabled verifier checks the signature (against the issuer's JWKS), the
 // issuer, the expiry and the audience. The MCP server is an OAuth resource
-// server, so it must only accept tokens issued for it: the aud claim has to
-// contain one of the configured audiences (WithAudiences) or start with one of
-// the configured prefixes (WithAudiencePrefixes). With neither configured the
+// server, so it must only accept tokens issued for it (MCP spec, no token
+// passthrough): the aud claim has to contain one of the configured audiences
+// (WithAudiences) or start with one of the configured prefixes
+// (WithAudiencePrefixes), and the client the token was issued to must be one
+// of them too. That client is the azp claim when present; without azp every
+// aud value must be accepted. So a Home OS UI token (aud home-os-ui), or a
+// cross-client token the UI obtained for the MCP (aud [home-os-mcp,
+// home-os-ui], azp home-os-ui), is refused. With no audiences configured the
 // verifier fails closed and rejects every token.
 type Verifier struct {
 	inner       *oidc.IDTokenVerifier
@@ -159,19 +171,49 @@ func NewVerifierWithKeySet(issuerURL string, keySet oidc.KeySet, pool *pgxpool.P
 	return newVerifier(inner, pool, opts)
 }
 
-// audienceAccepted reports whether any aud value is one this server accepts.
-func (v *Verifier) audienceAccepted(aud []string) bool {
-	for _, a := range aud {
-		if _, ok := v.audiences[a]; ok {
+// accepted reports whether a is an audience (or client id) this server
+// accepts: an exact configured audience or one with a configured prefix.
+func (v *Verifier) accepted(a string) bool {
+	if a == "" {
+		return false
+	}
+	if _, ok := v.audiences[a]; ok {
+		return true
+	}
+	for _, p := range v.audPrefixes {
+		if strings.HasPrefix(a, p) {
 			return true
-		}
-		for _, p := range v.audPrefixes {
-			if strings.HasPrefix(a, p) {
-				return true
-			}
 		}
 	}
 	return false
+}
+
+// tokenClient checks that a token was issued for this server and returns the
+// OAuth client it was issued to. aud must contain an accepted value. The
+// client is azp when set, and it must be accepted. Without azp, every aud
+// value must be accepted (a multi-audience token without azp cannot say which
+// client holds it, so a foreign audience means a foreign client) and the
+// first one is the client.
+func (v *Verifier) tokenClient(aud []string, azp string) (string, bool) {
+	ok := false
+	for _, a := range aud {
+		if v.accepted(a) {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return "", false
+	}
+	if azp != "" {
+		return azp, v.accepted(azp)
+	}
+	for _, a := range aud {
+		if !v.accepted(a) {
+			return "", false
+		}
+	}
+	return aud[0], true
 }
 
 func (v *Verifier) audienceList() []string {
@@ -200,17 +242,18 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Identity, erro
 	if err != nil {
 		return nil, fmt.Errorf("verify token: %w", err)
 	}
-	if !v.audienceAccepted(idToken.Audience) {
-		return nil, fmt.Errorf("verify token: %w (aud %v)", ErrInvalidAudience, idToken.Audience)
-	}
-
 	var claims struct {
 		Subject string `json:"sub"`
 		Email   string `json:"email"`
 		Name    string `json:"name"`
+		AZP     string `json:"azp"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("extract claims: %w", err)
+	}
+	clientID, ok := v.tokenClient(idToken.Audience, claims.AZP)
+	if !ok {
+		return nil, fmt.Errorf("verify token: %w (aud %v, azp %q)", ErrInvalidAudience, idToken.Audience, claims.AZP)
 	}
 
 	if claims.Subject == "" {
@@ -218,9 +261,10 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Identity, erro
 	}
 
 	return &Identity{
-		Subject: claims.Subject,
-		Email:   claims.Email,
-		Name:    claims.Name,
+		Subject:  claims.Subject,
+		Email:    claims.Email,
+		Name:     claims.Name,
+		ClientID: clientID,
 	}, nil
 }
 

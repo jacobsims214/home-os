@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -55,6 +56,10 @@ func main() {
 	// MCP_ACCEPTED_AUDIENCES, the canonical resource URI (RFC 8707), or a
 	// client the metadata server registered dynamically (mcp-<uuid>).
 	audiences := append(append([]string{}, cfg.AcceptedAudiences...), cfg.ResourceURL)
+	if slices.Contains(cfg.AcceptedAudiences, config.UIClientID) {
+		slog.Warn("MCP_ACCEPTED_AUDIENCES includes the web UI client: UI tokens will be accepted at /mcp; use this for local development only",
+			"client_id", config.UIClientID)
+	}
 	verifier, err := auth.NewVerifier(ctx, cfg.DexIssuer, cfg.DexJWKSURL, pool,
 		auth.WithAudiences(audiences...),
 		auth.WithAudiencePrefixes(metadata.DynamicClientIDPrefix),

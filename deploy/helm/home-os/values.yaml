@@ -167,6 +167,14 @@ mcp:
   image: mcp
   port: 8082
   metadataPort: 8083
+  # Extra Dex client ids whose tokens /mcp accepts (MCP_ACCEPTED_AUDIENCES, #4692).
+  # Empty = the binary default, home-os-mcp. The resource URL and mcp-<uuid>
+  # dynamically registered clients are always accepted; hos_ agent tokens don't
+  # use this. List only clients that exist to call the MCP. home-os-ui is
+  # refused at render time: UI tokens are for the API, and the MCP spec forbids
+  # accepting tokens issued for another service. When set, include home-os-mcp
+  # too if it should stay accepted (the list replaces the default).
+  acceptedClientIDs: []
   # Limits on public dynamic client registration (/oauth/register; apps/mcp/
   # internal/metadata/ratelimit.go, #4691). Past either budget it answers
   # 429 + Retry-After before anything reaches Dex. In memory per pod.
