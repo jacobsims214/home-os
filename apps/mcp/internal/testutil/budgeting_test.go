@@ -17,7 +17,8 @@ import (
 func TestBudgeting044_CopyAndReversible(t *testing.T) {
 	pool := NewPool(t)
 	ctx := context.Background()
-	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql")    // newest first: 056 sits on top of 038-054
+	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql") // newest first: 056 sits on top of 038-054
+	applyMigration(t, pool, "055_activity_event_titles.down.sql")
 	applyMigration(t, pool, "054_change_notifications.down.sql") // its trigger is on 050's activity_log
 	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "044_budgeting.down.sql")

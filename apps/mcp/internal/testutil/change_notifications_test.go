@@ -313,6 +313,7 @@ func TestChangeNotifications054_Reversible(t *testing.T) {
 	}
 	// 054 down also runs after 050 down (the test down chains do 054 first,
 	// but it must tolerate either order).
+	applyMigration(t, pool, "055_activity_event_titles.down.sql")
 	applyMigration(t, pool, "054_change_notifications.down.sql")
 	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "054_change_notifications.down.sql")

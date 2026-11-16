@@ -51,6 +51,7 @@ func TestPeople041_BackfillAndReversible(t *testing.T) {
 	// people, 049 replaces entity_household() on top of 047, and 050 adds
 	// authorship to all of them; undo them first (newest first).
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql") // newest first: 056 sits on top of 038-054
+	applyMigration(t, pool, "055_activity_event_titles.down.sql")
 	applyMigration(t, pool, "054_change_notifications.down.sql")
 	applyMigration(t, pool, "050_authorship.down.sql")
 	applyMigration(t, pool, "049_guides.down.sql")
@@ -191,6 +192,7 @@ func TestPeople041_EntityKindPerson(t *testing.T) {
 	kid2 := insertID(t, pool, `INSERT INTO people (household_id, display_name) VALUES ($1, 'Jo') RETURNING id`, f.household)
 	file2 := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'y.pdf', 1, 'person', $3) RETURNING id`, f.household, blob, kid2)
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql") // newest first: 056 sits on top of 038-054
+	applyMigration(t, pool, "055_activity_event_titles.down.sql")
 	applyMigration(t, pool, "054_change_notifications.down.sql")
 	applyMigration(t, pool, "050_authorship.down.sql")        // authorship columns on people and the tables below
 	applyMigration(t, pool, "049_guides.down.sql")            // entity_household() is replaced on top of 047

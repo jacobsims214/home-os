@@ -427,9 +427,10 @@ func TestList_ReadPolicyHook(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
-// TestList_NamesCalendarEvents: 050 names events from an iCal SUMMARY line,
-// but the apps store ical_data as JSON, so the feed fills the name from the
-// event while it exists. A deleted JSON event stays unnamed (see repo.go).
+// TestList_NamesCalendarEvents: migration 055 names events from ical_data's
+// JSON title (050 only read an iCal SUMMARY line), so every row, a deleted
+// event's included, carries the name it had when written. The feed still
+// fills the name from a live event for rows logged before 055 (see repo.go).
 func TestList_NamesCalendarEvents(t *testing.T) {
 	f := setup(t)
 	s := seed(t, f)
@@ -465,7 +466,7 @@ func TestList_NamesCalendarEvents(t *testing.T) {
 		`Sam created calendar event "Date night"`,
 	}, got[jsonEvent])
 	assert.Equal(t, []string{`Sam created calendar event "Dentist"`}, got[icsEvent])
-	assert.Equal(t, []string{"Dana deleted calendar event", "Sam created calendar event"}, got[gone],
-		"a deleted JSON event can't be named until 050's label is fixed")
+	assert.Equal(t, []string{`Dana deleted calendar event "Cancelled"`, `Sam created calendar event "Cancelled"`}, got[gone],
+		"055 names a JSON event in the log itself, so it stays named after delete")
 	assert.NotContains(t, rec.Body.String(), "PRIVATE-DETAILS")
 }
