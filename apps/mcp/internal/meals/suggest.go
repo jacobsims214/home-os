@@ -253,7 +253,7 @@ SELECT person_id::text, kind::text, category, value, coalesce(notes, '')
 			// A like or dislike is one food, read the same way as an allergy
 			// ("shrimp - anaphylaxis" means shrimp). The label stays the saved
 			// value, so reasons read "Sam dislikes chicken" (#4802).
-			for _, m := range allergyMatchers(e.id, e.name, p.value) {
+			for _, m := range preferenceMatchers(e.id, e.name, p.value) {
 				m.allergy = p.value
 				rules = append(rules, rule{kind: p.kind, m: m})
 			}

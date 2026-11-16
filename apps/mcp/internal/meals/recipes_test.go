@@ -388,10 +388,169 @@ func TestAllergyMatcher(t *testing.T) {
 	}
 }
 
+// TestAllergyIntensifiersAndFailClosed is #4874's unit acceptance test. The
+// #4802-#4805 chain fixed the vocabulary; it did not fix "the matcher
+// silently succeeds on garbage". Two holes, both proved end to end on real
+// Postgres: allergyFiller missed intensifiers and connectors, so "Deathly
+// allergic to peanuts" normalised to "deathly peanuts"; and newAllergyMatcher
+// said ok whenever a phrase had any word, so that junk phrase compiled,
+// matched nothing and never reached checks. A peanut-allergic person was
+// suggested a peanut recipe with an empty warnings list.
+//
+// Every wording on the ticket has to end in one of two states, never a third:
+// a real matcher that excludes the food, or no matcher and a visible
+// unchecked-allergy line.
+func TestAllergyIntensifiersAndFailClosed(t *testing.T) {
+	// The probed wordings, with the allergen each must normalise to and a food
+	// it must then match. Getting the allergen right is the filler half.
+	for _, tc := range []struct {
+		in      string
+		want    []string
+		matches string
+	}{
+		{"Deathly allergic to peanuts", []string{"peanuts"}, "peanut butter"},
+		{"extremely allergic to dairy", []string{"dairy"}, "cheddar"},
+		{"highly allergic to eggs", []string{"eggs"}, "mayonnaise"},
+		{"epi-pen for peanuts", []string{"peanuts"}, "peanuts"},
+		{"allergic to peanuts, wears medicalert", []string{"peanuts"}, "peanut butter"},
+		// The rest of the filler family, so a new word is a test row and not a
+		// silent regression.
+		{"deadly peanut allergy", []string{"peanut"}, "satay"},
+		{"really badly allergic to shellfish", []string{"shellfish"}, "prawns"},
+		{"strongly allergic to sesame", []string{"sesame"}, "tahini"},
+		{"possibly allergic to soy", []string{"soy"}, "tofu"},
+		{"allergic to all tree nuts", []string{"tree nuts"}, "cashews"},
+		{"carries medication for peanuts", []string{"peanuts"}, "peanuts"},
+		{"allergic to peanuts and wears a medical alert bracelet", []string{"peanuts"}, "peanut butter"},
+		{"allergic to peanuts, wears a medicalert bracelet", []string{"peanuts"}, "peanut butter"},
+	} {
+		if got := allergensIn(tc.in); !slices.Equal(got, tc.want) {
+			t.Errorf("allergensIn(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		ms, unchecked := allergyMatchers("p", "Nora", tc.in)
+		if len(unchecked) != 0 {
+			t.Errorf("%q: unchecked = %q, want a usable matcher", tc.in, unchecked)
+		}
+		if !slices.ContainsFunc(ms, func(m allergyMatcher) bool { return m.matches(tc.matches) }) {
+			t.Errorf("%q did not match %q", tc.in, tc.matches)
+		}
+	}
+
+	// The fail-closed half: a multi-word phrase the vocabulary does not know
+	// gets no matcher and is reported, instead of compiling into a regex that
+	// matches nothing. This is what makes "the matcher silently succeeds on
+	// garbage" impossible.
+	for _, junk := range []string{
+		"peanuts nuts seeds",   // words, but not a phrase the vocabulary knows
+		"red dye 40",           // a real allergy the vocabulary has no words for
+		"something in the air", // plainly unreadable
+		"purple elephants",     // nothing food-shaped in it at all
+	} {
+		ms, unchecked := allergyMatchers("p", "Nora", junk)
+		if len(ms) != 0 {
+			t.Errorf("allergyMatchers(%q) gave %d matchers, want none (fail closed)", junk, len(ms))
+		}
+		if len(unchecked) == 0 {
+			t.Errorf("allergyMatchers(%q) reported nothing unchecked, want the phrase", junk)
+		}
+	}
+
+	// The guard itself, straight at newAllergyMatcher with the pre-normalised
+	// phrase: these are the exact strings the old code compiled and called
+	// clean. The filler now means stored text cannot produce them, and this
+	// keeps them from ever counting as a checked allergy again.
+	for _, junk := range []string{
+		"deathly peanuts",        // what "Deathly allergic to peanuts" used to become
+		"extremely dairy",        // ... and "extremely allergic to dairy"
+		"highly eggs",            // ... and "highly allergic to eggs"
+		"for peanuts",            // ... and "epi-pen for peanuts"
+		"wears medicalert",       // ... and "allergic to peanuts, wears medicalert"
+		"purple elephants",       // anything else with no food in it
+		"all of the tree things", // plural nonsense
+	} {
+		if m, ok := newAllergyMatcher("p", "Nora", junk); ok {
+			t.Errorf("newAllergyMatcher(%q) = ok, want fail closed (%d own, %d group)", junk, len(m.own), len(m.group))
+		}
+	}
+
+	// A real allergen the vocabulary does not know is still one word, so it
+	// keeps working: fail-closed is about opaque phrases, not unknown foods.
+	for _, oneWord := range []string{"strawberry", "kiwi", "mango", "cinnamon"} {
+		ms, unchecked := allergyMatchers("p", "Nora", oneWord)
+		if len(ms) != 1 || len(unchecked) != 0 {
+			t.Errorf("allergyMatchers(%q) = %d matchers / %q unchecked, want 1 and none", oneWord, len(ms), unchecked)
+		}
+	}
+
+	// True multi-word allergens must keep resolving through group keys and
+	// aliases (#4874 says explicitly: do not break these).
+	for _, tc := range []struct {
+		in      string
+		matches string
+	}{
+		{"tree nuts", "cashews"},
+		{"Tree nut allergies", "walnuts"},
+		{"sesame seeds", "tahini"},
+		{"cow's milk", "cheddar"},
+		{"cows milk", "butter"},
+		{"cow\u2019s milk", "yogurt"},
+		{"dairy products", "mascarpone"},
+		{"lactose intolerance", "milk"},
+		{"celiac disease", "penne"},
+		{"seafood", "salmon"},
+		{"fish sauce", "fish sauce"}, // a group food, not a group key
+		{"sea bass", "sea bass"},
+		{"pine nut", "pine nuts"},
+		{"brazil nut", "brazil nuts"},
+		{"peanuts and tree nuts", "peanut butter"},
+		// Exception words are foods too, and people do save them as an
+		// allergy. Their matcher is the literal phrase only, so they can
+		// over-warn on that dish but never clear a real allergen.
+		{"coconut milk", "coconut milk"},
+		{"peanut butter", "peanut butter"},
+		{"root beer", "root beer"},
+	} {
+		ms, unchecked := allergyMatchers("p", "Nora", tc.in)
+		if len(ms) == 0 || len(unchecked) != 0 {
+			t.Errorf("%q: %d matchers / unchecked %q, want a matcher", tc.in, len(ms), unchecked)
+		}
+		if !slices.ContainsFunc(ms, func(m allergyMatcher) bool { return m.matches(tc.matches) }) {
+			t.Errorf("%q did not match %q", tc.in, tc.matches)
+		}
+	}
+
+	// A partly readable entry keeps the half it can read and reports the rest.
+	ms, unchecked := allergyMatchers("p", "Nora", "peanuts, red dye 40")
+	if len(ms) != 1 || !slices.Equal(unchecked, []string{"red dye 40"}) {
+		t.Errorf("mixed entry = %d matchers / unchecked %q, want 1 and [red dye 40]", len(ms), unchecked)
+	}
+	if !ms[0].matches("peanut butter") {
+		t.Error("the readable half of a mixed entry stopped matching")
+	}
+}
+
+// TestPreferenceMatchersStayBestEffort pins the other side of #4874: a like or
+// a dislike is ranking data with no checks list to report in, so an unknown
+// phrase keeps its matcher. Only allergy text fails closed.
+func TestPreferenceMatchersStayBestEffort(t *testing.T) {
+	for _, tc := range []struct {
+		text, item string
+	}{
+		{"ice cream", "vanilla ice cream"},
+		{"root beer", "root beer"},
+		{"red dye 40", "red dye 40"},
+	} {
+		if !slices.ContainsFunc(preferenceMatchers("p", "Sam", tc.text), func(m allergyMatcher) bool { return m.matches(tc.item) }) {
+			t.Errorf("preferenceMatchers(%q) did not match %q", tc.text, tc.item)
+		}
+	}
+}
+
 // anyMatch is how a stored allergy is used everywhere now: read the text
 // with allergensIn, then match each allergen it gives.
 func anyMatch(allergy, item string) bool {
-	for _, m := range allergyMatchers("p", "Nora", allergy) {
+	ms, _ := allergyMatchers("p", "Nora", allergy)
+	for _, m := range ms {
 		if m.matches(item) {
 			return true
 		}
@@ -826,7 +985,10 @@ func TestAllergenAliasGroups(t *testing.T) {
 // now do: one entry can give several allergens, and each warning keeps a
 // readable label (the bare allergen, not the raw text).
 func TestAllergyMatchersSplitAndLabel(t *testing.T) {
-	ms := allergyMatchers("p", "Nora", "peanuts and tree nuts")
+	ms, unchecked := allergyMatchers("p", "Nora", "peanuts and tree nuts")
+	if len(unchecked) != 0 {
+		t.Errorf("unchecked = %q, want none", unchecked)
+	}
 	if len(ms) != 2 {
 		t.Fatalf("matchers = %+v, want peanut and tree nut", ms)
 	}
@@ -844,7 +1006,7 @@ func TestAllergyMatchersSplitAndLabel(t *testing.T) {
 	}
 	// Nothing left to match: no matchers, so the caller can say so.
 	for _, nothing := range []string{"allergy", "anaphylactic", "  ", "severe", "(carries an EpiPen)"} {
-		if ms := allergyMatchers("p", "Nora", nothing); len(ms) != 0 {
+		if ms, _ := allergyMatchers("p", "Nora", nothing); len(ms) != 0 {
 			t.Errorf("allergyMatchers(%q) = %+v, want none", nothing, ms)
 		}
 	}
