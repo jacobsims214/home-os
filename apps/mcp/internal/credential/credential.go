@@ -85,7 +85,10 @@ type access struct {
 	householdID uuid.UUID
 	userID      *uuid.UUID
 	agentToken  *uuid.UUID
-	role        string
+	// clientID is the OAuth client (azp) of an interactive Dex session;
+	// nil for agent tokens, which agentToken identifies (#4491).
+	clientID *string
+	role     string
 }
 
 // checkAccess resolves the caller's current membership. Claims are taken
@@ -124,6 +127,12 @@ func checkAccess(ctx context.Context, pool *pgxpool.Pool, c *auth.Claims) (*acce
 			return nil, notSignedIn()
 		}
 		a.agentToken = &tid
+	} else if c.ClientID != "" {
+		cid := c.ClientID
+		if len(cid) > 200 { // activity_log.actor_client_id is VARCHAR(200)
+			cid = cid[:200]
+		}
+		a.clientID = &cid
 	}
 	if deniedRoles[a.role] {
 		return nil, respond.Fail(respond.Error{

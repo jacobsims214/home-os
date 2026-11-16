@@ -13,8 +13,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/config"
 	"home-os/mcp/internal/metadata"
@@ -34,9 +32,11 @@ func main() {
 		Level: parseLogLevel(cfg.LogLevel),
 	})))
 
-	// Create the pgx connection pool.
+	// Create the pgx connection pool. Its connections carry the calling
+	// member's identity (app.user_id and friends) for the authorship
+	// triggers, so every tool's writes are attributed (#4491).
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pool, err := server.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("failed to create database pool", "error", err)
 		os.Exit(1)

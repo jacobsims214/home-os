@@ -31,8 +31,9 @@ import (
 //  5. the server has its agent key, and the blob opens for this household
 //     and credential id.
 //
-// Then one activity_log row (action 'read', entity 'secret', actor user +
-// agent token, the credential's name; never the value) is written, and only
+// Then one activity_log row (action 'read', entity 'secret', actor user, the
+// client: agent token id, or the OAuth client id (azp) for an interactive
+// Dex session; the credential's name; never the value) is written, and only
 // if that insert succeeds is the value returned. The feed reads it as
 // `Dana revealed secret "Netflix" via agent "Claude"`.
 func NewCredentialRevealTool(pool *pgxpool.Pool, key *AgentKey) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
@@ -179,9 +180,9 @@ func audit(ctx context.Context, pool *pgxpool.Pool, a *access, sid uuid.UUID, na
 		parentType, parentID = &kind, &entityID
 	}
 	_, err := pool.Exec(ctx,
-		`INSERT INTO activity_log (household_id, actor_user_id, actor_agent_token_id,
+		`INSERT INTO activity_log (household_id, actor_user_id, actor_agent_token_id, actor_client_id,
 		                           entity_type, entity_id, parent_type, parent_id, action, summary)
-		 VALUES ($1, $2, $3, 'secret', $4, $5, $6, 'read', $7)`,
-		a.householdID, a.userID, a.agentToken, sid, parentType, parentID, summary)
+		 VALUES ($1, $2, $3, $4, 'secret', $5, $6, $7, 'read', $8)`,
+		a.householdID, a.userID, a.agentToken, a.clientID, sid, parentType, parentID, summary)
 	return err
 }

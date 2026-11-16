@@ -74,7 +74,10 @@ func NewPool(t testing.TB) *pgxpool.Pool {
 		t.Fatalf("testutil: create database %s: %v", name, err)
 	}
 
-	pool, err := pgxpool.New(ctx, withDatabase(adminConnStr, name))
+	// server.NewPool, as in production: writes made with a context from
+	// SeedHousehold (or server.ContextWithClaims) are attributed to that
+	// member by the authorship triggers.
+	pool, err := server.NewPool(ctx, withDatabase(adminConnStr, name))
 	if err != nil {
 		t.Fatalf("testutil: connect %s: %v", name, err)
 	}

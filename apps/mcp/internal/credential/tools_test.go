@@ -219,6 +219,56 @@ func TestReveal_ShareReadUnshare(t *testing.T) {
 	}
 }
 
+// TestReveal_AuditIdentifiesClient (#4491, decision update after review
+// #4448): the audit row names the client that read the credential: the
+// agent token id for an agent token, or the OAuth client id (azp) for an
+// interactive Dex session that has no agent token.
+func TestReveal_AuditIdentifiesClient(t *testing.T) {
+	f := newFixture(t)
+	sid := f.addSecret(t, f.hh.HouseholdID, "Netflix")
+	f.share(t, f.hh.HouseholdID, sid)
+
+	dex := *f.hh.Claims
+	dex.ClientID = "mcp-6a51c0de"
+	dexCtx := server.ContextWithClaims(context.Background(), &dex)
+
+	// A stray ClientID on an agent-token caller is not recorded: the token
+	// is the client.
+	agent := *f.hh.Claims
+	agent.AgentTokenID = f.token.String()
+	agent.Scopes = []string{auth.ScopeRead}
+	agent.ClientID = "stray"
+	agentCtx := server.ContextWithClaims(context.Background(), &agent)
+
+	for _, tc := range []struct {
+		name                string
+		ctx                 context.Context
+		wantToken, wantClnt string
+	}{
+		{"agent token", agentCtx, f.token.String(), "-"},
+		{"interactive OAuth session", dexCtx, "-", "mcp-6a51c0de"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := call(t, f.reveal, tc.ctx, map[string]any{"credential_id": sid.String()})
+			if r.isError || r.env.Data == nil || r.env.Data.Value["password"] != secretPassword {
+				t.Fatalf("reveal: %s", r.text)
+			}
+			var user, token, client string
+			if err := f.pool.QueryRow(context.Background(),
+				`SELECT coalesce(actor_user_id::text, '-'), coalesce(actor_agent_token_id::text, '-'),
+				        coalesce(actor_client_id, '-')
+				   FROM activity_log WHERE household_id = $1 AND action = 'read' ORDER BY id DESC LIMIT 1`,
+				f.hh.HouseholdID).Scan(&user, &token, &client); err != nil {
+				t.Fatal(err)
+			}
+			if user != f.hh.UserID.String() || token != tc.wantToken || client != tc.wantClnt {
+				t.Fatalf("audit user=%s token=%s client=%s, want %s/%s/%s",
+					user, token, client, f.hh.UserID, tc.wantToken, tc.wantClnt)
+			}
+		})
+	}
+}
+
 func TestReveal_Refusals(t *testing.T) {
 	f := newFixture(t)
 	sid := f.addSecret(t, f.hh.HouseholdID, "Wi-Fi")
