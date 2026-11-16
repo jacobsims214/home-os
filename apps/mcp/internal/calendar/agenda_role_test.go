@@ -33,7 +33,11 @@ func agendaEnv(t *testing.T) (*pgxpool.Pool, testutil.Household, handlerFunc) {
 		hh.HouseholdID, uuid.NewString()).Scan(&cal); err != nil {
 		t.Fatal(err)
 	}
-	insertAgendaEvent(t, pool, cal, "Soccer", now.Add(2*time.Hour))
+	// Noon of today, not now+2h: the household is on UTC here and agenda_get
+	// reads one local day, so an event two hours out lands on tomorrow when
+	// the suite runs after 22:00 UTC and the events section comes back empty.
+	insertAgendaEvent(t, pool, cal, "Soccer",
+		time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, time.UTC))
 
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO bills (household_id, name, amount, due_day) VALUES ($1, 'Electric', 142.50, $2)`,

@@ -744,7 +744,7 @@ func TestDataWarranty(t *testing.T) {
 		{today.AddDate(0, 0, 1), 1, true},
 		{today.AddDate(0, 0, -1), -1, false},
 	} {
-		d := assetRow{WarrantyExpiry: &tc.expiry}.data(today)
+		d := assetRow{WarrantyExpiry: &tc.expiry}.data(today, true)
 		if *d.WarrantyDaysLeft != tc.days || *d.WarrantyActive != tc.active {
 			t.Errorf("%s: days=%d active=%v, want %d %v", tc.expiry.Format(time.DateOnly), *d.WarrantyDaysLeft, *d.WarrantyActive, tc.days, tc.active)
 		}

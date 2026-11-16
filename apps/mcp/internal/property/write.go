@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/respond"
 )
 
@@ -196,7 +197,7 @@ SELECT id FROM properties
  ORDER BY created_at DESC LIMIT 1`, c.householdID, f.name.val, duplicateWindow).Scan(&dupID)
 		switch {
 		case err == nil:
-			d, err := loadProperty(ctx, tx, c.householdID, dupID)
+			d, err := loadProperty(ctx, tx, c.householdID, dupID, auth.CanSeeMoney(c.role))
 			if err != nil {
 				return respond.Failed("add the property", err), nil
 			}
@@ -223,7 +224,7 @@ VALUES ($1, $2, $3, $4, $5::date, $6, $7) RETURNING id`,
 			c.householdID, f.name.val, id).Scan(&sameName); err != nil {
 			return respond.Failed("add the property", err), nil
 		}
-		d, err := loadProperty(ctx, tx, c.householdID, id)
+		d, err := loadProperty(ctx, tx, c.householdID, id, auth.CanSeeMoney(c.role))
 		if err != nil {
 			return respond.Failed("add the property", err), nil
 		}
@@ -373,7 +374,7 @@ func NewPropertyUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 				return respond.Failed("update the property", err), nil
 			}
 		}
-		d, err := loadProperty(ctx, tx, c.householdID, id)
+		d, err := loadProperty(ctx, tx, c.householdID, id, auth.CanSeeMoney(c.role))
 		if err != nil {
 			return respond.Failed("update the property", err), nil
 		}

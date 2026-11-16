@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 )
@@ -57,14 +58,23 @@ func NewVehicleFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			return invalid(err, findExample), nil
 		}
 
+		// The role is re-read from memberships on every call (callerOf, as the
+		// write tools do), so a demotion hides money at once. auth.CanSeeMoney
+		// decides the money columns, the related loans and bills, and the hints.
+		c, bad := callerOf(ctx, pool)
+		if bad != nil {
+			return bad, nil
+		}
+		money := auth.CanSeeMoney(c.role)
+
 		rows, err := pool.Query(ctx, vehicleSelect+`
-			WHERE v.household_id = $1
-			  AND ($2::uuid IS NULL OR v.id = $2)
-			  AND ($3 = '' OR concat_ws(' ', v.year, v.make, v.model) ILIKE '%' || $3 || '%'
-			       OR v.vin ILIKE '%' || $3 || '%' OR v.license_plate ILIKE '%' || $3 || '%'
-			       OR v.color ILIKE '%' || $3 || '%' OR v.notes ILIKE '%' || $3 || '%')
+			WHERE v.household_id = $2
+			  AND ($3::uuid IS NULL OR v.id = $3)
+			  AND ($4 = '' OR concat_ws(' ', v.year, v.make, v.model) ILIKE '%' || $4 || '%'
+			       OR v.vin ILIKE '%' || $4 || '%' OR v.license_plate ILIKE '%' || $4 || '%'
+			       OR v.color ILIKE '%' || $4 || '%' OR v.notes ILIKE '%' || $4 || '%')
 			ORDER BY lower(COALESCE(v.make, '')), lower(COALESCE(v.model, '')), v.year DESC NULLS LAST, v.created_at, v.id`,
-			claims.HouseholdID, in.id, escapeLike(in.query),
+			money, claims.HouseholdID, in.id, escapeLike(in.query),
 		)
 		if err != nil {
 			return respond.Failed("find vehicles", err), nil
@@ -84,10 +94,10 @@ func NewVehicleFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		end := min(in.offset+in.limit, total)
 		page := make([]vehicleData, 0, end-in.offset)
 		for _, r := range loaded[in.offset:end] {
-			page = append(page, r.data())
+			page = append(page, r.data(money))
 		}
 		if in.id != nil && len(page) == 1 {
-			if page[0].Related, err = loadRelated(ctx, pool, *in.id, claims.HouseholdID); err != nil {
+			if page[0].Related, err = loadRelated(ctx, pool, *in.id, claims.HouseholdID, money); err != nil {
 				return respond.Failed("find vehicles", err), nil
 			}
 		}
@@ -96,7 +106,7 @@ func NewVehicleFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			Total:      total - in.offset,
 			NextCursor: respond.CursorAfter(end, total),
 			Narrow:     "Pass next_cursor as cursor for the next page, or add query.",
-		}, findNext(in, page)...), nil
+		}, findNext(in, page, money)...), nil
 	}
 	return "vehicle_find", tool, handler
 }
@@ -125,29 +135,42 @@ func findSummary(in findInput, page []vehicleData, total int) string {
 	}
 }
 
-// findNext is vehicle_find's next-step hints.
-func findNext(in findInput, page []vehicleData) []string {
+// findNext is vehicle_find's next-step hints. withMoney is the caller's
+// auth.CanSeeMoney: a role that may not see money is never pointed at
+// loan_create or loan_find, which would only refuse it (and would tell it the
+// car has a loan worth looking at).
+func findNext(in findInput, page []vehicleData, withMoney bool) []string {
 	if len(page) == 0 {
 		if !in.filtered() {
-			return []string{"Add one with vehicle_create make=… model=… year=…; then loans, bills and upkeep link to it by vehicle_id."}
+			return []string{"Add one with vehicle_create make=… model=… year=…; then upkeep links to it by vehicle_id."}
 		}
 		return []string{"Call vehicle_find without query to list every vehicle."}
 	}
 	v := page[0]
 	if len(page) > 1 {
-		return []string{
-			fmt.Sprintf("Get one in full, with its loans, bills and upkeep, with vehicle_find id=%s.", v.ID),
-			"Pass a vehicle's id as vehicle_id to loan_create or maintenance_create to link it.",
+		next := []string{fmt.Sprintf("Get one in full, with its upkeep, with vehicle_find id=%s.", v.ID)}
+		if withMoney {
+			next[0] = fmt.Sprintf("Get one in full, with its loans, bills and upkeep, with vehicle_find id=%s.", v.ID)
+			next = append(next, "Pass a vehicle's id as vehicle_id to loan_create or maintenance_create to link it.")
+		} else {
+			next = append(next, "Pass a vehicle's id as vehicle_id to maintenance_create to link it.")
 		}
+		return next
 	}
 	next := []string{}
 	if v.Related == nil {
-		next = append(next, fmt.Sprintf("See its loans, bills and upkeep with vehicle_find id=%s.", v.ID))
+		if withMoney {
+			next = append(next, fmt.Sprintf("See its loans, bills and upkeep with vehicle_find id=%s.", v.ID))
+		} else {
+			next = append(next, fmt.Sprintf("See its upkeep with vehicle_find id=%s.", v.ID))
+		}
 	}
 	next = append(next, fmt.Sprintf("Schedule upkeep (oil change, tires) with maintenance_create vehicle_id=%s.", v.ID))
-	if v.LoanCount == 0 {
+	switch {
+	case !withMoney:
+	case v.LoanCount == nil || *v.LoanCount == 0:
 		next = append(next, fmt.Sprintf("Record its car loan with loan_create vehicle_id=%s.", v.ID))
-	} else {
+	default:
 		next = append(next, fmt.Sprintf("See its loan details with loan_find vehicle_id=%s.", v.ID))
 	}
 	return next

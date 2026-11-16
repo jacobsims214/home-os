@@ -59,9 +59,17 @@ type searchIndexer interface {
 
 // assetSelect loads assets with their property and room names. Scanned by
 // scanAsset.
+// The two money columns (purchase price/value) and purchase_date are each
+// wrapped in `CASE WHEN $1 THEN ... END`, where $1 is the caller's
+// auth.CanSeeMoney: for a role without money the query yields NULL and the
+// family's finance never enters the process. Every query on this constant must
+// therefore pass withMoney first (see loadAsset and scanAsset).
 const assetSelect = `SELECT a.id, a.household_id, a.property_id, a.room_id, a.name, a.category,
-	       a.manufacturer, a.model, a.serial_number, a.purchase_date,
-	       a.purchase_price::float8, a.current_value::float8, a.warranty_expiry,
+	       a.manufacturer, a.model, a.serial_number,
+	       CASE WHEN $1::bool THEN a.purchase_date END,
+	       CASE WHEN $1::bool THEN a.purchase_price::float8 END,
+	       CASE WHEN $1::bool THEN a.current_value::float8 END,
+	       a.warranty_expiry,
 	       a.created_at, a.updated_at, p.name, r.name
 	FROM assets a
 	LEFT JOIN properties p ON p.id = a.property_id
@@ -104,12 +112,32 @@ type querier interface {
 }
 
 // loadAsset loads one asset of the household, pgx.ErrNoRows when there is none.
-func loadAsset(ctx context.Context, q querier, id uuid.UUID, householdID string) (assetRow, error) {
-	return scanAsset(q.QueryRow(ctx, assetSelect+` WHERE a.id = $1 AND a.household_id = $2`, id, householdID))
+// withMoney (the caller's auth.CanSeeMoney) is the query's $1: false makes it
+// yield no money at all.
+func loadAsset(ctx context.Context, q querier, id uuid.UUID, householdID string, withMoney bool) (assetRow, error) {
+	return scanAsset(q.QueryRow(ctx, assetSelect+` WHERE a.id = $2 AND a.household_id = $3`, withMoney, id, householdID))
+}
+
+// assetMoney is every money field of an asset in one struct, so hiding money
+// from a role is one decision (assetRow.data) rather than a check per field or
+// per handler (#4808, the pattern of #4806). It is embedded in assetData, so
+// the fields serialize at the top level next to name and category.
+//
+// Every field is a pointer with `omitzero`: when the struct is left zero (a
+// role that may not see money) the fields are ABSENT from the JSON rather than
+// null. A field added here is hidden from housesitters and vendors
+// automatically. This is the asset half #4806 left open: ResAssets read is
+// rolesEveryone, so a sitter or a vendor may list the family's things and was
+// told what each one cost and is worth.
+type assetMoney struct {
+	PurchaseDate  *string  `json:"purchase_date,omitzero" jsonschema_description:"YYYY-MM-DD."`
+	PurchasePrice *float64 `json:"purchase_price,omitzero" jsonschema_description:"Price paid, in the family's currency."`
+	CurrentValue  *float64 `json:"current_value,omitzero" jsonschema_description:"What it is worth now, in the family's currency."`
 }
 
 // assetData is one asset in every asset tool's output. IDs are strings (a
-// uuid.UUID would be advertised as a byte array in the outputSchema).
+// uuid.UUID would be advertised as a byte array in the outputSchema). Money is
+// embedded and filled only for a role that may see it.
 type assetData struct {
 	ID                 string    `json:"id" jsonschema_description:"The asset_id to pass to asset_update or asset_delete."`
 	Name               string    `json:"name"`
@@ -121,9 +149,6 @@ type assetData struct {
 	PropertyName       *string   `json:"property_name"`
 	RoomID             *string   `json:"room_id" jsonschema_description:"The room it is in; null when it is not in a room."`
 	RoomName           *string   `json:"room_name"`
-	PurchaseDate       *string   `json:"purchase_date" jsonschema_description:"YYYY-MM-DD."`
-	PurchasePrice      *float64  `json:"purchase_price"`
-	CurrentValue       *float64  `json:"current_value"`
 	WarrantyExpiry     *string   `json:"warranty_expiry" jsonschema_description:"Last day of the warranty, YYYY-MM-DD."`
 	WarrantyWeekday    *string   `json:"warranty_weekday" jsonschema_description:"Weekday of warranty_expiry, e.g. Thu."`
 	WarrantyActive     *bool     `json:"warranty_active" jsonschema_description:"true while the warranty runs (today in the family's timezone); null without warranty_expiry."`
@@ -134,17 +159,23 @@ type assetData struct {
 	UpkeepTasksDeleted *int      `json:"upkeep_tasks_deleted,omitempty" jsonschema_description:"asset_delete only: upkeep tasks deleted with the asset."`
 	DocumentsMoved     *int      `json:"documents_moved,omitempty" jsonschema_description:"asset_delete only: documents moved to the family."`
 	NotesDeleted       *int      `json:"notes_deleted,omitempty" jsonschema_description:"asset_delete only: notes about the asset that were deleted."`
+
+	assetMoney
 }
 
 // data builds the output for r as of today (household-local midnight UTC).
-func (r assetRow) data(today time.Time) assetData {
+// withMoney (the caller's auth.CanSeeMoney) decides the money block: false
+// leaves it zero, so the amounts are absent.
+func (r assetRow) data(today time.Time, withMoney bool) assetData {
 	d := assetData{
 		ID: r.ID.String(), Name: r.Name, Category: r.Category, Manufacturer: r.Manufacturer,
 		Model: r.Model, SerialNumber: r.SerialNumber,
 		PropertyID: uuidString(r.PropertyID), PropertyName: r.PropertyName,
 		RoomID: uuidString(r.RoomID), RoomName: r.RoomName,
-		PurchasePrice: r.PurchasePrice, CurrentValue: r.CurrentValue,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	if withMoney {
+		d.assetMoney = assetMoney{PurchasePrice: r.PurchasePrice, CurrentValue: r.CurrentValue}
 	}
 	if r.PropertyID == nil {
 		d.PropertyName = nil
@@ -152,7 +183,7 @@ func (r assetRow) data(today time.Time) assetData {
 	if r.RoomID == nil {
 		d.RoomName = nil
 	}
-	if r.PurchaseDate != nil {
+	if withMoney && r.PurchaseDate != nil {
 		d.PurchaseDate = dateOnly(*r.PurchaseDate)
 	}
 	if r.WarrantyExpiry != nil {
@@ -296,6 +327,37 @@ func householdOf(ctx context.Context) *string {
 	}
 	return &c.HouseholdID
 }
+
+// assetRole resolves the caller's current role the way the property, vehicle,
+// loan and people tools do: re-read from memberships for the claims' user and
+// household, so a demotion hides money at once and a removed member gets
+// nothing. Without a users.id (auth-disabled local development) the claims' role
+// is used; an agent token always resolves to a users.id, so one that cannot be
+// read fails closed. The handler has already checked for claims.
+func assetRole(ctx context.Context, q querier, householdID string) (string, error) {
+	c := server.ClaimsFromContext(ctx)
+	if c == nil {
+		return "", errNoClaims
+	}
+	uid, err := uuid.Parse(c.UserID)
+	if err != nil {
+		if c.AgentTokenID != "" {
+			return "", errNoClaims
+		}
+		return c.Role, nil // auth-disabled local mode: no users.id
+	}
+	var role string
+	err = q.QueryRow(ctx,
+		`SELECT role::text FROM memberships WHERE household_id = $1 AND user_id = $2`, householdID, uid).Scan(&role)
+	if err != nil {
+		return "", err
+	}
+	return role, nil
+}
+
+// errNoClaims is the refusal assetRole reports when the claims cannot be
+// resolved to a member; the handler answers respond.Failed("check your access").
+var errNoClaims = errors.New("not signed in to a household")
 
 // annotations sets all four hints (catalog §1): class R (find), C (create),
 // U (update) or X (delete). openWorldHint is always false.

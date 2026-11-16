@@ -247,7 +247,8 @@ func TestPropertyFind(t *testing.T) {
 	if h.ID != home || *h.Address != "12 Elm St" || *h.PurchaseDate != "2019-06-01" || *h.CurrentValue != 450000 || *h.PurchasePrice != 380000 {
 		t.Errorf("home fields: %+v", h)
 	}
-	if h.Counts != (propertyCounts{Rooms: 3, Assets: 2, Loans: 1, OpenMaintenance: 1}) {
+	if h.Counts.Rooms != 3 || h.Counts.Assets != 2 || h.Counts.OpenMaintenance != 1 ||
+		h.Counts.Loans == nil || *h.Counts.Loans != 1 || h.Counts.Bills == nil || *h.Counts.Bills != 0 {
 		t.Errorf("home counts = %+v", h.Counts)
 	}
 	if len(h.Rooms) != 3 || h.Rooms[0].Name != "Kitchen" || h.Rooms[0].AssetCount != 1 || h.Rooms[0].ID != kitchen ||

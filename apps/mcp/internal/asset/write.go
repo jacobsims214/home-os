@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/respond"
 )
 
@@ -281,6 +282,15 @@ func NewAssetCreateTool(pool *pgxpool.Pool, idx searchIndexer) (string, mcp.Tool
 				"Pass a kind of thing, e.g. appliance, electronics, furniture or jewelry.", createExample), nil
 		}
 
+		// The write tools are family-only (#4717's gate), but the record they
+		// return still asks auth.CanSeeMoney rather than assuming: a widened
+		// write cannot leak money by default (#4808).
+		role, err := assetRole(ctx, pool, *household)
+		if err != nil {
+			return respond.Failed("check your access", err), nil
+		}
+		money := auth.CanSeeMoney(role)
+
 		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 		if err != nil {
 			return respond.Failed("create the asset", err), nil
@@ -299,15 +309,15 @@ func NewAssetCreateTool(pool *pgxpool.Pool, idx searchIndexer) (string, mcp.Tool
 		}
 
 		dup, err := scanAsset(tx.QueryRow(ctx, assetSelect+`
-			WHERE a.household_id = $1 AND lower(a.name) = lower($2) AND lower(COALESCE(a.category, '')) = lower($3)
-			  AND a.created_at > NOW() - $4::interval
+			WHERE a.household_id = $2 AND lower(a.name) = lower($3) AND lower(COALESCE(a.category, '')) = lower($4)
+			  AND a.created_at > NOW() - $5::interval
 			ORDER BY a.created_at DESC
 			LIMIT 1`,
-			*household, *f.name, *f.category, duplicateWindow,
+			money, *household, *f.name, *f.category, duplicateWindow,
 		))
 		switch {
 		case err == nil:
-			d := dup.data(today)
+			d := dup.data(today, money)
 			d.Duplicate = true
 			return respond.OK(
 				fmt.Sprintf("Asset %s was already added a few minutes ago; returned it instead of adding a second one.", d.Name),
@@ -333,7 +343,7 @@ func NewAssetCreateTool(pool *pgxpool.Pool, idx searchIndexer) (string, mcp.Tool
 			}
 			return respond.Failed("create the asset", err), nil
 		}
-		r, err := loadAsset(ctx, tx, id, *household)
+		r, err := loadAsset(ctx, tx, id, *household, money)
 		if err != nil {
 			return respond.Failed("create the asset", err), nil
 		}
@@ -342,7 +352,7 @@ func NewAssetCreateTool(pool *pgxpool.Pool, idx searchIndexer) (string, mcp.Tool
 		}
 		indexAsset(idx, r)
 
-		d := r.data(today)
+		d := r.data(today, money)
 		next := createNext(d)
 		if h := createGuideHint(ctx, pool, d.ID); h != "" {
 			next = append(next, h)
@@ -404,6 +414,11 @@ func NewAssetUpdateTool(pool *pgxpool.Pool, idx searchIndexer) (string, mcp.Tool
 			return respond.Invalid("", "No fields to update.",
 				"Pass asset_id plus at least one field, e.g. current_value or room_id.", updateExample), nil
 		}
+		role, err := assetRole(ctx, pool, *household)
+		if err != nil {
+			return respond.Failed("check your access", err), nil
+		}
+		money := auth.CanSeeMoney(role)
 
 		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 		if err != nil {
@@ -411,8 +426,8 @@ func NewAssetUpdateTool(pool *pgxpool.Pool, idx searchIndexer) (string, mcp.Tool
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-		cur, err := scanAsset(tx.QueryRow(ctx, assetSelect+` WHERE a.id = $1 AND a.household_id = $2 FOR UPDATE OF a`,
-			*assetID, *household))
+		cur, err := scanAsset(tx.QueryRow(ctx, assetSelect+` WHERE a.id = $2 AND a.household_id = $3 FOR UPDATE OF a`,
+			money, *assetID, *household))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return respond.NotFound("asset", assetID.String(), "Call asset_find to get the asset_id."), nil
 		}
@@ -456,7 +471,7 @@ func NewAssetUpdateTool(pool *pgxpool.Pool, idx searchIndexer) (string, mcp.Tool
 			}
 			return respond.Failed("update the asset", err), nil
 		}
-		r, err := loadAsset(ctx, tx, *assetID, *household)
+		r, err := loadAsset(ctx, tx, *assetID, *household, money)
 		if err != nil {
 			return respond.Failed("update the asset", err), nil
 		}
@@ -469,7 +484,7 @@ func NewAssetUpdateTool(pool *pgxpool.Pool, idx searchIndexer) (string, mcp.Tool
 		}
 		indexAsset(idx, r)
 
-		d := r.data(today)
+		d := r.data(today, money)
 		summary := fmt.Sprintf("Updated asset %s (%s): %s.", d.Name, strings.Join(f.changed(), ", "), d.describe())
 		if where.leftRoom {
 			summary += " It moved to another property, so it is no longer in a room; pass room_id to place it."
@@ -514,6 +529,11 @@ func NewAssetDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		if assetID == nil {
 			return respond.Invalid("asset_id", "asset_id is required.", "Pass the asset's id from asset_find.", example), nil
 		}
+		role, err := assetRole(ctx, pool, *household)
+		if err != nil {
+			return respond.Failed("check your access", err), nil
+		}
+		money := auth.CanSeeMoney(role)
 
 		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 		if err != nil {
@@ -521,8 +541,8 @@ func NewAssetDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-		r, err := scanAsset(tx.QueryRow(ctx, assetSelect+` WHERE a.id = $1 AND a.household_id = $2 FOR UPDATE OF a`,
-			*assetID, *household))
+		r, err := scanAsset(tx.QueryRow(ctx, assetSelect+` WHERE a.id = $2 AND a.household_id = $3 FOR UPDATE OF a`,
+			money, *assetID, *household))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return respond.NotFound("asset", assetID.String(), "Call asset_find to list assets and their ids."), nil
 		}
@@ -548,7 +568,7 @@ func NewAssetDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			return respond.Failed("delete the asset", err), nil
 		}
 
-		d := r.data(today)
+		d := r.data(today, money)
 		d.UpkeepTasksDeleted, d.DocumentsMoved, d.NotesDeleted = &upkeep, &docs, &notes
 		summary := fmt.Sprintf("Deleted asset %s%s.", d.Name, d.where())
 		var extra []string

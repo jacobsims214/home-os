@@ -55,29 +55,55 @@ type roomData struct {
 	AssetCount int    `json:"asset_count" jsonschema_description:"Things recorded in this room."`
 }
 
+// propertyMoney is every money field of a property in one struct, so hiding
+// money from a role is one decision (propertyRow.data) rather than a check per
+// field or per handler. It is embedded in propertyData, so the fields serialize
+// at the top level next to id and name, exactly as the API's propertyMoney does
+// (#4806).
+//
+// Every field is a pointer with `omitzero`: when the struct is left zero (a
+// role that may not see money) the fields are ABSENT from the JSON rather than
+// null, so a model can never read "purchase_price: null" as a value. A field
+// added here is hidden from housesitters and vendors automatically.
+// PurchaseDate is not an amount, but it belongs to the same financial record.
+type propertyMoney struct {
+	PurchaseDate  *string  `json:"purchase_date,omitzero" jsonschema_description:"YYYY-MM-DD."`
+	PurchasePrice *float64 `json:"purchase_price,omitzero" jsonschema_description:"Price paid, in the family's currency."`
+	CurrentValue  *float64 `json:"current_value,omitzero" jsonschema_description:"Estimated value today, in the family's currency."`
+}
+
+// propertyMoneyCounts is the money part of propertyCounts: how many bills and
+// loans the property carries. Those counts are money too (a housesitter was
+// told how many bills and loans the family has, and findNext pointed them at
+// loan_find), so they sit in their own embedded struct with the same rule.
+type propertyMoneyCounts struct {
+	Bills *int `json:"bills,omitzero" jsonschema_description:"Bills tied to the property (electric, tax, insurance)."`
+	Loans *int `json:"loans,omitzero" jsonschema_description:"Loans on the property or its assets, e.g. the mortgage (loan_find property_id=...)."`
+}
+
 // propertyCounts is how much is recorded about a property.
 type propertyCounts struct {
 	Rooms           int `json:"rooms"`
 	Assets          int `json:"assets" jsonschema_description:"Things in the property, in a room or not (asset_find property_id=...)."`
-	Bills           int `json:"bills" jsonschema_description:"Bills tied to the property (electric, tax, insurance)."`
-	Loans           int `json:"loans" jsonschema_description:"Loans on the property or its assets, e.g. the mortgage (loan_find property_id=...)."`
 	OpenMaintenance int `json:"open_maintenance" jsonschema_description:"Upkeep tasks not done yet (maintenance_find property_id=...)."`
+	propertyMoneyCounts
 }
 
-// propertyData is one property in property_find's output.
+// propertyData is one property in property_find's output. The money fields are
+// embedded, so they serialize at the top level: filled only when the caller's
+// role may see money, absent otherwise.
 type propertyData struct {
-	ID            string         `json:"id" jsonschema_description:"The property_id to pass to asset_find, loan_find, bill_create and others."`
-	Name          string         `json:"name"`
-	Address       *string        `json:"address"`
-	PropertyType  *string        `json:"property_type" jsonschema_description:"e.g. house, condo, rental, land."`
-	Notes         *string        `json:"notes"`
-	PurchaseDate  *string        `json:"purchase_date" jsonschema_description:"YYYY-MM-DD."`
-	PurchasePrice *float64       `json:"purchase_price"`
-	CurrentValue  *float64       `json:"current_value" jsonschema_description:"Estimated value today, in the family's currency."`
-	Rooms         []roomData     `json:"rooms" jsonschema_description:"Every room, by floor then name. A room_id from search_all opens here."`
-	Counts        propertyCounts `json:"counts"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	ID           string         `json:"id" jsonschema_description:"The property_id to pass to asset_find, loan_find, bill_create and others."`
+	Name         string         `json:"name"`
+	Address      *string        `json:"address"`
+	PropertyType *string        `json:"property_type" jsonschema_description:"e.g. house, condo, rental, land."`
+	Notes        *string        `json:"notes"`
+	Rooms        []roomData     `json:"rooms" jsonschema_description:"Every room, by floor then name. A room_id from search_all opens here."`
+	Counts       propertyCounts `json:"counts"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+
+	propertyMoney
 
 	// Set only by the write tools.
 	Duplicate    bool     `json:"duplicate,omitempty" jsonschema_description:"property_create: true when this property was added minutes ago and is returned instead of a copy."`
@@ -87,20 +113,29 @@ type propertyData struct {
 }
 
 // describe is a short phrase for summaries, e.g. "at 12 Elm St, 5 rooms,
-// 14 assets, value $450,000.00".
+// 14 assets, value $450,000.00". The money parts are simply absent for a role
+// that may not see money: the fields they would read are unset.
 func (d propertyData) describe() string {
 	var parts []string
 	if d.Address != nil {
 		parts = append(parts, "at "+*d.Address)
 	}
 	parts = append(parts, plural(d.Counts.Rooms, "room"), plural(d.Counts.Assets, "asset"))
-	if d.Counts.Loans > 0 {
-		parts = append(parts, plural(d.Counts.Loans, "loan"))
+	if n := d.Counts.loans(); n > 0 {
+		parts = append(parts, plural(n, "loan"))
 	}
 	if d.CurrentValue != nil {
 		parts = append(parts, "value "+money(*d.CurrentValue))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// loans is the loan count, 0 when it is hidden from the caller's role.
+func (c propertyCounts) loans() int {
+	if c.Loans == nil {
+		return 0
+	}
+	return *c.Loans
 }
 
 func plural(n int, noun string) string {
