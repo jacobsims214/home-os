@@ -192,21 +192,23 @@ func foodCategory(c string) bool {
 // eaterRules builds every rule for the eaters. checks are things the user
 // should hear: allergy text that could not be read, diets not applied.
 // limited (housesitter) uses only allergy data.
+//
+// Allergies come from allergySources, the same loader the recipe and meal
+// warnings use, so a recipe meal_suggest refuses is a recipe the warnings
+// warn about (#4803). Diets, likes and dislikes are meal_suggest's own.
 func eaterRules(ctx context.Context, q querier, hid uuid.UUID, eaters []eater, limited bool) (rules []rule, checks []string, err error) {
 	ids := make([]string, len(eaters))
 	byID := map[string]eater{}
 	for i, e := range eaters {
 		ids[i] = e.id
 		byID[e.id] = e
-		for _, a := range e.allergies {
-			if ms := allergyMatchers(e.id, e.name, a); len(ms) > 0 {
-				for _, m := range ms {
-					rules = append(rules, rule{kind: "allergy", m: m})
-				}
-			} else {
-				checks = append(checks, uncheckedAllergyLine(e.name, a))
-			}
-		}
+	}
+	matchers, checks, err := allergySources(ctx, q, hid, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, m := range matchers {
+		rules = append(rules, rule{kind: "allergy", m: m})
 	}
 	rows, err := q.Query(ctx, `
 SELECT person_id::text, kind::text, category, value, coalesce(notes, '')
@@ -226,28 +228,9 @@ SELECT person_id::text, kind::text, category, value, coalesce(notes, '')
 	}
 	for _, p := range prefs {
 		e := byID[p.person]
-		// Allergy talk anywhere is an allergy, whatever kind it was filed as.
+		// Allergy talk anywhere is an allergy, whatever kind it was filed as;
+		// allergySources already turned those rows into rules and checks.
 		if allergyMention.MatchString(p.value) || allergyMention.MatchString(p.notes) {
-			// "peanut allergy" -> peanut; a dislike "shrimp" noted "allergic" -> shrimp.
-			found := allergensIn(p.value)
-			if len(found) == 0 {
-				found = allergensIn(p.notes)
-			}
-			if p.kind == "like" && !allergyMention.MatchString(p.value) {
-				// A like noted "allergic" is contradictory: flag it, and treat it as an allergy.
-				checks = append(checks, fmt.Sprintf("%s has %q saved as a like with the note %q; treated as an allergy.", e.name, p.value, p.notes))
-			}
-			added := 0
-			for _, a := range found {
-				// found is already normalised by allergensIn.
-				if m, ok := newAllergyMatcher(e.id, e.name, a); ok {
-					rules = append(rules, rule{kind: "allergy", m: m})
-					added++
-				}
-			}
-			if added == 0 {
-				checks = append(checks, fmt.Sprintf("%s has an allergy note %q that could not be read as an allergen; confirm the meal is safe.", e.name, strings.TrimSpace(p.value+" "+p.notes)))
-			}
 			continue
 		}
 		if limited {
@@ -733,15 +716,22 @@ func NewMealSuggestTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			return respond.Failed("suggest meals", err), nil
 		}
 		// Allergies of people not eating: flagged on a suggestion, never hidden.
+		// Same loader as the eaters' rules, so a preference-filed allergy counts
+		// here too (#4803).
 		var others []rule
+		var otherIDs []string
 		for _, p := range people {
-			if slices.ContainsFunc(eaters, func(e eater) bool { return e.id == p.id }) {
-				continue
+			if !slices.ContainsFunc(eaters, func(e eater) bool { return e.id == p.id }) {
+				otherIDs = append(otherIDs, p.id)
 			}
-			for _, a := range p.allergies {
-				for _, m := range allergyMatchers(p.id, p.name, a) {
-					others = append(others, rule{kind: "allergy", m: m})
-				}
+		}
+		if len(otherIDs) > 0 {
+			otherMatchers, _, err := allergySources(ctx, pool, c.householdID, otherIDs)
+			if err != nil {
+				return respond.Failed("suggest meals", err), nil
+			}
+			for _, m := range otherMatchers {
+				others = append(others, rule{kind: "allergy", m: m})
 			}
 		}
 
@@ -770,7 +760,12 @@ func NewMealSuggestTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		if res.Eating == nil {
 			res.Eating = []string{}
 		}
-		hasAllergyRules := slices.ContainsFunc(rules, func(r rule) bool { return r.kind == "allergy" || r.kind == "diet" })
+		// hasAllergy is the fail-closed trigger: an unknown recipe is not a safe
+		// recipe, so a recipe with no ingredients saved is left out when anyone
+		// eating has an allergy (manager decision on #4803). A diet alone keeps
+		// the old behaviour: suggested, ranked lower, with a caution.
+		hasAllergy := slices.ContainsFunc(rules, func(r rule) bool { return r.kind == "allergy" })
+		hasHardRules := slices.ContainsFunc(rules, func(r rule) bool { return r.kind == "allergy" || r.kind == "diet" })
 
 		for _, cd := range cands {
 			total := totalMinutes(cd.prep, cd.cook)
@@ -783,14 +778,15 @@ func NewMealSuggestTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 				continue
 			}
 			// Hard rules: allergies and diets of anyone eating. Each rule
-			// reports its first hit, an ingredient before the name.
-			checkItems := append(slices.Clone(cd.ingredients), cd.name)
+			// reports its first hit, an ingredient before the name. checkItems
+			// is the same list the recipe and meal warnings use (#4803).
+			items := checkItems(cd.name, cd.ingredients)
 			var why []string
 			for _, r := range rules {
 				if r.kind != "allergy" && r.kind != "diet" {
 					continue
 				}
-				for _, it := range checkItems {
+				for _, it := range items {
 					if r.m.matches(it) {
 						line := fmt.Sprintf("%s (%s): %s", r.m.person, r.m.allergy, it)
 						if r.kind == "diet" {
@@ -803,6 +799,12 @@ func NewMealSuggestTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 					}
 				}
 			}
+			// No ingredients saved and someone eating has an allergy: the name
+			// was all that could be checked, so it is not a safe recipe. The
+			// reason is the same line the recipe and meal warnings report.
+			if len(why) == 0 && len(cd.ingredients) == 0 && hasAllergy {
+				why = append(why, noIngredientsLine)
+			}
 			if len(why) > 0 {
 				res.ExcludedTotal++
 				if len(res.Excluded) < maxExcludedShown {
@@ -813,12 +815,12 @@ func NewMealSuggestTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			sc, rd, pros, cons := cd.score(date, eaters, rules)
 			sg := mealSuggestion{RecipeID: cd.id, Name: cd.name, TotalMinutes: total, Tags: cd.tags, Rating: rd,
 				TimesMade: cd.timesMade, LastMade: day(cd.lastBefore), Score: sc}
-			if len(cd.ingredients) == 0 && hasAllergyRules {
+			if len(cd.ingredients) == 0 && hasHardRules {
 				sg.Score = round1(sg.Score - 2)
 				sg.Cautions = append(sg.Cautions, "No ingredients are saved, so allergies and diets could only be checked against the name; confirm it is safe.")
 			}
 			for _, r := range others {
-				for _, it := range checkItems {
+				for _, it := range items {
 					if r.m.matches(it) {
 						sg.Cautions = append(sg.Cautions, fmt.Sprintf("Contains %s for %s (%s), who is not eating.", it, r.m.person, r.m.allergy))
 						break
