@@ -1,0 +1,122 @@
+import type { Page, TestInfo } from "@playwright/test";
+import { test, expect } from "./fixtures";
+
+/**
+ * Entity detail layout (#4531): components/layout/DetailPageLayout.tsx.
+ * Phone: sticky title bar (back, title, actions menu) and collapsible
+ * Details / Resources sections, no horizontal scroll. Desktop: two columns.
+ * Viewports and colour schemes are pinned per test, so this runs once, in the
+ * desktop-chrome project. Screenshots are attached for a visual check.
+ */
+const DETAIL = "/dashboard/bills/b1";
+const BILL = {
+  id: "b1",
+  name: "Duke Energy electric — Main Residence (autopay)",
+  amount: 142.37,
+  due_day: 14,
+  category: "Electric",
+  account_number: "9100-2231-4478-0021-5590",
+  payment_url: "https://www.duke-energy.com/my-account/sign-in/billing-and-payments",
+  is_autopay: true,
+  notes: "Budget billing since March. Call 800-777-9898 if the autopay fails twice.",
+};
+
+test.beforeEach(async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chrome", "viewports are pinned per test");
+  await page.route("**/bff/bills/b1", (route) => route.fulfill({ json: { data: BILL } }));
+});
+
+async function gotoDetail(page: Page) {
+  await page.goto(DETAIL);
+  await expect(page.getByRole("heading", { level: 2, name: BILL.name })).toBeVisible();
+}
+
+const noHorizontalScroll = (page: Page) =>
+  page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+
+async function snap(page: Page, testInfo: TestInfo, name: string, fullPage = false) {
+  const path = testInfo.outputPath(`${name}.png`);
+  await page.screenshot({ path, fullPage });
+  await testInfo.attach(name, { path, contentType: "image/png" });
+}
+
+for (const colorScheme of ["light", "dark"] as const) {
+  test.describe(`${colorScheme}`, () => {
+    test.use({ colorScheme });
+
+    test("phone 390: stacked, collapsible, actions in a menu, no horizontal scroll", async ({ loggedInPage: page }, testInfo) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await gotoDetail(page);
+
+      const main = page.locator("main");
+      await expect(main.getByRole("link", { name: "Back to Bills" })).toBeVisible();
+      // Edit/Delete live in the actions menu, not as a button row.
+      await expect(main.getByRole("button", { name: "Edit", exact: true })).toBeHidden();
+      const actions = main.getByRole("button", { name: `Actions for ${BILL.name}` });
+      const box = (await actions.boundingBox())!;
+      expect(box.width).toBeGreaterThanOrEqual(44);
+      expect(box.height).toBeGreaterThanOrEqual(44);
+
+      // Details open, Resources closed; both toggle.
+      const details = main.getByRole("button", { name: /^Details/ });
+      const resources = main.getByRole("button", { name: /^Resources/ });
+      await expect(details).toHaveAttribute("aria-expanded", "true");
+      await expect(resources).toHaveAttribute("aria-expanded", "false");
+      await expect(main.getByText("Account Number")).toBeVisible();
+      await expect(main.getByRole("tablist", { name: "Resource types" })).toBeHidden();
+      expect(await noHorizontalScroll(page)).toBe(true);
+      await snap(page, testInfo, `detail-390-${colorScheme}`, true);
+
+      await resources.click();
+      await expect(resources).toHaveAttribute("aria-expanded", "true");
+      await expect(main.getByRole("tablist", { name: "Resource types" })).toBeVisible();
+      await details.click();
+      await expect(main.getByText("Account Number")).toBeHidden();
+      expect(await noHorizontalScroll(page)).toBe(true);
+      await snap(page, testInfo, `detail-390-${colorScheme}-collapsed`);
+
+      // Edit from the menu reopens Details and swaps the menu for Cancel / Save.
+      await actions.click();
+      const del = page.getByRole("menuitem", { name: "Delete" });
+      await expect(del).toBeVisible();
+      // Destructive item paints in --danger.
+      const danger = colorScheme === "light" ? "rgb(201, 42, 42)" : "rgb(255, 135, 135)";
+      expect(await del.evaluate((el) => getComputedStyle(el).color)).toBe(danger);
+      await page.waitForTimeout(300); // menu fade-in
+      await snap(page, testInfo, `detail-390-${colorScheme}-menu`);
+      await page.getByRole("menuitem", { name: "Edit" }).click();
+      await expect(details).toHaveAttribute("aria-expanded", "true");
+      await expect(main.getByRole("button", { name: "Save" })).toBeVisible();
+      await expect(main.getByRole("button", { name: "Cancel" })).toBeVisible();
+      expect(await noHorizontalScroll(page)).toBe(true);
+
+      // The title bar sticks under the shell header while scrolling.
+      await page.mouse.wheel(0, 600);
+      await page.waitForTimeout(200);
+      const headerBottom = (await page.locator("header").boundingBox())!;
+      const saveBox = (await main.getByRole("button", { name: "Save" }).boundingBox())!;
+      expect(saveBox.y).toBeGreaterThanOrEqual(headerBottom.y + headerBottom.height - 1);
+      expect(saveBox.y).toBeLessThan(headerBottom.y + headerBottom.height + 60);
+      await snap(page, testInfo, `detail-390-${colorScheme}-editing`);
+    });
+
+    test("desktop 1440: two columns with buttons, nothing collapses", async ({ loggedInPage: page }, testInfo) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await gotoDetail(page);
+
+      const main = page.locator("main");
+      await expect(main.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
+      await expect(main.getByRole("button", { name: "Delete", exact: true })).toBeVisible();
+      await expect(main.getByRole("button", { name: /^Actions for/ })).toBeHidden();
+      await expect(main.getByRole("button", { name: /^Details/ })).toBeHidden();
+
+      const details = (await main.getByRole("region", { name: "Details" }).boundingBox())!;
+      const resources = (await main.getByRole("region", { name: "Resources" }).boundingBox())!;
+      expect(resources.x).toBeGreaterThan(details.x + details.width - 1);
+      expect(Math.abs(resources.y - details.y)).toBeLessThan(2);
+      await expect(main.getByRole("tablist", { name: "Resource types" })).toBeVisible();
+      expect(await noHorizontalScroll(page)).toBe(true);
+      await snap(page, testInfo, `detail-1440-${colorScheme}`);
+    });
+  });
+}
