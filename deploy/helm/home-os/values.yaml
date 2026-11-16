@@ -297,6 +297,33 @@ dex:
       - home-os-api
       - home-os-mcp
     httpExtraFrom: []
+  # mTLS on the Dex gRPC admin API (#697). Dex's gRPC listener (grpcPort) can
+  # CreatePassword for any user, CreateClient and revoke refresh tokens, and it
+  # authenticates nothing at the application layer — the transport is the only
+  # control. When enabled, the chart issues a private CA and two certificates
+  # with cert-manager (templates/dex-grpc-tls/), Dex requires a client cert
+  # (grpc.tlsCert/tlsKey/tlsClientCA), and the api and mcp pods mount the client
+  # cert. There is no plaintext fallback in either Go client.
+  #
+  # enabled=false is the documented opt-out. The gRPC service is then
+  # plaintext again, and dex.networkPolicy (below) is the ONLY thing restricting
+  # 5557 — which is why that policy is not optional. Setting this to false also
+  # makes the api and mcp Deployments render DEX_GRPC_INSECURE=true.
+  #
+  # Requires cert-manager in the cluster (Talos homelab: v1.17.4). Not the
+  # letsencrypt-cloudflare ClusterIssuer: these are in-cluster service names
+  # Let's Encrypt cannot validate.
+  grpcTLS:
+    enabled: true
+    # Secret names. caSecretName holds the CA keypair; the two leaf Secrets are
+    # what the pods actually mount.
+    caSecretName: home-os-dex-grpc-ca
+    serverSecretName: home-os-dex-grpc-server-tls
+    clientSecretName: home-os-dex-grpc-client-tls
+    # Leaf lifetime, and the CA's (longer: rotating the CA invalidates every
+    # leaf, so it should outlive several leaf renewals).
+    duration: 2160h # 90d
+    caDuration: 8760h # 365d
   # Dex's Postgres password is never rendered into the ConfigMap: the Deployment
   # reads it from a Secret into DEX_DB_PASSWORD and Dex expands it at startup.
   # existingSecret: Secret holding the password; empty = the database Secret

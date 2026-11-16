@@ -1,3 +1,4 @@
+{{- include "home-os.validate" . }}
 {{- if .Values.dex.dbPassword }}
 {{- fail "dex.dbPassword was removed: Dex reads its DB password from a Secret. Put it in a Secret and set dex.existingSecret (and dex.existingSecretPasswordKey), or leave both unset to use home-os-db-secret." }}
 {{- end }}
@@ -36,8 +37,26 @@ data:
     web:
       http: 0.0.0.0:5556
     
+    {{- /*
+    mTLS on the gRPC admin API (#697). Dex's gRPC surface (CreatePassword,
+    CreateClient, RevokeRefresh, …) authenticates nothing at the application
+    layer, so this listener must not be reachable without a client certificate.
+    tlsClientCA makes Dex demand one signed by our private CA
+    (tls.RequireAndVerifyClientCert, cmd/dex/serve.go loadTLSConfig), and
+    tlsCert/tlsKey are the server half. The files are the cert-manager
+    Certificates in templates/dex-grpc-tls/certificates.yaml, mounted by
+    dex/deployment.yaml.
+    */}}
     grpc:
       addr: 0.0.0.0:5557
+      {{- if .Values.dex.grpcTLS.enabled }}
+      tlsCert: {{ include "home-os.dexGrpcTLSDir" . }}/tls.crt
+      tlsKey: {{ include "home-os.dexGrpcTLSDir" . }}/tls.key
+      tlsClientCA: {{ include "home-os.dexGrpcTLSDir" . }}/ca.crt
+      # TLS 1.2 floor; Dex defaults to 1.2 already, stated so a future
+      # "just make it 1.1 compatible" change has to be deliberate.
+      tlsMinVersion: "1.2"
+      {{- end }}
     
     oauth2:
       skipApprovalScreen: true

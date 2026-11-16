@@ -85,6 +85,18 @@ dex:
   port: 5556
   grpcPort: 5557
   # Dex reads its DB password from home-os-db-secret (secrets.dbPassword below).
+  #
+  # Leave the chart default (grpcTLS.enabled=true) if the cluster has
+  # cert-manager: the chart then issues a private CA and both certificates and
+  # the gRPC admin API is mTLS-only (#697). docker-desktop needs cert-manager
+  # installed for that (helm install cert-manager jetstack/cert-manager).
+  #
+  # Without cert-manager, set grpcTLS.enabled=false. The gRPC admin API is then
+  # plaintext, and dex.networkPolicy (on by default) is the only thing limiting
+  # port 5557 to the api and mcp pods — which is why the chart refuses to render
+  # with both of them off.
+  grpcTLS:
+    enabled: true
 
 database:
   mode: managed

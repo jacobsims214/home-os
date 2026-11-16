@@ -9,9 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	dexapi "github.com/dexidp/dex/api"
+	dexapi "github.com/dexidp/dex/api/v2"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Client is a gRPC client for Dex's password management API.
@@ -20,10 +19,19 @@ type Client struct {
 	api  dexapi.DexClient
 }
 
-// NewClient creates a new Dex gRPC client connected to the given address.
-// For local development, it uses insecure credentials (no TLS).
-func NewClient(addr string) (*Client, error) {
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+// NewClient creates a new Dex gRPC client for the given address, presenting
+// the client certificate in tlsCfg and verifying Dex against tlsCfg.CAFile.
+// Set tlsCfg.Insecure for local development only: Dex's gRPC API has no
+// authentication, so the transport is the only control on it (#697).
+//
+// grpc.NewClient does not connect; the first RPC establishes the connection
+// and gRPC re-establishes it as needed.
+func NewClient(addr string, tlsCfg TLSConfig) (*Client, error) {
+	creds, err := tlsCfg.TransportCredentials()
+	if err != nil {
+		return nil, fmt.Errorf("dex client: %w", err)
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, fmt.Errorf("dex client: %w", err)
 	}

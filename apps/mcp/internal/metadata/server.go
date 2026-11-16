@@ -25,9 +25,8 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
-	dexapi "github.com/dexidp/dex/api"
+	dexapi "github.com/dexidp/dex/api/v2"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"home-os/mcp/internal/config"
@@ -263,11 +262,22 @@ type dexClientCreator interface {
 	CreateClient(ctx context.Context, in *dexapi.CreateClientReq, opts ...grpc.CallOption) (*dexapi.CreateClientResp, error)
 }
 
-// dialDex builds the Dex API client. grpc.NewClient does not connect; the
-// connection is made on first use and re-established by gRPC as needed. It
-// is a variable so tests can substitute a fake and count calls.
+// dialDex builds the Dex API client over mTLS. grpc.NewClient does not
+// connect; the connection is made on first use and re-established by gRPC as
+// needed. It is a variable so tests can substitute a fake and count calls.
+//
+// Dex's gRPC API has no authentication of its own — CreateClient here, and
+// CreatePassword from the API, are trusted by transport alone — so this
+// connection presents a client certificate and verifies Dex against the shared
+// private CA (DEX_GRPC_TLS_*, #697). It never falls back to plaintext: with no
+// material and no explicit DEX_GRPC_INSECURE the registration endpoint answers
+// 500 rather than opening an unauthenticated admin channel.
 var dialDex = func(addr string) (dexClientCreator, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds, err := DexTLSConfigFromEnv().TransportCredentials()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, err
 	}

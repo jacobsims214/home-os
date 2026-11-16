@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	dexapi "github.com/dexidp/dex/api"
+	dexapi "github.com/dexidp/dex/api/v2"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 

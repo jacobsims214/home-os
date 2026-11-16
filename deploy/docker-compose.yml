@@ -172,6 +172,12 @@ services:
       DEX_ISSUER: https://localhost:8443/dex
       DEX_JWKS_URL: http://home-os-dex:5556/dex/keys
       DEX_GRPC_ADDR: home-os-dex:5557
+      # The compose Dex has no gRPC TLS (deploy/dex/config.yaml sets only
+      # addr), so the client has to opt out of mTLS explicitly. The Go clients
+      # fail closed without this: they never silently downgrade to plaintext,
+      # because in Kubernetes the transport is the only control on Dex's
+      # unauthenticated admin API (#697).
+      DEX_GRPC_INSECURE: "true"
 
   calendar:
     build:
