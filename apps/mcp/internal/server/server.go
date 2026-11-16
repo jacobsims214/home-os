@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -49,6 +50,13 @@ type Server struct {
 	toolCount  int
 	// limits are the /mcp rate limits (ratelimit.go, #4693).
 	limits *mcpLimits
+	// toolPolicy holds per-server policy overrides (SetToolPolicy). In
+	// production it is empty and every tool's requirement comes from
+	// auth.ToolPolicy; tests register synthetic tools and say what each may
+	// do, and a deployment that serves a tool outside the catalog can
+	// classify it here instead of editing the shared table.
+	policyMu   sync.RWMutex
+	toolPolicy map[string]auth.Requirement
 }
 
 // Cache hints (SEP-2549) advertised on list/discover/read results to
@@ -64,10 +72,11 @@ const (
 // It initializes the underlying MCPServer and the stateless Streamable HTTP transport.
 func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) *Server {
 	s := &Server{
-		cfg:      cfg,
-		pool:     pool,
-		verifier: verifier,
-		limits:   newMCPLimits(cfg),
+		cfg:        cfg,
+		pool:       pool,
+		verifier:   verifier,
+		limits:     newMCPLimits(cfg),
+		toolPolicy: map[string]auth.Requirement{},
 	}
 
 	// Create the MCPServer with tool capabilities. mcp-go returns tools/list
@@ -78,10 +87,12 @@ func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) 
 		server.WithToolCapabilities(true),
 		server.WithCacheHints(catalogueCacheTTLMs, mcp.CacheScopePrivate),
 		server.WithMethodCacheHints(mcp.MethodResourcesRead, 0, mcp.CacheScopePrivate),
-		// Backstop for read-only agent tokens: AuthMiddleware already
-		// answers 403 before the transport, this catches anything it could
-		// not see (e.g. an unparseable or unusual request shape).
-		server.WithToolHandlerMiddleware(s.requireWriteScope),
+		// The household role policy (#4717) and the read-only agent token
+		// backstop: AuthMiddleware already answers 403 before the transport
+		// for both, this catches anything it could not see (e.g. an
+		// unparseable or unusual request shape) and is the check every tool
+		// goes through.
+		server.WithToolHandlerMiddleware(s.requirePolicy),
 		// Per-principal sub-limit on credential_reveal (#4693).
 		server.WithToolHandlerMiddleware(s.limitReveal),
 		// A caller who can't write is never pointed at a write tool (#4771).
@@ -120,16 +131,57 @@ func (s *Server) StreamableHTTPOptions() []server.StreamableHTTPOption {
 // that may change data.
 const readOnlyScopeMessage = "this agent token is read-only: tool %q can change data and needs an agent token with the write scope"
 
-// readOnlyRoleMessage is the error a member with a read-only household role
-// (viewer, housesitter, vendor) gets for a tool that may change data.
-const readOnlyRoleMessage = "the %s role is read-only: tool %q can change data"
-
-// writeDeniedMessage explains why c may not call write tool name.
-func writeDeniedMessage(c *auth.Claims, name string) string {
-	if c != nil && auth.RoleIsReadOnly(c.Role) {
-		return fmt.Sprintf(readOnlyRoleMessage, c.Role, name)
+// deniedMessage explains why c may not call tool name, in the order the
+// checks apply: the household role policy first (#4717), then the agent
+// token's scope (#4689).
+func (s *Server) deniedMessage(c *auth.Claims, name string) string {
+	if c != nil && s.deniedByRole(c.Role, name) {
+		return auth.RoleCannotMessage(c.Role, name)
 	}
 	return fmt.Sprintf(readOnlyScopeMessage, name)
+}
+
+// requirementFor returns the policy requirement for a tool: this server's
+// override (SetToolPolicy) when it has one, else auth.ToolPolicy. ok is false
+// for a tool nobody classified.
+func (s *Server) requirementFor(tool string) (auth.Requirement, bool) {
+	s.policyMu.RLock()
+	req, ok := s.toolPolicy[tool]
+	s.policyMu.RUnlock()
+	if ok {
+		return req, true
+	}
+	return auth.RequirementFor(tool)
+}
+
+// SetToolPolicy classifies a tool registered on this server, overriding
+// auth.ToolPolicy for it. Production registers every catalog tool through
+// registerAll, so the shared table already covers them; this is for tests
+// that register a synthetic tool and for a tool served outside the catalog.
+func (s *Server) SetToolPolicy(name string, req auth.Requirement) {
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	if s.toolPolicy == nil {
+		s.toolPolicy = map[string]auth.Requirement{}
+	}
+	s.toolPolicy[name] = req
+}
+
+// deniedByRole reports whether the caller's household role may not call
+// tool. A tool nobody classified is denied to every role, so a newly
+// registered tool cannot be served before its policy decision is made. An
+// empty role means auth-disabled local development (no Dex configured),
+// which has always had full access; every real caller (a Dex session, an
+// agent token) carries the role re-read from memberships.
+func (s *Server) deniedByRole(role, tool string) bool {
+	if role == "" {
+		return false
+	}
+	req, ok := s.requirementFor(tool)
+	if !ok {
+		return true
+	}
+	return !req.Allows(role)
 }
 
 // toolIsReadOnly reports whether a registered tool may be called with a
@@ -147,12 +199,28 @@ func (s *Server) toolIsReadOnly(name string) bool {
 	return a.ReadOnlyHint != nil && *a.ReadOnlyHint
 }
 
-// requireWriteScope refuses non-read-only tools to callers whose claims lack
-// write rights (read-only agent tokens).
-func (s *Server) requireWriteScope(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+// requirePolicy is the one place the household role policy is applied to
+// MCP tool calls (#4717). It asks auth.ToolPolicy for the tool's requirement
+// and refuses the call when the caller's role does not hold it, so a tool
+// cannot leak by forgetting its own check: the gate is registered on every
+// tool through NewServer, and a tool with no policy entry is refused
+// outright. A read-only agent token is still limited to read-only tools
+// (#4689): a role that may make a narrow write does not give its tokens one.
+//
+// Handlers still trim what a role may see (a section, a field, another
+// vendor's job); this only decides who may call the tool at all.
+func (s *Server) requirePolicy(next server.ToolHandlerFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if c := ClaimsFromContext(ctx); c != nil && !c.CanWrite() && !s.toolIsReadOnly(req.Params.Name) {
-			return mcp.NewToolResultError(writeDeniedMessage(c, req.Params.Name)), nil
+		c := ClaimsFromContext(ctx)
+		if c == nil {
+			return next(ctx, req) // no claims: the handler answers "not signed in"
+		}
+		name := req.Params.Name
+		if s.deniedByRole(c.Role, name) {
+			return mcp.NewToolResultError(s.deniedMessage(c, name)), nil
+		}
+		if c.AgentTokenID != "" && !c.CanWrite() && !s.toolIsReadOnly(name) {
+			return mcp.NewToolResultError(s.deniedMessage(c, name)), nil
 		}
 		return next(ctx, req)
 	}
@@ -162,11 +230,13 @@ func (s *Server) requireWriteScope(next server.ToolHandlerFunc) server.ToolHandl
 // AuthMiddleware buffers to find tools/call names.
 const maxScopeCheckBody = 8 << 20
 
-// writeToolCalled returns the name of the first tools/call in a JSON-RPC
-// body (a single message or a batch) whose tool is not read-only, or "".
-// Bodies it cannot parse return "": the transport rejects them anyway and
-// requireWriteScope still guards the handlers.
-func (s *Server) writeToolCalled(body []byte) string {
+// deniedToolCalled returns the name of the first tools/call in a JSON-RPC
+// body (a single message or a batch) that the caller may not run, or "".
+// That is a tool the caller's household role policy denies, or a tool that
+// may change data when the caller is a read-only agent token. Bodies it
+// cannot parse return "": the transport rejects them anyway and
+// requirePolicy still guards the handlers.
+func (s *Server) deniedToolCalled(body []byte, c *auth.Claims) string {
 	type rpcMsg struct {
 		Method string `json:"method"`
 		Params struct {
@@ -187,10 +257,13 @@ func (s *Server) writeToolCalled(body []byte) string {
 		msgs = []rpcMsg{m}
 	}
 	for _, m := range msgs {
-		if m.Method == string(mcp.MethodToolsCall) && !s.toolIsReadOnly(m.Params.Name) {
-			if s.mcpServer.GetTool(m.Params.Name) == nil {
-				continue // unknown tool: the transport answers "not found"
-			}
+		if m.Method != string(mcp.MethodToolsCall) || s.mcpServer.GetTool(m.Params.Name) == nil {
+			continue // unknown tool: the transport answers "not found"
+		}
+		if s.deniedByRole(c.Role, m.Params.Name) {
+			return m.Params.Name
+		}
+		if c.AgentTokenID != "" && !c.CanWrite() && !s.toolIsReadOnly(m.Params.Name) {
 			return m.Params.Name
 		}
 	}
@@ -501,22 +574,22 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 				}
 			}
 
-			if !claims.CanWrite() {
-				body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxScopeCheckBody))
-				if err != nil {
-					writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
-					return
-				}
-				r.Body = io.NopCloser(bytes.NewReader(body))
-				if tool := s.writeToolCalled(body); tool != "" {
-					slog.Info("auth middleware: read-only caller refused a write tool",
-						"token_id", claims.AgentTokenID, "role", claims.Role, "tool", tool)
-					// No WWW-Authenticate step-up challenge: agent tokens are
-					// static secrets and a role is not an OAuth scope, so no
-					// OAuth flow can widen either.
-					writeJSONError(w, http.StatusForbidden, writeDeniedMessage(claims, tool))
-					return
-				}
+			// A tools/call the caller's role policy denies (or a write for a
+			// read-only agent token) is refused here, before the transport.
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxScopeCheckBody))
+			if err != nil {
+				writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			if tool := s.deniedToolCalled(body, claims); tool != "" {
+				slog.Info("auth middleware: caller refused a tool by the role policy",
+					"token_id", claims.AgentTokenID, "role", claims.Role, "tool", tool)
+				// No WWW-Authenticate step-up challenge: agent tokens are
+				// static secrets and a role is not an OAuth scope, so no
+				// OAuth flow can widen either.
+				writeJSONError(w, http.StatusForbidden, s.deniedMessage(claims, tool))
+				return
 			}
 
 			ctx := context.WithValue(r.Context(), claimsKey, claims)

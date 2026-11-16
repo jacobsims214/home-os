@@ -194,6 +194,9 @@ func TestRateLimit_CredentialReveal(t *testing.T) {
 		return mcp.NewToolResultText("ok"), nil
 	}
 	for _, name := range []string{"credential_reveal", "whoami"} {
+		// Synthetic tools: classify them so the role policy gate lets the
+		// owner through and the rate-limit behaviour is what this test sees.
+		s.SetToolPolicy(name, auth.Requirement{})
 		s.RegisterTool(name, mcp.NewTool(name, mcp.WithDescription(name),
 			mcp.WithReadOnlyHintAnnotation(true), mcp.WithDestructiveHintAnnotation(false)), ok)
 	}

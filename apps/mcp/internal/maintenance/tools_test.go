@@ -222,9 +222,10 @@ func TestToolDefinitions(t *testing.T) {
 		required []string
 		params   []string
 	}{
-		"maintenance_find":     {classR, nil, []string{"id", "status", "due_within_days", "property_id", "asset_id", "vehicle_id", "query", "limit", "cursor"}},
-		"maintenance_create":   {classC, []string{"name", "due_date"}, []string{"name", "due_date", "description", "property_id", "asset_id", "vehicle_id", "contact_id"}},
-		"maintenance_update":   {classU, []string{"task_id"}, []string{"task_id", "name", "due_date", "description", "property_id", "asset_id", "vehicle_id", "contact_id"}},
+		"maintenance_find":   {classR, nil, []string{"id", "status", "due_within_days", "property_id", "asset_id", "vehicle_id", "query", "limit", "cursor"}},
+		"maintenance_create": {classC, []string{"name", "due_date"}, []string{"name", "due_date", "description", "property_id", "asset_id", "vehicle_id", "contact_id"}},
+		// status and notes are the narrow write a vendor may use (#4717).
+		"maintenance_update":   {classU, []string{"task_id"}, []string{"task_id", "name", "due_date", "description", "property_id", "asset_id", "vehicle_id", "contact_id", "status", "notes"}},
 		"maintenance_complete": {classU, []string{"task_id"}, []string{"task_id", "done_date", "cost", "odometer", "notes"}},
 		"maintenance_delete":   {classX, []string{"task_id"}, []string{"task_id"}},
 	}

@@ -14,69 +14,66 @@ import (
 	"home-os/mcp/internal/respond"
 )
 
-// The household role policy (KB decisions/2026-11-15-role-policy.md, #4689;
-// the API's table is apps/api/internal/auth/roles.go) applied to search_all.
-// The MCP has no shared per-resource read policy yet, so search keeps its own
-// copy here; keep it in step with the policy and with credential.deniedRoles.
+// The household role policy (KB decisions/2026-11-15-role-policy.md, #4689)
+// applied to search_all (#4717). Search keeps its own copy of the policy for
+// one release as internal/search/role.go did, but the copy is gone: every
+// decision below asks internal/auth, the MCP's mirror of
+// apps/api/internal/auth/roles.go, so a search area and the find tool for the
+// same data cannot disagree.
 
-// credentialRoles may see household credentials, names included. Everyone
-// else (viewer, housesitter, vendor, any unknown role) gets no credential
-// hits and no notes or documents attached to a secret.
-var credentialRoles = map[string]bool{"owner": true, "family_manager": true, "family_member": true}
-
-// fullRoles may search every area other than credentials.
-var fullRoles = map[string]bool{"owner": true, "family_manager": true, "family_member": true, "viewer": true}
-
-// limitedAreas is what the partial roles may read, by search area.
-//   - housesitter: pets, properties/rooms/assets, contacts (vendors),
-//     calendar, lists and meals (recipes); people by name and relationship
-//     only (area.SitterDoc). No money, vehicles, documents, notes or
-//     credentials.
-//   - vendor: properties/rooms/assets and maintenance tasks, nothing else.
-var limitedAreas = map[string]map[string]bool{
-	"housesitter": {"person": true, "event": true, "contact": true, "list": true, "recipe": true,
-		"asset": true, "pet": true, "property": true, "room": true},
-	"vendor": {"maintenance": true, "asset": true, "property": true, "room": true},
+// areaResource maps each search area to the entity kind (and so the resource)
+// that guards it, so an area is searchable exactly when the role may see
+// records of that kind. "event" is the calendar; "credential" is a secret;
+// "document" is a file.
+var areaResource = map[string]string{
+	"person":      "person",
+	"event":       "calendar_event",
+	"bill":        "bill",
+	"loan":        "loan",
+	"maintenance": "maintenance_task",
+	"contact":     "vendor",
+	"note":        "note",
+	"list":        "list",
+	"recipe":      "recipe",
+	"document":    "file",
+	"asset":       "asset",
+	"vehicle":     "vehicle",
+	"pet":         "pet",
+	"property":    "property",
+	"room":        "room",
+	"credential":  "secret",
 }
 
-// canSearch reports whether role may see results of the named area. Unknown
-// roles see nothing, so a new role fails closed.
+// canSearch reports whether role may see results of the named area: it may
+// see records of the area's kind (auth.CanSeeKind, which lets a housesitter
+// find people by name and relationship). An unknown area or role is false, so
+// a new area (or a new role) fails closed until it is mapped.
 func canSearch(role, areaName string) bool {
-	if areaName == "credential" {
-		return credentialRoles[role]
+	kind, ok := areaResource[areaName]
+	if !ok {
+		return false
 	}
-	if fullRoles[role] {
-		return true
-	}
-	return limitedAreas[role][areaName]
+	return auth.CanSeeKind(role, kind)
 }
 
 // forRole adapts an area's SQL to the caller: records attached to a secret
 // are dropped unless the role may see credentials, a housesitter searches
 // only the part of a record they may see, and a linked vendor finds only
-// their own maintenance tasks (#4799, the same rule as maintenance_find,
-// the API and CalDAV).
+// their own maintenance tasks (#4799, the same rule as maintenance_find, the
+// API and CalDAV).
 func forRole(a area, who caller) area {
-	if credentialRoles[who.Role] {
+	if auth.Can(who.Role, auth.ResSecrets, auth.ActRead) {
 		a.SecretWhere = ""
 	}
-	if who.Role == "housesitter" && a.SitterDoc != "" {
+	if who.Role == auth.RoleHousesitter && a.SitterDoc != "" {
 		a.Doc = a.SitterDoc
 	}
-	if who.Role == "vendor" && who.VendorID != nil && a.Name == "maintenance" {
+	if who.Role == auth.RoleVendor && who.VendorID != nil && a.Name == "maintenance" {
 		// A uuid.UUID prints only hex digits and dashes, so it is safe as a
 		// literal; searchArea's parameters are positional and shared.
 		a.ScopeWhere = fmt.Sprintf("t.vendor_id = '%s'::uuid", who.VendorID.String())
 	}
 	return a
-}
-
-// roleLabel names the role in messages.
-func roleLabel(role string) string {
-	if role == "" {
-		return "current"
-	}
-	return role
 }
 
 // caller is the search_all caller's current access: the role and, for a
@@ -88,11 +85,10 @@ type caller struct {
 	VendorID *uuid.UUID
 }
 
-// callerRole resolves the caller's current role the way credential.checkAccess
-// does: the role is re-read from memberships for the claims' user and
-// household, so a demoted member loses access at once and a removed one gets
-// nothing. The vendor link is read in the same query. A non-nil result is
-// the isError to return.
+// callerRole resolves the caller's current role from memberships for the
+// claims' user and household, so a demoted member loses access at once and a
+// removed one gets nothing. The vendor link is read in the same query. A
+// non-nil result is the isError to return.
 func callerRole(ctx context.Context, pool *pgxpool.Pool, c *auth.Claims) (caller, *mcp.CallToolResult) {
 	hid, err := uuid.Parse(c.HouseholdID)
 	if err != nil {
@@ -125,3 +121,6 @@ func notSignedIn() *mcp.CallToolResult {
 		Fix:     "Tell the user to reconnect Home OS; retrying will not help.",
 	})
 }
+
+// roleLabel names the role in a message.
+func roleLabel(role string) string { return auth.RoleLabel(role) }

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -183,6 +185,14 @@ func NewFamilyOverviewTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		if claims == nil {
 			return notSignedIn(), nil
 		}
+		// The household role policy (#4717): family_overview answers every
+		// role, so each section is trimmed to what the caller may see. The
+		// role is re-read from memberships, and a linked vendor's vendors id
+		// with it (#4799), so a demotion or a new link applies at once.
+		view, bad := overviewViewFor(ctx, pool, claims)
+		if bad != nil {
+			return bad, nil
+		}
 		days, given, ok := intArg(req.GetArguments(), "days")
 		if !ok || (given && (days < 1 || days > 31)) {
 			return respond.Invalid("days", "days must be a whole number from 1 to 31.",
@@ -223,22 +233,36 @@ func NewFamilyOverviewTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			defer mu.Unlock()
 			ov.Warnings = append(ov.Warnings, fmt.Sprintf("Could not load %s; do not assume it is empty.", section))
 		}
+		// A section the role may not see is never queried: the values do not
+		// enter the process, and a housesitter's overview cannot be slowed or
+		// broken by the family's finance rows (the same rule the API's
+		// property repo follows, #4806).
 		parallel(
 			func() {
+				if !view.people {
+					ov.People = []personRow{}
+					return
+				}
 				rows, err := pool.Query(ctx, peopleSelect+peopleOrder, hh)
 				if err == nil {
 					ov.People, _, err = scanPeople(rows)
 				}
 				peopleErr = err
 			},
-			func() { ov.Calendars, calsErr = loadCalendars(ctx, pool, hh) },
+			func() {
+				if !view.calendars {
+					ov.Calendars = []calendarRow{}
+					return
+				}
+				ov.Calendars, calsErr = loadCalendars(ctx, pool, hh)
+			},
 			func() {
 				var err error
 				if ov.Counts, err = loadCounts(ctx, pool, hh); err != nil {
 					warn("counts", err)
 				}
 			},
-			func() { ov.NextDays = loadNextDays(ctx, pool, hh, loc, now, days, warn) },
+			func() { ov.NextDays = loadNextDays(ctx, pool, hh, loc, now, days, view, warn) },
 			func() {
 				var err error
 				if ov.UnreadNotifications, err = notification.UnreadCount(ctx, pool, hh, claims.UserID); err != nil {
@@ -246,6 +270,10 @@ func NewFamilyOverviewTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 				}
 			},
 			func() {
+				if !view.recentChanges {
+					ov.RecentChanges = []recentChange{}
+					return
+				}
 				var err error
 				if ov.RecentChanges, err = loadRecentChanges(ctx, pool, hh, loc); err != nil {
 					warn("recent_changes", err)
@@ -258,10 +286,13 @@ func NewFamilyOverviewTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		if calsErr != nil {
 			return respond.Failed("load the family's calendars", calsErr), nil
 		}
+		// Trim in one place, after loading: a section added to the overview
+		// without a view decision is caught by the trim, not by each loader.
+		view.apply(&ov)
 		sort.Strings(ov.Warnings)
 		ov.HowTo = howTo
 
-		return respond.OK(overviewSummary(ov), ov, overviewNext(ov)...), nil
+		return respond.OK(overviewSummary(ov, view), ov, overviewNext(ov, view)...), nil
 	}
 	return tool.Name, tool, handler
 }
@@ -321,7 +352,7 @@ func loadCounts(ctx context.Context, pool *pgxpool.Pool, hh string) (areaCounts,
 // maintenance follows maintenance_find due_within_days (open tasks, overdue
 // included). A failed section is reported through warn and left empty.
 func loadNextDays(ctx context.Context, pool *pgxpool.Pool, hh string, loc *time.Location, now time.Time,
-	days int, warn func(string, error)) nextDays {
+	days int, view overviewView, warn func(string, error)) nextDays {
 	y, m, d := now.In(loc).Date()
 	first := time.Date(y, m, d, 0, 0, 0, 0, loc)
 	end := time.Date(y, m, d+days, 0, 0, 0, 0, loc) // DST-safe
@@ -332,9 +363,28 @@ func loadNextDays(ctx context.Context, pool *pgxpool.Pool, hh string, loc *time.
 	within := days - 1                                // due_within_days for the same window
 	today := time.Date(y, m, d, 0, 0, 0, 0, time.UTC) // bill dates are midnight UTC
 
-	parallel(func() { nd.Events = eventsPreview(ctx, pool, hh, loc, first, end, nd.From, nd.To, warn) },
-		func() { nd.BillsDue = billsPreview(ctx, pool, hh, today, within, warn) },
-		func() { nd.MaintenanceDue = maintenancePreview(ctx, pool, hh, today, within, warn) })
+	parallel(
+		func() {
+			if !view.calendars {
+				nd.Events = eventsSection{Items: []eventBrief{}}
+				return
+			}
+			nd.Events = eventsPreview(ctx, pool, hh, loc, first, end, nd.From, nd.To, warn)
+		},
+		func() {
+			if !view.billsDue {
+				nd.BillsDue = billsSection{Items: []billBrief{}}
+				return
+			}
+			nd.BillsDue = billsPreview(ctx, pool, hh, today, within, warn)
+		},
+		func() {
+			if !view.maintenance {
+				nd.MaintenanceDue = maintenanceSection{Items: []taskBrief{}}
+				return
+			}
+			nd.MaintenanceDue = maintenancePreview(ctx, pool, hh, today, within, view.ownJobs, warn)
+		})
 	return nd
 }
 
@@ -387,9 +437,10 @@ func billsPreview(ctx context.Context, pool *pgxpool.Pool, hh string, today time
 	return sec
 }
 
-func maintenancePreview(ctx context.Context, pool *pgxpool.Pool, hh string, today time.Time, within int, warn func(string, error)) maintenanceSection {
+func maintenancePreview(ctx context.Context, pool *pgxpool.Pool, hh string, today time.Time, within int,
+	ownJobs *uuid.UUID, warn func(string, error)) maintenanceSection {
 	sec := maintenanceSection{Items: []taskBrief{}}
-	tasks, total, err := maintenanceDue(ctx, pool, hh, today, today.AddDate(0, 0, within))
+	tasks, total, err := maintenanceDue(ctx, pool, hh, today, today.AddDate(0, 0, within), ownJobs)
 	if err != nil {
 		warn("next_days.maintenance_due", err)
 		return sec
@@ -436,13 +487,18 @@ func billsDue(ctx context.Context, pool *pgxpool.Pool, hh string, today time.Tim
 
 // maintenanceDue returns up to maxPreview open tasks due on or before last
 // (overdue first), plus how many there are in all.
-func maintenanceDue(ctx context.Context, pool *pgxpool.Pool, hh string, today, last time.Time) ([]taskBrief, int, error) {
+// maintenanceDue returns up to maxPreview open tasks due on or before last
+// (overdue first), plus how many there are in all. ownJobs limits it to one
+// vendor's own jobs (#4799), the same rule maintenance_find, search_all and
+// the API apply.
+func maintenanceDue(ctx context.Context, pool *pgxpool.Pool, hh string, today, last time.Time, ownJobs *uuid.UUID) ([]taskBrief, int, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT id::text, name, status::text, due_date, count(*) OVER ()
 		   FROM maintenance_tasks
 		  WHERE household_id = $1 AND status IN ('pending', 'in_progress') AND due_date <= $2
+		    AND ($4::uuid IS NULL OR vendor_id = $4::uuid)
 		  ORDER BY due_date, name, id
-		  LIMIT $3`, hh, last, maxPreview)
+		  LIMIT $3`, hh, last, maxPreview, ownJobs)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -484,18 +540,44 @@ func loadRecentChanges(ctx context.Context, pool *pgxpool.Pool, hh string, loc *
 	return out, err
 }
 
-func overviewSummary(ov overview) string {
+// overviewSummary describes the overview the caller actually got: a section
+// the role may not see is left out of the sentence rather than reported as
+// empty, so the model does not tell the user the family has no bills.
+func overviewSummary(ov overview, view overviewView) string {
 	nd := ov.NextDays
-	s := fmt.Sprintf("%s: %d %s, %d %s. Today is %s %s (%s). Next %d %s: %d %s, %d %s due, %d maintenance %s due. %d unread %s.",
-		ov.Family.Name,
-		len(ov.People), plural(len(ov.People), "person", "people"),
-		len(ov.Calendars), plural(len(ov.Calendars), "calendar", "calendars"),
-		ov.Family.Weekday, ov.Family.Today, ov.Family.Timezone,
-		nd.Days, plural(nd.Days, "day", "days"),
-		nd.Events.Total, plural(nd.Events.Total, "event", "events"),
-		nd.BillsDue.Total, plural(nd.BillsDue.Total, "bill", "bills"),
-		nd.MaintenanceDue.Total, plural(nd.MaintenanceDue.Total, "task", "tasks"),
-		ov.UnreadNotifications, plural(ov.UnreadNotifications, "notification", "notifications"))
+	var parts []string
+	if view.visible("people") {
+		parts = append(parts, fmt.Sprintf("%d %s", len(ov.People), plural(len(ov.People), "person", "people")))
+	}
+	if view.visible("calendars") {
+		parts = append(parts, fmt.Sprintf("%d %s", len(ov.Calendars), plural(len(ov.Calendars), "calendar", "calendars")))
+	}
+	s := ov.Family.Name
+	if len(parts) > 0 {
+		s += ": " + strings.Join(parts, ", ")
+	}
+	s += fmt.Sprintf(". Today is %s %s (%s).", ov.Family.Weekday, ov.Family.Today, ov.Family.Timezone)
+
+	var due []string
+	if view.visible("bills_due") {
+		due = append(due, fmt.Sprintf("%d %s due", nd.BillsDue.Total, plural(nd.BillsDue.Total, "bill", "bills")))
+	}
+	if view.visible("maintenance_due") {
+		due = append(due, fmt.Sprintf("%d maintenance %s due", nd.MaintenanceDue.Total, plural(nd.MaintenanceDue.Total, "task", "tasks")))
+	}
+	head := fmt.Sprintf(" Next %d %s: ", nd.Days, plural(nd.Days, "day", "days"))
+	if view.visible("calendars") {
+		head += fmt.Sprintf("%d %s", nd.Events.Total, plural(nd.Events.Total, "event", "events"))
+		if len(due) > 0 {
+			head += ", "
+		}
+	}
+	s += head + strings.Join(due, ", ") + "."
+	if len(parts) == 0 && len(due) == 0 && !view.visible("calendars") {
+		// Nothing about the family's own records is shared with this role.
+		s += " Your role sees only the family name, its timezone and your own notifications."
+	}
+	s += fmt.Sprintf(" %d unread %s.", ov.UnreadNotifications, plural(ov.UnreadNotifications, "notification", "notifications"))
 	if len(ov.Warnings) > 0 {
 		s += " Some sections failed to load; see warnings."
 	}
@@ -503,8 +585,10 @@ func overviewSummary(ov overview) string {
 }
 
 // overviewNext suggests next steps from what the overview found. Only
-// registered tool names (#4671).
-func overviewNext(ov overview) []string {
+// registered tool names (#4671), and only tools and records the caller's role
+// may use: a hint naming a tool the role policy refuses is a call the model
+// cannot make (#4771).
+func overviewNext(ov overview, view overviewView) []string {
 	nd := ov.NextDays
 	next := []string{fmt.Sprintf("See the days in full with agenda_get from=%s to=%s.", nd.From, nd.To)}
 	if len(nd.BillsDue.Items) > 0 {
@@ -516,6 +600,11 @@ func overviewNext(ov overview) []string {
 	if ov.UnreadNotifications > 0 {
 		next = append(next, "Read notifications with notification_find unread_only=true.")
 	}
-	next = append(next, "Add an event with event_create.", "Look someone up with person_find.")
+	if view.visible("calendars") {
+		next = append(next, "Add an event with event_create.")
+	}
+	if view.visible("people") {
+		next = append(next, "Look someone up with person_find.")
+	}
 	return next
 }

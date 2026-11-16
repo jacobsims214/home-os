@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 )
@@ -504,6 +505,17 @@ func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		if a.Type == "family" {
 			a.ID = householdID
 		}
+		// The household role policy (#4717): a role with only the annotate
+		// grant (a housesitter) may add a note on a pet and nothing else, the
+		// narrow write the policy allows (auth.CanAnnotateEntity). Family
+		// roles may annotate anything they can see.
+		if !auth.CanAnnotateEntity(claims.Role, a.Kind) {
+			return respond.Fail(respond.Error{
+				Message: fmt.Sprintf("The %s role can only add notes about a pet, not about %s (tool note_create).",
+					auth.RoleLabel(claims.Role), aboutLabel(a.Type)),
+				Fix: "Add the note about the pet (about_type=pet, about_id=<pet id>), or ask an owner or family manager to save it.",
+			}), nil
+		}
 
 		// claims.UserID is the users.id UUID once enriched, but may be an
 		// OIDC subject or "local-dev" otherwise. Only record an author that
@@ -880,4 +892,13 @@ func truncate(s string, n int) string {
 		count++
 	}
 	return s
+}
+
+// aboutLabel names an about_type in a message: "the family" for a family
+// note, otherwise the kind itself ("bill", "property").
+func aboutLabel(t string) string {
+	if t == "" || t == "family" {
+		return "the family"
+	}
+	return t
 }

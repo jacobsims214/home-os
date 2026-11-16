@@ -38,6 +38,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/sqlutil"
@@ -1767,7 +1768,16 @@ func NewListAddItemsTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 			return respond.Invalid("items", "items is empty.", `Pass at least one item, e.g. items=[{"text":"milk"}].`, example), nil
 		}
 
-		out, shadowed, badResult, err := addItems(ctx, pool, hid, str(args, "list_id"), items, addOptions{example: example})
+		// The household role policy (#4717): a role that may add items but
+		// not manage lists (a housesitter) may not start a list, so a kind
+		// word with no active list of that kind is an isError rather than a
+		// new list. The role is re-read from memberships on every call.
+		role, bad := callerRoleOf(ctx, pool, hid)
+		if bad != nil {
+			return bad, nil
+		}
+		out, shadowed, badResult, err := addItems(ctx, pool, hid, str(args, "list_id"), items,
+			addOptions{example: example, noCreate: !auth.Can(role, auth.ResLists, auth.ActManage)})
 		if badResult != nil {
 			return badResult, nil
 		}
@@ -2588,4 +2598,31 @@ func NewListUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 		return respond.OK(summary, l, next...), nil
 	}
 	return "list_update", tool, handler
+}
+
+// callerRoleOf re-reads the caller's current role from memberships, the way
+// the other tool packages do, so a demotion applies at once. Without a users
+// id (auth-disabled local development) the claims' role is used; an agent
+// token always resolves to a users id, so one that cannot be read is refused.
+func callerRoleOf(ctx context.Context, pool *pgxpool.Pool, hid uuid.UUID) (string, *mcp.CallToolResult) {
+	c := server.ClaimsFromContext(ctx)
+	if c == nil {
+		return "", notSignedIn()
+	}
+	uid, err := uuid.Parse(c.UserID)
+	if err != nil {
+		if c.AgentTokenID != "" {
+			return "", notSignedIn()
+		}
+		return c.Role, nil
+	}
+	var role string
+	err = pool.QueryRow(ctx, `SELECT role::text FROM memberships WHERE household_id = $1 AND user_id = $2`, hid, uid).Scan(&role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", notSignedIn()
+	}
+	if err != nil {
+		return "", respond.Failed("check your access", err)
+	}
+	return role, nil
 }
