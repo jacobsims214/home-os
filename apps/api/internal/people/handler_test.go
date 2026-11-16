@@ -160,6 +160,7 @@ type personJSON struct {
 	Grade        *string    `json:"grade"`
 	Allergies    []string   `json:"allergies"`
 	Notes        *string    `json:"notes"`
+	Color        string     `json:"color"`
 	Preferences  []prefJSON `json:"preferences"`
 }
 
@@ -664,4 +665,252 @@ func TestPeople_RolePermissions(t *testing.T) {
 		rec = f.do(t, req{method: http.MethodDelete, path: path, as: viewer})
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	})
+}
+
+// TestPeople_Color covers put people.color (#4821): every person has a
+// palette colour, it round-trips through GET and the list, PATCH sets it, and
+// the value is validated against the palette rather than stored as free text
+// (it is interpolated into a style/class by the UI, so anything else would be
+// an injection surface).
+func TestPeople_Color(t *testing.T) {
+	f := setup(t)
+	hh := f.household(t)
+	owner := f.member(t, hh, "owner")
+	me := f.member(t, hh, "family_member")
+
+	palette := map[string]bool{"red": true, "orange": true, "yellow": true, "green": true,
+		"teal": true, "cyan": true, "blue": true, "violet": true}
+
+	// Both have a colour before anyone sets one, and it is on the palette.
+	kid := f.createKid(t, owner, "Ada")
+	if !palette[kid.Color] {
+		t.Fatalf("created person color = %q, want a palette name", kid.Color)
+	}
+	for _, m := range []member{owner, me} {
+		rec := f.do(t, req{method: http.MethodGet, path: "/api/v1/people/" + m.personID, as: owner})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		got := decode[personJSON](t, rec)
+		if !palette[got.Color] {
+			t.Errorf("member's default color = %q, want a palette name", got.Color)
+		}
+	}
+	// Stable: reading again (and listing) gives the same colour.
+	rec := f.do(t, req{method: http.MethodGet, path: "/api/v1/people/" + kid.ID, as: owner})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	if again := decode[personJSON](t, rec); again.Color != kid.Color {
+		t.Errorf("color changed between reads: %q then %q", kid.Color, again.Color)
+	}
+
+	t.Run("a member sets their own colour", func(t *testing.T) {
+		rec := f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + me.personID, as: me,
+			body: map[string]any{"color": "violet"}})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		got := decode[personJSON](t, rec)
+		assert.Equal(t, "violet", got.Color)
+		assert.Equal(t, "Member family_member", got.DisplayName, "the response is the whole person")
+		assert.True(t, got.HasLogin, "the record is otherwise untouched")
+
+		// And it is what everyone reads back, by every route that carries it.
+		rec = f.do(t, req{method: http.MethodGet, path: "/api/v1/people/" + me.personID, as: owner})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, "violet", decode[personJSON](t, rec).Color)
+		rec = f.do(t, req{method: http.MethodGet, path: "/api/v1/people", as: owner})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		byID := map[string]personJSON{}
+		for _, p := range decode[[]personJSON](t, rec) {
+			byID[p.ID] = p
+		}
+		assert.Equal(t, "violet", byID[me.personID].Color, "the list carries it too")
+
+		// The rest of the record is untouched: PUT is the full replacement,
+		// this is not one.
+		var school *string
+		var name string
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`SELECT display_name, school FROM people WHERE id = $1`, me.personID).Scan(&name, &school))
+		assert.Equal(t, "Member family_member", name)
+	})
+
+	t.Run("a manager sets anyone's colour", func(t *testing.T) {
+		rec := f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + kid.ID, as: owner,
+			body: map[string]any{"color": "green"}})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, "green", decode[personJSON](t, rec).Color)
+		// A kid has no login, so only a manager could have done that; and a
+		// family_manager counts as a manager too.
+		fm := f.member(t, hh, "family_manager")
+		rec = f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + kid.ID, as: fm,
+			body: map[string]any{"color": "yellow"}})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, "yellow", decode[personJSON](t, rec).Color)
+	})
+
+	t.Run("a member cannot set another member's colour", func(t *testing.T) {
+		var before string
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`SELECT color FROM people WHERE id = $1`, owner.personID).Scan(&before))
+		rec := f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + owner.personID, as: me,
+			body: map[string]any{"color": "red"}})
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		// A kid's record too: same refusal, and nothing written.
+		rec = f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + kid.ID, as: me,
+			body: map[string]any{"color": "red"}})
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		var after string
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`SELECT color FROM people WHERE id = $1`, owner.personID).Scan(&after))
+		assert.Equal(t, before, after, "nothing was written")
+		var kidColor string
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`SELECT color FROM people WHERE id = $1`, kid.ID).Scan(&kidColor))
+		assert.Equal(t, "yellow", kidColor, "the kid's colour is unchanged")
+	})
+
+	t.Run("invalid colours are 400 and change nothing", func(t *testing.T) {
+		for name, body := range map[string]any{
+			"unknown name":    map[string]any{"color": "purple"},
+			"hex":             map[string]any{"color": "#ff0000"},
+			"upper case":      map[string]any{"color": "Violet"},
+			"leading space":   map[string]any{"color": " violet"},
+			"trailing space":  map[string]any{"color": "violet "},
+			"blank":           map[string]any{"color": ""},
+			"null":            map[string]any{"color": nil},
+			"missing the key": map[string]any{},
+			"css":             map[string]any{"color": "red; background: url(https://x/y.png)"},
+			"css variable":    map[string]any{"color": "var(--mantine-color-red-6)"},
+			"rgb":             map[string]any{"color": "rgb(255,0,0)"},
+			"property name":   map[string]any{"color": "background-color"},
+			"not json":        "nope",
+			"a number":        map[string]any{"color": 3},
+			"an array":        map[string]any{"color": []string{"red"}},
+		} {
+			rec := f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + me.personID, as: me, body: body})
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", name, rec.Body.String())
+			if rec.Code == http.StatusBadRequest && name == "unknown name" {
+				assert.Contains(t, rec.Body.String(), "violet", "the 400 names the palette")
+			}
+		}
+		var got string
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`SELECT color FROM people WHERE id = $1`, me.personID).Scan(&got))
+		assert.Equal(t, "violet", got, "no rejected value was stored")
+	})
+
+	t.Run("every palette colour is accepted", func(t *testing.T) {
+		for c := range palette {
+			rec := f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + me.personID, as: me,
+				body: map[string]any{"color": c}})
+			require.Equal(t, http.StatusOK, rec.Code, "%s: %s", c, rec.Body.String())
+			assert.Equal(t, c, decode[personJSON](t, rec).Color)
+		}
+		// Leave a known colour behind for the subtests below (map order is
+		// not stable).
+		rec := f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + me.personID, as: me,
+			body: map[string]any{"color": "violet"}})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	t.Run("unknown id is 404, a malformed one 400", func(t *testing.T) {
+		rec := f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + uuid.NewString(), as: owner,
+			body: map[string]any{"color": "red"}})
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+		rec = f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/nope", as: owner,
+			body: map[string]any{"color": "red"}})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	})
+
+	t.Run("another family's person is not reachable", func(t *testing.T) {
+		otherHH := f.household(t)
+		otherOwner := f.member(t, otherHH, "owner")
+		// Compare against the colour the other family's person already has:
+		// the default is derived from the id, so it may be any palette name
+		// (including the one this attempt sends).
+		var before string
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`SELECT color FROM people WHERE id = $1`, otherOwner.personID).Scan(&before))
+		want := "red"
+		if before == want {
+			want = "teal"
+		}
+		rec := f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + otherOwner.personID, as: owner,
+			body: map[string]any{"color": want}})
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+		var after string
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`SELECT color FROM people WHERE id = $1`, otherOwner.personID).Scan(&after))
+		assert.Equal(t, before, after, "nothing in the other family changed")
+	})
+
+	t.Run("a PUT does not clear the colour", func(t *testing.T) {
+		rec := f.do(t, req{method: http.MethodPut, path: "/api/v1/people/" + me.personID, as: me,
+			body: map[string]any{"display_name": "Me renamed"}})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		got := decode[personJSON](t, rec)
+		assert.Equal(t, "Me renamed", got.DisplayName)
+		assert.Equal(t, "violet", got.Color, "PUT leaves the colour alone: it is not one of PUT's fields")
+	})
+}
+
+// TestPeople_ColorRoles pins the record-level rule for every role: the person
+// themselves or a manager may set a colour; nobody else may, not even for
+// their own record. The route-level grant (people.ActSetColor, the family
+// roles) and this narrowing together are the whole permission.
+func TestPeople_ColorRoles(t *testing.T) {
+	f := setup(t)
+	hh := f.household(t)
+	owner := f.member(t, hh, "owner")
+	kid := f.createKid(t, owner, "Kid")
+	other := f.member(t, hh, "family_member")
+
+	tests := []struct {
+		role string
+		own  int
+		any  int // someone else's (the kid's, and another member's)
+	}{
+		{"owner", http.StatusOK, http.StatusOK},
+		{"family_manager", http.StatusOK, http.StatusOK},
+		{"family_member", http.StatusOK, http.StatusForbidden},
+		// Read-only on people: the policy refuses the route, so they cannot
+		// even recolour themselves (they may not edit a people record at all).
+		{"viewer", http.StatusForbidden, http.StatusForbidden},
+		{"housesitter", http.StatusForbidden, http.StatusForbidden},
+		{"vendor", http.StatusForbidden, http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.role, func(t *testing.T) {
+			m := f.member(t, hh, tt.role)
+			rec := f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + m.personID, as: m,
+				body: map[string]any{"color": "cyan"}})
+			assert.Equal(t, tt.own, rec.Code, "own: %s", rec.Body.String())
+			for _, id := range []string{kid.ID, other.personID} {
+				rec = f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + id, as: m,
+					body: map[string]any{"color": "cyan"}})
+				assert.Equal(t, tt.any, rec.Code, "%s: %s", id, rec.Body.String())
+			}
+		})
+	}
+
+	// A demotion applies at once: the manager who could recolour the kid is
+	// now a viewer, and the next request is refused.
+	demoted := f.member(t, hh, "family_manager")
+	rec := f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + kid.ID, as: demoted,
+		body: map[string]any{"color": "blue"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	_, err := f.pool.Exec(context.Background(),
+		`UPDATE memberships SET role = 'viewer' WHERE household_id = $1 AND user_id = $2`, hh, demoted.userID)
+	require.NoError(t, err)
+	rec = f.do(t, req{method: http.MethodPatch, path: "/api/v1/people/" + kid.ID, as: demoted,
+		body: map[string]any{"color": "red"}})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	// A housesitter keeps reading the colour (it is cosmetic and already sits
+	// beside the name and allergies they may see) but cannot set one.
+	var kidColor string
+	require.NoError(t, f.pool.QueryRow(context.Background(), `SELECT color FROM people WHERE id = $1`, kid.ID).Scan(&kidColor))
+	sitter := f.member(t, hh, "housesitter")
+	rec = f.do(t, req{method: http.MethodGet, path: "/api/v1/people/" + kid.ID, as: sitter})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got := decode[personJSON](t, rec)
+	assert.Equal(t, kidColor, got.Color, "a housesitter sees the colour")
+	assert.Nil(t, got.Birthdate, "and nothing more than read_basic")
 }

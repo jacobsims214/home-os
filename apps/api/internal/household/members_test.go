@@ -27,6 +27,7 @@ func membersRouter(pool *pgxpool.Pool, v *auth.Verifier) http.Handler {
 	r := chi.NewRouter()
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(v))
+		r.Get("/api/v1/households/me/members", h.ListMembers)
 		r.Patch("/api/v1/households/me/members/{userId}", h.UpdateMemberRole)
 		r.Delete("/api/v1/households/me/members/{userId}", h.RemoveMember)
 	})
@@ -303,4 +304,76 @@ func TestMembers_DemotionDropsInvitesTheyCouldNoLongerCreate(t *testing.T) {
 			assert.True(t, f.inviteExists(t, acceptedOwner), "accepted invitations are history")
 		})
 	}
+}
+
+// TestMembers_ListCarriesTheColor (#4821): GET /households/me/members reports
+// each member's people.color, the same value GET /people returns, so the
+// Settings member list can draw the swatch it lets a manager change. The
+// colour changes with PATCH /people/{id} and the member list follows on the
+// next read.
+func TestMembers_ListCarriesTheColor(t *testing.T) {
+	f := newMFix(t)
+	ctx := context.Background()
+	ownerToken, _ := f.member(t, f.hhID, "owner")
+	_, kidUser := f.member(t, f.hhID, "family_member")
+
+	list := func() []struct {
+		UserID string  `json:"user_id"`
+		Role   string  `json:"role"`
+		Color  *string `json:"color"`
+	} {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/households/me/members", nil)
+		req.Header.Set("Authorization", "Bearer "+ownerToken)
+		rec := httptest.NewRecorder()
+		f.h.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body struct {
+			Data []struct {
+				UserID string  `json:"user_id"`
+				Role   string  `json:"role"`
+				Color  *string `json:"color"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+		return body.Data
+	}
+
+	colors := func() map[string]string {
+		t.Helper()
+		out := map[string]string{}
+		for _, m := range list() {
+			if m.Color == nil {
+				t.Fatalf("member %s (%s) has no color", m.UserID, m.Role)
+			}
+			out[m.UserID] = *m.Color
+		}
+		return out
+	}
+
+	got := colors()
+	require.Len(t, got, 2)
+	palette := map[string]bool{"red": true, "orange": true, "yellow": true, "green": true,
+		"teal": true, "cyan": true, "blue": true, "violet": true}
+	for user, c := range got {
+		if !palette[c] {
+			t.Errorf("member %s: color %q is not a palette name", user, c)
+		}
+	}
+
+	// The same value as the person record: one colour, two responses.
+	var personColor string
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`SELECT color FROM people WHERE household_id = $1 AND user_id = $2`, f.hhID, kidUser).Scan(&personColor))
+	assert.Equal(t, got[kidUser], personColor)
+
+	// Change it and the member list follows. Pick a colour the member does not
+	// already have, so the assertion cannot pass on the default.
+	want := "violet"
+	if got[kidUser] == want {
+		want = "teal"
+	}
+	_, err := f.pool.Exec(ctx, `UPDATE people SET color = $3 WHERE household_id = $1 AND user_id = $2`, f.hhID, kidUser, want)
+	require.NoError(t, err)
+	assert.Equal(t, want, colors()[kidUser])
 }

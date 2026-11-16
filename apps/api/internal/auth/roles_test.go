@@ -60,6 +60,49 @@ func TestPolicy_HouseholdWrite(t *testing.T) {
 	}
 }
 
+// TestPolicy_PersonColor: a person's colour is a cosmetic, self-service
+// setting, so it gets its own action on the people resource rather than
+// riding on ActWrite (#4821). Two things are pinned here:
+//
+//   - the route-level grant is exactly the family roles (owner,
+//     family_manager, family_member): a viewer, housesitter or vendor may not
+//     recolour anyone, not even their own record;
+//   - every role that may set a colour may also write a people record, so the
+//     action can never become a way around the people write rules. The
+//     record-level narrowing (self-or-manager) is the handler's decision, on
+//     top of this grant, and is tested end to end in
+//     internal/people/handler_test.go.
+func TestPolicy_PersonColor(t *testing.T) {
+	for _, role := range AllRoles {
+		sets := role == RoleOwner || role == RoleFamilyManager || role == RoleFamilyMember
+		if got := Can(role, ResPeople, ActSetColor); got != sets {
+			t.Errorf("Can(%s, people, set_color) = %v, want %v", role, got, sets)
+		}
+		if got := Can(role, ResPeople, ActSetColor); got && !Can(role, ResPeople, ActWrite) {
+			t.Errorf("%s may set a person's colour but may not write a people record", role)
+		}
+	}
+	for _, bad := range []string{"", "admin", "OWNER", "instance_admin"} {
+		if Can(bad, ResPeople, ActSetColor) {
+			t.Errorf("unknown role %q may set a person's colour", bad)
+		}
+	}
+	// The colour is visible to everyone who may see a person at all, and
+	// setting it grants nothing else on the record: a family_member may
+	// recolour, but still cannot manage members.
+	for _, role := range AllRoles {
+		if !Can(role, ResPeople, ActSetColor) {
+			continue
+		}
+		if !Can(role, ResPeople, ActReadBasic) {
+			t.Errorf("%s may set a colour but may not read people", role)
+		}
+	}
+	if Can(RoleFamilyMember, ResMembers, ActWrite) {
+		t.Error("family_member may set a colour and manage members: the colour grant must not widen")
+	}
+}
+
 // TestPolicy_Entities checks the record-level helpers of the household role
 // policy (#4689).
 func TestPolicy_Entities(t *testing.T) {

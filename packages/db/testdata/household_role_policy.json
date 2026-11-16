@@ -340,6 +340,11 @@
         "viewer",
         "housesitter"
       ],
+      "set_color": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ],
       "write": [
         "owner",
         "family_manager",

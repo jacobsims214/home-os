@@ -198,6 +198,7 @@ var expectedAccess = map[string][]string{
 	"POST /api/v1/people":                             family,
 	"GET /api/v1/people/{id}":                         sitters,
 	"PUT /api/v1/people/{id}":                         family,
+	"PATCH /api/v1/people/{id}":                       family, // handler: self or manager only
 	"DELETE /api/v1/people/{id}":                      family,
 	"GET /api/v1/people/{id}/preferences":             readers,
 	"POST /api/v1/people/{id}/preferences":            family,

@@ -165,10 +165,14 @@ var routeRules = map[string]RouteRule{
 	"DELETE /api/v1/links/{id}": rr(auth.ResLinks, auth.ActWrite),
 
 	// People: the handler hides all but names/allergies without people read.
+	// PATCH names the colour action (#4821), the narrowest one that can
+	// succeed there; the handler then narrows it to the person themselves or
+	// a manager from memberships.
 	"GET /api/v1/people":                              rr(auth.ResPeople, auth.ActReadBasic),
 	"POST /api/v1/people":                             rr(auth.ResPeople, auth.ActWrite),
 	"GET /api/v1/people/{id}":                         rr(auth.ResPeople, auth.ActReadBasic),
 	"PUT /api/v1/people/{id}":                         rr(auth.ResPeople, auth.ActWrite),
+	"PATCH /api/v1/people/{id}":                       rr(auth.ResPeople, auth.ActSetColor),
 	"DELETE /api/v1/people/{id}":                      rr(auth.ResPeople, auth.ActWrite),
 	"GET /api/v1/people/{id}/preferences":             rr(auth.ResPreferences, auth.ActRead),
 	"POST /api/v1/people/{id}/preferences":            rr(auth.ResPreferences, auth.ActWrite),

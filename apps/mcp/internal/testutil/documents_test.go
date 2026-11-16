@@ -19,6 +19,7 @@ func TestDocuments048_Reversible(t *testing.T) {
 	f := seedV2Family(t, pool)
 	blob := insertID(t, pool, `INSERT INTO file_blobs (data, size) VALUES ('x', 1) RETURNING id`)
 
+	applyMigration(t, pool, "071_person_color.down.sql")  // newest first: drops people.color and its palette CHECK
 	applyMigration(t, pool, "070_entity_kind_notifications.down.sql")  // newest first: notifications/calendar_objects entity_type back to VARCHAR
 	applyMigration(t, pool, "069_drop_finance_columns.down.sql")       // newest first: restores the property/vehicle finance columns
 	applyMigration(t, pool, "068_guide_revision_change_note.down.sql") // newest first: drops guide_revisions.change_note

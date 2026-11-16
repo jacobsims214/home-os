@@ -45,12 +45,19 @@ type Person struct {
 	Grade        *string
 	Allergies    []string
 	Notes        *string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// Color is the palette name the person is drawn in (migration 071). It
+	// is never NULL: the database backfills it and a BEFORE INSERT trigger
+	// derives it from the id.
+	Color     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // PersonInput holds the fields a caller may set on a person. user_id is not
-// settable: it is managed by the memberships triggers.
+// settable: it is managed by the memberships triggers. Color is not here
+// either: PUT replaces the record's text fields and leaves the colour alone
+// (a client that omits it must not lose it), and the colour has its own
+// route, its own policy action and its own record-level rule (#4821).
 type PersonInput struct {
 	DisplayName  string
 	Relationship *string
@@ -93,14 +100,14 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 }
 
 const personCols = `id, household_id, user_id, display_name, relationship, birthdate,
-	school, grade, allergies, notes, created_at, updated_at`
+	school, grade, allergies, notes, color, created_at, updated_at`
 
 const prefCols = `id, household_id, person_id, kind::text, category, value, notes, created_at, updated_at`
 
 func scanPerson(row pgx.Row) (*Person, error) {
 	var p Person
 	err := row.Scan(&p.ID, &p.HouseholdID, &p.UserID, &p.DisplayName, &p.Relationship, &p.Birthdate,
-		&p.School, &p.Grade, &p.Allergies, &p.Notes, &p.CreatedAt, &p.UpdatedAt)
+		&p.School, &p.Grade, &p.Allergies, &p.Notes, &p.Color, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -207,6 +214,23 @@ func (r *Repo) Update(ctx context.Context, householdID, id uuid.UUID, in PersonI
 		allergies(in.Allergies), in.Notes))
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, fmt.Errorf("update person: %w", err)
+	}
+	return p, err
+}
+
+// SetColor sets one person's colour and returns the updated row, or
+// ErrNotFound. color must already be a palette name (the handler validates
+// it; the database CHECK is the backstop). Nothing else about the record
+// changes, and updated_at moves, so the change shows in the activity feed's
+// record timestamp like any other edit.
+func (r *Repo) SetColor(ctx context.Context, householdID, id uuid.UUID, color string) (*Person, error) {
+	p, err := scanPerson(r.pool.QueryRow(ctx,
+		`UPDATE people SET color = $3, updated_at = NOW()
+		  WHERE id = $1 AND household_id = $2
+		 RETURNING `+personCols,
+		id, householdID, color))
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, fmt.Errorf("set person colour: %w", err)
 	}
 	return p, err
 }

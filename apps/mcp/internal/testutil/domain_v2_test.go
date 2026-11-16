@@ -419,6 +419,7 @@ func TestDomainV2_Backfill039(t *testing.T) {
 	// secret_keys and 052 one bills column; they are undone first to keep the
 	// chain strictly newest-first. 056 drops the legacy bill/loan/vendor
 	// columns that 038 down and the legacy inserts below need back.
+	applyMigration(t, pool, "071_person_color.down.sql")  // newest first: drops people.color and its palette CHECK
 	apply("070_entity_kind_notifications.down.sql")  // newest first: notifications/calendar_objects entity_type back to VARCHAR
 	apply("069_drop_finance_columns.down.sql")       // newest first: restores the property/vehicle finance columns
 	apply("068_guide_revision_change_note.down.sql") // newest first: drops guide_revisions.change_note

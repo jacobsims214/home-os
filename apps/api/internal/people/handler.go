@@ -30,6 +30,11 @@ import (
 //   - any member may update their own person record (the one linked to their
 //     login) and its preferences. People without a login (kids and others)
 //     are therefore editable only by owner/family_manager;
+//   - PATCH /people/{id} sets one field, the colour, and it is the one field a
+//     family_member may change on themselves without PUT's full replacement:
+//     the person or a manager (people.ActSetColor + the record-level check in
+//     canSetColor). A viewer, housesitter or vendor cannot, not even for
+//     themselves;
 //   - a person linked to a current member can't be deleted (409
 //     LINKED_MEMBER): remove the member instead, which unlinks the person;
 //   - deleting a person that notes, documents, list items, meal ratings or
@@ -56,6 +61,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/v1/people", h.Create)
 	r.Get("/api/v1/people/{id}", h.Get)
 	r.Put("/api/v1/people/{id}", h.Update)
+	r.Patch("/api/v1/people/{id}", h.SetColor)
 	r.Delete("/api/v1/people/{id}", h.Delete)
 	r.Get("/api/v1/people/{id}/preferences", h.ListPreferences)
 	r.Post("/api/v1/people/{id}/preferences", h.CreatePreference)
@@ -83,20 +89,30 @@ type preferenceRequest struct {
 }
 
 type personResponse struct {
-	ID           string                `json:"id"`
-	HouseholdID  string                `json:"household_id"`
-	UserID       *string               `json:"user_id"`
-	HasLogin     bool                  `json:"has_login"`
-	DisplayName  string                `json:"display_name"`
-	Relationship *string               `json:"relationship"`
-	Birthdate    *string               `json:"birthdate"`
-	School       *string               `json:"school"`
-	Grade        *string               `json:"grade"`
-	Allergies    []string              `json:"allergies"`
-	Notes        *string               `json:"notes"`
-	CreatedAt    string                `json:"created_at"`
-	UpdatedAt    string                `json:"updated_at"`
-	Preferences  *[]preferenceResponse `json:"preferences,omitempty"` // Get only
+	ID           string   `json:"id"`
+	HouseholdID  string   `json:"household_id"`
+	UserID       *string  `json:"user_id"`
+	HasLogin     bool     `json:"has_login"`
+	DisplayName  string   `json:"display_name"`
+	Relationship *string  `json:"relationship"`
+	Birthdate    *string  `json:"birthdate"`
+	School       *string  `json:"school"`
+	Grade        *string  `json:"grade"`
+	Allergies    []string `json:"allergies"`
+	Notes        *string  `json:"notes"`
+	// Color is the palette name the person is drawn in (#4821). It has no
+	// omitempty: every person has one, and a client never has to default it.
+	Color       string                `json:"color"`
+	CreatedAt   string                `json:"created_at"`
+	UpdatedAt   string                `json:"updated_at"`
+	Preferences *[]preferenceResponse `json:"preferences,omitempty"` // Get only
+}
+
+// personColorRequest is the body of PATCH /api/v1/people/{id}: one field,
+// the colour. It is the whole PATCH vocabulary today; a second partial field
+// would add its own action and check rather than riding on this one.
+type personColorRequest struct {
+	Color *string `json:"color"`
 }
 
 type preferenceResponse struct {
@@ -123,6 +139,7 @@ func toPersonResponse(p *Person) personResponse {
 		Grade:        p.Grade,
 		Allergies:    p.Allergies,
 		Notes:        p.Notes,
+		Color:        p.Color,
 		CreatedAt:    p.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:    p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
@@ -223,6 +240,39 @@ func (req personRequest) input() (PersonInput, string) {
 	return in, ""
 }
 
+// PaletteColours is the fixed set of colours a person may be drawn in
+// (#4821). It is names, never hex: the value is interpolated into a class or
+// style by the UI, so anything else would be an injection surface, and a raw
+// colour cannot follow the light and dark schemes. The names are Mantine
+// palette colours, every one of which apps/ui/app/providers.tsx contrast-fixes
+// in both schemes (#4754), so the UI can render them directly.
+//
+// Keep this list in step with the people_color_check constraint in migration
+// 071: the database refuses anything else, so a drift here would be a 500
+// instead of a 400.
+var PaletteColours = []string{"red", "orange", "yellow", "green", "teal", "cyan", "blue", "violet"}
+
+// paletteColours is PaletteColours as a set.
+var paletteColours = func() map[string]bool {
+	m := make(map[string]bool, len(PaletteColours))
+	for _, c := range PaletteColours {
+		m[c] = true
+	}
+	return m
+}()
+
+// validColor reports whether c is a palette name. It is exact: no trimming
+// and no case folding, so "Red" and " red" are refused rather than
+// normalised, and the stored value is always one of the eight literals the UI
+// knows.
+func validColor(c string) bool { return paletteColours[c] }
+
+// paletteMessage is the 400 body's message, listing the palette so a client
+// (or a person typing) knows what to send.
+func paletteMessage() string {
+	return "color must be one of " + strings.Join(PaletteColours, ", ")
+}
+
 var validKinds = map[string]bool{"like": true, "dislike": true, "dietary": true, "other": true}
 
 func (req preferenceRequest) input() (PreferenceInput, string) {
@@ -267,6 +317,18 @@ func (c caller) canEdit(p *Person) bool {
 	return c.isManager() || (p.UserID != nil && *p.UserID == c.userID)
 }
 
+// canSetColor: the colour is self-service for the person or a management act
+// for a manager (#4821). The policy grants people.ActSetColor to the family
+// roles, and this narrows it to the caller's own record unless they manage
+// members. A viewer, housesitter or vendor fails the policy check even for
+// their own record, matching the rule that they edit no people record at all.
+func (c caller) canSetColor(p *Person) bool {
+	if !auth.Can(c.role, auth.ResPeople, auth.ActSetColor) {
+		return false
+	}
+	return c.isManager() || (p.UserID != nil && *p.UserID == c.userID)
+}
+
 // canReadFull: the role may see birthdates, schools, grades and notes. A
 // housesitter sees names, relationship and allergies only (read_basic).
 func (c caller) canReadFull() bool { return auth.Can(c.role, auth.ResPeople, auth.ActRead) }
@@ -278,7 +340,10 @@ func (c caller) canReadPreferences() bool {
 
 // view returns p as the caller may see it: everything for roles with people
 // read, otherwise only the basic fields (id, name, relationship, whether
-// they log in, allergies).
+// they log in, allergies). The colour survives the redaction (#4821): it is
+// cosmetic, it is what the calendar and lists draw the person with, and a
+// housesitter who may already see the name and allergies learns nothing from
+// it. A vendor sees no people at all, so it never reaches them.
 func (c caller) view(p *Person) personResponse {
 	out := toPersonResponse(p)
 	if !c.canReadFull() {
@@ -472,6 +537,65 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		apierr.DB(w, err)
 		return
 	}
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": toPersonResponse(updated)})
+}
+
+func forbidSetColor(w http.ResponseWriter, c caller, p *Person) {
+	slog.Warn("people: refused colour change", "user_id", c.userID, "household_id", c.householdID,
+		"role", c.role, "person_id", p.ID)
+	if !auth.Can(c.role, auth.ResPeople, auth.ActSetColor) {
+		apierr.Forbidden(w, middleware.DenyMessage(c.role, auth.ResPeople, auth.ActSetColor))
+		return
+	}
+	apierr.Forbidden(w, "you can only change your own colour; ask an owner or family manager to change someone else's")
+}
+
+// SetColor changes one person's colour. The person themselves or a manager.
+//
+// PATCH, not PUT: the colour is one field, and a PUT would have to carry (and
+// could accidentally clear) every other field. The body is {"color": name}
+// with at least that key; an unknown palette name, a blank value, a null or a
+// missing key is a 400 listing the palette, so a bad value never reaches the
+// database or a browser's style attribute.
+//
+// PATCH /api/v1/people/{id}
+func (h *Handler) SetColor(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.resolveCaller(w, r)
+	if !ok {
+		return
+	}
+	p, ok := h.loadPerson(w, r, c)
+	if !ok {
+		return
+	}
+	if !c.canSetColor(p) {
+		forbidSetColor(w, c, p)
+		return
+	}
+	var req personColorRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierr.BadRequest(w, "invalid request body")
+		return
+	}
+	if req.Color == nil {
+		apierr.BadRequest(w, paletteMessage())
+		return
+	}
+	if !validColor(*req.Color) {
+		apierr.BadRequest(w, paletteMessage())
+		return
+	}
+	updated, err := h.repo.SetColor(r.Context(), c.householdID, p.ID, *req.Color)
+	if errors.Is(err, ErrNotFound) {
+		apierr.NotFound(w, "person not found")
+		return
+	}
+	if err != nil {
+		apierr.DB(w, err)
+		return
+	}
+	slog.Info("people: colour changed", "user_id", c.userID, "household_id", c.householdID,
+		"role", c.role, "person_id", p.ID, "color", updated.Color)
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": toPersonResponse(updated)})
 }
 

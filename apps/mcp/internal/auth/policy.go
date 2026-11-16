@@ -119,6 +119,10 @@ const (
 	ActRevoke Action = "revoke"
 	// ActMarkRead (notifications): mark one's notification read.
 	ActMarkRead Action = "mark_read"
+	// ActSetColor (people): set a person's colour (#4821). No MCP tool uses
+	// it; it is here so this mirror matches roles.go, which the shared
+	// fixture enforces.
+	ActSetColor Action = "set_color"
 )
 
 // AllRoles lists every household role, most to least privileged. It mirrors
@@ -192,7 +196,12 @@ var Policy = map[Resource]map[Action][]string{
 	// search at all".
 	ResSearch: {ActRead: rolesEveryone},
 
-	ResPeople:      {ActRead: rolesReaders, ActReadBasic: rolesSitter, ActWrite: rolesFamily},
+	ResPeople: {
+		ActRead:      rolesReaders,
+		ActReadBasic: rolesSitter,
+		ActWrite:     rolesFamily,
+		ActSetColor:  rolesFamily,
+	},
 	ResPreferences: {ActRead: rolesReaders, ActWrite: rolesFamily},
 	ResLists: {
 		ActRead:       rolesSitter,

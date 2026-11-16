@@ -360,6 +360,7 @@ func TestAuthorship050_Reversible(t *testing.T) {
 	})
 
 	for cycle := 0; cycle < 2; cycle++ {
+		applyMigration(t, pool, "071_person_color.down.sql") // newest first: drops people.color and its palette CHECK
 		applyMigration(t, pool, "070_entity_kind_notifications.down.sql") // newest first: notifications/calendar_objects entity_type back to VARCHAR
 		applyMigration(t, pool, "055_activity_event_titles.down.sql")      // restores 050's log_activity
 		applyMigration(t, pool, "054_change_notifications.down.sql")       // its trigger is on 050's activity_log
@@ -383,6 +384,7 @@ func TestAuthorship050_Reversible(t *testing.T) {
 
 		applyMigration(t, pool, "050_authorship.up.sql")
 		applyMigration(t, pool, "070_entity_kind_notifications.up.sql")
+		applyMigration(t, pool, "071_person_color.up.sql")
 		var createdBy *uuid.UUID
 		mustScan(t, pool.QueryRow(ctx, `SELECT created_by FROM notes WHERE id = $1`, note), &createdBy)
 		if !eqID(createdBy, alex) {
