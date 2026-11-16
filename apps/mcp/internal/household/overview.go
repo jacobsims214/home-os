@@ -316,7 +316,8 @@ func loadCounts(ctx context.Context, pool *pgxpool.Pool, hh string) (areaCounts,
 
 // loadNextDays builds next_days for today (in loc, as of now) and the
 // days-1 days after it. Events follow agenda_get (calendar.EventsBetween),
-// bills follow bill_find (bill.BillDue: the next unpaid due date), and
+// bills follow bill_find (bill.BillDueFor: the next unpaid due date, any
+// frequency), and
 // maintenance follows maintenance_find due_within_days (open tasks, overdue
 // included). A failed section is reported through warn and left empty.
 func loadNextDays(ctx context.Context, pool *pgxpool.Pool, hh string, loc *time.Location, now time.Time,
@@ -400,12 +401,13 @@ func maintenancePreview(ctx context.Context, pool *pgxpool.Pool, hh string, toda
 	return sec
 }
 
-// billsDue returns every bill whose next unpaid due date (bill.BillDue, the
+// billsDue returns every bill whose next unpaid due date (bill.BillDueFor, the
 // rule bill_find uses) is within `within` days of today, by date then name.
 func billsDue(ctx context.Context, pool *pgxpool.Pool, hh string, today time.Time, within int) ([]billBrief, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT id::text, name, amount::float8, due_day, paid_date, paid_for_due_date
-		   FROM bills WHERE household_id = $1 AND due_day BETWEEN 1 AND 31 ORDER BY name, id`, hh)
+		`SELECT id::text, name, amount::float8, frequency, due_day, due_date, paid_date, paid_for_due_date
+		   FROM bills WHERE household_id = $1 AND (due_day IS NOT NULL OR due_date IS NOT NULL)
+		  ORDER BY name, id`, hh)
 	if err != nil {
 		return nil, err
 	}
@@ -413,13 +415,13 @@ func billsDue(ctx context.Context, pool *pgxpool.Pool, hh string, today time.Tim
 	out := []billBrief{}
 	for rows.Next() {
 		var b billBrief
-		var dueDay int
+		var s bill.Schedule
 		var paidDate, paidFor *time.Time
-		if err := rows.Scan(&b.ID, &b.Name, &b.Amount, &dueDay, &paidDate, &paidFor); err != nil {
+		if err := rows.Scan(&b.ID, &b.Name, &b.Amount, &s.Frequency, &s.DueDay, &s.DueDate, &paidDate, &paidFor); err != nil {
 			return nil, fmt.Errorf("scan bill: %w", err)
 		}
-		due := bill.BillDue(today, dueDay, paidDate, paidFor)
-		if due.DaysUntil < 0 || due.DaysUntil > within {
+		due, ok := bill.BillDueFor(today, s, paidDate, paidFor)
+		if !ok || due.Next.IsZero() || due.DaysUntil < 0 || due.DaysUntil > within {
 			continue
 		}
 		b.LocalDate, b.Weekday, b.DaysUntil = due.Next.Format(time.DateOnly), due.Next.Weekday().String(), due.DaysUntil

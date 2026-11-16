@@ -126,7 +126,8 @@ func writeOutbox(ctx context.Context, tx pgx.Tx, eventType, householdID string, 
 // It inserts a bill for the authenticated household and returns it with its
 // next due date. frequency defaults to monthly, which needs due_day; any
 // other frequency (quarterly, semiannual, annual, once) needs due_date and
-// no due_day (044's bills_due_day_monthly_check, #4468). rrule is left unset.
+// no due_day (044's bills_due_day_monthly_check, #4468). rrule is left unset. The bill
+// gets a repeating all-day event on the Bills calendar (syncBillEvent).
 // Invalid input returns an isError result and inserts nothing. Loop guard:
 // the same name (any case), amount and schedule created in the household in
 // the last 10 minutes returns that bill with duplicate true instead of a
@@ -235,6 +236,9 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return respond.Failed("create the bill", err), nil
 		}
 
+		if _, err := syncBillEvent(ctx, tx, claims.HouseholdID, r); err != nil {
+			return respond.Failed("create the bill", err), nil
+		}
 		if err := writeOutbox(ctx, tx, "bill.created", claims.HouseholdID,
 			map[string]string{"id": r.ID.String(), "name": r.Name}); err != nil {
 			return respond.Failed("create the bill", err), nil
@@ -407,6 +411,9 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return respond.Failed("update the bill", err), nil
 		}
 
+		if _, err := syncBillEvent(ctx, tx, claims.HouseholdID, r); err != nil {
+			return respond.Failed("update the bill", err), nil
+		}
 		if err := writeOutbox(ctx, tx, "bill.updated", claims.HouseholdID,
 			map[string]string{"id": r.ID.String(), "name": r.Name}); err != nil {
 			return respond.Failed("update the bill", err), nil
@@ -430,8 +437,8 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 // NewBillDeleteTool creates the bill_delete MCP tool (catalog v2, class X).
 // It deletes one bill in the authenticated household and returns it as it
 // was. A bill in another household, or one that doesn't exist (including a
-// repeat call), is reported as not found and nothing is deleted. Bill
-// calendar entries are derived from the bills table, so they go with the row.
+// repeat call), is reported as not found and nothing is deleted. The bill's
+// event on the Bills calendar (syncBillEvent) is deleted with it.
 func NewBillDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Delete a bill and its future calendar entries. " +
@@ -461,6 +468,13 @@ func NewBillDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 
 		today, err := householdToday(ctx, tx, claims.HouseholdID)
 		if err != nil {
+			return respond.Failed("delete the bill", err), nil
+		}
+
+		// The mirror event goes first: the 038 rehome trigger would only
+		// unlink it from the deleted bill. Rolled back if the bill is not
+		// found.
+		if err := deleteBillEvent(ctx, tx, claims.HouseholdID, id); err != nil {
 			return respond.Failed("delete the bill", err), nil
 		}
 

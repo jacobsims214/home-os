@@ -624,7 +624,7 @@ func findConflicts(ctx context.Context, pool querier, householdID string, loc *t
 
 	conflicts := make([]ConflictEvent, 0)
 	for _, ev := range events {
-		if ev.ID == excludeID || !eventOverlapsRange(ev, start, end) {
+		if ev.ID == excludeID || isBillEvent(ev) || !eventOverlapsRange(ev, start, end) {
 			continue
 		}
 		conflicts = append(conflicts, ConflictEvent{
@@ -817,7 +817,8 @@ func LocalDay(start, end string, allDay bool, loc *time.Location) (localStart, l
 // EventsBetween returns the household's events overlapping [start, end),
 // sorted by start instant, exactly as agenda_get lists them (all-day events
 // read as household-local days in loc). Exported for family_overview's
-// next_days (#4385) so both tools agree. Always returns a non-nil slice.
+// next_days (#4385) so both tools agree. Bills' own calendar events are
+// left out (isBillEvent). Always returns a non-nil slice.
 func EventsBetween(ctx context.Context, pool *pgxpool.Pool, householdID string, loc *time.Location, start, end time.Time) ([]Event, error) {
 	events, err := queryEvents(ctx, pool, householdID, loc, nil, start, end)
 	if err != nil {
@@ -825,13 +826,20 @@ func EventsBetween(ctx context.Context, pool *pgxpool.Pool, householdID string, 
 	}
 	out := make([]Event, 0, len(events))
 	for _, ev := range events {
-		if eventOverlapsRange(ev, start, end) {
+		if !isBillEvent(ev) && eventOverlapsRange(ev, start, end) {
 			out = append(out, ev)
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return startsBefore(out[i].Start, out[j].Start) })
 	return out, nil
 }
+
+// isBillEvent reports whether ev is a bill's mirror event on the Bills
+// calendar (#4485, bill.syncBillEvent). agenda_get and family_overview list
+// bills in their own bills sections (with paid state), and an all-day due
+// date is not a scheduling conflict, so those leave these events out;
+// event_find still shows them.
+func isBillEvent(ev Event) bool { return ev.EventType == bill.CalendarEventType }
 
 // startsBefore orders RFC 3339 start times by instant. Stored times mix
 // offsets (timed events in UTC, all-day events as local midnights), so a
@@ -1545,7 +1553,7 @@ func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 					res.Warnings = append(res.Warnings, truncatedNote(truncated))
 				}
 				for _, ev := range events {
-					if eventOverlapsRange(ev, dayStart, dayEnd) {
+					if !isBillEvent(ev) && eventOverlapsRange(ev, dayStart, dayEnd) {
 						res.Events = append(res.Events, ev)
 					}
 				}
@@ -1630,17 +1638,19 @@ func agendaHints(res agendaResult) []string {
 // household's bills due that day and not yet paid for that due date,
 // ordered by date then name.
 //
-// It applies bill.BillDue, the rule bill_find uses, so the agenda agrees
-// with it: due_day is clamped to the month (31 is due Nov 30) and the last
+// It applies bill.BillDueFor, the rule bill_find uses, so the agenda agrees
+// with it for every frequency (monthly, quarterly, semiannual, annual and
+// once, #4468): due days are clamped to the month (31 is due Nov 30) and the last
 // payment (paid_for_due_date, else inferred from paid_date) only hides the
 // bill when it covers this due date (a payment for last
 // month's bill does not). As of a day, the first unpaid due date on or
 // after it is that day exactly when the bill is due then and unpaid.
 func billsDueBetween(ctx context.Context, pool querier, householdID string, days []time.Time) ([]AgendaBill, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT id::text, name, COALESCE(amount, 0)::float8, COALESCE(category, ''), due_day, paid_date, paid_for_due_date
+		`SELECT id::text, name, COALESCE(amount, 0)::float8, COALESCE(category, ''),
+		        frequency, due_day, due_date, paid_date, paid_for_due_date
 		 FROM bills
-		 WHERE household_id = $1 AND due_day BETWEEN 1 AND 31
+		 WHERE household_id = $1 AND (due_day IS NOT NULL OR due_date IS NOT NULL)
 		 ORDER BY name`,
 		householdID,
 	)
@@ -1650,14 +1660,15 @@ func billsDueBetween(ctx context.Context, pool querier, householdID string, days
 	defer rows.Close()
 	type billRow struct {
 		b        AgendaBill
-		dueDay   int
+		schedule bill.Schedule
 		paidDate *time.Time
 		paidFor  *time.Time
 	}
 	var all []billRow
 	for rows.Next() {
 		var r billRow
-		if err := rows.Scan(&r.b.BillID, &r.b.Name, &r.b.Amount, &r.b.Category, &r.dueDay, &r.paidDate, &r.paidFor); err != nil {
+		if err := rows.Scan(&r.b.BillID, &r.b.Name, &r.b.Amount, &r.b.Category,
+			&r.schedule.Frequency, &r.schedule.DueDay, &r.schedule.DueDate, &r.paidDate, &r.paidFor); err != nil {
 			return nil, fmt.Errorf("scan bill: %w", err)
 		}
 		all = append(all, r)
@@ -1670,7 +1681,7 @@ func billsDueBetween(ctx context.Context, pool querier, householdID string, days
 		y, m, dd := d.Date()
 		day := time.Date(y, m, dd, 0, 0, 0, 0, time.UTC) // bill dates are midnight UTC
 		for _, r := range all {
-			if bill.BillDue(day, r.dueDay, r.paidDate, r.paidFor).Next.Equal(day) {
+			if due, ok := bill.BillDueFor(day, r.schedule, r.paidDate, r.paidFor); ok && due.Next.Equal(day) {
 				b := r.b
 				b.DueDate, b.Weekday = day.Format(dateLayout), day.Weekday().String()
 				out = append(out, b)
