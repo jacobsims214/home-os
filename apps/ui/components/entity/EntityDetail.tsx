@@ -8,7 +8,7 @@
  * to edit mode with a Mantine Form. Supports save (PUT) and delete (with confirmation).
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { apiFetch } from "@/lib/api";
@@ -22,9 +22,17 @@ import DetailPageLayout from "@/components/layout/DetailPageLayout";
 export interface FieldConfig {
   name: string;
   label: string;
-  type: "text" | "textarea" | "select" | "number" | "date" | "boolean";
+  type: "text" | "textarea" | "select" | "number" | "date" | "boolean" | "custom";
   options?: { value: string; label: string }[];
   required?: boolean;
+  /** type "custom": the read-only value (default: the raw value as text). */
+  renderView?: (entity: Record<string, unknown>) => ReactNode;
+  /** type "custom": the edit control for this field's value (for example the pet's VetPicker, #4703). */
+  renderEdit?: (args: {
+    value: unknown;
+    onChange: (value: unknown) => void;
+    entity: Record<string, unknown>;
+  }) => ReactNode;
 }
 
 export interface SectionConfig {
@@ -245,12 +253,25 @@ export default function EntityDetail({
 
   // Render field value in read-only mode
   const renderFieldValue = (fieldName: string) => {
+    const custom = getFieldConfig(fieldName)?.renderView;
+    if (custom) return custom(entity);
     const value = getFieldValue(entity, fieldName);
     return formatDisplayValue(value);
   };
 
   // Render field input in edit mode
   const renderFieldInput = (field: FieldConfig) => {
+    if (field.type === "custom" && field.renderEdit) {
+      return (
+        <div key={field.name}>
+          {field.renderEdit({
+            value: formValues[field.name] ?? null,
+            onChange: (v) => handleFormChange(field.name, v),
+            entity,
+          })}
+        </div>
+      );
+    }
     const value = formValues[field.name] ?? "";
     const baseProps = {
       label: field.label,

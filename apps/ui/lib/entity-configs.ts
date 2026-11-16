@@ -185,8 +185,9 @@ export const petConfig = {
     ] },
     { name: "breed", label: "Breed", type: "text" },
     { name: "date_of_birth", label: "Date of Birth", type: "date" },
-    { name: "vet_name", label: "Veterinarian", type: "text" },
-    { name: "vet_phone", label: "Vet Phone", type: "text" },
+    // A family contact tagged "vet" (pets.vet_vendor_id, #4703); the API's
+    // vet_name / vet_phone are read-only and never sent.
+    { name: "vet_vendor_id", label: "Veterinarian", type: "select", options: [] },
     { name: "microchip_id", label: "Microchip ID", type: "text" },
     { name: "insurance_provider", label: "Insurance Provider", type: "text" },
     { name: "insurance_policy", label: "Insurance Policy", type: "text" },
@@ -195,7 +196,7 @@ export const petConfig = {
   ] as FieldConfig[],
   sections: [
     { title: "Pet Details", fields: ["name", "species", "breed", "date_of_birth"] },
-    { title: "Veterinary Info", fields: ["vet_name", "vet_phone"] },
+    { title: "Veterinary Info", fields: ["vet_vendor_id"] },
     { title: "Identification", fields: ["microchip_id", "registration_id"] },
     { title: "Insurance", fields: ["insurance_provider", "insurance_policy"] },
     { title: "Additional Info", fields: ["notes"] },

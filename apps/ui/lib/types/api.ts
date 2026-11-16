@@ -42,6 +42,51 @@ export interface Asset {
 }
 
 /** POST /api/v1/assets request body */
+/** GET /api/v1/vendors response item (a family contact). `trades` is always an array. */
+export interface Vendor {
+  id: string;
+  household_id: string;
+  name: string;
+  trades: string[];
+  specialty?: string;
+  phone?: string;
+  email?: string;
+  website?: string;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * GET /api/v1/pets response item (#4700). The vet is a family contact:
+ * `vet_vendor_id`. `vet_name` / `vet_phone` are read-only, the contact's name
+ * and phone, omitted when there is no vet.
+ */
+export interface Pet {
+  id: string;
+  household_id: string;
+  name: string;
+  species?: string;
+  breed?: string;
+  date_of_birth?: string;
+  vet_vendor_id?: string;
+  readonly vet_name?: string;
+  readonly vet_phone?: string;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** POST / PUT /api/v1/pets body. Never vet_name / vet_phone (#4703, dropped in #4705). */
+export interface PetWriteRequest {
+  name: string;
+  species?: string;
+  breed?: string;
+  date_of_birth?: string;
+  vet_vendor_id?: string | null;
+  notes?: string;
+}
+
 export interface CreateAssetRequest {
   name: string;
   property_id?: string;
