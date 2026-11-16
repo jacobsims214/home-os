@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/legacyfinance"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
@@ -124,10 +125,10 @@ func (req *propertyRequest) toProperty() *Property {
 		name = *req.Name
 	}
 	return &Property{
-		Name:          name,
-		Address:       req.Address,
-		PropertyType:  req.PropertyType,
-		Notes:         req.Notes,
+		Name:         name,
+		Address:      req.Address,
+		PropertyType: req.PropertyType,
+		Notes:        req.Notes,
 		// The property edit page sends "" for a blank field; a NUMERIC/DATE
 		// column can't take "", so it means "not sent" (COALESCE keeps the
 		// value on update), the same as for the legacy fields.
@@ -185,21 +186,21 @@ func writeError(w http.ResponseWriter, err error) {
 	apierr.DB(w, err)
 }
 
-type propertyResponse struct {
-	ID           string  `json:"id"`
-	HouseholdID  string  `json:"household_id"`
-	Name         string  `json:"name"`
-	Address      *string `json:"address,omitempty"`
-	PropertyType *string `json:"property_type,omitempty"`
-	Notes        *string `json:"notes,omitempty"`
-	CreatedAt    string  `json:"created_at"`
-	UpdatedAt    string  `json:"updated_at"`
-
-	// Financial fields. Carried as *string (no omitempty) so NULL in the DB
-	// serializes as JSON null, matching the TS `string | null` type exactly.
-	// mortgage_* through hoa_fee_monthly are derived from the property's
-	// loan and bills (#4704); null when there is no such row.
-	PurchasePrice         *string `json:"purchase_price"`
+// propertyMoney is every money field of a property response, in one struct
+// so that hiding money from a role is a single decision (see
+// toPropertyResponse) rather than a check per field. The fields are carried
+// as *string with no omitempty, so NULL in the DB serializes as JSON null,
+// matching the TS `string | null` type exactly; mortgage_* through
+// hoa_fee_monthly are derived from the property's loan and bills (#4704).
+//
+// A field added here is invisible to housesitters and vendors automatically:
+// redaction zeroes the whole struct, and it is never filled for a role that
+// may not see money (#4806).
+type propertyMoney struct {
+	PurchasePrice *string `json:"purchase_price"`
+	// PurchaseDate is not an amount, but it belongs to the same financial
+	// record (when the family bought the place) and an outsider has no use
+	// for it.
 	PurchaseDate          *string `json:"purchase_date"`
 	CurrentValue          *string `json:"current_value"`
 	DownPayment           *string `json:"down_payment"`
@@ -214,6 +215,21 @@ type propertyResponse struct {
 	InsuranceAnnual       *string `json:"insurance_annual"`
 	InsuranceProvider     *string `json:"insurance_provider"`
 	HOAFeeMonthly         *string `json:"hoa_fee_monthly"`
+}
+
+// propertyResponse is a property as a caller may see it. The money fields
+// are embedded, so they serialize at the top level next to id and name.
+type propertyResponse struct {
+	ID           string  `json:"id"`
+	HouseholdID  string  `json:"household_id"`
+	Name         string  `json:"name"`
+	Address      *string `json:"address,omitempty"`
+	PropertyType *string `json:"property_type,omitempty"`
+	Notes        *string `json:"notes,omitempty"`
+	CreatedAt    string  `json:"created_at"`
+	UpdatedAt    string  `json:"updated_at"`
+
+	propertyMoney
 }
 
 type roomRequest struct {
@@ -260,8 +276,18 @@ func householdID(w http.ResponseWriter, r *http.Request) uuid.UUID {
 	return id
 }
 
-func toPropertyResponse(p *Property) propertyResponse {
-	return propertyResponse{
+// toPropertyResponse is the one place a property becomes JSON, and therefore
+// the one place the money policy is applied to it (#4806). Every handler that
+// returns a property goes through it, so a new endpoint cannot forget.
+//
+// A role without money read (housesitter, vendor, unknown) gets the identity
+// fields and every money field as null. Housesitters and vendors may read
+// properties (ResProperties read = rolesEveryone), but money is theirs to
+// read only through ResBills/ResLoans, which they do not have; since #4704
+// the property's money comes from the family's loans and bills, so without
+// this the property route was a side door around the money policy.
+func toPropertyResponse(p *Property, role string) propertyResponse {
+	resp := propertyResponse{
 		ID:           p.ID.String(),
 		HouseholdID:  p.HouseholdID.String(),
 		Name:         p.Name,
@@ -270,23 +296,27 @@ func toPropertyResponse(p *Property) propertyResponse {
 		Notes:        p.Notes,
 		CreatedAt:    p.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:    p.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
-
-		PurchasePrice:         p.PurchasePrice,
-		PurchaseDate:          p.PurchaseDate,
-		CurrentValue:          p.CurrentValue,
-		DownPayment:           p.DownPayment,
-		MortgageAmount:        p.MortgageAmount,
-		MortgageRate:          p.MortgageRate,
-		MortgageTermMonths:    p.MortgageTermMonths,
-		MortgageStartDate:     p.MortgageStartDate,
-		MortgageLender:        p.MortgageLender,
-		MortgageAccountNumber: p.MortgageAccountNumber,
-		PropertyTaxAnnual:     p.PropertyTaxAnnual,
-		PropertyTaxDueMonths:  p.PropertyTaxDueMonths,
-		InsuranceAnnual:       p.InsuranceAnnual,
-		InsuranceProvider:     p.InsuranceProvider,
-		HOAFeeMonthly:         p.HOAFeeMonthly,
 	}
+	if auth.CanSeeMoney(role) {
+		resp.propertyMoney = propertyMoney{
+			PurchasePrice:         p.PurchasePrice,
+			PurchaseDate:          p.PurchaseDate,
+			CurrentValue:          p.CurrentValue,
+			DownPayment:           p.DownPayment,
+			MortgageAmount:        p.MortgageAmount,
+			MortgageRate:          p.MortgageRate,
+			MortgageTermMonths:    p.MortgageTermMonths,
+			MortgageStartDate:     p.MortgageStartDate,
+			MortgageLender:        p.MortgageLender,
+			MortgageAccountNumber: p.MortgageAccountNumber,
+			PropertyTaxAnnual:     p.PropertyTaxAnnual,
+			PropertyTaxDueMonths:  p.PropertyTaxDueMonths,
+			InsuranceAnnual:       p.InsuranceAnnual,
+			InsuranceProvider:     p.InsuranceProvider,
+			HOAFeeMonthly:         p.HOAFeeMonthly,
+		}
+	}
+	return resp
 }
 
 func toRoomResponse(r *Room) roomResponse {
@@ -303,13 +333,19 @@ func toRoomResponse(r *Room) roomResponse {
 // --- property handlers ---
 
 // ListProperties handles GET /api/v1/properties.
+//
+// Every role may list properties (ResProperties read = rolesEveryone), but
+// only roles with money read get the finance fields: housesitters and
+// vendors get nulls, and the query skips the family's loans and bills
+// entirely (#4806).
 func (h *Handler) ListProperties(w http.ResponseWriter, r *http.Request) {
 	hhID := householdID(w, r)
 	if hhID == uuid.Nil {
 		return
 	}
+	role := middleware.Role(r)
 
-	properties, err := h.repo.ListProperties(r.Context(), hhID)
+	properties, err := h.repo.ListProperties(r.Context(), hhID, auth.CanSeeMoney(role))
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -317,7 +353,7 @@ func (h *Handler) ListProperties(w http.ResponseWriter, r *http.Request) {
 
 	resp := make([]propertyResponse, len(properties))
 	for i, p := range properties {
-		resp[i] = toPropertyResponse(p)
+		resp[i] = toPropertyResponse(p, role)
 	}
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
@@ -349,7 +385,8 @@ func (h *Handler) CreateProperty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	property, err := h.repo.CreateProperty(r.Context(), hhID, req.toProperty(), fin)
+	role := middleware.Role(r)
+	property, err := h.repo.CreateProperty(r.Context(), hhID, req.toProperty(), fin, auth.CanSeeMoney(role))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -358,7 +395,7 @@ func (h *Handler) CreateProperty(w http.ResponseWriter, r *http.Request) {
 	h.indexProperty(r.Context(), property)
 
 	apierr.JSON(w, http.StatusCreated, map[string]any{
-		"data": toPropertyResponse(property),
+		"data": toPropertyResponse(property, role),
 	})
 }
 
@@ -375,7 +412,8 @@ func (h *Handler) GetProperty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	property, err := h.repo.GetProperty(r.Context(), propertyID, hhID)
+	role := middleware.Role(r)
+	property, err := h.repo.GetProperty(r.Context(), propertyID, hhID, auth.CanSeeMoney(role))
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -386,7 +424,7 @@ func (h *Handler) GetProperty(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
-		"data": toPropertyResponse(property),
+		"data": toPropertyResponse(property, role),
 	})
 }
 
@@ -415,7 +453,8 @@ func (h *Handler) UpdateProperty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	property, err := h.repo.UpdateProperty(r.Context(), propertyID, hhID, req.toProperty(), fin)
+	role := middleware.Role(r)
+	property, err := h.repo.UpdateProperty(r.Context(), propertyID, hhID, req.toProperty(), fin, auth.CanSeeMoney(role))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -428,7 +467,7 @@ func (h *Handler) UpdateProperty(w http.ResponseWriter, r *http.Request) {
 	h.indexProperty(r.Context(), property)
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
-		"data": toPropertyResponse(property),
+		"data": toPropertyResponse(property, role),
 	})
 }
 
@@ -503,8 +542,10 @@ func (h *Handler) ListRooms(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the property exists and belongs to this household.
-	property, err := h.repo.GetProperty(r.Context(), propertyID, hhID)
+	// Verify the property exists and belongs to this household. Only the
+	// existence matters here, so the money fields are not read: a room list
+	// never puts a loan or a bill in front of the caller (#4806).
+	property, err := h.repo.GetProperty(r.Context(), propertyID, hhID, false)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -543,8 +584,9 @@ func (h *Handler) CreateRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the property exists and belongs to this household.
-	property, err := h.repo.GetProperty(r.Context(), propertyID, hhID)
+	// Verify the property exists and belongs to this household. Only the
+	// existence matters here (see ListRooms).
+	property, err := h.repo.GetProperty(r.Context(), propertyID, hhID, false)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return

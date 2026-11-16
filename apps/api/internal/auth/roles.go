@@ -313,6 +313,23 @@ func HiddenEntityKinds(role string) []string {
 	return out
 }
 
+// CanSeeMoney reports whether a member with role may see money: amounts,
+// rates, lenders and account numbers on bills, loans and the budget. The
+// grant is rolesReaders (the family plus the viewer) through ResBills and
+// ResLoans; both are required, so a drift between the two hides the money
+// rather than leaking it.
+//
+// It exists for records that are themselves visible to a role without money.
+// A property and a vehicle are readable by housesitters and vendors, and
+// their response carries money derived from bills and loans (#4704), so the
+// record route would otherwise be a side door around the money policy
+// (#4806). Handlers ask this before they derive or serialize an amount,
+// instead of naming roles themselves, so one decision covers every money
+// field and a field added later is covered by default.
+func CanSeeMoney(role string) bool {
+	return Can(role, ResBills, ActRead) && Can(role, ResLoans, ActRead)
+}
+
 // CanAnnotateEntity reports whether a member with role may add a note on a
 // record of kind kind: family roles on anything they can see, a housesitter
 // on pets only.
