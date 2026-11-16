@@ -128,7 +128,10 @@ func dietRules(e eater, value string) ([]rule, bool) {
 	mk := func(phrases ...[]string) rule {
 		m := allergyMatcher{personID: e.id, person: e.name, allergy: label}
 		for _, p := range phrases {
-			m.group = append(m.group, compilePhrases(p)...)
+			// Group words, so a vegan's "no fish" catches catfish and
+			// swordfish too (#4805). Only curated words get the compound
+			// forms, so the meat lists are unchanged.
+			m.group = append(m.group, compileGroupPhrases(p)...)
 		}
 		return rule{kind: "diet", m: m}
 	}

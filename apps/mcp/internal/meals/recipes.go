@@ -928,6 +928,11 @@ func wordForm(w string) string {
 // phrasePatterns returns the Postgres (\m...\M) and Go (\b...\b) regexes for
 // a phrase: its words in order, each singular or plural. ok is false when
 // the phrase has no words.
+//
+// Both ends are anchored to a word boundary, so a phrase only matches whole
+// words. That is what the recipe_find filters want, and what an allergy's own
+// word and its exceptions want. Group words that also sit inside a one-word
+// compound get groupPatterns instead (#4805).
 func phrasePatterns(phrase string) (pg, goRe string, ok bool) {
 	ws := words(phrase)
 	if len(ws) == 0 {
@@ -939,6 +944,72 @@ func phrasePatterns(phrase string) (pg, goRe string, ok bool) {
 	}
 	body := strings.Join(parts, `[^\w]+`)
 	return `\m` + body + `\M`, `(?i)\b` + body + `\b`, true
+}
+
+// compoundMode says where in a longer word a group word may sit (#4805).
+type compoundMode uint8
+
+const (
+	compoundPrefix compoundMode = 1 << iota // cheesecake, butterscotch
+	compoundSuffix                          // catfish, cornbread
+)
+
+// compoundWords are the group words that are also part of a one-word
+// ingredient, which a word boundary cannot see: "catfish fillets" carries
+// fish, "cornbread" carries bread, "cheesecake" carries cheese. Only curated
+// words get this, and only as group words or diet words: an allergy's own
+// word ("nut") and the exceptions keep the whole-word rule.
+//
+// Deliberately absent:
+//   - nut: coconut, doughnut and nutmeg stay unmatched (the ticket's negative).
+//   - cream, cake, sauce, oil, flour and the rest: they compound too rarely as
+//     a head or a tail to be worth the false positives.
+//
+// bread is both ways round: cornbread/shortbread/flatbread on the tail, and
+// breadstick/breadcrumbs/breaded on the head (breaded chicken is gluten).
+var compoundWords = map[string]compoundMode{
+	"corn":   compoundPrefix,                  // cornbread, cornmeal, cornstarch
+	"fish":   compoundSuffix,                  // catfish, swordfish, monkfish, whitefish
+	"bread":  compoundSuffix | compoundPrefix, // cornbread; breadstick, breaded
+	"cheese": compoundPrefix,                  // cheesecake, cheeseburger, cheesesteak
+	"egg":    compoundPrefix,                  // eggnog, eggroll (eggplant excepted)
+	"milk":   compoundPrefix,                  // milkshake (milkfish excepted)
+	"butter": compoundPrefix,                  // butterscotch, buttercream (butterfly excepted)
+}
+
+// groupPatterns is phrasePatterns for one of an allergen group's words, which
+// may also sit inside a one-word compound (#4805). A multi-word phrase and a
+// word that is not in compoundWords get phrasePatterns exactly, so the two
+// cannot drift: it is the same body, anchored one word-boundary looser on the
+// side the compound hangs off.
+//
+// There is deliberately no Postgres form. Group words are matched in Go, on
+// ingredient names (AllergyWarnings, recipeAllergyCheck); the regexes that go
+// to Postgres are recipe_find's query and ingredient filters, which stay on
+// phrasePatterns and keep matching whole words only, so searching for "cod"
+// still does not return every recipe with "codfish" (deliberate, #4805).
+func groupPatterns(phrase string) (goRe string, ok bool) {
+	ws := words(phrase)
+	if len(ws) != 1 {
+		_, goRe, ok = phrasePatterns(phrase)
+		return goRe, ok
+	}
+	mode, isCompound := compoundWords[singular(strings.ToLower(ws[0]))]
+	if !isCompound {
+		_, goRe, ok = phrasePatterns(phrase)
+		return goRe, ok
+	}
+	// The compound hangs off the side the word does not sit on: a suffix word
+	// (fish) matches whatever precedes it, a prefix word (cheese) whatever
+	// follows.
+	head, tail := `\b`, `\b`
+	if mode&compoundSuffix != 0 {
+		head = `\b\w*`
+	}
+	if mode&compoundPrefix != 0 {
+		tail = `\w*\b`
+	}
+	return `(?i)` + head + wordForm(phrase) + tail, true
 }
 
 // allergenGroups expands an allergy to the ingredients that usually carry
@@ -969,9 +1040,14 @@ var allergenGroups = map[string][]string{
 	"shellfish":  shellfishFoods,
 	"crustacean": {"shrimp", "prawn", "crab", "lobster", "crayfish", "crawfish", "langoustine", "scampi", "krill", "shrimp paste", "crab paste"},
 	"mollusc":    molluscFoods,
-	"fish":       {"fish", "salmon", "tuna", "cod", "tilapia", "halibut", "anchovy", "sardine", "trout", "haddock", "mackerel", "fish sauce", "worcestershire", "sea bass", "bass", "snapper", "pollock", "sole", "flounder", "mahi mahi", "swordfish", "catfish", "monkfish", "grouper", "hake", "bream"},
-	"soy":        {"soy", "soya", "soybean", "tofu", "edamame", "tempeh", "miso", "soy sauce", "tamari"},
-	"sesame":     {"sesame", "tahini"},
+	// corn had no group at all, so "corn allergy" matched only the literal
+	// word and cornbread, popcorn and cornstarch all went through (#4805).
+	"corn": {"corn", "popcorn", "sweetcorn", "cornmeal", "corn starch", "cornstarch", "cornflour",
+		"corn flour", "corn syrup", "polenta", "grits", "masa", "hominy", "corn chip", "tortilla chip",
+		"corn on the cob"},
+	"fish":   {"fish", "salmon", "tuna", "cod", "tilapia", "halibut", "anchovy", "sardine", "trout", "haddock", "mackerel", "fish sauce", "worcestershire", "sea bass", "bass", "snapper", "pollock", "sole", "flounder", "mahi mahi", "swordfish", "catfish", "monkfish", "grouper", "hake", "bream"},
+	"soy":    {"soy", "soya", "soybean", "tofu", "edamame", "tempeh", "miso", "soy sauce", "tamari"},
+	"sesame": {"sesame", "tahini"},
 }
 
 var (
@@ -1035,8 +1111,13 @@ var allergenExceptions = map[string][]string{
 	"milk":    dairyFree,
 	"lactose": dairyFree,
 	"egg":     {"eggplant"},
-	"fish":    {"fish shaped", "goldfish", "bass ale"},
-	"nut":     {"nutmeg", "butternut", "coconut", "water chestnut"},
+	// #4805 turned on suffix matching for fish, so every -fish word that is
+	// not a fish has to be listed here. Only the ones that are not food: a
+	// -fish shellfish (shellfish, crayfish, crawfish) is deliberately left
+	// matching, because flagging a crustacean for a fish allergy is the cheap
+	// mistake and clearing one is not.
+	"fish": {"fish shaped", "goldfish", "bass ale", "jellyfish", "starfish", "silverfish"},
+	"nut":  {"nutmeg", "butternut", "coconut", "water chestnut"},
 	// Root beer and ginger beer carry no gluten, so a gluten allergy must not
 	// flag them (#4804 added "beer" to the grains). Note what is NOT listed:
 	// "gluten-free bread" stays flagged. A packet claim is not a food
@@ -1056,6 +1137,9 @@ var allergenExceptions = map[string][]string{
 // (#4804). Exceptions only apply to the group's words, so an almond flour
 // still matches a nut allergy.
 var glutenFree = []string{"root beer", "ginger beer", "corn tortilla",
+	// Breadfruit is a fruit, and #4805 made bread match as a prefix so that
+	// breadstick and breaded are caught.
+	"breadfruit",
 	// Flours and noodles made from something other than wheat.
 	"almond flour", "rice flour", "cornflour", "corn flour", "coconut flour", "chickpea flour",
 	"buckwheat flour", "potato flour", "tapioca flour", "potato starch",
@@ -1067,7 +1151,13 @@ var dairyFree = []string{"peanut butter", "almond butter", "cashew butter", "nut
 	"apple butter", "cocoa butter", "shea butter", "butternut", "coconut milk", "almond milk", "oat milk", "soy milk",
 	"rice milk", "cashew milk", "coconut cream", "cream of tartar", "butter bean", "butter lettuce", "bean curd",
 	"cream of coconut", "coconut yogurt", "coconut yoghurt", "oat cream", "oat yogurt", "soy cream", "soy yogurt",
-	"cashew cream", "almond cream", "cream soda", "buttercup squash", "butterhead lettuce"}
+	"cashew cream", "almond cream", "cream soda", "buttercup squash", "butterhead lettuce", "buttercup",
+	"butterhead",
+	// #4805 turned on prefix matching for butter, milk and cheese: a butterfly
+	// cut is not butter, milkfish (bangus) is a fish, and cheesecloth is
+	// cloth. Anything else that starts with one of those words and carries no
+	// dairy belongs here too.
+	"butterfly", "butterflied", "milkfish", "cheesecloth"}
 
 // allergyMatcher matches ingredient names against one person's allergy.
 type allergyMatcher struct {
@@ -1121,11 +1211,27 @@ func allergensIn(text string) []string {
 	return out
 }
 
-// compilePhrases compiles each phrase's Go regex (phrasePatterns).
+// compilePhrases compiles each phrase's Go regex (phrasePatterns): whole
+// words only. The allergy's own word, the exceptions and the recipe search
+// filters use this.
 func compilePhrases(phrases []string) []*regexp.Regexp {
 	var out []*regexp.Regexp
 	for _, p := range phrases {
 		if _, goRe, ok := phrasePatterns(p); ok {
+			out = append(out, regexp.MustCompile(goRe))
+		}
+	}
+	return out
+}
+
+// compileGroupPhrases compiles a group's words with the curated compound
+// forms (groupPatterns). allergenGroups and the diet word lists go through
+// here; the allergy's own word and the exceptions never do, so an egg allergy
+// still ignores eggplant and a dairy one still ignores peanut butter (#4805).
+func compileGroupPhrases(phrases []string) []*regexp.Regexp {
+	var out []*regexp.Regexp
+	for _, p := range phrases {
+		if goRe, ok := groupPatterns(p); ok {
 			out = append(out, regexp.MustCompile(goRe))
 		}
 	}
@@ -1139,7 +1245,9 @@ func newAllergyMatcher(personID, person, allergen string) (allergyMatcher, bool)
 	m := allergyMatcher{personID: personID, person: person, allergy: allergen}
 	m.own = compilePhrases([]string{allergen})
 	for _, key := range allergyGroupKeys(allergen) {
-		m.group = append(m.group, compilePhrases(allergenGroups[key])...)
+		// Group words allow the curated compound forms (catfish, cornbread,
+		// cheesecake); the allergy's own word and the exceptions do not (#4805).
+		m.group = append(m.group, compileGroupPhrases(allergenGroups[key])...)
 		m.except = append(m.except, compilePhrases(allergenExceptions[key])...)
 	}
 	return m, len(m.own) > 0
