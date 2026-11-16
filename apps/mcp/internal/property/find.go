@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 )
@@ -36,13 +37,23 @@ func (in findInput) filtered() bool { return in.id != nil || in.query != "" }
 // address, type, notes or any room's name, so "kitchen" finds the house.
 // Loans and bills on an asset carry the asset's property_id (038's
 // derive_subject_property), so property_id alone counts them.
+//
+// The money columns (purchase date/price/value and the bill and loan counts)
+// are each wrapped in `CASE WHEN $6 THEN ... END`, where $6 is the caller's
+// auth.CanSeeMoney. For a role that may not see money the query yields NULL
+// instead of the amount, so the family's finance never enters the process at
+// all: the same rule #4806 applied to the API query, one level simpler because
+// the counts are scalar subqueries rather than LATERAL joins.
 const propertySelect = `
-	SELECT p.id, p.name, p.address, p.property_type, p.notes, p.purchase_date,
-	       p.purchase_price::float8, p.current_value::float8, p.created_at, p.updated_at,
+	SELECT p.id, p.name, p.address, p.property_type, p.notes,
+	       CASE WHEN $6::bool THEN p.purchase_date END,
+	       CASE WHEN $6::bool THEN p.purchase_price::float8 END,
+	       CASE WHEN $6::bool THEN p.current_value::float8 END,
+	       p.created_at, p.updated_at,
 	       (SELECT count(*) FROM rooms r WHERE r.property_id = p.id),
 	       (SELECT count(*) FROM assets a WHERE a.property_id = p.id),
-	       (SELECT count(*) FROM bills b WHERE b.property_id = p.id),
-	       (SELECT count(*) FROM loans l WHERE l.property_id = p.id),
+	       CASE WHEN $6::bool THEN (SELECT count(*) FROM bills b WHERE b.property_id = p.id) END,
+	       CASE WHEN $6::bool THEN (SELECT count(*) FROM loans l WHERE l.property_id = p.id) END,
 	       (SELECT count(*) FROM maintenance_tasks m WHERE m.property_id = p.id
 	           AND m.status IN ('pending', 'in_progress')),
 	       count(*) OVER ()
@@ -91,7 +102,16 @@ func NewPropertyFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		if err != nil {
 			return invalid(err, findExample), nil
 		}
-		page, total, err := findProperties(ctx, pool, claims.HouseholdID, in)
+		// The role is re-read from memberships on every call (callerOf, as the
+		// write tools and loan/access.go do), so a demotion applies at once.
+		// auth.CanSeeMoney decides the money columns; the query omits them for a
+		// role without money rather than fetching and discarding them.
+		c, bad := callerOf(ctx, pool)
+		if bad != nil {
+			return bad, nil
+		}
+		money := auth.CanSeeMoney(c.role)
+		page, total, err := findProperties(ctx, pool, claims.HouseholdID, money, in)
 		if err != nil {
 			return respond.Failed("find properties", err), nil
 		}
@@ -101,7 +121,7 @@ func NewPropertyFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		if total == 0 && in.offset > 0 {
 			// Past the end: count what there is so the summary is honest.
-			if _, total, err = findProperties(ctx, pool, claims.HouseholdID, findInput{id: in.id, query: in.query, limit: 1}); err != nil {
+			if _, total, err = findProperties(ctx, pool, claims.HouseholdID, money, findInput{id: in.id, query: in.query, limit: 1}); err != nil {
 				return respond.Failed("find properties", err), nil
 			}
 			in.offset = total
@@ -111,15 +131,16 @@ func NewPropertyFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			Total:      max(total-in.offset, len(page)),
 			NextCursor: respond.CursorAfter(end, total),
 			Narrow:     "Pass next_cursor as cursor for the next page, or add query.",
-		}, findNext(in, page)...), nil
+		}, findNext(in, page, money)...), nil
 	}
 	return "property_find", tool, handler
 }
 
 // findProperties loads one page of properties with their rooms, and the
-// total number of matches.
-func findProperties(ctx context.Context, pool querier, householdID string, in findInput) ([]propertyData, int, error) {
-	rows, err := pool.Query(ctx, propertySelect, householdID, in.id, escapeLike(in.query), in.limit, in.offset)
+// total number of matches. withMoney is the caller's auth.CanSeeMoney: false
+// makes the query skip every money column.
+func findProperties(ctx context.Context, pool querier, householdID string, withMoney bool, in findInput) ([]propertyData, int, error) {
+	rows, err := pool.Query(ctx, propertySelect, householdID, in.id, escapeLike(in.query), in.limit, in.offset, withMoney)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -197,8 +218,11 @@ func findSummary(in findInput, page []propertyData, total int) string {
 	}
 }
 
-// findNext is property_find's next-step hints.
-func findNext(in findInput, page []propertyData) []string {
+// findNext is property_find's next-step hints. withMoney is the caller's
+// auth.CanSeeMoney: a role that may not see money is never pointed at
+// loan_find or bill_create, which would only refuse it (and would tell it the
+// family has loans and bills to look at).
+func findNext(in findInput, page []propertyData, withMoney bool) []string {
 	if len(page) == 0 {
 		if !in.filtered() {
 			return []string{"The family has not added a property yet. Add one with property_create name=… rooms=[…]."}
@@ -210,12 +234,12 @@ func findNext(in findInput, page []propertyData) []string {
 	if p.Counts.Rooms == 0 {
 		next = append(next, fmt.Sprintf("Add rooms with property_update property_id=%s add_rooms=[…].", p.ID))
 	}
-	if p.Counts.Loans > 0 {
+	if withMoney && p.Counts.loans() > 0 {
 		next = append(next, fmt.Sprintf("See its mortgage and other loans with loan_find property_id=%s.", p.ID))
 	}
 	if p.Counts.OpenMaintenance > 0 {
 		next = append(next, fmt.Sprintf("See its open upkeep with maintenance_find property_id=%s.", p.ID))
-	} else if len(next) < 2 {
+	} else if withMoney && len(next) < 2 {
 		next = append(next, fmt.Sprintf("Tie a bill to it with bill_create property_id=%s.", p.ID))
 	}
 	return next[:min(len(next), 3)]

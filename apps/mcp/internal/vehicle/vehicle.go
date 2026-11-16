@@ -45,10 +45,18 @@ const vehicleLink = `(t.vehicle_id = v.id)`
 
 // vehicleSelect loads vehicles with counts of what is linked to them.
 // Scanned by scanVehicle.
+//
+// The money columns (purchase price/date/value and the loan and bill counts)
+// are each wrapped in `CASE WHEN $1 THEN ... END`, where $1 is the caller's
+// auth.CanSeeMoney: for a role without money the query yields NULL and the
+// family's finance never enters the process (#4808, the rule of #4806).
 var vehicleSelect = `SELECT v.id, v.year, v.make, v.model, v.vin, v.license_plate, v.color, v.notes,
-	       v.purchase_price::float8, v.purchase_date, v.current_value::float8, v.created_at, v.updated_at,
-	       (SELECT count(*) FROM loans t WHERE t.household_id = v.household_id AND ` + vehicleLink + `),
-	       (SELECT count(*) FROM bills t WHERE t.household_id = v.household_id AND ` + vehicleLink + `),
+	       CASE WHEN $1::bool THEN v.purchase_price::float8 END,
+	       CASE WHEN $1::bool THEN v.purchase_date END,
+	       CASE WHEN $1::bool THEN v.current_value::float8 END,
+	       v.created_at, v.updated_at,
+	       CASE WHEN $1::bool THEN (SELECT count(*) FROM loans t WHERE t.household_id = v.household_id AND ` + vehicleLink + `) END,
+	       CASE WHEN $1::bool THEN (SELECT count(*) FROM bills t WHERE t.household_id = v.household_id AND ` + vehicleLink + `) END,
 	       (SELECT count(*) FROM maintenance_tasks m WHERE m.vehicle_id = v.id AND m.household_id = v.household_id
 	           AND m.status IN ('pending', 'in_progress'))
 	FROM vehicles v`
@@ -68,9 +76,11 @@ type vehicleRow struct {
 	CurrentValue  *float64
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
-	Loans         int
-	Bills         int
-	OpenUpkeep    int
+	// Loans and Bills are nil for a role that may not see money: the query's
+	// CASE yields NULL rather than counting the family's finance (#4808).
+	Loans      *int
+	Bills      *int
+	OpenUpkeep int
 }
 
 // scanVehicle reads one row of vehicleSelect.
@@ -82,8 +92,27 @@ func scanVehicle(row pgx.Row) (vehicleRow, error) {
 	return r, err
 }
 
+// vehicleMoney is every money field of a vehicle in one struct, so hiding money
+// from a role is one decision (vehicleRow.data) rather than a check per field
+// or per handler (#4808, the pattern of #4806). It is embedded in vehicleData,
+// so the fields serialize at the top level next to vin and plate.
+//
+// Every field is a pointer with `omitzero`: when the struct is left zero (a
+// role that may not see money) the fields are ABSENT from the JSON rather than
+// null. The two counts are money too: how many loans and bills a car carries
+// tells an outsider about the family's finance, and the counts are what pointed
+// the model at loan_find. A field added here is hidden automatically.
+type vehicleMoney struct {
+	PurchasePrice *float64 `json:"purchase_price,omitzero" jsonschema_description:"Price paid, in the family's currency."`
+	PurchaseDate  *string  `json:"purchase_date,omitzero" jsonschema_description:"YYYY-MM-DD."`
+	CurrentValue  *float64 `json:"current_value,omitzero" jsonschema_description:"What it is worth now, in the family's currency."`
+	LoanCount     *int     `json:"loan_count,omitzero" jsonschema_description:"Loans tied to it; list them with loan_find vehicle_id."`
+	BillCount     *int     `json:"bill_count,omitzero" jsonschema_description:"Bills tied to it (insurance, registration), listed in related."`
+}
+
 // vehicleData is one vehicle in vehicle_find's output. IDs are strings (a
-// uuid.UUID would be advertised as a byte array in the outputSchema).
+// uuid.UUID would be advertised as a byte array in the outputSchema). Money is
+// embedded and filled only for a role that may see it.
 type vehicleData struct {
 	ID              string          `json:"id" jsonschema_description:"The vehicle_id to pass to loan_find, loan_create, maintenance_find or maintenance_create."`
 	Name            string          `json:"name" jsonschema_description:"Year, make and model, e.g. 2022 Honda Odyssey."`
@@ -94,23 +123,23 @@ type vehicleData struct {
 	LicensePlate    *string         `json:"license_plate"`
 	Color           *string         `json:"color"`
 	Notes           *string         `json:"notes"`
-	PurchasePrice   *float64        `json:"purchase_price"`
-	PurchaseDate    *string         `json:"purchase_date" jsonschema_description:"YYYY-MM-DD."`
-	CurrentValue    *float64        `json:"current_value" jsonschema_description:"What it is worth now, in the family's currency."`
-	LoanCount       int             `json:"loan_count" jsonschema_description:"Loans tied to it; list them with loan_find vehicle_id."`
-	BillCount       int             `json:"bill_count" jsonschema_description:"Bills tied to it (insurance, registration), listed in related."`
 	OpenUpkeepCount int             `json:"open_upkeep_count" jsonschema_description:"Pending upkeep tasks; list them with maintenance_find vehicle_id."`
 	CreatedAt       time.Time       `json:"created_at"`
 	UpdatedAt       time.Time       `json:"updated_at"`
 	Related         *vehicleRelated `json:"related,omitempty" jsonschema_description:"Only when id is given: its loans, bills and pending upkeep."`
 	Duplicate       bool            `json:"duplicate,omitempty" jsonschema_description:"vehicle_create only: true when the same vehicle was added minutes ago and was returned instead."`
 	Changed         []string        `json:"changed,omitempty" jsonschema_description:"vehicle_update only: the fields that changed."`
+
+	vehicleMoney
 }
 
-// vehicleRelated is what is linked to one vehicle by vehicle_id.
+// vehicleRelated is what is linked to one vehicle by vehicle_id. Loans and
+// bills are money records with their own names, so they are omitted entirely
+// for a role without money (a nil slice with omitzero is absent; a money role
+// still gets [] rather than null). Upkeep carries no amount and stays.
 type vehicleRelated struct {
-	Loans  []relatedLoan   `json:"loans"`
-	Bills  []relatedBill   `json:"bills"`
+	Loans  []relatedLoan   `json:"loans,omitzero" jsonschema_description:"Loans tied to it."`
+	Bills  []relatedBill   `json:"bills,omitzero" jsonschema_description:"Bills tied to it (insurance, registration)."`
 	Upkeep []relatedUpkeep `json:"upkeep" jsonschema_description:"Pending upkeep tasks, soonest first."`
 }
 
@@ -156,22 +185,29 @@ func (r vehicleRow) displayName() string {
 	return strings.Join(parts, " ")
 }
 
-func (r vehicleRow) data() vehicleData {
+// data builds one vehicle's output. withMoney (the caller's auth.CanSeeMoney)
+// decides the money block: false leaves it zero, so the fields are absent.
+func (r vehicleRow) data(withMoney bool) vehicleData {
 	d := vehicleData{
 		ID: r.ID.String(), Name: r.displayName(), Year: r.Year, Make: r.Make, Model: r.Model,
 		VIN: r.VIN, LicensePlate: r.LicensePlate, Color: r.Color, Notes: r.Notes,
-		PurchasePrice: r.PurchasePrice, CurrentValue: r.CurrentValue,
-		LoanCount: r.Loans, BillCount: r.Bills, OpenUpkeepCount: r.OpenUpkeep,
-		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+		OpenUpkeepCount: r.OpenUpkeep, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	if r.PurchaseDate != nil {
-		d.PurchaseDate = dateOnly(*r.PurchaseDate)
+	if withMoney {
+		d.vehicleMoney = vehicleMoney{
+			PurchasePrice: r.PurchasePrice, CurrentValue: r.CurrentValue,
+			LoanCount: r.Loans, BillCount: r.Bills,
+		}
+		if r.PurchaseDate != nil {
+			d.PurchaseDate = dateOnly(*r.PurchaseDate)
+		}
 	}
 	return d
 }
 
 // describe is a short phrase for summaries, e.g. "plate ABC123, worth
-// $22,000.00, 1 loan".
+// $22,000.00, 1 loan". The money parts are absent for a role without money,
+// because the fields they read are unset.
 func (d vehicleData) describe() string {
 	var parts []string
 	if d.LicensePlate != nil {
@@ -180,11 +216,11 @@ func (d vehicleData) describe() string {
 	if d.CurrentValue != nil {
 		parts = append(parts, "worth "+money(*d.CurrentValue))
 	}
-	if d.LoanCount > 0 {
-		parts = append(parts, plural(d.LoanCount, "loan"))
+	if d.LoanCount != nil && *d.LoanCount > 0 {
+		parts = append(parts, plural(*d.LoanCount, "loan"))
 	}
-	if d.BillCount > 0 {
-		parts = append(parts, plural(d.BillCount, "bill"))
+	if d.BillCount != nil && *d.BillCount > 0 {
+		parts = append(parts, plural(*d.BillCount, "bill"))
 	}
 	if d.OpenUpkeepCount > 0 {
 		parts = append(parts, plural(d.OpenUpkeepCount, "pending upkeep task"))
@@ -193,50 +229,59 @@ func (d vehicleData) describe() string {
 }
 
 // loadRelated loads the loans, bills and pending upkeep tied to one vehicle.
+// withMoney (the caller's auth.CanSeeMoney) decides the two money groups: for
+// a role without money the loan and bill queries are not run at all and both
+// slices stay nil, so `related` carries only upkeep (a nil slice with omitzero
+// serializes nothing; the [] a money role gets is unaffected).
 func loadRelated(ctx context.Context, q interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}, vehicleID uuid.UUID, householdID string) (*vehicleRelated, error) {
-	rel := &vehicleRelated{Loans: []relatedLoan{}, Bills: []relatedBill{}, Upkeep: []relatedUpkeep{}}
-
-	rows, err := q.Query(ctx, `SELECT t.id, t.name, t.lender, t.remaining_balance::float8, t.monthly_payment::float8
-		FROM loans t JOIN vehicles v ON v.id = $1 AND v.household_id = t.household_id
-		WHERE t.household_id = $2 AND `+vehicleLink+` ORDER BY lower(t.name), t.id`, vehicleID, householdID)
-	if err != nil {
-		return nil, fmt.Errorf("load vehicle loans: %w", err)
-	}
-	rel.Loans, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (relatedLoan, error) {
-		var l relatedLoan
-		var id uuid.UUID
-		err := row.Scan(&id, &l.Name, &l.Lender, &l.RemainingBalance, &l.MonthlyPayment)
-		l.ID = id.String()
-		return l, err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("load vehicle loans: %w", err)
+}, vehicleID uuid.UUID, householdID string, withMoney bool) (*vehicleRelated, error) {
+	rel := &vehicleRelated{Upkeep: []relatedUpkeep{}}
+	if withMoney {
+		rel.Loans, rel.Bills = []relatedLoan{}, []relatedBill{}
 	}
 
-	rows, err = q.Query(ctx, `SELECT t.id, t.name, t.amount::float8, t.frequency, t.due_day, t.due_date
-		FROM bills t JOIN vehicles v ON v.id = $1 AND v.household_id = t.household_id
-		WHERE t.household_id = $2 AND `+vehicleLink+` ORDER BY lower(t.name), t.id`, vehicleID, householdID)
-	if err != nil {
-		return nil, fmt.Errorf("load vehicle bills: %w", err)
-	}
-	rel.Bills, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (relatedBill, error) {
-		var b relatedBill
-		var id uuid.UUID
-		var due *time.Time
-		err := row.Scan(&id, &b.Name, &b.Amount, &b.Frequency, &b.DueDay, &due)
-		b.ID = id.String()
-		if due != nil {
-			b.DueDate = dateOnly(*due)
+	if withMoney {
+		rows, err := q.Query(ctx, `SELECT t.id, t.name, t.lender, t.remaining_balance::float8, t.monthly_payment::float8
+			FROM loans t JOIN vehicles v ON v.id = $1 AND v.household_id = t.household_id
+			WHERE t.household_id = $2 AND `+vehicleLink+` ORDER BY lower(t.name), t.id`, vehicleID, householdID)
+		if err != nil {
+			return nil, fmt.Errorf("load vehicle loans: %w", err)
 		}
-		return b, err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("load vehicle bills: %w", err)
+		rel.Loans, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (relatedLoan, error) {
+			var l relatedLoan
+			var id uuid.UUID
+			err := row.Scan(&id, &l.Name, &l.Lender, &l.RemainingBalance, &l.MonthlyPayment)
+			l.ID = id.String()
+			return l, err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("load vehicle loans: %w", err)
+		}
+
+		rows, err = q.Query(ctx, `SELECT t.id, t.name, t.amount::float8, t.frequency, t.due_day, t.due_date
+			FROM bills t JOIN vehicles v ON v.id = $1 AND v.household_id = t.household_id
+			WHERE t.household_id = $2 AND `+vehicleLink+` ORDER BY lower(t.name), t.id`, vehicleID, householdID)
+		if err != nil {
+			return nil, fmt.Errorf("load vehicle bills: %w", err)
+		}
+		rel.Bills, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (relatedBill, error) {
+			var b relatedBill
+			var id uuid.UUID
+			var due *time.Time
+			err := row.Scan(&id, &b.Name, &b.Amount, &b.Frequency, &b.DueDay, &due)
+			b.ID = id.String()
+			if due != nil {
+				b.DueDate = dateOnly(*due)
+			}
+			return b, err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("load vehicle bills: %w", err)
+		}
 	}
 
-	rows, err = q.Query(ctx, `SELECT id, name, status::text, due_date
+	rows, err := q.Query(ctx, `SELECT id, name, status::text, due_date
 		FROM maintenance_tasks
 		WHERE vehicle_id = $1 AND household_id = $2 AND status IN ('pending', 'in_progress')
 		ORDER BY due_date NULLS LAST, lower(name), id`, vehicleID, householdID)

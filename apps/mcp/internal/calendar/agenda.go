@@ -603,7 +603,11 @@ func (b *agendaBuilder) loadEvents(ctx context.Context, pool *pgxpool.Pool, hous
 		return
 	}
 	b.res.Coverage.Calendars = cals
-	events, truncated, err := queryOccurrences(ctx, pool, householdID, b.loc, nil, dayStart, dayEnd)
+	// Read with the caller's per-record view, not the family-wide one: a bill's
+	// mirror event carries the bill's name and "Amount: $X" in its description
+	// and is dropped whole for a role that may not see money (#4808), the same
+	// rule event_find applies.
+	events, truncated, err := queryOccurrencesAs(ctx, pool, eventView{role: b.view.role}, householdID, b.loc, nil, dayStart, dayEnd)
 	if err != nil {
 		slog.Error("agenda_get: query events error", "error", err)
 		b.res.Warnings = append(b.res.Warnings, "Could not load events; do not assume the days are free.")

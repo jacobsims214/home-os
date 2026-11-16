@@ -223,6 +223,11 @@ type eventRow struct {
 	UpdatedAt    time.Time
 	Rrule        *string
 	IcalRaw      *string
+	// CalendarType is calendars.type ('family', 'bills', 'maintenance',
+	// 'vehicles', 'properties', 'custom'): the calendar's kind, which together
+	// with EntityType (the record the event mirrors, #4807) says what kind of
+	// record the event is for the role view (#4808).
+	CalendarType string
 }
 
 // parseEventFromRow decodes a calendar_objects row. All-day events come back
@@ -520,11 +525,17 @@ func loadHouseholdLocation(ctx context.Context, pool *pgxpool.Pool, householdID 
 
 // eventColumns selects an eventRow from calendar_objects co JOIN calendars c;
 // scanEventRow reads it.
-const eventColumns = `co.id::text, co.calendar_id::text, co.ical_data, co.event_type, co.entity_type::text, c.name, co.created_at, co.updated_at, co.rrule, co.ical_raw`
+// eventColumns selects an eventRow from calendar_objects co JOIN calendars c.
+// c.type is the calendar's kind ('family', 'bills', 'maintenance', 'vehicles',
+// 'properties', 'custom'), which the role view needs to decide whether the
+// caller may see this event at all (#4808); co.entity_type is the record the
+// event mirrors (#4807).
+const eventColumns = `co.id::text, co.calendar_id::text, co.ical_data, co.event_type, co.entity_type::text, c.name, co.created_at, co.updated_at, co.rrule, co.ical_raw, c.type::text`
 
 func scanEventRow(row pgx.Row) (eventRow, error) {
 	var r eventRow
-	err := row.Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.EntityType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt, &r.Rrule, &r.IcalRaw)
+	err := row.Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.EntityType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt,
+		&r.Rrule, &r.IcalRaw, &r.CalendarType)
 	return r, err
 }
 
@@ -544,6 +555,21 @@ func queryEvents(ctx context.Context, pool querier, householdID string, loc *tim
 // occurrences in the range, of which only the first ones are returned. With
 // a zero range, series come back unexpanded.
 func queryOccurrences(ctx context.Context, pool querier, householdID string, loc *time.Location, calendarIDs []string, startDate, endDate time.Time) (events []Event, truncated []string, err error) {
+	return queryOccurrencesAs(ctx, pool, eventView{role: roleFamily}, householdID, loc, calendarIDs, startDate, endDate)
+}
+
+// roleFamily is the role that sees every event, used by the reads that serve a
+// family-only write (event_create's read-back, event_update's, event_delete's)
+// or an internal caller whose caller already passed the policy (the API's
+// RequirePolicy is per route). It is a role name from the policy table, not a
+// bypass: a read that serves a caller goes through queryOccurrencesAs with that
+// caller's view.
+const roleFamily = "family_member"
+
+// queryOccurrencesAs is queryOccurrences for one role: rows the role may not
+// see are dropped before parsing, so a bill mirror's amount never even reaches
+// the process, and every occurrence of a hidden series goes with its row.
+func queryOccurrencesAs(ctx context.Context, pool querier, view eventView, householdID string, loc *time.Location, calendarIDs []string, startDate, endDate time.Time) (events []Event, truncated []string, err error) {
 	// Base query: join calendar_objects with calendars for household scoping
 	query := `SELECT ` + eventColumns + `
 		FROM calendar_objects co
@@ -597,6 +623,12 @@ func queryOccurrences(ctx context.Context, pool querier, householdID string, loc
 			slog.Warn("calendar: query events: scan error", "error", err)
 			continue
 		}
+		// The role view drops the row before it is parsed: a bill mirror's
+		// amount, category, autopay flag and payment URL never enter the
+		// process for a role that may not see money (#4808).
+		if !view.rowVisible(row) {
+			continue
+		}
 		ev, series, err := parseRow(row, loc)
 		if err != nil {
 			slog.Warn("calendar: query events: parse error", "event_id", row.ID, "error", err)
@@ -628,7 +660,14 @@ func queryOccurrences(ctx context.Context, pool querier, householdID string, loc
 // household-local days, so one on 11/18 conflicts with any range touching
 // 11/18 household time and none on 11/19. Always returns a non-nil slice.
 func findConflicts(ctx context.Context, pool querier, householdID string, loc *time.Location, calendarIDs []string, start, end time.Time, excludeID string) ([]ConflictEvent, error) {
-	events, err := queryEvents(ctx, pool, householdID, loc, calendarIDs, start, end)
+	return findConflictsAs(ctx, pool, eventView{role: roleFamily}, householdID, loc, calendarIDs, start, end, excludeID)
+}
+
+// findConflictsAs is findConflicts for one role: a bill's or an upkeep job's
+// mirror event is not a scheduling conflict, and it must not be named to a role
+// that may not see it either.
+func findConflictsAs(ctx context.Context, pool querier, view eventView, householdID string, loc *time.Location, calendarIDs []string, start, end time.Time, excludeID string) ([]ConflictEvent, error) {
+	events, _, err := queryOccurrencesAs(ctx, pool, view, householdID, loc, calendarIDs, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("query events: %w", err)
 	}
@@ -829,9 +868,10 @@ func LocalDay(start, end string, allDay bool, loc *time.Location) (localStart, l
 // sorted by start instant, exactly as agenda_get lists them (all-day events
 // read as household-local days in loc). Exported for family_overview's
 // next_days (#4385) so both tools agree. Bills' own calendar events are
-// left out (isBillEvent). Always returns a non-nil slice.
-func EventsBetween(ctx context.Context, pool *pgxpool.Pool, householdID string, loc *time.Location, start, end time.Time) ([]Event, error) {
-	events, err := queryEvents(ctx, pool, householdID, loc, nil, start, end)
+// left out (isBillEvent), and so is every record the role may not see:
+// family_overview passes the caller's role through (#4808).
+func EventsBetween(ctx context.Context, pool *pgxpool.Pool, role, householdID string, loc *time.Location, start, end time.Time) ([]Event, error) {
+	events, _, err := queryOccurrencesAs(ctx, pool, eventView{role: role}, householdID, loc, nil, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -888,6 +928,12 @@ func NewCalendarFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		if claims == nil {
 			return authRequired(), nil
 		}
+		// A calendar is listed only when the role may see its kind: the Bills
+		// calendar is money and is not a sitter's business (#4808).
+		view, bad := eventViewFor(ctx, pool, claims)
+		if bad != nil {
+			return bad, nil
+		}
 		cals, err := scanCalendars(ctx, pool,
 			`SELECT id::text, name, type::text, color, property_id::text
 			   FROM calendars WHERE household_id = $1 ORDER BY name`, claims.HouseholdID)
@@ -895,6 +941,7 @@ func NewCalendarFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			slog.Error("calendar_find: query error", "error", err)
 			return respond.Failed("list calendars", err), nil
 		}
+		cals = view.keepCalendars(cals)
 		if len(cals) == 0 {
 			return respond.List("The family has no calendars yet.", cals, respond.Page{}), nil
 		}
@@ -934,6 +981,13 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		if claims == nil {
 			return authRequired(), nil
 		}
+		// The caller's role, re-read from memberships per call, decides which
+		// records are visible: a bill's mirror event carries the bill's name and
+		// "Amount: $X" and is not shown to a role that may not see money (#4808).
+		view, bad := eventViewFor(ctx, pool, claims)
+		if bad != nil {
+			return bad, nil
+		}
 		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
 		args := req.GetArguments()
 
@@ -949,6 +1003,11 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			}
 			if err != nil {
 				return respond.Failed("read the event", err), nil
+			}
+			// A record the role may not see is treated as absent, like a
+			// calendar of another household (#4807's denial semantics).
+			if !view.rowVisible(r) {
+				return respond.NotFound("event", id, "Call event_find with from/to or query to find the event_id."), nil
 			}
 			ev, err := parseEventFromRow(r, loc)
 			if err != nil {
@@ -995,7 +1054,7 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			calendarIDs = []string{cal.ID}
 		}
 
-		events, truncated, err := queryOccurrences(ctx, pool, claims.HouseholdID, loc, calendarIDs, from, to)
+		events, truncated, err := queryOccurrencesAs(ctx, pool, view, claims.HouseholdID, loc, calendarIDs, from, to)
 		if err != nil {
 			slog.Error("event_find: query error", "error", err)
 			return respond.Failed("find events", err), nil
@@ -1303,7 +1362,11 @@ func NewCalendarFindFreeTimeTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		last := days[len(days)-1]
 		queryEnd := time.Date(last.Year(), last.Month(), last.Day()+1, 0, 0, 0, 0, loc)
 
-		events, err := queryEvents(ctx, pool, claims.HouseholdID, loc, calendarIDs, queryStart, queryEnd)
+		role, _, bad := callerRoleOf(ctx, pool, claims)
+		if bad != nil {
+			return bad, nil
+		}
+		events, _, err := queryOccurrencesAs(ctx, pool, eventView{role: role}, claims.HouseholdID, loc, calendarIDs, queryStart, queryEnd)
 		if err != nil {
 			return respond.Failed("read the calendar", err), nil
 		}
