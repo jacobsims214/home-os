@@ -31,10 +31,41 @@ namespace: home-os
 envoy:
   enabled: true
   # Pinned: runs as uid 101 (the image's envoy user), see templates/envoy.
-  image: envoyproxy/envoy:v1.31.10
+  # >= 1.34 is required for the per-IP Dex login limit below (dynamic
+  # descriptors, XffConfig.xff_trusted_cidrs).
+  image: envoyproxy/envoy:v1.39.6
   port: 8000
   https:
     enabled: false
+  # Per-client-IP brute-force throttle on Dex's login pages (#4686). Dex has no
+  # login throttling of its own. This covers every request under /dex/auth: the
+  # authorize endpoint, /dex/auth/local and the password form POST at
+  # /dex/auth/local/login. It's keyed on the whole prefix so that a re-encoded
+  # connector segment can't slip past it. Past the budget, Envoy answers 429.
+  # /dex/token, /dex/keys, /dex/userinfo and openid-configuration are not
+  # limited, so token refresh is unaffected. A normal login is about 4 requests
+  # (authorize, redirect, form, POST); a wrong password re-posts the form.
+  # Envoy runs one replica and buckets are in memory, so the budget is exact
+  # (it resets when the pod restarts).
+  dexLoginRateLimit:
+    enabled: true
+    # Sustained requests per client per minute.
+    requestsPerMinute: 10
+    # Bucket size: requests a client may make at once before the rate applies.
+    burst: 20
+    # IPv6 clients are keyed per prefix of this length, because one host
+    # usually owns a whole /64. IPv4 clients are keyed per address.
+    ipv6PrefixLen: 64
+    # Number of client buckets Envoy keeps (least recently used are evicted).
+    maxClients: 10000
+  # Networks of the reverse proxies in front of Envoy. The client is the
+  # rightmost X-Forwarded-For hop outside these, so it's the same rule as the
+  # API's limiter. Empty = reuse api.rateLimit.trustedProxies (pod CIDR plus
+  # Cloudflare ranges) so the two limiters key on the same address. Don't add
+  # LAN ranges: a client inside a trusted range could pick its own key.
+  # Behind Cloudflare, Traefik must also trust Cloudflare's ranges
+  # (forwardedHeaders.trustedIPs) or every client is keyed as a Cloudflare edge.
+  trustedProxies: []
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 256Mi }
