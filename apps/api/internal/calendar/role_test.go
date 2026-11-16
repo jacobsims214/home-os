@@ -384,6 +384,65 @@ func TestCalendarRepoHidesByKind(t *testing.T) {
 	assert.Equal(t, "Bills", cal.Name)
 }
 
+// TestListAllEventsPropertyFilterKeepsRoleArgument covers the ?property_id=
+// path of ListAllEvents, where the role's SQL placeholder is computed before
+// rangeFilter appends its own arguments: a mis-numbered placeholder would
+// either compare the role to a timestamp or bind the property to the role.
+func TestListAllEventsPropertyFilterKeepsRoleArgument(t *testing.T) {
+	f := setupRoles(t)
+	ctx := context.Background()
+	repo := NewRepo(f.pool)
+	hid := uuid.MustParse(f.household)
+
+	var propID string
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`INSERT INTO properties (household_id, name) VALUES ($1, 'Lake House') RETURNING id::text`,
+		f.household).Scan(&propID))
+	// A property calendar with an ordinary event on it, and a bill bound to the
+	// property so its mirror also reaches the property-filtered listing.
+	var propCal string
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`INSERT INTO calendars (household_id, property_id, name, type, caldav_uid)
+		 VALUES ($1, $2, 'Lake House', 'properties', gen_random_uuid()::text) RETURNING id::text`,
+		f.household, propID).Scan(&propCal))
+	_, err := f.pool.Exec(ctx,
+		`INSERT INTO calendar_objects (id, calendar_id, uid, ical_data, etag, event_type)
+		 VALUES (gen_random_uuid(), $1, gen_random_uuid()::text,
+		         '{"title":"Cleaners","start":"2026-11-25T15:00:00Z","end":"2026-11-25T16:00:00Z","event_type":"custom"}',
+		         gen_random_uuid()::text, 'custom')`, propCal)
+	require.NoError(t, err)
+	_, err = f.pool.Exec(ctx,
+		`INSERT INTO calendar_objects (id, calendar_id, uid, ical_data, etag, event_type, entity_type, entity_id)
+		 VALUES (gen_random_uuid(), $1, gen_random_uuid()::text,
+		         '{"title":"Pay the electrician","start":"2026-11-26T15:00:00Z","end":"2026-11-26T16:00:00Z","event_type":"custom"}',
+		         gen_random_uuid()::text, 'custom', 'bill', $2)`, propCal, f.bill)
+	require.NoError(t, err)
+
+	propIDParsed := uuid.MustParse(propID)
+	loc := repo.HouseholdLocation(ctx, hid)
+
+	// No window at all: the property filter and the role are the only
+	// arguments, and a housesitter still loses the bill-linked event.
+	events, err := repo.ListAllEvents(ctx, hid, EventRange{}, &propIDParsed, loc, auth.RoleHousesitter)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, "Cleaners", events[0].Title)
+
+	// With a window, rangeFilter appends after the role: a wrong placeholder
+	// would make Postgres compare a timestamptz to a text role and error.
+	from := mustDate(t, "2026-11-20")
+	to := mustDate(t, "2026-11-30")
+	events, err = repo.ListAllEvents(ctx, hid, EventRange{Start: &from, End: &to}, &propIDParsed, loc, auth.RoleHousesitter)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, "Cleaners", events[0].Title)
+
+	// The family sees both, so the filter is the role's and not the window's.
+	events, err = repo.ListAllEvents(ctx, hid, EventRange{Start: &from, End: &to}, &propIDParsed, loc, auth.RoleOwner)
+	require.NoError(t, err)
+	assert.Len(t, events, 2)
+}
+
 // TestCalendarPolicyAsksThePolicyTable pins the rule to the one policy table:
 // the visibility of each kind for each role must equal auth.CanSeeEntity, so a
 // change to roles.go cannot leave the calendar routes behind.
