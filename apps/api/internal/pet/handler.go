@@ -37,11 +37,21 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexPet(ctx context.Context, p *Pet) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("pet: panic during search indexing", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("pet: panic during search indexing", "panic", r)
+		}
+	}()
 	body := ""
-	if p.Species != nil { body = *p.Species }
-	if p.Breed != nil { body += " " + *p.Breed }
+	if p.Species != nil {
+		body = *p.Species
+	}
+	if p.Breed != nil {
+		body += " " + *p.Breed
+	}
 	doc := search.SearchDocument{
 		ID: "pet-" + p.ID.String(), HouseholdID: p.HouseholdID.String(),
 		EntityType: "pet", EntityID: p.ID.String(),
@@ -54,8 +64,14 @@ func (h *Handler) indexPet(ctx context.Context, p *Pet) {
 }
 
 func (h *Handler) deletePetIndex(ctx context.Context, id string) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("pet: panic during search deletion", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("pet: panic during search deletion", "panic", r)
+		}
+	}()
 	if err := h.search.DeleteDocument(context.Background(), "pet-"+id); err != nil {
 		slog.Warn("pet: failed to delete from search", "id", id, "error", err)
 	}
@@ -63,26 +79,38 @@ func (h *Handler) deletePetIndex(ctx context.Context, id string) {
 
 // --- request / response types ---
 
-type createPetRequest struct {
+// petRequest is the body of POST and PUT /api/v1/pets. PUT is a full replace.
+//
+// The vet is a family vendor: send vet_vendor_id (a vendor of another family
+// is a 404). vet_name / vet_phone are accepted for older clients (the UI
+// still sends them) and are never stored on the pet: when vet_vendor_id is
+// absent they are matched to a family vendor (same name with a compatible
+// phone, or the same phone when there is no name, as migration 043 did) or a
+// new vendor with trades ["vet"] is created. vet_vendor_id wins when both
+// are sent. Sending neither clears the vet.
+type petRequest struct {
 	Name        string     `json:"name"`
 	Species     *string    `json:"species"`
 	Breed       *string    `json:"breed"`
 	DateOfBirth *time.Time `json:"date_of_birth"`
+	VetVendorID *uuid.UUID `json:"vet_vendor_id"`
 	VetName     *string    `json:"vet_name"`
 	VetPhone    *string    `json:"vet_phone"`
 	Notes       *string    `json:"notes"`
 }
 
-type updatePetRequest struct {
-	Name        string     `json:"name"`
-	Species     *string    `json:"species"`
-	Breed       *string    `json:"breed"`
-	DateOfBirth *time.Time `json:"date_of_birth"`
-	VetName     *string    `json:"vet_name"`
-	VetPhone    *string    `json:"vet_phone"`
-	Notes       *string    `json:"notes"`
+func (req petRequest) pet() (*Pet, VetRef) {
+	return &Pet{
+		Name:        req.Name,
+		Species:     req.Species,
+		Breed:       req.Breed,
+		DateOfBirth: req.DateOfBirth,
+		VetVendorID: req.VetVendorID,
+		Notes:       req.Notes,
+	}, VetRef{Name: req.VetName, Phone: req.VetPhone}
 }
 
+// petResponse: vet_name and vet_phone are the vet vendor's name and phone.
 type petResponse struct {
 	ID          string     `json:"id"`
 	HouseholdID string     `json:"household_id"`
@@ -90,6 +118,7 @@ type petResponse struct {
 	Species     *string    `json:"species,omitempty"`
 	Breed       *string    `json:"breed,omitempty"`
 	DateOfBirth *time.Time `json:"date_of_birth,omitempty"`
+	VetVendorID *string    `json:"vet_vendor_id,omitempty"`
 	VetName     *string    `json:"vet_name,omitempty"`
 	VetPhone    *string    `json:"vet_phone,omitempty"`
 	Notes       *string    `json:"notes,omitempty"`
@@ -98,6 +127,11 @@ type petResponse struct {
 }
 
 func toPetResponse(p *Pet) petResponse {
+	var vetID *string
+	if p.VetVendorID != nil {
+		s := p.VetVendorID.String()
+		vetID = &s
+	}
 	return petResponse{
 		ID:          p.ID.String(),
 		HouseholdID: p.HouseholdID.String(),
@@ -105,6 +139,7 @@ func toPetResponse(p *Pet) petResponse {
 		Species:     p.Species,
 		Breed:       p.Breed,
 		DateOfBirth: p.DateOfBirth,
+		VetVendorID: vetID,
 		VetName:     p.VetName,
 		VetPhone:    p.VetPhone,
 		Notes:       p.Notes,
@@ -189,7 +224,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req createPetRequest
+	var req petRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		apierr.BadRequest(w, "invalid request body")
 		return
@@ -200,19 +235,11 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p := &Pet{
-		Name:        req.Name,
-		Species:     req.Species,
-		Breed:       req.Breed,
-		DateOfBirth: req.DateOfBirth,
-		VetName:     req.VetName,
-		VetPhone:    req.VetPhone,
-		Notes:       req.Notes,
-	}
+	p, vet := req.pet()
 
-	created, err := h.repo.Create(r.Context(), hid, p)
+	created, err := h.repo.Create(r.Context(), hid, p, vet)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 
@@ -238,7 +265,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req updatePetRequest
+	var req petRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		apierr.BadRequest(w, "invalid request body")
 		return
@@ -249,19 +276,11 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p := &Pet{
-		Name:        req.Name,
-		Species:     req.Species,
-		Breed:       req.Breed,
-		DateOfBirth: req.DateOfBirth,
-		VetName:     req.VetName,
-		VetPhone:    req.VetPhone,
-		Notes:       req.Notes,
-	}
+	p, vet := req.pet()
 
-	updated, err := h.repo.Update(r.Context(), hid, id, p)
+	updated, err := h.repo.Update(r.Context(), hid, id, p, vet)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 	if updated == nil {

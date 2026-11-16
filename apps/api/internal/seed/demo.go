@@ -333,19 +333,29 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 
 		slog.Info("demo seed: created 3 vehicles")
 
-		// 8. Create pets
+		// 8. Create pets. The vet is a family vendor with trade "vet"
+		// (pets.vet_vendor_id); pets.vet_name / vet_phone are legacy and are
+		// not written, so 043's vet backfill has nothing to pick up.
+		var vetVendorID uuid.UUID
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO vendors (household_id, name, specialty, phone, trades)
+			 VALUES ($1, $2, $3, $4, ARRAY['vet'])
+			 RETURNING id`,
+			householdID, "Springfield Animal Hospital", "Veterinarian", "555-0100",
+		).Scan(&vetVendorID); err != nil {
+			return fmt.Errorf("insert vet vendor: %w", err)
+		}
+
 		type petDef struct {
 			name        string
 			species     string
 			breed       string
 			dateOfBirth string
-			vetName     string
-			vetPhone    string
 		}
 
 		pets := []petDef{
-			{"Max", "Dog", "Golden Retriever", "2020-03-15", "Springfield Animal Hospital", "555-0100"},
-			{"Luna", "Cat", "Domestic Shorthair", "2021-07-04", "Springfield Animal Hospital", "555-0100"},
+			{"Max", "Dog", "Golden Retriever", "2020-03-15"},
+			{"Luna", "Cat", "Domestic Shorthair", "2021-07-04"},
 		}
 
 		for _, p := range pets {
@@ -354,15 +364,15 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 				return fmt.Errorf("parse pet DOB for %s: %w", p.name, err)
 			}
 			if _, err := pool.Exec(ctx,
-				`INSERT INTO pets (household_id, name, species, breed, date_of_birth, vet_name, vet_phone)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				householdID, p.name, p.species, p.breed, dob, p.vetName, p.vetPhone,
+				`INSERT INTO pets (household_id, name, species, breed, date_of_birth, vet_vendor_id)
+				 VALUES ($1, $2, $3, $4, $5, $6)`,
+				householdID, p.name, p.species, p.breed, dob, vetVendorID,
 			); err != nil {
 				return fmt.Errorf("insert pet %s: %w", p.name, err)
 			}
 		}
 
-		slog.Info("demo seed: created 2 pets")
+		slog.Info("demo seed: created 2 pets and their vet vendor")
 
 		// 9. Create vendors
 		type vendorDef struct {
