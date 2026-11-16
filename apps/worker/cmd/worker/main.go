@@ -382,6 +382,37 @@ func insertDueNotifications(ctx context.Context, pool *pgxpool.Pool, now time.Ti
 	return append(allNotifs, maintNotifs...), nil
 }
 
+// recipient is one household member a notification email can go to.
+type recipient struct {
+	Email string
+	Name  string
+}
+
+// householdMembers returns the active members of a household: the people who
+// can still sign in and act on a notification. A deactivated account
+// (users.active = false, the flag auth and CalDAV already reject, migration
+// 037) keeps its membership row, so it has to be filtered here rather than by
+// the membership alone; the in-app notification is suppressed for them on the
+// same grounds (alarms.insertSQL).
+func householdMembers(ctx context.Context, pool *pgxpool.Pool, householdID string) ([]recipient, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT u.email, u.name
+		FROM memberships m
+		JOIN users u ON u.id = m.user_id
+		WHERE m.household_id = $1
+		  AND u.active
+	`, householdID)
+	if err != nil {
+		return nil, err
+	}
+	members, err := pgx.CollectRows(rows, pgx.RowToStructByPos[recipient])
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	return members, nil
+}
+
 // sendNotificationEmails sends HTML email notifications to all household members.
 // It is best-effort: failures are logged but never returned.
 func sendNotificationEmails(ctx context.Context, pool *pgxpool.Pool, smtpClient *smtp.Client, notifs []notif) {
@@ -401,27 +432,11 @@ func sendNotificationEmails(ctx context.Context, pool *pgxpool.Pool, smtpClient 
 	}
 
 	// Pre-load member emails for all affected households.
-	type member struct {
-		Email string
-		Name  string
-	}
-	hhMembers := make(map[string][]member, len(hhIDs))
+	hhMembers := make(map[string][]recipient, len(hhIDs))
 	for _, hhID := range hhIDs {
-		mRows, err := pool.Query(ctx, `
-			SELECT u.email, u.name
-			FROM memberships m
-			JOIN users u ON u.id = m.user_id
-			WHERE m.household_id = $1
-		`, hhID)
+		members, err := householdMembers(ctx, pool, hhID)
 		if err != nil {
 			slog.Error("notification: failed to query household members",
-				"household_id", hhID, "error", err)
-			continue
-		}
-		members, err := pgx.CollectRows(mRows, pgx.RowToStructByPos[member])
-		mRows.Close()
-		if err != nil {
-			slog.Error("notification: failed to collect household members",
 				"household_id", hhID, "error", err)
 			continue
 		}

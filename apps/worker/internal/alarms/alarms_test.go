@@ -239,6 +239,20 @@ func newFixture(t *testing.T, pool *pgxpool.Pool, tz string, members int) fixtur
 	return f
 }
 
+// deactivate flips users.active for one member, as the admin deactivate
+// endpoint does (apps/api/internal/admin). The membership row stays, exactly
+// as in production.
+func (f fixture) deactivate(t *testing.T, userID string) {
+	t.Helper()
+	tag, err := f.pool.Exec(context.Background(), `UPDATE users SET active = false WHERE id = $1`, userID)
+	if err != nil {
+		t.Fatalf("deactivate %s: %v", userID, err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("deactivate %s: %d rows, want 1", userID, tag.RowsAffected())
+	}
+}
+
 func (f fixture) addObject(t *testing.T, uid string, raw *string) string {
 	t.Helper()
 	var id string
@@ -324,6 +338,42 @@ func TestProcess(t *testing.T) {
 			if n.EntityType != EntityType || n.EntityID != obj {
 				t.Errorf("notification about %s %s, want %s %s", n.EntityType, n.EntityID, EntityType, obj)
 			}
+		}
+	})
+
+	// Regression for #4873 (code review #4499, Significant #3): the insert
+	// targeted every membership row, so a deactivated user — who can no longer
+	// sign in — kept receiving calendar_alarm notifications that piled up
+	// unread. users.active has to gate the insert, not just auth and CalDAV.
+	t.Run("deactivated member gets no calendar_alarm, active members still do", func(t *testing.T) {
+		f := newFixture(t, pool, "UTC", 3)
+		inactive := f.members[1]
+		f.deactivate(t, inactive)
+		raw := ics(event("gathering", "DTSTART:20261209T150000Z", "DTEND:20261209T160000Z", "-PT30M")...)
+		f.addObject(t, "gathering", &raw)
+
+		if n := process(t, New(pool), mustTime(t, "2026-12-09T14:30:00Z")); n != 2 {
+			t.Fatalf("inserted %d, want 2 (one per active member, none for the deactivated one)", n)
+		}
+
+		got := f.notifications(t)
+		notified := map[string]bool{}
+		for _, n := range got {
+			notified[n.UserID] = true
+		}
+		if notified[inactive] {
+			t.Errorf("deactivated member %s got a calendar_alarm notification", inactive)
+		}
+		for i, m := range f.members {
+			if m == inactive {
+				continue
+			}
+			if !notified[m] {
+				t.Errorf("active member %d (%s) got no notification", i, m)
+			}
+		}
+		if len(got) != 2 {
+			t.Fatalf("notifications = %d, want 2 (active members only): %+v", len(got), got)
 		}
 	})
 

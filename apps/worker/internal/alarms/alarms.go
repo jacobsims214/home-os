@@ -183,10 +183,16 @@ const candidatesSQL = `
 // about the event ($6), skipping members who already have a notification for
 // this firing key ($7). The partial unique index idx_notifications_dedupe
 // (migration 056) makes the skip race-free.
+//
+// Only active users are notified: a deactivated account (users.active = false,
+// the flag auth and CalDAV already reject, migration 037) can no longer sign
+// in, so a reminder it cannot act on would only pile up unread. The JOIN also
+// covers the case of a membership left behind by a deactivated user.
 const insertSQL = `
 	INSERT INTO notifications (household_id, user_id, type, title, body, entity_type, entity_id, dedupe_key)
 	SELECT $1::uuid, m.user_id, $2::varchar, $3::varchar, $4::text, $5::varchar, $6::uuid, $7::text
 	FROM memberships m
+	JOIN users u ON u.id = m.user_id AND u.active
 	WHERE m.household_id = $1::uuid
 	ON CONFLICT (user_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
 `
