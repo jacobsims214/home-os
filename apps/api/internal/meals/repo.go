@@ -131,6 +131,11 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 	return &Repo{pool: pool}
 }
 
+// Pool exposes the connection pool. The grocery merge (#4568) needs it to call
+// lists.Repo.MergeItems: that write belongs to the lists package, not this one,
+// so the merge does not fork the idempotent-add rule.
+func (r *Repo) Pool() *pgxpool.Pool { return r.pool }
+
 const recipeCols = `id, household_id, title, description, servings, prep_minutes, cook_minutes,
 	ingredients, steps, tags, source_url, created_at, updated_at`
 
