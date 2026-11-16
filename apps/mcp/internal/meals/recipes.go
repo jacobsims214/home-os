@@ -126,7 +126,7 @@ type AllergyWarning struct {
 	Person     string `json:"person"`
 	PersonID   string `json:"person_id"`
 	Allergy    string `json:"allergy" jsonschema_description:"The allergy as saved on the person, e.g. tree nuts."`
-	Ingredient string `json:"ingredient" jsonschema_description:"The ingredient that matched, e.g. walnuts."`
+	Ingredient string `json:"ingredient" jsonschema_description:"The ingredient or name that matched, e.g. walnuts."`
 }
 
 // recipeData is one full recipe (recipe_get and the write tools).
@@ -172,6 +172,7 @@ type recipeItem struct {
 	LastMade        *dayData    `json:"last_made"`
 	Matched         []string    `json:"matched,omitempty" jsonschema_description:"Ingredients that matched the ingredient filter."`
 	AllergyWarnings []string    `json:"allergy_warnings,omitempty" jsonschema_description:"e.g. Nora (peanut): peanut butter. Tell the user."`
+	Checks          []string    `json:"checks,omitempty" jsonschema_description:"What could not be checked about this recipe; tell the user."`
 }
 
 // ---------------------------------------------------------------------------
@@ -1096,22 +1097,38 @@ func (m allergyMatcher) matches(item string) bool {
 	return false
 }
 
-// familyAllergies loads every person's allergies as matchers. checks holds
-// one line per allergy that normalised to nothing: it matches no ingredient,
-// so the caller must show it rather than let the warning silently vanish.
-func familyAllergies(ctx context.Context, q querier, hid uuid.UUID) (matchers []allergyMatcher, checks []string, err error) {
+// allergySources is the one loader for the family's allergies (#4803). An
+// allergy can be saved in two places, and both count:
+//
+//  1. people.allergies, the field person_update writes.
+//  2. any person_preferences row whose value or notes mention an allergy,
+//     whatever kind it was filed under: a dietary "Severe shellfish allergy",
+//     an other "tree nuts" noted "allergic", a dislike "sesame" noted
+//     "allergy".
+//
+// Before #4803 only meal_suggest read the second source, so a recipe the
+// suggester refused could be planned with no warning at all.
+//
+// personIDs limits it to those people (meal_suggest's eaters); nil means
+// everyone in the family, an empty slice nobody. checks holds one line per
+// allergy that could not be read as an allergen, so the caller can show it
+// rather than let the warning silently vanish.
+func allergySources(ctx context.Context, q querier, hid uuid.UUID, personIDs []string) (matchers []allergyMatcher, checks []string, err error) {
 	rows, err := q.Query(ctx, `SELECT id::text, display_name, allergies FROM people
-	                            WHERE household_id = $1 AND cardinality(allergies) > 0 ORDER BY lower(display_name), id`, hid)
+	                            WHERE household_id = $1 AND ($2::uuid[] IS NULL OR id = ANY($2::uuid[]))
+	                            ORDER BY lower(display_name), id`, hid, personIDs)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer rows.Close()
+	names := map[string]string{}
 	for rows.Next() {
 		var id, name string
 		var allergies []string
 		if err := rows.Scan(&id, &name, &allergies); err != nil {
 			return nil, nil, err
 		}
+		names[id] = name
 		for _, a := range allergies {
 			if ms := allergyMatchers(id, name, a); len(ms) > 0 {
 				matchers = append(matchers, ms...)
@@ -1120,7 +1137,59 @@ func familyAllergies(ctx context.Context, q querier, hid uuid.UUID) (matchers []
 			}
 		}
 	}
-	return matchers, checks, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	prefs, err := q.Query(ctx, `
+SELECT person_id::text, kind::text, value, coalesce(notes, '')
+  FROM person_preferences
+ WHERE household_id = $1 AND ($2::uuid[] IS NULL OR person_id = ANY($2::uuid[]))
+ ORDER BY person_id, kind, lower(value)`, hid, personIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer prefs.Close()
+	for prefs.Next() {
+		var personID, kind, value, notes string
+		if err := prefs.Scan(&personID, &kind, &value, &notes); err != nil {
+			return nil, nil, err
+		}
+		// Allergy talk anywhere is an allergy, whatever kind it was filed as.
+		if !allergyMention.MatchString(value) && !allergyMention.MatchString(notes) {
+			continue
+		}
+		name := names[personID]
+		// "peanut allergy" -> peanut; a dislike "shrimp" noted "allergic" -> shrimp.
+		found := allergensIn(value)
+		if len(found) == 0 {
+			found = allergensIn(notes)
+		}
+		if kind == "like" && !allergyMention.MatchString(value) {
+			// A like noted "allergic" is contradictory: flag it, and treat it as an allergy.
+			checks = append(checks, fmt.Sprintf("%s has %q saved as a like with the note %q; treated as an allergy.", name, value, notes))
+		}
+		added := 0
+		for _, a := range found {
+			// found is already normalised by allergensIn.
+			if m, ok := newAllergyMatcher(personID, name, a); ok {
+				matchers = append(matchers, m)
+				added++
+			}
+		}
+		if added == 0 {
+			checks = append(checks, fmt.Sprintf("%s has an allergy note %q that could not be read as an allergen; confirm the meal is safe.", name, strings.TrimSpace(value+" "+notes)))
+		}
+	}
+	return matchers, checks, prefs.Err()
+}
+
+// familyAllergies loads every person's allergies as matchers, from both places
+// an allergy can be saved (allergySources). checks holds one line per allergy
+// that could not be read as an allergen: it matches no ingredient, so the
+// caller must show it rather than let the warning silently vanish.
+func familyAllergies(ctx context.Context, q querier, hid uuid.UUID) (matchers []allergyMatcher, checks []string, err error) {
+	return allergySources(ctx, q, hid, nil)
 }
 
 // AllergyWarnings lists the ingredients that match someone's allergy.
@@ -1136,10 +1205,61 @@ func AllergyWarnings(matchers []allergyMatcher, items []string) []AllergyWarning
 	return out
 }
 
+// noIngredientsLine is the one wording for "this recipe has no ingredients
+// saved, so its allergies could only be checked against its name".
+// meal_suggest excludes such a recipe when anyone eating has an allergy (fail
+// closed: an unknown recipe is not a safe recipe), and the recipe and meal
+// tools report the same sentence in checks. One constant, so they cannot drift
+// apart (#4803).
+const noIngredientsLine = "no ingredients saved, can't check allergies"
+
+// checkItems is what a recipe's allergies and diets are checked against: its
+// ingredients, then its name. One helper, so meal_suggest and the recipe and
+// meal warnings look at exactly the same text (#4803).
+func checkItems(title string, ingredients []string) []string {
+	items := slices.Clone(ingredients)
+	if strings.TrimSpace(title) != "" {
+		items = append(items, title)
+	}
+	return items
+}
+
+// recipeAllergyCheck is the one place a recipe's allergies are checked, so
+// recipe_find, recipe_get, meal_set, agenda_get and meal_suggest cannot
+// disagree (#4803). It checks the ingredients and then the recipe's name, and
+// reports the no-ingredients caution when the name is all there is to check.
+func recipeAllergyCheck(matchers []allergyMatcher, title string, ingredients []string) (warnings []AllergyWarning, checks []string) {
+	// One person's allergy can match the same item through two matchers
+	// ("peanuts and nuts"), so drop the repeats here, once, for every caller.
+	seen := map[AllergyWarning]bool{}
+	for _, w := range AllergyWarnings(matchers, checkItems(title, ingredients)) {
+		if !seen[w] {
+			seen[w] = true
+			warnings = append(warnings, w)
+		}
+	}
+	if len(ingredients) == 0 && len(matchers) > 0 {
+		checks = []string{noIngredientsLine}
+	}
+	return warnings, checks
+}
+
 func warningLines(ws []AllergyWarning) []string {
 	var out []string
 	for _, w := range ws {
 		out = append(out, fmt.Sprintf("%s (%s): %s", w.Person, w.Allergy, w.Ingredient))
+	}
+	return out
+}
+
+// dedupeLines drops repeats, keeping the first: one person's allergy can match
+// the same ingredient through two matchers ("peanuts and tree nuts").
+func dedupeLines(lines []string) []string {
+	var out []string
+	for _, l := range lines {
+		if !slices.Contains(out, l) {
+			out = append(out, l)
+		}
 	}
 	return out
 }
@@ -1157,7 +1277,11 @@ func checkSentence(checks []string) string {
 	if len(checks) == 0 {
 		return ""
 	}
-	return " " + strings.Join(checks, " ")
+	s := " " + strings.Join(checks, " ")
+	if !strings.HasSuffix(s, ".") {
+		s += "."
+	}
+	return s
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,8 +1406,10 @@ func loadRecipe(ctx context.Context, q querier, hid, id uuid.UUID, today time.Ti
 	for i, s := range ings {
 		names[i] = s.Name
 	}
-	d.AllergyWarnings = AllergyWarnings(matchers, names)
-	d.Checks = checks
+	// The name counts too, and a recipe with no ingredients says so (#4803).
+	warnings, ingChecks := recipeAllergyCheck(matchers, d.Name, names)
+	d.AllergyWarnings = warnings
+	d.Checks = append(checks, ingChecks...)
 
 	if withFeedback {
 		rows, err := q.Query(ctx, `
@@ -1604,7 +1730,9 @@ SELECT r.id, r.title, r.tags, r.servings, r.prep_minutes, r.cook_minutes,
 					}
 				}
 			}
-			it.AllergyWarnings = warningLines(AllergyWarnings(matchers, ings))
+			w, c := recipeAllergyCheck(matchers, it.Name, ings)
+			it.AllergyWarnings = warningLines(w)
+			it.Checks = c
 			items = append(items, it)
 		}
 		if err := rows.Err(); err != nil {
@@ -1657,7 +1785,13 @@ SELECT r.id, r.title, r.tags, r.servings, r.prep_minutes, r.cook_minutes,
 		if warned > 0 {
 			summary += fmt.Sprintf(" %s contain an allergen for someone in the family (see allergy_warnings).", plural(warned, "recipe"))
 		}
-		summary += checkSentence(allergyChecks)
+		var itemChecks []string
+		for _, it := range items {
+			for _, c := range it.Checks {
+				itemChecks = append(itemChecks, it.Name+": "+c)
+			}
+		}
+		summary += checkSentence(append(allergyChecks, itemChecks...))
 		return respond.List(summary, items, page,
 			fmt.Sprintf("Read ingredients and steps with recipe_get recipe_id=%s.", items[0].ID)), nil
 	}

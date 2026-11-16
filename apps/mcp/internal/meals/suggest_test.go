@@ -284,7 +284,10 @@ func TestMealSuggestNeverSuggestsAllergens(t *testing.T) {
 	st := suggestTool(k.pool)
 	r := st.run(t, k.ctx, map[string]any{"count": 10}).suggest(t)
 	got := suggested(r)
-	for _, bad := range []string{"Satay Noodles", "Shrimp Scampi", "Pesto Pasta", "Sesame Chicken", "Peanut Brittle"} {
+	// Mystery Casserole has no ingredients saved. Someone eating has an
+	// allergy, so it is left out too: an unknown recipe is not a safe recipe
+	// (manager decision on #4803), and the reason is the shared line.
+	for _, bad := range []string{"Satay Noodles", "Shrimp Scampi", "Pesto Pasta", "Sesame Chicken", "Peanut Brittle", "Mystery Casserole"} {
 		if slices.Contains(got, bad) {
 			t.Errorf("suggested %s, which has an allergen: %v", bad, got)
 		}
@@ -292,10 +295,10 @@ func TestMealSuggestNeverSuggestsAllergens(t *testing.T) {
 			t.Errorf("%s not listed in excluded: %+v", bad, r.Excluded)
 		}
 	}
-	if !slices.Equal(got, []string{"Chicken Tacos", "Veggie Curry", "Mystery Casserole"}) {
+	if !slices.Equal(got, []string{"Chicken Tacos", "Veggie Curry"}) {
 		t.Errorf("suggestions = %v", got)
 	}
-	if r.ExcludedTotal != 5 || len(r.Eating) != 4 {
+	if r.ExcludedTotal != 6 || len(r.Eating) != 4 {
 		t.Errorf("excluded_total %d, eating %v", r.ExcludedTotal, r.Eating)
 	}
 	for _, e := range r.Excluded {
@@ -306,16 +309,17 @@ func TestMealSuggestNeverSuggestsAllergens(t *testing.T) {
 			t.Errorf("scampi reason %q", e.Reason)
 		}
 	}
-	// No ingredients saved: suggested, but flagged and ranked last.
-	last := r.Suggestions[len(r.Suggestions)-1]
-	if last.Name != "Mystery Casserole" || len(last.Cautions) == 0 || !strings.Contains(last.Cautions[0], "No ingredients") {
-		t.Errorf("mystery casserole = %+v", last)
+	// No ingredients saved with an allergy in the family: excluded, not hidden.
+	for _, e := range r.Excluded {
+		if e.Name == "Mystery Casserole" && e.Reason != noIngredientsLine {
+			t.Errorf("mystery casserole reason %q, want %q", e.Reason, noIngredientsLine)
+		}
 	}
 	if !slices.ContainsFunc(r.Checks, func(c string) bool { return strings.Contains(c, `"low carb" was not applied`) }) {
 		t.Errorf("checks = %v", r.Checks)
 	}
 	e := st.run(t, k.ctx, map[string]any{})
-	if !strings.Contains(e.Summary, "Left out for allergies or diets") || !strings.Contains(e.Summary, "Caution: No ingredients") {
+	if !strings.Contains(e.Summary, "Left out for allergies or diets") || !strings.Contains(e.Summary, noIngredientsLine) {
 		t.Errorf("summary = %s", e.Summary)
 	}
 

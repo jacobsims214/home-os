@@ -248,7 +248,12 @@ SELECT m.id::text, m.date::text, m.slot, m.title, m.recipe_id::text, m.notes, r.
 		if d, err := time.Parse(time.DateOnly, m.LocalDate); err == nil {
 			m.Weekday = d.Weekday().String()
 		}
-		m.AllergyWarnings = mealWarnings(matchers, m.Title, m.RecipeID != nil, x.ings)
+		w, c := mealWarnings(matchers, m.Title, m.RecipeID != nil, x.ings)
+		m.AllergyWarnings = w
+		for _, line := range c {
+			// Say which meal: the checks list is the whole range's.
+			checks = append(checks, m.Title+": "+line)
+		}
 		index[m.MealID] = len(out)
 		out = append(out, m)
 	}
@@ -283,29 +288,30 @@ SELECT f.meal_plan_id::text, p.display_name, f.person_id::text, f.rating, f.comm
 }
 
 // mealWarnings matches a meal against the family's allergies: a recipe's
-// ingredients, or a free-text meal's own name ("peanut noodles"). The
-// matchers come from familyAllergies, which reads every stored allergy with
-// the same normaliser preference text gets (#4802).
-func mealWarnings(matchers []allergyMatcher, title string, hasRecipe bool, rawIngredients []byte) []string {
+// ingredients and its name, or a free-text meal's own name ("peanut noodles").
+// The matchers come from familyAllergies, which reads every stored allergy
+// with the same normaliser preference text gets (#4802), from both places an
+// allergy can be saved (#4803).
+//
+// A recipe meal with no ingredients saved returns noIngredientsLine as a check:
+// only its name could be checked, which is exactly what meal_suggest says when
+// it leaves such a recipe out (#4803). Free text has no ingredients by
+// definition, so that is not a gap worth reporting.
+func mealWarnings(matchers []allergyMatcher, title string, hasRecipe bool, rawIngredients []byte) (warnings, checks []string) {
 	if len(matchers) == 0 {
-		return nil
-	}
-	var items []string
-	if hasRecipe && len(rawIngredients) > 0 {
-		if ings, err := decodeIngredients(rawIngredients); err == nil {
-			items = ingredientNames(ings)
-		}
+		return nil, nil
 	}
 	if !hasRecipe {
-		items = []string{title}
+		return warningLines(AllergyWarnings(matchers, []string{title})), nil
 	}
-	var out []string
-	for _, l := range warningLines(AllergyWarnings(matchers, items)) {
-		if !slices.Contains(out, l) {
-			out = append(out, l)
+	var ings []string
+	if len(rawIngredients) > 0 {
+		if decoded, err := decodeIngredients(rawIngredients); err == nil {
+			ings = ingredientNames(decoded)
 		}
 	}
-	return out
+	w, c := recipeAllergyCheck(matchers, title, ings)
+	return dedupeLines(warningLines(w)), c
 }
 
 // AgendaMeals is agenda_get's meals area: the meals planned from first to

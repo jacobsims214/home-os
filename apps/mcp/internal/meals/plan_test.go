@@ -212,7 +212,8 @@ func TestMealSetWeek(t *testing.T) {
 		t.Errorf("meals = %+v", m)
 	}
 	// Allergy warnings for the family: a recipe's ingredients, or free text.
-	if !slices.Equal(m[1].Meal.AllergyWarnings, []string{"Nora (peanuts): peanut butter"}) ||
+	// "Satay Noodles" is a second hit: the recipe's name is checked too (#4803).
+	if !slices.Equal(m[1].Meal.AllergyWarnings, []string{"Nora (peanuts): peanut butter", "Nora (peanuts): Satay Noodles"}) ||
 		!slices.Equal(m[6].Meal.AllergyWarnings, []string{"Nora (peanuts): Peanut brittle sundaes"}) || m[0].Meal.AllergyWarnings != nil {
 		t.Errorf("warnings = %v / %v / %v", m[1].Meal.AllergyWarnings, m[6].Meal.AllergyWarnings, m[0].Meal.AllergyWarnings)
 	}

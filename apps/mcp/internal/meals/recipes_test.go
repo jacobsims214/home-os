@@ -694,7 +694,9 @@ func TestRecipeRatingsAndAllergies(t *testing.T) {
 	e := ts.create.run(t, ctx, map[string]any{"name": "Satay Noodles", "ingredients": []any{"200 g rice noodles", "3 tbsp peanut butter", "1 tbsp butter", "1 lime"},
 		"steps": []any{"Cook.", "Toss."}})
 	d := e.recipe(t)
-	if len(d.AllergyWarnings) != 2 || !strings.Contains(e.Summary, "Allergy warning: Nora (peanuts): peanut butter") {
+	// Three hits now: peanut butter and the name ("Satay" is a peanut synonym),
+	// plus butter for the dairy allergy (#4803 checks the title too).
+	if len(d.AllergyWarnings) != 3 || !strings.Contains(e.Summary, "Allergy warning: Nora (peanuts): peanut butter") {
 		t.Fatalf("warnings = %+v / %s", d.AllergyWarnings, e.Summary)
 	}
 	for _, w := range d.AllergyWarnings {
@@ -771,7 +773,10 @@ func TestRecipeWarningsForWordedAllergies(t *testing.T) {
 
 	// recipe_get: the ingredient matches, and the label stays the bare allergen.
 	g := ts.get.run(t, ctx, map[string]any{"recipe_id": d.ID}).recipe(t)
-	if len(g.AllergyWarnings) != 1 || g.AllergyWarnings[0].Allergy != "peanuts" || g.AllergyWarnings[0].Ingredient != "peanut butter" {
+	// The ingredient and the name: "Satay" is a peanut synonym, so the title
+	// is a second hit for Nora (#4803).
+	if len(g.AllergyWarnings) != 2 || g.AllergyWarnings[0].Allergy != "peanuts" || g.AllergyWarnings[0].Ingredient != "peanut butter" ||
+		g.AllergyWarnings[1].Ingredient != "Satay Noodles" {
 		t.Errorf("get warnings = %+v", g.AllergyWarnings)
 	}
 	if !slices.Contains(g.Checks, `Bea has an allergy saved as "allergy" that could not be checked against recipes; confirm the meal is safe.`) {
@@ -781,7 +786,8 @@ func TestRecipeWarningsForWordedAllergies(t *testing.T) {
 	// recipe_find: the same hit, and the summary names the unreadable allergy.
 	e := ts.find.run(t, ctx, map[string]any{"query": "satay"})
 	it := e.items(t)
-	if len(it) != 1 || !slices.Contains(it[0].AllergyWarnings, "Nora (peanuts): peanut butter") {
+	if len(it) != 1 || !slices.Contains(it[0].AllergyWarnings, "Nora (peanuts): peanut butter") ||
+		!slices.Contains(it[0].AllergyWarnings, "Nora (peanuts): Satay Noodles") {
 		t.Errorf("find = %+v", it)
 	}
 	if !strings.Contains(e.Summary, "contain an allergen") || !strings.Contains(e.Summary, `Bea has an allergy saved as "allergy"`) {
@@ -803,7 +809,8 @@ func TestRecipeWarningsForWordedAllergies(t *testing.T) {
 	if err != nil || !allowed || len(plan) != 1 {
 		t.Fatalf("agenda = %+v %v %v %v", plan, checks, allowed, err)
 	}
-	if !slices.Contains(plan[0].AllergyWarnings, "Nora (peanuts): peanut butter") || len(checks) != 1 {
+	if !slices.Contains(plan[0].AllergyWarnings, "Nora (peanuts): peanut butter") ||
+		!slices.Contains(plan[0].AllergyWarnings, "Nora (peanuts): Satay Noodles") || len(checks) != 1 {
 		t.Errorf("agenda meal = %+v / checks %v", plan[0], checks)
 	}
 
