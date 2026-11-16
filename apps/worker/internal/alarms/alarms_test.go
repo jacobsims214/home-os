@@ -361,6 +361,40 @@ func TestProcess(t *testing.T) {
 		}
 	})
 
+	t.Run("bill mirror events are left to bill_due", func(t *testing.T) {
+		f := newFixture(t, pool, "America/New_York", 2)
+		// The bill mirror's shape (#4485): all-day, 3 days before at 09:00 local.
+		bill := ics("BEGIN:VEVENT", "UID:bill-electric", "DTSTAMP:20261101T000000Z", "SUMMARY:Electric due",
+			"DTSTART;VALUE=DATE:20261120", "DTEND;VALUE=DATE:20261121", "RRULE:FREQ=MONTHLY;BYMONTHDAY=20",
+			"BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:Electric is due in 3 days", "TRIGGER:-P2DT15H", "END:VALARM",
+			"END:VEVENT")
+		billObj := f.addObject(t, "bill-electric", &bill)
+		if _, err := pool.Exec(context.Background(), `UPDATE calendar_objects SET event_type = 'bill' WHERE id = $1`, billObj); err != nil {
+			t.Fatal(err)
+		}
+		// An ordinary event whose 30-minute alarm fires at the same instant.
+		plain := ics(event("dentist", "DTSTART;TZID=America/New_York:20261117T093000", "DTEND;TZID=America/New_York:20261117T103000", "-PT30M")...)
+		plainObj := f.addObject(t, "dentist", &plain)
+
+		now := mustTime(t, "2026-11-17T14:00:00Z") // 09:00 EST, when both alarms fire
+		// The bill VALARM itself does fire then; only the job's filter drops it.
+		ny, err := time.LoadLocation("America/New_York")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fs, err := FiringsFor(uuid.New(), uuid.New(), bill, ny, now, DefaultLookback); err != nil || len(fs) != 1 {
+			t.Fatalf("bill raw: %d firings, err %v; want 1 (test setup)", len(fs), err)
+		}
+		if n := process(t, New(pool), now); n != 2 {
+			t.Fatalf("inserted %d, want 2 (ordinary event, one per member)", n)
+		}
+		for _, n := range f.notifications(t) {
+			if n.EntityID != plainObj {
+				t.Errorf("notification %q about %s, want only the ordinary event %s (bill %s)", n.Title, n.EntityID, plainObj, billObj)
+			}
+		}
+	})
+
 	t.Run("deleting the event clears the link, keeps the reminder", func(t *testing.T) {
 		f := newFixture(t, pool, "UTC", 1)
 		raw := ics(event("vet", "DTSTART:20261202T120000Z", "DTEND:20261202T130000Z", "-PT30M")...)

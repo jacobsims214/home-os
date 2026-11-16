@@ -31,6 +31,16 @@
 // all-day events are placed in the household's time zone (households.timezone;
 // UTC when unset or unknown), so a floating 09:00 event with a 30-minute alarm
 // fires at 08:30 household time.
+//
+// # Bill events
+//
+// Bill mirror events on the Bills calendar (event_type 'bill', #4485) are left
+// out. Their VALARM stays in ical_raw so phones keep their native reminder,
+// but the in-app reminder for a bill belongs to the worker's bill_due job: it
+// knows whether the bill is already paid (the mirror event does not change on
+// bill_pay) and it already notifies the family 3 days before the due date, so
+// an alarm notification here would be a duplicate, or a reminder for a paid
+// bill. The match is on event_type, which every bill mirror writer sets.
 package alarms
 
 import (
@@ -157,6 +167,8 @@ type Firing struct {
 
 // candidatesSQL selects objects with stored iCalendar text that mention a
 // VALARM. Rows without ical_raw predate migration 036 and carry no alarms.
+// Bill mirror events (event_type 'bill') are skipped: bill_due owns those
+// reminders (see the package doc).
 const candidatesSQL = `
 	SELECT co.id, c.household_id, h.timezone, co.ical_raw
 	FROM calendar_objects co
@@ -164,6 +176,7 @@ const candidatesSQL = `
 	JOIN households h ON h.id = c.household_id
 	WHERE co.ical_raw IS NOT NULL
 	  AND co.ical_raw ILIKE '%BEGIN:VALARM%'
+	  AND co.event_type IS DISTINCT FROM 'bill'
 `
 
 // insertSQL writes one notification per household member for a firing,
