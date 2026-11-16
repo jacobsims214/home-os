@@ -943,21 +943,88 @@ func phrasePatterns(phrase string) (pg, goRe string, ok bool) {
 
 // allergenGroups expands an allergy to the ingredients that usually carry
 // it. The allergy's own words always match too.
+//
+// Breadth matters more than precision here: a missed allergen can be an
+// anaphylaxis, a needless warning is a nuisance. #4804 widened the groups
+// with the words a parent actually types (#4804), using supermarket names
+// for the same food (penne, naan, mascarpone, squid, soybeans ...).
 var allergenGroups = map[string][]string{
-	"peanut":    {"peanut", "groundnut", "satay"},
-	"nut":       {"almond", "walnut", "pecan", "cashew", "pistachio", "hazelnut", "macadamia", "brazil nut", "pine nut", "nut", "praline", "marzipan", "nutella", "peanut"},
-	"tree nut":  {"almond", "walnut", "pecan", "cashew", "pistachio", "hazelnut", "macadamia", "brazil nut", "pine nut", "praline", "marzipan", "nutella"},
-	"dairy":     {"milk", "butter", "cheese", "cream", "yogurt", "yoghurt", "ghee", "whey", "casein", "buttermilk", "parmesan", "mozzarella", "cheddar", "ricotta", "feta", "half and half", "custard"},
-	"milk":      {"milk", "butter", "cheese", "cream", "yogurt", "yoghurt", "ghee", "whey", "casein", "buttermilk", "parmesan", "mozzarella", "cheddar", "ricotta", "feta", "half and half", "custard"},
-	"lactose":   {"milk", "butter", "cheese", "cream", "yogurt", "yoghurt", "buttermilk", "half and half", "custard", "ricotta"},
-	"egg":       {"egg", "mayonnaise", "mayo", "meringue", "aioli", "custard"},
-	"gluten":    {"wheat", "flour", "bread", "breadcrumb", "panko", "pasta", "spaghetti", "noodle", "couscous", "barley", "rye", "semolina", "farro", "bulgur", "cracker", "tortilla", "soy sauce", "seitan", "malt"},
-	"wheat":     {"wheat", "flour", "bread", "breadcrumb", "panko", "pasta", "spaghetti", "noodle", "couscous", "semolina", "farro", "bulgur", "cracker", "tortilla", "soy sauce", "seitan"},
-	"celiac":    {"wheat", "flour", "bread", "breadcrumb", "panko", "pasta", "spaghetti", "noodle", "couscous", "barley", "rye", "semolina", "farro", "bulgur", "cracker", "tortilla", "soy sauce", "seitan", "malt"},
-	"shellfish": {"shrimp", "prawn", "crab", "lobster", "crayfish", "crawfish", "scallop", "clam", "mussel", "oyster", "shellfish"},
-	"fish":      {"fish", "salmon", "tuna", "cod", "tilapia", "halibut", "anchovy", "sardine", "trout", "haddock", "mackerel", "fish sauce", "worcestershire"},
-	"soy":       {"soy", "soya", "tofu", "edamame", "tempeh", "miso", "soy sauce"},
-	"sesame":    {"sesame", "tahini"},
+	"peanut":   {"peanut", "groundnut", "satay"},
+	"nut":      {"almond", "walnut", "pecan", "cashew", "pistachio", "hazelnut", "macadamia", "brazil nut", "pine nut", "nut", "praline", "marzipan", "nutella", "peanut"},
+	"tree nut": {"almond", "walnut", "pecan", "cashew", "pistachio", "hazelnut", "macadamia", "brazil nut", "pine nut", "praline", "marzipan", "nutella"},
+	// dairy and milk are the same list: a person who says "dairy" and one who
+	// says "milk" are avoiding the same foods (#4804: mascarpone, paneer,
+	// kefir, creme fraiche, the named cheeses).
+	"dairy": dairyFoods,
+	"milk":  dairyFoods,
+	// lactose is dairy too: a lactose-intolerant person may tolerate hard
+	// cheese, but flagging it is the cheaper mistake (#4804).
+	"lactose": dairyFoods,
+	"egg":     {"egg", "mayonnaise", "mayo", "meringue", "aioli", "custard"},
+	// gluten, wheat and celiac differ only where the grain does: malt is
+	// barley, so it is gluten and celiac but not wheat.
+	"gluten":     append(append([]string{}, grainFoods...), "malt"),
+	"wheat":      grainFoods,
+	"celiac":     append(append([]string{}, grainFoods...), "malt"),
+	"shellfish":  shellfishFoods,
+	"crustacean": {"shrimp", "prawn", "crab", "lobster", "crayfish", "crawfish", "langoustine", "scampi", "krill", "shrimp paste", "crab paste"},
+	"mollusc":    molluscFoods,
+	"fish":       {"fish", "salmon", "tuna", "cod", "tilapia", "halibut", "anchovy", "sardine", "trout", "haddock", "mackerel", "fish sauce", "worcestershire", "sea bass", "bass", "snapper", "pollock", "sole", "flounder", "mahi mahi", "swordfish", "catfish", "monkfish", "grouper", "hake", "bream"},
+	"soy":        {"soy", "soya", "soybean", "tofu", "edamame", "tempeh", "miso", "soy sauce", "tamari"},
+	"sesame":     {"sesame", "tahini"},
+}
+
+var (
+	// dairyFoods is every word that means a dairy product (#4804).
+	dairyFoods = []string{"milk", "butter", "ghee", "whey", "casein", "cheese", "cream", "yogurt", "yoghurt",
+		"buttermilk", "half and half", "custard", "parmesan", "parmigiano reggiano", "mozzarella", "cheddar",
+		"ricotta", "feta", "mascarpone", "paneer", "queso", "kefir", "brie", "gruyere", "gruyère", "halloumi",
+		"pecorino", "parmigiano", "creme fraiche", "crème fraîche"}
+
+	// grainFoods is what carries gluten: wheat and the other gluten grains,
+	// and the breads, pasta shapes and pastries made from them (#4804).
+	grainFoods = []string{"wheat", "flour", "bread", "breadcrumb", "panko", "pasta", "spaghetti", "noodle",
+		"couscous", "barley", "rye", "semolina", "farro", "bulgur", "cracker", "tortilla", "soy sauce", "seitan",
+		"penne", "macaroni", "lasagna", "lasagne", "orzo", "ramen", "udon", "naan", "pita", "pitta", "baguette",
+		"sourdough", "puff pastry", "pastry", "phyllo", "filo", "pie crust", "pizza dough", "crouton", "beer",
+		"bagel", "croissant", "donut", "doughnut", "pretzel", "muffin", "scone", "waffle", "pancake", "cookie",
+		"biscuit", "cake", "stuffing"}
+
+	// shellfishFoods is the everyday meaning of "shellfish": crustaceans and
+	// molluscs together (#4804). Crustacean and mollusc allergy are separate
+	// diagnoses, so each has its own group as well.
+	shellfishFoods = []string{"shrimp", "prawn", "crab", "lobster", "crayfish", "crawfish", "langoustine",
+		"scampi", "krill", "shellfish", "squid", "calamari", "octopus", "cuttlefish", "clam", "mussel",
+		"oyster", "scallop", "cockle", "whelk", "abalone", "snail", "escargot"}
+
+	// molluscFoods is a mollusc allergy, which shellfish covers too.
+	molluscFoods = []string{"squid", "calamari", "octopus", "cuttlefish", "clam", "mussel", "oyster", "scallop",
+		"cockle", "whelk", "abalone", "snail", "escargot"}
+)
+
+// allergenAliases maps the key newAllergyMatcher builds for an allergy (its
+// singularised words, "dairy products" -> "dairy product") to the groups it
+// means. Without this, only an exact group key expanded, so "crustaceans",
+// "seafood" or "cow's milk" matched nothing but their own literal words
+// (#4804). The alias is data: the one matcher, the one loader and the one
+// check still do the work.
+var allergenAliases = map[string][]string{
+	// A crustacean allergy is not a mollusc allergy, but the ticket asks for
+	// it to cover shellfish: flagging squid is a nuisance, missing crab is
+	// not, so it errs wide (#4804).
+	"crustacean":          {"shellfish"},
+	"seafood":             {"fish", "shellfish"},
+	"sea food":            {"fish", "shellfish"},
+	"shell fish":          {"shellfish"},
+	"dairy product":       {"dairy"},
+	"cow milk":            {"dairy"}, // "cow's milk", "cows milk": the key drops the possessive
+	"celiac disease":      {"celiac"},
+	"mollusk":             {"mollusc"},
+	"soya":                {"soy"},
+	"soya bean":           {"soy"},
+	"sesame seed":         {"sesame"},
+	"lactose intolerance": {"lactose"},
+	"lactose intolerant":  {"lactose"},
 }
 
 // allergenExceptions are ingredients a group word appears in that don't
@@ -968,13 +1035,39 @@ var allergenExceptions = map[string][]string{
 	"milk":    dairyFree,
 	"lactose": dairyFree,
 	"egg":     {"eggplant"},
-	"fish":    {"fish shaped", "goldfish"},
+	"fish":    {"fish shaped", "goldfish", "bass ale"},
 	"nut":     {"nutmeg", "butternut", "coconut", "water chestnut"},
+	// Root beer and ginger beer carry no gluten, so a gluten allergy must not
+	// flag them (#4804 added "beer" to the grains). Note what is NOT listed:
+	// "gluten-free bread" stays flagged. A packet claim is not a food
+	// identity, "bread" still matches, and a needless flag is the cheaper
+	// mistake than trusting a label the recipe text cannot verify.
+	"gluten": glutenFree,
+	"wheat":  glutenFree,
+	"celiac": glutenFree,
+	// #4804 widened shellfish and dairy: oyster mushrooms are mushrooms and
+	// bean curd is tofu, so neither may raise the alarm.
+	"shellfish": {"oyster mushroom"},
+	"mollusc":   {"oyster mushroom"},
 }
+
+// glutenFree is what a gluten group word appears in without any gluten: root
+// beer and ginger beer are not beer, and the alternative flours are not wheat
+// (#4804). Exceptions only apply to the group's words, so an almond flour
+// still matches a nut allergy.
+var glutenFree = []string{"root beer", "ginger beer", "corn tortilla",
+	// Flours and noodles made from something other than wheat.
+	"almond flour", "rice flour", "cornflour", "corn flour", "coconut flour", "chickpea flour",
+	"buckwheat flour", "potato flour", "tapioca flour", "potato starch",
+	"rice noodle", "rice pasta", "glass noodle", "rice cake", "rice cracker",
+	"buckwheat noodle", "buckwheat pasta", "soba noodle", "chickpea pasta", "lentil pasta", "corn pasta",
+	"zucchini noodle", "courgette noodle"}
 
 var dairyFree = []string{"peanut butter", "almond butter", "cashew butter", "nut butter", "sunflower butter", "seed butter",
 	"apple butter", "cocoa butter", "shea butter", "butternut", "coconut milk", "almond milk", "oat milk", "soy milk",
-	"rice milk", "cashew milk", "coconut cream", "cream of tartar", "butter bean", "butter lettuce"}
+	"rice milk", "cashew milk", "coconut cream", "cream of tartar", "butter bean", "butter lettuce", "bean curd",
+	"cream of coconut", "coconut yogurt", "coconut yoghurt", "oat cream", "oat yogurt", "soy cream", "soy yogurt",
+	"cashew cream", "almond cream", "cream soda", "buttercup squash", "butterhead lettuce"}
 
 // allergyMatcher matches ingredient names against one person's allergy.
 type allergyMatcher struct {
@@ -1044,17 +1137,39 @@ func compilePhrases(phrases []string) []*regexp.Regexp {
 // against ingredient names and the label shown in warnings.
 func newAllergyMatcher(personID, person, allergen string) (allergyMatcher, bool) {
 	m := allergyMatcher{personID: personID, person: person, allergy: allergen}
-	key := strings.Join(func() []string {
-		ws := words(allergen)
-		for i, w := range ws {
-			ws[i] = singular(w)
-		}
-		return ws
-	}(), " ")
 	m.own = compilePhrases([]string{allergen})
-	m.group = compilePhrases(allergenGroups[key])
-	m.except = compilePhrases(allergenExceptions[key])
+	for _, key := range allergyGroupKeys(allergen) {
+		m.group = append(m.group, compilePhrases(allergenGroups[key])...)
+		m.except = append(m.except, compilePhrases(allergenExceptions[key])...)
+	}
 	return m, len(m.own) > 0
+}
+
+// possessive is the "'s" in "cow's milk": a group key is built from the words
+// alone, so "cow's milk" and "cows milk" both key to "cow milk" (#4804).
+var possessive = strings.NewReplacer("'s", "", "\u2019s", "", "'", "", "\u2019", "")
+
+// allergyGroupKeys is the group keys an allergen means: its own key (its
+// words, singularised) and, when it is a synonym, the groups it stands for
+// ("crustaceans" -> crustacean, "seafood" -> fish and shellfish). One lookup
+// over allergenGroups/allergenAliases, so a synonym is data and not a second
+// matcher (#4804).
+func allergyGroupKeys(allergen string) []string {
+	// "cow's milk" is one allergen, not "cow s milk": drop the possessive
+	// before the key is built.
+	plain := possessive.Replace(strings.ToLower(allergen))
+	ws := words(plain)
+	for i, w := range ws {
+		ws[i] = singular(w)
+	}
+	key := strings.Join(ws, " ")
+	keys := []string{key}
+	for _, alias := range allergenAliases[key] {
+		if !slices.Contains(keys, alias) {
+			keys = append(keys, alias)
+		}
+	}
+	return keys
 }
 
 // allergyMatchers turns one stored allergy into the matchers it means. The
