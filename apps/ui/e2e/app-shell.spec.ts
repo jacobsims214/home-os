@@ -222,6 +222,9 @@ test.describe("role-aware navigation", () => {
     await expect(bar.getByRole("link", { name: "Today" })).toBeVisible();
     await expect(bar.getByRole("button", { name: "More" })).toBeVisible();
     await expect(bar.getByText("Calendar")).toHaveCount(0);
+    // Right after the 1440 -> 390 resize the header can be 2 px wide for a frame
+    // while Mantine's media queries switch (flaky before #4752 too); let it settle.
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
     await expectNoHorizontalOverflow(page);
   });
 });
@@ -283,6 +286,8 @@ for (const width of [390, 1440]) {
       expect(controls).toBeTruthy();
       expect(await dialog.getAttribute("id")).toBe(controls);
       await expect(dialog.getByText("Water bill due Friday")).toBeVisible();
+      // Wait out the fade-in: axe reads partly transparent text as low contrast.
+      await expect.poll(() => dialog.evaluate((el) => getComputedStyle(el).opacity)).toBe("1");
       await expectNoSeriousAxeViolations(page);
 
       // Esc closes it and focus returns to the bell; clicking toggles it again.
