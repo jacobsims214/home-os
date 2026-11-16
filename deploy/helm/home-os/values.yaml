@@ -119,6 +119,17 @@ api:
       - 2405:8100::/32
       - 2a06:98c0::/29
       - 2c0f:f248::/32
+  # POST /auth/change-password takes the caller's current password, so it is a
+  # password-guessing surface for anyone holding a live session (#4822). It gets
+  # its own limiter instance (not the public one above) and is enforced twice:
+  # per client IP, and per account in the handler, so a stolen session cannot
+  # outrun the IP budget by moving between addresses. Past the budget: 429 with
+  # Retry-After, before bcrypt or Dex runs. In memory per pod, like rateLimit.
+  changePasswordRateLimit:
+    # Requests per client IP (and per account) per minute.
+    perMinute: 5
+    # Attempts allowed at once before the per-minute rate applies.
+    burst: 3
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }

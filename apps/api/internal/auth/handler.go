@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,12 +29,36 @@ type Handler struct {
 	smtpClient *smtp.Client
 	dexClient  *dex.Client
 	verifier   *Verifier
+
+	// passwords verifies and replaces Dex passwords for ChangePassword. It
+	// defaults to dexClient; NewHandler leaves it nil when Dex is not
+	// configured, which makes the endpoint answer 503.
+	passwords PasswordService
+	// changeLimiter bounds change-password attempts per account. Nil means
+	// only the per-IP limiter wired in cmd/api applies.
+	changeLimiter ChangePasswordLimiter
 }
 
 // NewHandler creates a new auth handler. Instance-admin user provisioning
 // lives in the admin package (it replaced AdminCreateUser here).
 func NewHandler(repo *Repo, cfg *config.Config, smtpClient *smtp.Client, dexClient *dex.Client, verifier *Verifier) *Handler {
-	return &Handler{repo: repo, cfg: cfg, smtpClient: smtpClient, dexClient: dexClient, verifier: verifier}
+	h := &Handler{repo: repo, cfg: cfg, smtpClient: smtpClient, dexClient: dexClient, verifier: verifier}
+	if dexClient != nil { // a nil *dex.Client must not become a non-nil interface
+		h.passwords = dexClient
+	}
+	return h
+}
+
+// WithPasswordService replaces the Dex password backend (tests use a fake).
+func (h *Handler) WithPasswordService(p PasswordService) *Handler {
+	h.passwords = p
+	return h
+}
+
+// WithChangePasswordLimiter adds the per-account change-password budget.
+func (h *Handler) WithChangePasswordLimiter(l ChangePasswordLimiter) *Handler {
+	h.changeLimiter = l
+	return h
 }
 
 // --- token verification for handlers outside RequireAuth ---
@@ -347,8 +373,8 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Password == "" || len(req.Password) < 8 {
-		apierr.BadRequest(w, "password must be at least 8 characters")
+	if err := ValidatePasswordLength(req.Password); err != nil {
+		apierr.BadRequest(w, err.Error())
 		return
 	}
 
@@ -389,4 +415,264 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apierr.JSON(w, http.StatusOK, map[string]string{"message": "Password reset successfully"})
+}
+
+// --- change password (signed in) ---
+
+// PasswordService is the part of Dex's admin API that ChangePassword needs.
+// *dex.Client implements it; tests substitute a fake.
+//
+// The current password is verified by Dex rather than by comparing
+// users.password_hash: Dex is the identity store that signs people in, and
+// users.password_hash survives only as a legacy column.
+type PasswordService interface {
+	VerifyPassword(ctx context.Context, email, plaintext string) error
+	UpdatePassword(ctx context.Context, email, hash string) error
+	RefreshClientIDs(ctx context.Context, sub string) ([]string, error)
+	RevokeRefresh(ctx context.Context, sub, clientID string) error
+}
+
+// ChangePasswordLimiter spends a budget keyed by an arbitrary string; it is
+// *middleware.RateLimiter, which cannot be imported here (middleware imports
+// auth). Allow reports whether the call may proceed and, when it may not, how
+// long the caller must wait.
+type ChangePasswordLimiter interface {
+	Allow(key string) (bool, time.Duration)
+}
+
+// changePasswordBodyLimit caps the request body: two passwords and nothing
+// else fits in well under 1 KiB.
+const changePasswordBodyLimit = 16 << 10
+
+// changePasswordRevokeTimeout bounds the Dex calls that revoke the caller's
+// refresh tokens after the new password is stored. They run on a context
+// detached from the request (see revokeRefreshTokens), so they need a deadline
+// of their own.
+const changePasswordRevokeTimeout = 10 * time.Second
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// changePasswordResponse is the 200 body. It says only that the password
+// changed; what happens to sessions is in the completion notes and the KB
+// (architecture/change-password.md), because it is a property of Dex's tokens,
+// not something the caller acts on.
+type changePasswordResponse struct {
+	Message string `json:"message"`
+}
+
+// ChangePassword changes the signed-in caller's own password.
+// POST /api/v1/auth/change-password with {current_password, new_password}.
+//
+// The current password is verified against Dex first and nothing is written
+// unless it matches: a change-password screen that skipped that check would be
+// an account-takeover primitive for anyone holding a live session.
+//
+// Every failure to verify the current password answers the same 401 with the
+// same body and takes the same time, whether the password was wrong or Dex had
+// no password for the caller's email: Dex's lookup path skips bcrypt, so the
+// handler spends one bcrypt comparison itself when that happens
+// (passwordCheckCost). Failures are logged and rate limited per user and per
+// client IP, because a stolen session makes this a guessing surface.
+//
+// On success the new bcrypt hash is written to Dex with UpdatePassword (never
+// CreatePassword: the entry the current password proved exists must be the one
+// that changes), the legacy users.password_hash column is kept in step,
+// and every Dex refresh token the caller holds is revoked. Id tokens already
+// issued keep working until they expire, which is a property of Dex's JWTs and
+// not something this endpoint can change.
+func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	claims := h.authenticate(w, r)
+	if claims == nil {
+		return
+	}
+	// Per-user budget. The per-IP budget was spent by RateLimiter.Middleware
+	// before the token was even verified; this one is keyed by the account so
+	// a guessing attacker behind many addresses still runs out.
+	if !h.allowChangePassword(w, claims) {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, changePasswordBodyLimit)
+	var req changePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			apierr.JSON(w, http.StatusRequestEntityTooLarge, apierr.ErrorResponse{Error: apierr.ErrorDetail{
+				Code: "PAYLOAD_TOO_LARGE", Message: "request body too large",
+			}})
+			return
+		}
+		apierr.BadRequest(w, "invalid request body")
+		return
+	}
+	if req.CurrentPassword == "" {
+		apierr.BadRequest(w, "current_password is required")
+		return
+	}
+	// The same rule signup and reset apply (auth.ValidatePasswordLength); a
+	// change-password endpoint with its own idea of a strong password would be
+	// a second rule to keep in step.
+	if err := ValidatePasswordLength(req.NewPassword); err != nil {
+		apierr.BadRequest(w, err.Error())
+		return
+	}
+
+	if h.passwords == nil {
+		// Without Dex the caller could never sign in with the new password.
+		apierr.JSON(w, http.StatusServiceUnavailable, apierr.ErrorResponse{Error: apierr.ErrorDetail{
+			Code: "SERVICE_UNAVAILABLE", Message: "changing your password is not available",
+		}})
+		return
+	}
+
+	// The account comes from the verified token (claims.UserID, which
+	// VerifyToken resolved from the Dex subject), and so does the email: it is
+	// users.email, the column every Dex password entry is created under
+	// (invite signup and admin create both pass it to CreatePassword). Taking
+	// the email from the token instead would mean trusting a claim whose value
+	// is only a hint about which row the resolver already picked, and the two
+	// can differ after an email change in Dex.
+	user, err := h.repo.GetUserByID(r.Context(), claims.UserID)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	if user == nil {
+		// The token is valid but its user is gone (deleted between the
+		// resolver's lookup and this one). Nothing to change.
+		apierr.NotFound(w, "user not found")
+		return
+	}
+	email := user.Email
+
+	if !h.verifyCurrentPassword(w, r, claims, email, req.CurrentPassword) {
+		return
+	}
+
+	hash, err := HashPassword(req.NewPassword)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	if err := h.passwords.UpdatePassword(r.Context(), email, hash); err != nil {
+		// Nothing changed, so the old password still works. Say so rather
+		// than claim a change that did not happen.
+		slog.Error("auth: change password: dex update failed", "user_id", claims.UserID, "error", err)
+		apierr.JSON(w, http.StatusBadGateway, apierr.ErrorResponse{Error: apierr.ErrorDetail{
+			Code: "BAD_GATEWAY", Message: "could not change your password; try again",
+		}})
+		return
+	}
+	slog.Info("auth: password changed", "user_id", claims.UserID)
+
+	// Keep the legacy column in step with the credential that now signs in.
+	// Dex is authoritative from here on, so a failure is logged, not fatal.
+	if err := h.repo.UpdatePassword(r.Context(), claims.UserID, hash); err != nil {
+		slog.Error("auth: change password: users.password_hash not updated", "user_id", claims.UserID, "error", err)
+	}
+
+	revoked, err := h.revokeRefreshTokens(r, claims)
+	if err != nil {
+		slog.Error("auth: change password: refresh tokens not revoked", "user_id", claims.UserID, "error", err)
+	} else {
+		slog.Info("auth: change password: revoked refresh tokens", "user_id", claims.UserID, "clients", revoked)
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	apierr.JSON(w, http.StatusOK, changePasswordResponse{Message: "password changed"})
+}
+
+// allowChangePassword spends the caller's per-user budget, answering 429 with
+// Retry-After when it is gone.
+func (h *Handler) allowChangePassword(w http.ResponseWriter, claims *Claims) bool {
+	if h.changeLimiter == nil {
+		return true
+	}
+	ok, wait := h.changeLimiter.Allow("user:" + claims.UserID)
+	if ok {
+		return true
+	}
+	secs := int(math.Ceil(wait.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	slog.Warn("auth: change password rate limited", "user_id", claims.UserID, "retry_after_s", secs)
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	apierr.JSON(w, http.StatusTooManyRequests, apierr.ErrorResponse{Error: apierr.ErrorDetail{
+		Code: "RATE_LIMITED", Message: "too many requests, try again later",
+	}})
+	return false
+}
+
+// verifyCurrentPassword checks plaintext against the caller's Dex password. It
+// answers the request itself and returns false when the check failed or could
+// not be run, so ChangePassword can return immediately.
+//
+// A wrong password and an email Dex has no password for answer exactly the same
+// 401 with the same body, and both take about as long: Dex's NotFound path does
+// no bcrypt work, so this one does it instead.
+func (h *Handler) verifyCurrentPassword(w http.ResponseWriter, r *http.Request, claims *Claims, email, plaintext string) bool {
+	err := h.passwords.VerifyPassword(r.Context(), email, plaintext)
+	if err == nil {
+		return true
+	}
+	failed := false
+	switch {
+	case errors.Is(err, dex.ErrPasswordLookup):
+		// No password entry to compare against, so Dex spent nothing.
+		passwordCheckCost(plaintext)
+		failed = true
+	case errors.Is(err, dex.ErrPasswordNotVerified):
+		failed = true
+	}
+	if !failed {
+		// Dex is unreachable or refused the call: not a wrong password, and
+		// not something the caller can fix.
+		slog.Error("auth: change password: dex verify failed", "user_id", claims.UserID, "error", err)
+		apierr.JSON(w, http.StatusBadGateway, apierr.ErrorResponse{Error: apierr.ErrorDetail{
+			Code: "BAD_GATEWAY", Message: "could not verify your current password; try again",
+		}})
+		return false
+	}
+	// One line per failed attempt: with a stolen session this is the signal
+	// that someone is guessing, and the rate limiter alone only shows 429s.
+	slog.Warn("auth: change password refused: current password did not verify",
+		"user_id", claims.UserID, "remote_addr", r.RemoteAddr)
+	writeAuthError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "current password is incorrect")
+	return false
+}
+
+// revokeRefreshTokens revokes every Dex refresh token the caller holds, one per
+// client that has one, and returns how many. An empty Dex subject (an account
+// that has never signed in through Dex) leaves nothing to revoke.
+//
+// It runs on a context detached from the request, like the reset email: the
+// password has already changed by now, and a browser that hung up must not stop
+// the revocation half-way and leave a token minting id tokens.
+func (h *Handler) revokeRefreshTokens(r *http.Request, claims *Claims) (int, error) {
+	if claims.DexSub == "" {
+		return 0, nil
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), changePasswordRevokeTimeout)
+	defer cancel()
+
+	clients, err := h.passwords.RefreshClientIDs(ctx, claims.DexSub)
+	if err != nil {
+		return 0, err
+	}
+	revoked := 0
+	for _, clientID := range clients {
+		switch err := h.passwords.RevokeRefresh(ctx, claims.DexSub, clientID); {
+		case err == nil:
+			revoked++
+		case errors.Is(err, dex.ErrRefreshNotFound):
+			// Rotated or already gone between the list and the revoke.
+		default:
+			return revoked, fmt.Errorf("revoke %s: %w", clientID, err)
+		}
+	}
+	return revoked, nil
 }

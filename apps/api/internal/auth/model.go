@@ -19,6 +19,16 @@ type Claims struct {
 	Role        string `json:"role"`
 	Email       string `json:"email"`
 	Name        string `json:"name"`
+	// DexSub is the verified token's own "sub" claim, in Dex's encoding
+	// (base64 of an IDTokenSubject: user id + connector id). It is a different
+	// value from UserID (users.id) and stays empty for the auth-disabled local
+	// dev identity. Dex's admin API identifies a user by this value, so the
+	// endpoints that must name the caller to Dex (change-password, which
+	// revokes their refresh tokens) read it here.
+	//
+	// Never serialized: it is an internal identifier, and no response body
+	// needs it.
+	DexSub string `json:"-"`
 }
 
 // User represents a registered user from the users table.

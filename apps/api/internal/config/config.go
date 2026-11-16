@@ -57,6 +57,15 @@ type Config struct {
 	PublicRatePerMinute int
 	PublicRateBurst     int
 	TrustedProxies      string
+
+	// Rate limit for POST /api/v1/auth/change-password, which takes a password
+	// guess and so is a guessing surface for whoever holds a live session
+	// (#4822). Its own limiter instance, not the public one, and enforced both
+	// per client IP and per account:
+	//   API_CHANGE_PASSWORD_RATE_PER_MINUTE  default 5
+	//   API_CHANGE_PASSWORD_RATE_BURST       default 3
+	ChangePasswordRatePerMinute int
+	ChangePasswordRateBurst     int
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -96,6 +105,9 @@ func Load() (*Config, error) {
 		PublicRatePerMinute: getEnvInt("API_PUBLIC_RATE_PER_MINUTE", "10"),
 		PublicRateBurst:     getEnvInt("API_PUBLIC_RATE_BURST", "5"),
 		TrustedProxies:      os.Getenv("API_TRUSTED_PROXIES"),
+
+		ChangePasswordRatePerMinute: getEnvInt("API_CHANGE_PASSWORD_RATE_PER_MINUTE", "5"),
+		ChangePasswordRateBurst:     getEnvInt("API_CHANGE_PASSWORD_RATE_BURST", "3"),
 	}
 
 	var missing []string

@@ -316,6 +316,16 @@
         "family_member"
       ]
     },
+    "password": {
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter",
+        "vendor"
+      ]
+    },
     "people": {
       "read": [
         "owner",

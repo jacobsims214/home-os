@@ -99,6 +99,95 @@ func (c *Client) UpdatePassword(ctx context.Context, email, hash string) error {
 	return nil
 }
 
+// ErrPasswordNotVerified means Dex did not accept the password handed to
+// VerifyPassword.
+var ErrPasswordNotVerified = errors.New("dex: password not verified")
+
+// ErrPasswordLookup means Dex has no password entry for this email at all
+// (VerifyPassword answers NotFound). It is deliberately NOT distinguishable
+// from a wrong password at the HTTP layer: a change-password screen that
+// answered differently for "no such user" and "wrong password" would confirm
+// which emails exist.
+var ErrPasswordLookup = errors.New("dex: no password entry for this email")
+
+// VerifyPassword asks Dex whether plaintext is the password stored for email.
+// It returns nil only when Dex answers verified, and ErrPasswordNotVerified
+// in both remaining cases: a wrong password, and an email Dex has no password
+// for (which comes back wrapped with ErrPasswordLookup, so a caller may log
+// the difference but must not report it). Any transport failure is returned
+// as-is so the caller can answer 5xx rather than "wrong password".
+//
+// The plaintext crosses the mTLS-protected gRPC admin channel (#697) and is
+// hashed and compared inside Dex; this client never sees a hash. That is why
+// the check is a Dex call and not auth.CheckPassword against
+// users.password_hash: that column is a leftover from before Dex became the
+// identity store, and it is not the credential that signs anyone in.
+func (c *Client) VerifyPassword(ctx context.Context, email, plaintext string) error {
+	if plaintext == "" {
+		// Dex returns a bare error for an empty password, which a caller
+		// would have to read as an outage. An empty password cannot be the
+		// stored one; answer the ordinary failed check.
+		return ErrPasswordNotVerified
+	}
+	resp, err := c.api.VerifyPassword(ctx, &dexapi.VerifyPasswordReq{Email: email, Password: plaintext})
+	if err != nil {
+		return fmt.Errorf("dex verify password: %w", err)
+	}
+	switch {
+	case resp.GetNotFound():
+		return fmt.Errorf("%w: %w", ErrPasswordNotVerified, ErrPasswordLookup)
+	case !resp.GetVerified():
+		return ErrPasswordNotVerified
+	}
+	return nil
+}
+
+// RefreshClientIDs returns the client IDs the user (a Dex "sub") currently
+// holds a refresh token for. Dex keeps at most one refresh token per user per
+// client (#4649), so this is the list of clients that can mint new id tokens
+// for that user.
+//
+// A user with no offline session (never signed in with offline_access, or
+// signed out) yields an empty slice, not an error.
+func (c *Client) RefreshClientIDs(ctx context.Context, sub string) ([]string, error) {
+	resp, err := c.api.ListRefresh(ctx, &dexapi.ListRefreshReq{UserId: sub})
+	if err != nil {
+		return nil, fmt.Errorf("dex list refresh: %w", err)
+	}
+	refs := resp.GetRefreshTokens()
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if id := ref.GetClientId(); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+// ErrRefreshNotFound is returned by RevokeRefresh when Dex holds no refresh
+// token for that user and client. That is normal: a client that signed out,
+// or one that never asked for offline_access.
+var ErrRefreshNotFound = errors.New("dex: no refresh token for this user and client")
+
+// RevokeRefresh deletes the user's refresh token for clientID, so it can no
+// longer be redeemed for fresh id tokens. sub is the "sub" claim of the user's
+// ID token (Dex's own subject encoding, not users.id).
+//
+// Only the refresh token goes. Id tokens already issued keep working until
+// they expire: the API verifies them against Dex's JWKS and has no revocation
+// list. A caller that changes a credential must therefore say what still
+// works instead of implying the change ended every session.
+func (c *Client) RevokeRefresh(ctx context.Context, sub, clientID string) error {
+	resp, err := c.api.RevokeRefresh(ctx, &dexapi.RevokeRefreshReq{UserId: sub, ClientId: clientID})
+	if err != nil {
+		return fmt.Errorf("dex revoke refresh: %w", err)
+	}
+	if resp.GetNotFound() {
+		return ErrRefreshNotFound
+	}
+	return nil
+}
+
 // PasswordSetter is the part of *Client that SetPassword needs.
 type PasswordSetter interface {
 	CreatePassword(ctx context.Context, email, hash, userID string) error

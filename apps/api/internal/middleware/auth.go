@@ -9,11 +9,11 @@ import (
 	"home-os/api/pkg/apierr"
 )
 
-// claimsCtxKey is an unexported type used for context keys to prevent
-// collisions with keys from other packages.
-type claimsCtxKey string
-
-const claimsKey claimsCtxKey = "claims"
+// The claims a request carries live under auth.ClaimsContextKey, which
+// auth.ClaimsFromContext reads. Handlers in internal/auth need them too (the
+// change-password endpoint acts on the caller's own account), and they cannot
+// import this package: middleware imports auth, not the other way round. One
+// key, owned by auth, keeps both sides in step.
 
 // RequireAuth returns a chi-compatible middleware that validates Dex-issued
 // OIDC Bearer tokens on protected routes. It extracts the Authorization header,
@@ -53,7 +53,7 @@ func requireToken(verifier *auth.Verifier) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !verifier.Enabled() {
 				// Local dev mode — inject anonymous identity.
-				ctx := context.WithValue(r.Context(), claimsKey, &auth.Claims{
+				ctx := context.WithValue(r.Context(), auth.ClaimsContextKey, &auth.Claims{
 					UserID: "local-dev",
 					Email:  "local-dev@homeos.local",
 					Name:   "Local Dev",
@@ -91,12 +91,10 @@ func requireToken(verifier *auth.Verifier) func(http.Handler) http.Handler {
 
 // ClaimsFromContext extracts the *auth.Claims that were injected by the
 // RequireAuth/RequireOIDC middleware. Returns nil if the middleware was not
-// used on the request or if the claims were not found in the context.
+// used on the request or if the claims were not found in the context. It is
+// auth.ClaimsFromContext, so handlers in internal/auth read the same claims.
 func ClaimsFromContext(ctx context.Context) *auth.Claims {
-	if claims, ok := ctx.Value(claimsKey).(*auth.Claims); ok {
-		return claims
-	}
-	return nil
+	return auth.ClaimsFromContext(ctx)
 }
 
 // WithClaims returns a copy of ctx carrying claims, as RequireAuth does for
@@ -109,7 +107,7 @@ func ClaimsFromContext(ctx context.Context) *auth.Claims {
 //
 // Tests that call handlers without a token verifier use it directly.
 func WithClaims(ctx context.Context, claims *auth.Claims) context.Context {
-	ctx = context.WithValue(ctx, claimsKey, claims)
+	ctx = context.WithValue(ctx, auth.ClaimsContextKey, claims)
 	if claims != nil {
 		ctx = db.WithActorIDs(ctx, claims.UserID, claims.HouseholdID)
 	}

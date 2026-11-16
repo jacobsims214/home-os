@@ -347,12 +347,12 @@ func (h *Handler) RevokeInvite(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Signup password limits. bcrypt ignores (newer versions reject) input past
-// 72 bytes, so longer passwords are refused rather than silently truncated.
+// Signup name limit. The password rules are auth.ValidatePasswordLength's:
+// bcrypt ignores (newer versions reject) input past 72 bytes, so longer
+// passwords are refused rather than silently truncated, and signup, admin
+// create, reset and change-password must all say the same thing.
 const (
-	minPasswordLen = 8
-	maxPasswordLen = 72
-	maxNameLen     = 100
+	maxNameLen = 100
 
 	// maxAcceptBody caps the POST /api/v1/invites/accept body. The route is
 	// unauthenticated and public; a real body ({"token","name","password"})
@@ -447,11 +447,9 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request, token, name, pa
 	case utf8.RuneCountInString(name) > maxNameLen:
 		apierr.BadRequest(w, "name is too long")
 		return
-	case len(password) < minPasswordLen:
-		apierr.BadRequest(w, "password must be at least 8 characters")
-		return
-	case len(password) > maxPasswordLen:
-		apierr.BadRequest(w, "password must be at most 72 bytes")
+	}
+	if err := auth.ValidatePasswordLength(password); err != nil {
+		apierr.BadRequest(w, err.Error())
 		return
 	}
 	if h.dex == nil {
