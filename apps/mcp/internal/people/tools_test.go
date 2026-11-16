@@ -637,6 +637,108 @@ func TestPersonCreate(t *testing.T) {
 	})
 }
 
+// TestPersonCreateAllergies is #4744: "Add Leo, allergic to peanuts (carries
+// an EpiPen)" stores the allergy in the person_create call itself, and a
+// loop-guard duplicate merges new allergies into the existing person.
+func TestPersonCreateAllergies(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	tl := newTools(t, pool)
+	const epi = "peanuts (carries an EpiPen)"
+
+	stored := func(t *testing.T, id string) []string {
+		t.Helper()
+		var got []string
+		if err := pool.QueryRow(context.Background(), `SELECT allergies FROM people WHERE id = $1`, id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	env := tl.create.call(t, ctx, map[string]any{
+		"display_name": "Leo", "relationship": "child",
+		"add_preferences": []any{
+			map[string]any{"kind": "allergy", "item": "peanuts", "notes": "carries an EpiPen"},
+			map[string]any{"kind": "like", "item": "dinosaurs"},
+		},
+	})
+	if !env.OK || env.Data.Duplicate || !slices.Equal(env.Data.Allergies, []string{epi}) ||
+		!slices.Equal(env.Data.Added, []string{"allergy: " + epi, "like: dinosaurs"}) ||
+		!slices.Equal(prefLabels(*env.Data), []string{"like: dinosaurs"}) || !strings.Contains(env.Summary, epi) {
+		t.Fatalf("create with add_preferences = %+v", env)
+	}
+	leo := env.Data.PersonID
+	if got := stored(t, leo); !slices.Equal(got, []string{epi}) {
+		t.Fatalf("stored = %v", got)
+	}
+	got := tl.get.call(t, ctx, map[string]any{"person_id": leo})
+	if !got.OK || !strings.Contains(got.Summary, "Allergies: "+epi+".") {
+		t.Fatalf("get = %+v", got)
+	}
+
+	t.Run("duplicate merges new allergies into the existing person", func(t *testing.T) {
+		env := tl.create.call(t, ctx, map[string]any{"display_name": "leo", "relationship": "son",
+			"allergies": []any{"Peanuts", "shellfish"}})
+		d := env.Data
+		if !env.OK || !d.Duplicate || d.PersonID != leo || !slices.Equal(d.Added, []string{"allergy: shellfish"}) ||
+			!slices.Equal(d.Unchanged, []string{"allergy: " + epi + " (already listed)"}) || !slices.Equal(d.Changed, []string{"allergies"}) ||
+			!strings.Contains(env.Summary, "Added allergy: shellfish to them") {
+			t.Fatalf("duplicate = %+v", env)
+		}
+		// The bare re-add kept the EpiPen note.
+		if got := stored(t, leo); !slices.Equal(got, []string{epi, "shellfish"}) {
+			t.Fatalf("stored = %v", got)
+		}
+		// The same call again changes nothing.
+		again := tl.create.mustOK(t, ctx, map[string]any{"display_name": "Leo", "relationship": "child", "allergies": "shellfish"})
+		if !again.Duplicate || len(again.Added) != 0 || len(again.Changed) != 0 || len(again.Unchanged) != 1 ||
+			!slices.Equal(stored(t, leo), []string{epi, "shellfish"}) {
+			t.Fatalf("repeat = %+v", again)
+		}
+		var n int
+		_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM people WHERE household_id = $1 AND lower(display_name) = 'leo'`, hh.HouseholdID).Scan(&n)
+		if n != 1 {
+			t.Fatalf("%d Leos", n)
+		}
+	})
+
+	t.Run("allergies alias forms", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			value any
+			want  []string
+		}{
+			{"Ava", []any{"peanuts (carries an EpiPen)"}, []string{epi}},
+			{"Ben", "peanuts (carries an EpiPen, in backpack); milk", []string{"peanuts (carries an EpiPen, in backpack)", "milk"}},
+			{"Cal", `["tree nuts", "eggs"]`, []string{"tree nuts", "eggs"}},
+			{"Dee", []any{map[string]any{"item": "bees", "notes": "stings"}}, []string{"bees (stings)"}},
+		} {
+			p := tl.create.mustOK(t, ctx, map[string]any{"display_name": tc.name, "relationship": "child", "allergies": tc.value})
+			if !slices.Equal(stored(t, p.PersonID), tc.want) || len(p.Added) != len(tc.want) {
+				t.Errorf("%s: stored %v, added %v, want %v", tc.name, stored(t, p.PersonID), p.Added, tc.want)
+			}
+		}
+		// Both lists together: one entry per allergen, the noted one wins.
+		p := tl.create.mustOK(t, ctx, map[string]any{"display_name": "Eve", "relationship": "child", "allergies": []any{"peanuts"},
+			"add_preferences": []any{map[string]any{"kind": "allergy", "item": "Peanuts", "notes": "carries an EpiPen"}}})
+		if got := stored(t, p.PersonID); !slices.Equal(got, []string{"Peanuts (carries an EpiPen)"}) {
+			t.Fatalf("both lists stored %v", got)
+		}
+	})
+
+	t.Run("bad allergies create nobody", func(t *testing.T) {
+		tl.create.mustFail(t, ctx, map[string]any{"display_name": "Max", "relationship": "child", "allergies": []any{strings.Repeat("x", maxItem+1)}}, "allergies")
+		tl.create.mustFail(t, ctx, map[string]any{"display_name": "Max", "relationship": "child", "allergies": 7}, "allergies")
+		tl.create.mustFail(t, ctx, map[string]any{"display_name": "Max", "relationship": "child",
+			"add_preferences": []any{map[string]any{"kind": "pet", "item": "cats"}}}, "add_preferences")
+		var n int
+		_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM people WHERE household_id = $1 AND display_name = 'Max'`, hh.HouseholdID).Scan(&n)
+		if n != 0 {
+			t.Fatalf("invalid creates made %d people", n)
+		}
+	})
+}
+
 func TestPersonUpdateFields(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
@@ -836,6 +938,11 @@ func TestToolDefinitions(t *testing.T) {
 	_, create, _ := NewPersonCreateTool(nil)
 	if fmt.Sprint(create.InputSchema.Required) != "[display_name relationship]" {
 		t.Errorf("person_create required = %v", create.InputSchema.Required)
+	}
+	for _, p := range []string{"add_preferences", "allergies", "birthdate", "notes"} {
+		if _, ok := create.InputSchema.Properties[p]; !ok {
+			t.Errorf("person_create has no %s", p)
+		}
 	}
 	_, update, _ := NewPersonUpdateTool(nil)
 	for _, p := range []string{"display_name", "relationship", "birthdate", "school", "grade", "notes", "add_preferences", "remove_preferences"} {

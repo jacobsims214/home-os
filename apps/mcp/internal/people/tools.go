@@ -727,11 +727,49 @@ var prefSchema = map[string]any{
 // {kind, item} objects. A single object, and the same encoded as a JSON
 // string, are accepted too. Duplicates within the call are dropped.
 func readPrefs(args map[string]any, key string) ([]prefChange, *mcp.CallToolResult) {
-	example := map[string]any{"person_id": "Nora", key: []any{map[string]any{"kind": "allergy", "item": "peanuts"}}}
-	bad := func(msg string) ([]prefChange, *mcp.CallToolResult) {
-		return nil, respond.Invalid(key, msg,
-			`Pass `+key+` as a list of {"kind","item"} objects; kind is one of `+strings.Join(prefKinds, ", ")+".", example)
+	list, bad := prefList(args, key)
+	if bad != nil {
+		return nil, bad
 	}
+	out, bad := parsePrefs(list, key)
+	if bad != nil {
+		return nil, bad
+	}
+	return dedupePrefs(out), nil
+}
+
+// readAddPrefs reads what to add: add_preferences, plus the allergies alias
+// that person_create takes (["peanuts"], "peanuts", or "peanuts, milk"),
+// each meaning {kind:"allergy", item:x}. Both lists are validated and
+// deduplicated together, as one add_preferences list would be.
+func readAddPrefs(args map[string]any) ([]prefChange, *mcp.CallToolResult) {
+	list, bad := prefList(args, "add_preferences")
+	if bad != nil {
+		return nil, bad
+	}
+	out, bad := parsePrefs(list, "add_preferences")
+	if bad != nil {
+		return nil, bad
+	}
+	alias, bad := allergyList(args, "allergies")
+	if bad != nil {
+		return nil, bad
+	}
+	more, bad := parsePrefs(alias, "allergies")
+	if bad != nil {
+		return nil, bad
+	}
+	out = dedupePrefs(append(out, more...))
+	if len(out) > maxPrefChanges {
+		return nil, respond.Invalid("add_preferences", fmt.Sprintf("%d preferences and allergies to add; at most %d per call.", len(out), maxPrefChanges),
+			"Add the rest with person_update.", map[string]any{"allergies": []any{"peanuts"}})
+	}
+	return out, nil
+}
+
+// prefList is args[key] as a list of entries: an array, a single object, or
+// either encoded as a JSON string.
+func prefList(args map[string]any, key string) ([]any, *mcp.CallToolResult) {
 	raw := args[key]
 	if s, ok := raw.(string); ok {
 		s = strings.TrimSpace(s)
@@ -739,7 +777,42 @@ func readPrefs(args map[string]any, key string) ([]prefChange, *mcp.CallToolResu
 			return nil, nil
 		}
 		if err := json.Unmarshal([]byte(s), &raw); err != nil {
-			return bad(key + " is text, not a list of preferences.")
+			return nil, prefsInvalid(key, key+" is text, not a list of preferences.")
+		}
+	}
+	switch v := raw.(type) {
+	case nil:
+		return nil, nil
+	case []any:
+		return v, nil
+	case map[string]any:
+		return []any{v}, nil
+	default:
+		return nil, prefsInvalid(key, key+" must be a list of preferences.")
+	}
+}
+
+// allergyList is the allergies alias as preference entries. Strings are
+// allergens; a plain string may list several, separated by commas or
+// semicolons outside parentheses. Objects are entries whose kind defaults to
+// allergy.
+func allergyList(args map[string]any, key string) ([]any, *mcp.CallToolResult) {
+	example := map[string]any{"display_name": "Leo", "relationship": "child", key: []any{"peanuts"}}
+	bad := func(msg string) ([]any, *mcp.CallToolResult) {
+		return nil, respond.Invalid(key, msg, `Pass `+key+` as a list of allergens, e.g. ["peanuts"].`, example)
+	}
+	raw := args[key]
+	if s, ok := raw.(string); ok {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil, nil
+		}
+		if strings.HasPrefix(s, "[") || strings.HasPrefix(s, "{") {
+			if err := json.Unmarshal([]byte(s), &raw); err != nil {
+				return bad(key + " is not a list of allergens.")
+			}
+		} else {
+			raw = splitAllergens(s)
 		}
 	}
 	var list []any
@@ -748,27 +821,91 @@ func readPrefs(args map[string]any, key string) ([]prefChange, *mcp.CallToolResu
 		return nil, nil
 	case []any:
 		list = v
+	case []string:
+		for _, x := range v {
+			list = append(list, x)
+		}
 	case map[string]any:
 		list = []any{v}
 	default:
-		return bad(key + " must be a list of preferences.")
+		return bad(key + " must be a list of allergens.")
 	}
 	if len(list) > maxPrefChanges {
 		return bad(fmt.Sprintf("%s has %d entries; at most %d per call.", key, len(list), maxPrefChanges))
 	}
+	out := make([]any, 0, len(list))
+	for i, e := range list {
+		switch x := e.(type) {
+		case string:
+			if strings.TrimSpace(x) == "" {
+				continue
+			}
+			out = append(out, map[string]any{"kind": "allergy", "item": x})
+		case map[string]any:
+			m := map[string]any{"kind": "allergy"}
+			for k, v := range x {
+				if k == "kind" && strings.TrimSpace(fmt.Sprint(valueOr(v, ""))) == "" {
+					continue
+				}
+				m[k] = v
+			}
+			out = append(out, m)
+		default:
+			return bad(fmt.Sprintf("%s[%d] is not an allergen.", key, i))
+		}
+	}
+	return out, nil
+}
+
+// splitAllergens splits "peanuts, milk (hives only)" at commas and
+// semicolons outside parentheses.
+func splitAllergens(s string) []string {
+	var out []string
+	depth, start := 0, 0
+	for i, r := range s {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',', ';':
+			if depth == 0 {
+				out = append(out, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(out, s[start:])
+}
+
+func prefsInvalid(key, msg string) *mcp.CallToolResult {
+	example := map[string]any{"person_id": "Nora", key: []any{map[string]any{"kind": "allergy", "item": "peanuts"}}}
+	return respond.Invalid(key, msg,
+		`Pass `+key+` as a list of {"kind","item"} objects; kind is one of `+strings.Join(prefKinds, ", ")+".", example)
+}
+
+// parsePrefs validates preference entries; key names the argument in errors.
+// An allergy item written with its note, "peanuts (carries an EpiPen)", is
+// split into item and notes so it matches and replaces like one sent with
+// notes.
+func parsePrefs(list []any, key string) ([]prefChange, *mcp.CallToolResult) {
+	if len(list) > maxPrefChanges {
+		return nil, prefsInvalid(key, fmt.Sprintf("%s has %d entries; at most %d per call.", key, len(list), maxPrefChanges))
+	}
 	var out []prefChange
-	seen := map[string]int{} // key -> index in out
 	for i, e := range list {
 		m, ok := e.(map[string]any)
 		if !ok {
-			return bad(fmt.Sprintf("%s[%d] is not an object with kind and item.", key, i))
+			return nil, prefsInvalid(key, fmt.Sprintf("%s[%d] is not an object with kind and item.", key, i))
 		}
 		kind := strings.ToLower(strings.TrimSpace(fmt.Sprint(valueOr(m["kind"], ""))))
 		if k, ok := kindAliases[kind]; ok {
 			kind = k
 		}
 		if !slices.Contains(prefKinds, kind) {
-			return bad(fmt.Sprintf("%s[%d].kind %q is not one of %s.", key, i, kind, strings.Join(prefKinds, ", ")))
+			return nil, prefsInvalid(key, fmt.Sprintf("%s[%d].kind %q is not one of %s.", key, i, kind, strings.Join(prefKinds, ", ")))
 		}
 		item, _ := m["item"].(string)
 		if strings.TrimSpace(item) == "" { // "value" is the API's name for it
@@ -776,29 +913,46 @@ func readPrefs(args map[string]any, key string) ([]prefChange, *mcp.CallToolResu
 		}
 		item = strings.Join(strings.Fields(item), " ")
 		if item == "" {
-			return bad(fmt.Sprintf("%s[%d].item is empty.", key, i))
+			return nil, prefsInvalid(key, fmt.Sprintf("%s[%d].item is empty.", key, i))
 		}
 		if len([]rune(item)) > maxItem {
-			return bad(fmt.Sprintf("%s[%d].item is longer than %d characters.", key, i, maxItem))
+			return nil, prefsInvalid(key, fmt.Sprintf("%s[%d].item is longer than %d characters.", key, i, maxItem))
 		}
 		c := prefChange{kind: kind, item: item}
 		if kind != "allergy" { // category is ignored for allergies
 			if cat, _ := m["category"].(string); strings.TrimSpace(cat) != "" {
 				c.category = strings.ToLower(strings.TrimSpace(cat))
 				if len([]rune(c.category)) > maxCategory {
-					return bad(fmt.Sprintf("%s[%d].category is longer than %d characters.", key, i, maxCategory))
+					return nil, prefsInvalid(key, fmt.Sprintf("%s[%d].category is longer than %d characters.", key, i, maxCategory))
 				}
 			}
 		}
 		if n, _ := m["notes"].(string); strings.TrimSpace(n) != "" {
 			n = strings.Join(strings.Fields(n), " ")
 			c.notes = &n
+		} else if kind == "allergy" {
+			if base, rest, ok := strings.Cut(item, " ("); ok && strings.HasSuffix(rest, ")") {
+				if n := strings.TrimSpace(strings.TrimSuffix(rest, ")")); n != "" && strings.TrimSpace(base) != "" {
+					c.item, c.notes = strings.TrimSpace(base), &n
+				}
+			}
 		}
 		if kind == "allergy" && len([]rune(c.value())) > maxItem {
-			return bad(fmt.Sprintf("%s[%d] allergy with its notes is longer than %d characters.", key, i, maxItem))
+			return nil, prefsInvalid(key, fmt.Sprintf("%s[%d] allergy with its notes is longer than %d characters.", key, i, maxItem))
 		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// dedupePrefs drops repeated entries, keeping the first; for one allergen
+// (bare, ignoring case) the entry that carries notes wins.
+func dedupePrefs(in []prefChange) []prefChange {
+	var out []prefChange
+	seen := map[string]int{} // key -> index in out
+	for _, c := range in {
 		k := c.kind + "\x00" + strings.ToLower(c.item) + "\x00" + c.category
-		if kind == "allergy" {
+		if c.kind == "allergy" {
 			k = c.kind + "\x00" + strings.ToLower(allergen(c.item))
 		}
 		if j, ok := seen[k]; !ok {
@@ -808,7 +962,66 @@ func readPrefs(args map[string]any, key string) ([]prefChange, *mcp.CallToolResu
 			out[j] = c // keep the entry that carries detail
 		}
 	}
-	return out, nil
+	return out
+}
+
+// mergeAllergies applies the allergy entries of adds to the stored list
+// (#4742 rules): a new allergen is appended; the same allergen with the same
+// or no note is unchanged (a bare re-add never drops a stored note); the
+// same allergen with a new note replaces the entry in place.
+func mergeAllergies(stored []string, adds []prefChange) (out, added, unchanged []string, changed bool) {
+	out = slices.Clone(stored)
+	for _, a := range adds {
+		if a.kind != "allergy" {
+			continue
+		}
+		i := allergyIndex(out, a.item)
+		switch {
+		case i < 0:
+			out = append(out, a.value())
+			added = append(added, a.label())
+		case strings.EqualFold(strings.TrimSpace(out[i]), a.value()):
+			unchanged = append(unchanged, a.label()+" (already listed)")
+			continue
+		case a.notes == nil:
+			unchanged = append(unchanged, "allergy: "+out[i]+" (already listed)")
+			continue
+		default: // same allergen, new note: replace, don't duplicate
+			added = append(added, a.label()+", replacing "+out[i])
+			out[i] = a.value()
+		}
+		changed = true
+	}
+	return out, added, unchanged, changed
+}
+
+// insertPreferences stores the non-allergy entries of adds for person id;
+// ones already there (ignoring case) are reported in unchanged.
+func insertPreferences(ctx context.Context, q querier, hid uuid.UUID, id string, adds []prefChange) (added, unchanged []string, err error) {
+	for _, a := range adds {
+		if a.kind == "allergy" {
+			continue
+		}
+		cat := a.category
+		if cat == "" {
+			cat = "general"
+		}
+		var prefID string
+		err := q.QueryRow(ctx, `
+INSERT INTO person_preferences (household_id, person_id, kind, category, value, notes)
+VALUES ($1, $2, $3::person_preference_kind, $4, $5, $6)
+ON CONFLICT (person_id, kind, lower(category), lower(value)) DO NOTHING
+RETURNING id::text`, hid, id, dbKind(a.kind), cat, a.item, a.notes).Scan(&prefID)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			unchanged = append(unchanged, a.label()+" (already listed)")
+		case err != nil:
+			return added, unchanged, err
+		default:
+			added = append(added, a.label())
+		}
+	}
+	return added, unchanged, nil
 }
 
 func valueOr(v, def any) any {
@@ -940,15 +1153,21 @@ func plural(n int, one, many string) string {
 // ---------------------------------------------------------------------------
 
 // NewPersonCreateTool creates person_create (class C): a family member
-// without a login. The catalog loop guard returns the same person
-// (duplicate:true) when the same name and relationship were added in the
-// last 10 minutes.
+// without a login, with their allergies and preferences in the same call
+// (add_preferences, or the allergies alias). The catalog loop guard returns
+// the same person (duplicate:true) when the same name and relationship were
+// added in the last 10 minutes; the given allergies and preferences are then
+// merged into that person instead of dropped (#4744).
 func NewPersonCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 	tool := mcp.NewTool("person_create", append(append([]mcp.ToolOption{
-		mcp.WithDescription("Add a family member who doesn't log in (a kid, grandparent, nanny). Login members are added by invite in the app, not here."),
+		mcp.WithDescription("Add a family member who doesn't log in (a kid, grandparent, nanny), with allergies and likes in the same call. Login members are added by invite in the app."),
 		mcp.WithString("display_name", mcp.Description("Their name, e.g. Nora"), mcp.Required()),
 		mcp.WithString("relationship", mcp.Description("How they belong to the family"), mcp.Required(), mcp.Enum(relationships...)),
-	}, fieldParams()...), append(classC("Add person"), respond.Schema[Person]())...)...)
+	}, fieldParams()...), append(classC("Add person"),
+		mcp.WithArray("add_preferences", mcp.Description(`e.g. [{"kind":"allergy","item":"peanuts"}]`), mcp.Items(prefSchema)),
+		mcp.WithArray("allergies", mcp.Description(`Shortcut for allergy entries, e.g. ["peanuts"]`), mcp.WithStringItems()),
+		respond.Schema[Person](),
+	)...)...)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		c, bad := callerOf(ctx, pool)
@@ -958,8 +1177,13 @@ func NewPersonCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 		if !canManage(c.role) {
 			return managersOnly(c.role, "person_create", "add people"), nil
 		}
+		args := req.GetArguments()
 		example := map[string]any{"display_name": "Nora", "relationship": "child", "birthdate": "2015-04-02"}
-		f, bad := readFields(req.GetArguments(), familyToday(time.Now(), c.tz), true, example)
+		f, bad := readFields(args, familyToday(time.Now(), c.tz), true, example)
+		if bad != nil {
+			return bad, nil
+		}
+		adds, bad := readAddPrefs(args)
 		if bad != nil {
 			return bad, nil
 		}
@@ -1015,10 +1239,26 @@ VALUES ($1, $2, $3, $4::date, $5, $6, $7) RETURNING id::text`,
 		if err != nil {
 			return respond.Failed("add the person", err), nil
 		}
-		row, err := loadPerson(ctx, tx, c.householdID, id, false)
+		row, err := loadPerson(ctx, tx, c.householdID, id, len(adds) > 0)
 		if err != nil {
 			return respond.Failed("add the person", err), nil
 		}
+		// Allergies and preferences, with person_update's rules, for a new
+		// person and for the loop guard's existing one alike: on a duplicate
+		// they are merged in, and ones already there go to unchanged.
+		allergies, added, unchanged, allergiesChanged := mergeAllergies(row.allergies, adds)
+		if allergiesChanged {
+			if _, err := tx.Exec(ctx, `UPDATE people SET allergies = $3, updated_at = NOW() WHERE household_id = $1 AND id = $2`,
+				c.householdID, id, allergies); err != nil {
+				return respond.Failed("add the allergies", err), nil
+			}
+			row.allergies = allergies
+		}
+		prefAdded, prefUnchanged, err := insertPreferences(ctx, tx, c.householdID, id, adds)
+		if err != nil {
+			return respond.Failed("add the preference", err), nil
+		}
+		added, unchanged = append(added, prefAdded...), append(unchanged, prefUnchanged...)
 		if err := tx.Commit(ctx); err != nil {
 			return respond.Failed("add the person", err), nil
 		}
@@ -1027,19 +1267,34 @@ VALUES ($1, $2, $3, $4::date, $5, $6, $7) RETURNING id::text`,
 			return respond.Failed("read the new person", err), nil
 		}
 		p.Duplicate = duplicate
+		p.Added, p.Unchanged = added, unchanged
+		if duplicate && allergiesChanged {
+			p.Changed = []string{"allergies"}
+		}
+		var extra string
+		if len(added) > 0 {
+			extra += " Added " + strings.Join(added, ", ")
+			if duplicate {
+				extra += " to them"
+			}
+			extra += "."
+		}
+		if len(unchanged) > 0 {
+			extra += " Unchanged: " + strings.Join(unchanged, ", ") + "."
+		}
 
 		if duplicate {
-			return respond.OK(fmt.Sprintf("%s was already added a few minutes ago; returned that person instead of a copy.", describe(p)), p,
+			return respond.OK(fmt.Sprintf("%s was already added a few minutes ago; returned that person instead of a copy.%s", describe(p), extra), p,
 				fmt.Sprintf("Change details with person_update person_id=%s.", p.PersonID)), nil
 		}
-		next := []string{
-			fmt.Sprintf(`Add allergies or likes with person_update person_id=%s add_preferences=[{"kind":"allergy","item":"peanuts"}].`, p.PersonID),
-			fmt.Sprintf(`Put them on events with event_create person_ids=["%s"].`, p.PersonID),
+		next := []string{fmt.Sprintf(`Put them on events with event_create person_ids=["%s"].`, p.PersonID)}
+		if len(adds) == 0 {
+			next = append([]string{fmt.Sprintf(`Add allergies or likes with person_update person_id=%s add_preferences=[{"kind":"allergy","item":"peanuts"}].`, p.PersonID)}, next...)
 		}
 		if len(sameName) > 0 {
 			next = append(next, fmt.Sprintf("Another person is also named %s (%s); pass person ids, not the name, from now on.", p.Name, strings.Join(sameName, ", ")))
 		}
-		return respond.OK(fmt.Sprintf("Added %s.", describe(p)), p, next...), nil
+		return respond.OK(fmt.Sprintf("Added %s.%s", describe(p), extra), p, next...), nil
 	}
 	return tool.Name, tool, handler
 }
@@ -1119,7 +1374,7 @@ func NewPersonUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 			return bad, nil
 		}
 
-		var changed, added, removed, unchanged []string
+		var changed, removed []string
 		next := row
 		setText := func(name string, a textArg, cur **string) {
 			if !a.set {
@@ -1149,30 +1404,7 @@ func NewPersonUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 				changed = append(changed, "birthdate")
 			}
 		}
-		allergies := slices.Clone(row.allergies)
-		allergiesChanged := false
-		for _, a := range adds {
-			if a.kind != "allergy" {
-				continue
-			}
-			i := allergyIndex(allergies, a.item)
-			switch {
-			case i < 0:
-				allergies = append(allergies, a.value())
-				added = append(added, a.label())
-			case strings.EqualFold(strings.TrimSpace(allergies[i]), a.value()):
-				unchanged = append(unchanged, a.label()+" (already listed)")
-				continue
-			case a.notes == nil:
-				// A bare re-add never drops the detail already stored.
-				unchanged = append(unchanged, "allergy: "+allergies[i]+" (already listed)")
-				continue
-			default: // same allergen, new note: replace, don't duplicate
-				added = append(added, a.label()+", replacing "+allergies[i])
-				allergies[i] = a.value()
-			}
-			allergiesChanged = true
-		}
+		allergies, added, unchanged, allergiesChanged := mergeAllergies(row.allergies, adds)
 		for _, r := range removes {
 			if r.kind != "allergy" {
 				continue
@@ -1210,29 +1442,11 @@ UPDATE people SET display_name = $3, relationship = $4, birthdate = $5::date, sc
 				return respond.Failed("update the person", err), nil
 			}
 		}
-		for _, a := range adds {
-			if a.kind == "allergy" {
-				continue
-			}
-			cat := a.category
-			if cat == "" {
-				cat = "general"
-			}
-			var prefID string
-			err := tx.QueryRow(ctx, `
-INSERT INTO person_preferences (household_id, person_id, kind, category, value, notes)
-VALUES ($1, $2, $3::person_preference_kind, $4, $5, $6)
-ON CONFLICT (person_id, kind, lower(category), lower(value)) DO NOTHING
-RETURNING id::text`, c.householdID, id, dbKind(a.kind), cat, a.item, a.notes).Scan(&prefID)
-			switch {
-			case errors.Is(err, pgx.ErrNoRows):
-				unchanged = append(unchanged, a.label()+" (already listed)")
-			case err != nil:
-				return respond.Failed("add the preference", err), nil
-			default:
-				added = append(added, a.label())
-			}
+		prefAdded, prefUnchanged, err := insertPreferences(ctx, tx, c.householdID, id, adds)
+		if err != nil {
+			return respond.Failed("add the preference", err), nil
 		}
+		added, unchanged = append(added, prefAdded...), append(unchanged, prefUnchanged...)
 		for _, r := range removes {
 			if r.kind == "allergy" {
 				continue
