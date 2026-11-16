@@ -1,12 +1,12 @@
 import type { Page, TestInfo } from "@playwright/test";
-import { test, expect } from "./fixtures";
+import { test, expect, onlyOn } from "./fixtures";
 
 /**
  * Entity detail layout (#4531): components/layout/DetailPageLayout.tsx.
  * Phone: sticky title bar (back, title, actions menu) and collapsible
  * Details / Resources sections, no horizontal scroll. Desktop: two columns.
- * Viewports and colour schemes are pinned per test, so this runs once, in the
- * desktop-chrome project. Screenshots are attached for a visual check.
+ * Viewports and colour schemes are pinned per test: desktop-chrome, and phone
+ * widths on iphone-390 too (WebKit, touch; #4757). Screenshots are attached for a visual check.
  */
 const DETAIL = "/dashboard/bills/b1";
 const BILL = {
@@ -21,8 +21,7 @@ const BILL = {
   notes: "Budget billing since March. Call 800-777-9898 if the autopay fails twice.",
 };
 
-test.beforeEach(async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop-chrome", "viewports are pinned per test");
+test.beforeEach(async ({ page }) => {
   await page.route("**/bff/bills/b1", (route) => route.fulfill({ json: { data: BILL } }));
 });
 
@@ -87,6 +86,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     test.use({ colorScheme });
 
     test("phone 390: stacked, collapsible, actions in a menu, no horizontal scroll", async ({ loggedInPage: page }, testInfo) => {
+      onlyOn("phone");
       await page.setViewportSize({ width: 390, height: 844 });
       await gotoDetail(page);
 
@@ -166,7 +166,8 @@ for (const colorScheme of ["light", "dark"] as const) {
       expect(await input.evaluate((el) => getComputedStyle(el).fontSize)).toBe("16px");
 
       // The title bar sticks under the shell header while scrolling.
-      await page.mouse.wheel(0, 600);
+      // Not mouse.wheel: mobile WebKit (iphone-390) has no wheel events.
+      await page.evaluate(() => window.scrollBy(0, 600));
       await page.waitForTimeout(200);
       const headerBottom = (await page.locator("header").boundingBox())!;
       const saveBox = (await main.getByRole("button", { name: "Save" }).boundingBox())!;
@@ -176,6 +177,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     });
 
     test("desktop 1440: two columns with buttons, nothing collapses", async ({ loggedInPage: page }, testInfo) => {
+      onlyOn("desktop");
       await page.setViewportSize({ width: 1440, height: 900 });
       await gotoDetail(page);
 
@@ -249,6 +251,7 @@ test.describe("boolean field round-trip (#4728)", () => {
     ["false", false, "No"],
   ] as const) {
     test(`${label}: shows ${shown}, saving untouched keeps ${label}`, async ({ loggedInPage: page }) => {
+      onlyOn("phone");
       const { select, save } = await editAutopay(page, value);
       await expect(select).toHaveValue(shown);
       // Phone touch target (#4537).
@@ -259,6 +262,7 @@ test.describe("boolean field round-trip (#4728)", () => {
   }
 
   test("unset: shows the placeholder, saving untouched does not send it", async ({ loggedInPage: page }) => {
+    onlyOn("phone");
     const { select, save } = await editAutopay(page, undefined);
     await expect(select).toHaveValue("");
     await expect(select).toHaveAttribute("placeholder", "Not set");
@@ -267,6 +271,7 @@ test.describe("boolean field round-trip (#4728)", () => {
   });
 
   test("changing Yes to No sends the boolean false", async ({ loggedInPage: page }) => {
+    onlyOn("phone");
     const { select, save } = await editAutopay(page, true);
     await select.click();
     await page.getByRole("option", { name: "No" }).click();

@@ -6,9 +6,14 @@ on:
   push:
     branches: [feat/family-hub]
 
+# PRs: a newer push to the PR cancels the older run (only the latest commit
+# matters). Pushes to feat/family-hub: one group per commit, never cancelled,
+# so every push gets a complete run, e2e included. Parallel tickets push in
+# bursts; with a per-ref group each push cancelled the previous run and e2e
+# never finished (#4757).
 concurrency:
-  group: pr-checks-${{ github.ref }}
-  cancel-in-progress: true
+  group: pr-checks-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

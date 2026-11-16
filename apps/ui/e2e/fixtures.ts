@@ -1,4 +1,4 @@
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, expect, type Locator, type Page } from "@playwright/test";
 
 /**
  * Shared E2E fixtures (#4510).
@@ -78,6 +78,37 @@ export const test = base.extend<Fixtures>({
 });
 
 export { expect };
+
+/**
+ * Activates a button from the keyboard (focus + Enter), for the checks that
+ * focus returns to the opener when a dialog closes. Focus return is for
+ * keyboard users, and WebKit (Safari) never focuses a button on click or tap,
+ * so a clicked opener has nothing to return focus to there (#4757).
+ */
+export async function pressOpener(opener: Locator): Promise<void> {
+  await opener.focus();
+  await opener.page().keyboard.press("Enter");
+}
+
+/**
+ * Projects that run the viewport-pinned shell/component specs (#4757).
+ * Phone-width tests run in desktop Chromium and on iphone-390, which is
+ * WebKit with isMobile and hasTouch: the iOS engine (safe areas,
+ * visualViewport, history back, sticky, dvh) the phone layouts target. Only
+ * one iPhone project, to keep CI time down. Tablet/desktop widths run once,
+ * in desktop-chrome.
+ */
+export const PHONE_PROJECTS = ["desktop-chrome", "iphone-390"];
+
+/**
+ * Skips the current test unless this project runs tests of `kind`. Call it
+ * first thing in a test body or a describe-level beforeEach.
+ */
+export function onlyOn(kind: "phone" | "desktop"): void {
+  const project = test.info().project.name;
+  if (kind === "phone") test.skip(!PHONE_PROJECTS.includes(project), "phone-width test: desktop-chrome and iphone-390 only");
+  else test.skip(project !== "desktop-chrome", "viewport is pinned to tablet/desktop: desktop-chrome only");
+}
 
 /**
  * Asserts the page cannot scroll sideways. On failure the message lists the

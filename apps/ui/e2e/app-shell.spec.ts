@@ -1,19 +1,15 @@
 import type { Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { test, expect, expectNoHorizontalOverflow } from "./fixtures";
+import { test, expect, expectNoHorizontalOverflow, onlyOn, pressOpener } from "./fixtures";
 
 /**
  * Responsive app shell (#4528), per KB design/app-shell.md:
  * phone < 768 header + drawer, tablet 768-991 icon rail, desktop >= 992
- * 260 px sidebar. Viewports are pinned here, so these run once, in the
- * desktop-chrome project (the phone projects already cover the device
- * emulation in smoke.spec.ts).
+ * 260 px sidebar. Viewports are pinned here. Phone-width tests run in
+ * desktop-chrome and on iphone-390 (WebKit, touch); tablet and desktop
+ * widths only in desktop-chrome (#4757, see onlyOn in fixtures.ts).
  */
 const HOME = "/dashboard";
-
-test.beforeEach(({}, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop-chrome", "viewports are pinned per test");
-});
 
 async function gotoHome(page: Page) {
   await page.goto(HOME);
@@ -33,6 +29,7 @@ async function expectHeadingUncovered(page: Page) {
 for (const width of [375, 390]) {
   test.describe(`phone ${width}px`, () => {
     test.use({ viewport: { width, height: 844 } });
+    test.beforeEach(() => onlyOn("phone"));
 
     test("header, no sidebar over the content, drawer opens and closes", async ({ loggedInPage: page }) => {
       await gotoHome(page);
@@ -50,7 +47,7 @@ for (const width of [375, 390]) {
 
       // Open with the menu button, close with Esc; focus goes back to the opener.
       const menu = header.getByRole("button", { name: "Open menu" });
-      await menu.click();
+      await pressOpener(menu);
       const drawer = page.getByRole("dialog");
       await expect(drawer).toBeVisible();
       await expect(drawer.getByRole("link", { name: "Calendar" })).toBeVisible();
@@ -78,6 +75,7 @@ for (const width of [375, 390]) {
 
 test.describe("tablet 768px", () => {
   test.use({ viewport: { width: 768, height: 1024 } });
+  test.beforeEach(() => onlyOn("desktop"));
 
   test("icon rail beside the content; its menu button opens the drawer", async ({ loggedInPage: page }) => {
     await gotoHome(page);
@@ -105,6 +103,7 @@ test.describe("tablet 768px", () => {
 
 test.describe("desktop 1440px", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
+  test.beforeEach(() => onlyOn("desktop"));
 
   test("260px sidebar always open, no menu button", async ({ loggedInPage: page }) => {
     await gotoHome(page);
@@ -159,6 +158,7 @@ async function asRole(page: Page, role: string) {
 
 test.describe("phone 390px drawer content", () => {
   test.use({ viewport: { width: 390, height: 844 } });
+  test.beforeEach(() => onlyOn("phone"));
 
   test("the drawer shows the same nine sections as the sidebar, and logs out through the logout route", async ({ loggedInPage: page }) => {
     await gotoHome(page);
@@ -183,6 +183,8 @@ test.describe("phone 390px drawer content", () => {
 });
 
 test.describe("role-aware navigation", () => {
+  // Resizes across all three breakpoints in one page: desktop-chrome only.
+  test.beforeEach(() => onlyOn("desktop"));
   test("housesitter: no Money or Documents in the sidebar, drawer, rail or More sheet", async ({ loggedInPage: page }) => {
     await asRole(page, "housesitter");
     const expected = ["Today", "Calendar", "Lists", "Meals", "People & House", "Guides", "Settings"];
@@ -250,6 +252,7 @@ async function expectNoSeriousAxeViolations(page: Page) {
 for (const width of [390, 1440]) {
   test.describe(`header bell ${width}px`, () => {
     test.use({ viewport: { width, height: width < 768 ? 844 : 900 } });
+    test.beforeEach(() => onlyOn(width < 768 ? "phone" : "desktop"));
 
     test("the bell button owns the popover ARIA, opens and closes, and axe finds nothing critical/serious", async ({ loggedInPage: page }) => {
       await page.route("**/bff/notifications", (route) =>
@@ -276,8 +279,8 @@ for (const width of [390, 1440]) {
       await expect(header.locator("[aria-expanded]:not(button)")).toHaveCount(0);
       await expectNoSeriousAxeViolations(page);
 
-      // Opens; aria-controls points at the dialog.
-      await bell.click();
+      // Opens (from the keyboard, see pressOpener); aria-controls points at the dialog.
+      await pressOpener(bell);
       const dialog = page.getByRole("dialog", { name: "Notifications" });
       await expect(dialog).toBeVisible();
       await expect(bell).toHaveAttribute("aria-expanded", "true");

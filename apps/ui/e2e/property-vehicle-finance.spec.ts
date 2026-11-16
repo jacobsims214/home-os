@@ -1,5 +1,5 @@
 import type { Page, Route, TestInfo } from "@playwright/test";
-import { test, expect } from "./fixtures";
+import { test, expect, onlyOn } from "./fixtures";
 
 /**
  * Property/vehicle finance (#4706). Since #4704 the mortgage, tax, insurance
@@ -9,7 +9,8 @@ import { test, expect } from "./fixtures";
  * (#4707 drops the columns). The pages list the linked loans and bills, link
  * to each, and add new ones with the FK already set.
  *
- * Viewports are pinned per test, so this runs in the desktop-chrome project.
+ * Viewports are pinned per test: desktop-chrome, and the 390 tests on
+ * iphone-390 too (WebKit, touch; #4757).
  */
 
 type Body = Record<string, unknown>;
@@ -120,11 +121,8 @@ async function snap(page: Page, testInfo: TestInfo, name: string) {
 
 const noHorizontalScroll = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
 
-test.beforeEach(async ({ page: _page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop-chrome", "viewport is pinned per test");
-});
-
 test("property: linked loans and bills are listed; editing sends no legacy finance field", async ({ loggedInPage: page }, testInfo) => {
+  onlyOn("desktop");
   const writes = await stubFinance(page);
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/dashboard/properties/p9");
@@ -159,6 +157,7 @@ test("property: linked loans and bills are listed; editing sends no legacy finan
 });
 
 test("vehicle: linked loan and bills are listed; editing sends no legacy finance field", async ({ loggedInPage: page }, testInfo) => {
+  onlyOn("desktop");
   const writes = await stubFinance(page);
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/dashboard/vehicles/v9");
@@ -187,6 +186,7 @@ test("vehicle: linked loan and bills are listed; editing sends no legacy finance
 });
 
 test("390: Add bill from a property creates it with property_id and stays on the page", async ({ loggedInPage: page }, testInfo) => {
+  onlyOn("phone");
   const writes = await stubFinance(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/dashboard/properties/p9");
@@ -213,6 +213,7 @@ test("390: Add bill from a property creates it with property_id and stays on the
 });
 
 test("390: Add loan from a vehicle creates it with vehicle_id", async ({ loggedInPage: page }) => {
+  onlyOn("phone");
   const writes = await stubFinance(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/dashboard/vehicles/v9");
@@ -231,6 +232,7 @@ test("390: Add loan from a vehicle creates it with vehicle_id", async ({ loggedI
 });
 
 test("Add property sends no legacy finance field", async ({ loggedInPage: page }) => {
+  onlyOn("desktop");
   const writes = await stubFinance(page);
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/dashboard/properties");

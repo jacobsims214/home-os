@@ -1,18 +1,14 @@
 import type { Page, TestInfo } from "@playwright/test";
-import { test, expect } from "./fixtures";
+import { test, expect, onlyOn } from "./fixtures";
 
 /**
  * Theme tokens (#4529), per KB design/app-shell.md: the app follows the
  * system colour scheme until the user picks Light / Dark in the account menu,
  * and the shell paints from the semantic tokens in app/globals.css.
- * Viewports and colour schemes are pinned per test, so this runs once, in the
- * desktop-chrome project. Each test attaches screenshots for a visual check.
+ * Viewports and colour schemes are pinned per test: desktop-chrome, and phone
+ * widths on iphone-390 too (WebKit, touch; #4757). Each test attaches screenshots for a visual check.
  */
 const HOME = "/dashboard";
-
-test.beforeEach(({}, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop-chrome", "viewports are pinned per test");
-});
 
 async function gotoHome(page: Page) {
   await page.goto(HOME);
@@ -39,6 +35,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     test.use({ colorScheme });
 
     test("phone 390: follows the system scheme; shell paints from tokens", async ({ loggedInPage: page }, testInfo) => {
+      onlyOn("phone");
       await page.setViewportSize({ width: 390, height: 844 });
       await gotoHome(page);
       expect(await scheme(page)).toBe(colorScheme);
@@ -60,6 +57,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     });
 
     test("desktop 1440: follows the system scheme; sidebar paints from tokens", async ({ loggedInPage: page }, testInfo) => {
+      onlyOn("desktop");
       await page.setViewportSize({ width: 1440, height: 900 });
       await gotoHome(page);
       expect(await scheme(page)).toBe(colorScheme);
@@ -75,6 +73,7 @@ test.describe("manual override", () => {
   test.use({ colorScheme: "light" });
 
   test("picking Dark overrides a light system and survives a reload; System goes back", async ({ loggedInPage: page }) => {
+    onlyOn("phone");
     await page.setViewportSize({ width: 390, height: 844 });
     await gotoHome(page);
     expect(await scheme(page)).toBe("light");
@@ -96,6 +95,7 @@ test.describe("manual override", () => {
   });
 
   test("an explicit Dark from the old toggle carries over", async ({ loggedInPage: page }) => {
+    onlyOn("desktop");
     await page.addInitScript(() => {
       if (!sessionStorage.getItem("seeded")) {
         localStorage.removeItem("home-os-color-scheme");
@@ -157,6 +157,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     test.use({ colorScheme });
 
     test("delete button: hover turns it the danger colour; disabled shows no red hover", async ({ loggedInPage: page }, testInfo) => {
+      onlyOn("desktop");
       await gotoBillFiles(page);
       const del = page.getByRole("button", { name: `Delete ${FILE.name}` });
       const style = () => del.evaluate((el) => ({ color: getComputedStyle(el).color, bg: getComputedStyle(el).backgroundColor }));
@@ -181,6 +182,7 @@ test.describe("legacy-colour bridge, drop zone", () => {
   test.use({ colorScheme: "dark" });
 
   test("dark 1440: the Files drop zone passes axe colour-contrast", async ({ loggedInPage: page }, testInfo) => {
+    onlyOn("desktop");
     await gotoBillFiles(page);
     const zone = page.getByRole("button", { name: "Drop files here or click to upload" });
     await expect(zone).toBeVisible();

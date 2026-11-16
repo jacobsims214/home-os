@@ -1,14 +1,12 @@
 import type { Page } from "@playwright/test";
-import { test, expect, expectNoHorizontalOverflow } from "./fixtures";
+import { test, expect, expectNoHorizontalOverflow, onlyOn, pressOpener } from "./fixtures";
 
 /**
  * Phone bottom tab bar and More sheet (#4536), per KB design/app-shell.md:
  * Today / Calendar / Lists / Meals / More below 768 px, nothing from 768 up.
- * Viewports are pinned here, so these run once, in the desktop-chrome project.
+ * Viewports are pinned here. Phone widths run in desktop-chrome and on
+ * iphone-390 (WebKit, touch); 768/1440 only in desktop-chrome (#4757).
  */
-test.beforeEach(({}, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop-chrome", "viewports are pinned per test");
-});
 
 async function gotoHome(page: Page) {
   await page.goto("/dashboard");
@@ -51,6 +49,7 @@ async function expectLastElementUncovered(page: Page) {
 for (const width of [375, 390]) {
   test.describe(`phone ${width}px`, () => {
     test.use({ viewport: { width, height: 844 } });
+    test.beforeEach(() => onlyOn("phone"));
 
     test("tab bar is visible, follows the route, and doesn't cover content", async ({ loggedInPage: page }) => {
       await gotoHome(page);
@@ -91,7 +90,7 @@ for (const width of [375, 390]) {
       await gotoHome(page);
       const nav = tabBar(page);
       const more = nav.getByRole("button", { name: "More" });
-      await more.click();
+      await pressOpener(more); // Esc below returns focus here
 
       const sheet = page.getByRole("dialog", { name: "More" });
       await expect(sheet).toBeVisible();
@@ -145,6 +144,7 @@ for (const width of [375, 390]) {
 for (const width of [768, 1440]) {
   test.describe(`${width}px`, () => {
     test.use({ viewport: { width, height: 1024 } });
+    test.beforeEach(() => onlyOn("desktop"));
 
     test("no tab bar", async ({ loggedInPage: page }) => {
       await gotoHome(page);

@@ -1,13 +1,13 @@
 import type { Page, TestInfo } from "@playwright/test";
-import { test, expect, expectNoHorizontalOverflow } from "./fixtures";
+import { test, expect, expectNoHorizontalOverflow, onlyOn } from "./fixtures";
 
 /**
  * Entity list pattern (#4530): components/entity/EntityList.tsx.
  * Phone (< 768): stacked cards, each one tappable link, no horizontal scroll.
  * ≥ 768: a table in a horizontal scroller, so columns never clip.
  * "Add <type>" opens the create modal (no /new route) and POSTs.
- * Viewports and colour schemes are pinned per test, so this runs once, in the
- * desktop-chrome project. Screenshots are attached for a visual check.
+ * Viewports and colour schemes are pinned per test: desktop-chrome, and phone
+ * widths on iphone-390 too (WebKit, touch; #4757). Screenshots are attached for a visual check.
  */
 const BILLS = [
   { id: "b1", name: "Duke Energy electric — Main Residence (time-of-use plan, autopay)", amount: "182.40", due_day: 12, category: "Electric", property_id: "p1" },
@@ -51,15 +51,12 @@ async function snap(page: Page, testInfo: TestInfo, name: string, fullPage = fal
   await testInfo.attach(name, { path, contentType: "image/png" });
 }
 
-test.beforeEach(async ({}, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop-chrome", "viewports are pinned per test");
-});
-
 for (const colorScheme of ["light", "dark"] as const) {
   test.describe(`${colorScheme}`, () => {
     test.use({ colorScheme });
 
     test("phone 390: cards, no clipping, Add opens the create modal and POSTs", async ({ loggedInPage: page }, testInfo) => {
+      onlyOn("phone");
       await page.setViewportSize({ width: 390, height: 844 });
       const captured = await stubBills(page);
       await gotoBills(page);
@@ -126,6 +123,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     });
 
     test("desktop 1440: table with every column visible, rows open the record", async ({ loggedInPage: page }, testInfo) => {
+      onlyOn("desktop");
       await page.setViewportSize({ width: 1440, height: 900 });
       await stubBills(page);
       await gotoBills(page);
@@ -162,6 +160,7 @@ for (const colorScheme of ["light", "dark"] as const) {
 }
 
 test("tablet 800: the table scrolls inside its frame instead of clipping", async ({ loggedInPage: page }) => {
+  onlyOn("desktop");
   await page.setViewportSize({ width: 800, height: 900 });
   await stubBills(page);
   await gotoBills(page);
@@ -173,6 +172,7 @@ test("tablet 800: the table scrolls inside its frame instead of clipping", async
 });
 
 test("API failure shows an error with retry, not an empty list", async ({ loggedInPage: page }) => {
+  onlyOn("phone");
   await page.setViewportSize({ width: 390, height: 844 });
   await stubBills(page, { fail: true });
   await page.goto("/dashboard/bills");

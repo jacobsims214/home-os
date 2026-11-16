@@ -1,5 +1,5 @@
 import type { Locator, Page, TestInfo } from "@playwright/test";
-import { test, expect } from "./fixtures";
+import { test, expect, onlyOn, pressOpener } from "./fixtures";
 
 /**
  * ResponsiveModal (#4532): components/ui/ResponsiveModal.tsx, exercised
@@ -12,7 +12,8 @@ import { test, expect } from "./fixtures";
  *   shrinks like it does when the iOS keyboard opens (Playwright can't show
  *   a real on-screen keyboard); the sheet, the focused field and the actions
  *   must all fit in the visible part.
- * Viewports and colour schemes are pinned per test (desktop-chrome project).
+ * Viewports and colour schemes are pinned per test: desktop-chrome, and the
+ * phone tests on iphone-390 too (WebKit, touch; #4757).
  */
 
 const PROPERTIES = [{ id: "p1", name: "Main house" }];
@@ -28,7 +29,9 @@ async function openAddBill(page: Page): Promise<{ add: Locator; dialog: Locator;
   await expect(main.getByText("Internet").filter({ visible: true }).first()).toBeVisible();
   const add = main.getByRole("button", { name: "Add bill" });
   const openedAt = await historyIndex(page);
-  await add.click();
+  // From the keyboard: expectEscCloses checks focus goes back to the opener
+  // (see pressOpener). expectBackCloses opens it with a click/tap.
+  await pressOpener(add);
   const dialog = page.getByRole("dialog", { name: "Add bill" });
   await expect(dialog).toBeVisible();
   // Wait for the transition to finish (the sheet slides up 240 ms).
@@ -94,15 +97,12 @@ async function expectBackCloses(page: Page, add: Locator) {
   await expect(page.locator("main").getByRole("heading", { level: 2, name: "Bills" })).toBeVisible();
 }
 
-test.beforeEach(async ({}, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop-chrome", "viewports are pinned per test");
-});
-
 for (const colorScheme of ["light", "dark"] as const) {
   test.describe(colorScheme, () => {
     test.use({ colorScheme });
 
     test("phone 390: bottom sheet, focus trap, Esc and back close", async ({ loggedInPage: page }, testInfo) => {
+      onlyOn("phone");
       await page.setViewportSize({ width: 390, height: 844 });
       const { add, dialog, openedAt } = await openAddBill(page);
 
@@ -137,6 +137,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     });
 
     test("phone 390: keyboard open keeps the field and actions visible", async ({ loggedInPage: page }, testInfo) => {
+      onlyOn("phone");
       await page.setViewportSize({ width: 390, height: 844 });
       // A controllable visualViewport, installed before the page's code runs.
       await page.addInitScript(() => {
@@ -193,6 +194,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     });
 
     test("desktop 1440: centred dialog, focus trap, Esc and back close", async ({ loggedInPage: page }, testInfo) => {
+      onlyOn("desktop");
       await page.setViewportSize({ width: 1440, height: 900 });
       const { add, dialog, openedAt } = await openAddBill(page);
 
@@ -215,6 +217,7 @@ for (const colorScheme of ["light", "dark"] as const) {
 }
 
 test("submit navigates to the new record, and Back returns to the list", async ({ loggedInPage: page }) => {
+  onlyOn("phone");
   await page.setViewportSize({ width: 390, height: 844 });
   const { dialog, openedAt } = await openAddBill(page);
   // Registered after openAddBill's stubs, so it's tried first.

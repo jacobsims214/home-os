@@ -1,12 +1,12 @@
 import type { Page, Route, TestInfo } from "@playwright/test";
-import { test, expect } from "./fixtures";
+import { test, expect, onlyOn } from "./fixtures";
 
 /**
  * Pet vet picker (#4703): the pet's vet is a family contact tagged "vet"
  * (pets.vet_vendor_id), chosen in a ResponsiveModal sheet, with an inline
  * "add a new vet contact". The pet PUT carries vet_vendor_id and never
  * vet_name / vet_phone (#4705 drops those columns). Phone width 390, pinned,
- * so this runs once, in the desktop-chrome project.
+ * so this runs in desktop-chrome and on iphone-390 (WebKit, touch; #4757).
  */
 
 const VETS = [
@@ -100,11 +100,8 @@ function expectOnlyVendorId(body: Body, id: string) {
   expect(body).not.toHaveProperty("vet_phone");
 }
 
-test.beforeEach(async ({ page: _page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop-chrome", "viewport is pinned per test");
-});
-
 test("390: pick an existing vet contact; the save sends only vet_vendor_id", async ({ loggedInPage: page }, testInfo) => {
+  onlyOn("phone");
   const writes = await stubPet(page);
   const { main, picker } = await startEditing(page);
 
@@ -133,6 +130,7 @@ test("390: pick an existing vet contact; the save sends only vet_vendor_id", asy
 });
 
 test("390: add a new vet contact inline; it is created tagged vet and chosen", async ({ loggedInPage: page }, testInfo) => {
+  onlyOn("phone");
   const writes = await stubPet(page);
   const { main, picker } = await startEditing(page);
 
