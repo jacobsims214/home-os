@@ -397,8 +397,10 @@ func TestNotificationFind(t *testing.T) {
 	if n, err := UnreadCount(context.Background(), pool, hh.HouseholdID.String(), hh.UserID.String()); err != nil || n != 3 {
 		t.Errorf("UnreadCount = %d, %v", n, err)
 	}
-	// A token without a user UUID (local dev) sees only family-wide ones.
-	if n, err := UnreadCount(context.Background(), pool, hh.HouseholdID.String(), "local-dev"); err != nil || n != 2 {
+	// A token without a user UUID (local dev) sees only family-wide ones, as
+	// far as the claims' role allows (#4794; role_test.go has the rest).
+	dev := server.ContextWithClaims(context.Background(), &auth.Claims{UserID: "local-dev", HouseholdID: hh.HouseholdID.String(), Role: "owner"})
+	if n, err := UnreadCount(dev, pool, hh.HouseholdID.String(), "local-dev"); err != nil || n != 2 {
 		t.Errorf("UnreadCount(local-dev) = %d, %v", n, err)
 	}
 }

@@ -40,22 +40,22 @@ type markResult struct {
 }
 
 // markAllSQL marks every unread visible notification read.
-const markAllSQL = `
+var markAllSQL = `
 	UPDATE notifications n SET read_at = NOW()
 	WHERE ` + visibleSQL + ` AND n.read_at IS NULL
 	RETURNING n.id, n.user_id IS NULL`
 
 // lockSQL locks the named visible notifications and reports which are read.
-const lockSQL = `
+var lockSQL = `
 	SELECT n.id, n.read_at IS NOT NULL
 	FROM notifications n
-	WHERE ` + visibleSQL + ` AND n.id = ANY($3)
+	WHERE ` + visibleSQL + ` AND n.id = ANY($4)
 	FOR UPDATE`
 
 // markIDsSQL marks the named unread visible notifications read.
-const markIDsSQL = `
+var markIDsSQL = `
 	UPDATE notifications n SET read_at = NOW()
-	WHERE ` + visibleSQL + ` AND n.id = ANY($3) AND n.read_at IS NULL
+	WHERE ` + visibleSQL + ` AND n.id = ANY($4) AND n.read_at IS NULL
 	RETURNING n.id, n.user_id IS NULL`
 
 // NewNotificationMarkReadTool creates the notification_mark_read MCP tool
@@ -105,12 +105,18 @@ func markRead(ctx context.Context, pool *pgxpool.Pool, householdID string, userI
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// The role is re-read in this transaction: a notification the caller's
+	// current role can't see is not found and is never marked.
+	role, err := callerRole(ctx, tx, householdID, userID)
+	if err != nil {
+		return res, nil, err
+	}
 	var rows pgx.Rows
 	if in.all {
-		rows, err = tx.Query(ctx, markAllSQL, householdID, userID)
+		rows, err = tx.Query(ctx, markAllSQL, householdID, userID, role)
 	} else {
 		found := make(map[uuid.UUID]bool, len(in.ids))
-		lock, qerr := tx.Query(ctx, lockSQL, householdID, userID, in.ids)
+		lock, qerr := tx.Query(ctx, lockSQL, householdID, userID, role, in.ids)
 		if qerr != nil {
 			return res, nil, qerr
 		}
@@ -135,7 +141,7 @@ func markRead(ctx context.Context, pool *pgxpool.Pool, householdID string, userI
 		if len(missing) > 0 {
 			return res, missing, nil
 		}
-		rows, err = tx.Query(ctx, markIDsSQL, householdID, userID, in.ids)
+		rows, err = tx.Query(ctx, markIDsSQL, householdID, userID, role, in.ids)
 	}
 	if err != nil {
 		return res, nil, err
@@ -154,7 +160,7 @@ func markRead(ctx context.Context, pool *pgxpool.Pool, householdID string, userI
 		return res, nil, err
 	}
 	res.Marked = len(res.NotificationIDs)
-	if res.UnreadCount, _, err = counts(ctx, tx, householdID, userID); err != nil {
+	if res.UnreadCount, _, err = counts(ctx, tx, householdID, userID, role); err != nil {
 		return res, nil, err
 	}
 	return res, nil, tx.Commit(ctx)

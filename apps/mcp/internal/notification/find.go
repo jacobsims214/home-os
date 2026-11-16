@@ -40,15 +40,15 @@ type findResult struct {
 }
 
 // listSQL loads one page of the caller's visible notifications, newest
-// first. $3 limits it to unread ones.
-const listSQL = `
+// first. $4 limits it to unread ones.
+var listSQL = `
 	SELECT n.id, n.type, n.title, NULLIF(btrim(n.body), ''), n.user_id IS NULL, n.read_at, n.created_at,
 	       NULLIF(btrim(n.entity_type), ''), n.entity_id
 	FROM notifications n
 	WHERE ` + visibleSQL + `
-	  AND (NOT $3 OR n.read_at IS NULL)
+	  AND (NOT $4 OR n.read_at IS NULL)
 	ORDER BY n.created_at DESC, n.id DESC
-	LIMIT $4 OFFSET $5`
+	LIMIT $5 OFFSET $6`
 
 // NewNotificationFindTool creates the notification_find MCP tool (catalog
 // v2, class R), replacing list_notifications and get_unread_count.
@@ -90,7 +90,11 @@ func findNotifications(ctx context.Context, pool *pgxpool.Pool, householdID stri
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	unread, all, err := counts(ctx, tx, householdID, userID)
+	role, err := callerRole(ctx, tx, householdID, userID)
+	if err != nil {
+		return res, err
+	}
+	unread, all, err := counts(ctx, tx, householdID, userID, role)
 	if err != nil {
 		return res, err
 	}
@@ -102,7 +106,7 @@ func findNotifications(ctx context.Context, pool *pgxpool.Pool, householdID stri
 	if err != nil {
 		return res, err
 	}
-	rows, err := tx.Query(ctx, listSQL, householdID, userID, in.unreadOnly, in.limit, in.offset)
+	rows, err := tx.Query(ctx, listSQL, householdID, userID, role, in.unreadOnly, in.limit, in.offset)
 	if err != nil {
 		return res, err
 	}

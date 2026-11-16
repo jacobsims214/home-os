@@ -47,11 +47,6 @@ const (
 // toolHandler is the signature every notification tool handler has.
 type toolHandler = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)
 
-// visibleSQL is the WHERE fragment for the rows the caller may see: $1 is
-// the household id, $2 the caller's user id (NULL when the token has no
-// user UUID, which leaves only family-wide rows).
-const visibleSQL = `n.household_id = $1 AND (n.user_id IS NULL OR n.user_id = $2)`
-
 // notificationData is one notification in output. IDs are strings (a
 // uuid.UUID would be advertised as a byte array in the outputSchema).
 type notificationData struct {
@@ -173,18 +168,25 @@ type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// counts returns the caller's unread and total visible notifications.
-func counts(ctx context.Context, q querier, householdID string, userID *uuid.UUID) (unread, total int, err error) {
+// counts returns the caller's unread and total visible notifications; role
+// is their current role (callerRole), so the counts match what find lists.
+func counts(ctx context.Context, q querier, householdID string, userID *uuid.UUID, role string) (unread, total int, err error) {
 	err = q.QueryRow(ctx, `SELECT count(*) FILTER (WHERE n.read_at IS NULL), count(*)
-		FROM notifications n WHERE `+visibleSQL, householdID, userID).Scan(&unread, &total)
+		FROM notifications n WHERE `+visibleSQL, householdID, userID, role).Scan(&unread, &total)
 	return unread, total, err
 }
 
 // UnreadCount returns how many notifications the member userID has unread:
-// family-wide ones plus their own personal ones. family_overview's
-// unread_notifications (#4385) should use it so both tools agree.
+// family-wide ones plus their own personal ones, limited to what their
+// current role may see (visibility.go). family_overview's
+// unread_notifications (#4385) uses it so both tools agree.
 func UnreadCount(ctx context.Context, q querier, householdID, userID string) (int, error) {
-	unread, _, err := counts(ctx, q, householdID, callerUser(userID))
+	uid := callerUser(userID)
+	role, err := callerRole(ctx, q, householdID, uid)
+	if err != nil {
+		return 0, err
+	}
+	unread, _, err := counts(ctx, q, householdID, uid, role)
 	return unread, err
 }
 
