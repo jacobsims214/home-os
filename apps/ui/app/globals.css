@@ -170,3 +170,14 @@ body {
   & .text-green-700,
   & .text-green-800 { color: #8ce99a; }
 }
+
+/* #4568: the "Skipped for safety" disclosure's caret, matching the mockup. */
+details[data-skipped-for-safety] > summary::-webkit-details-marker {
+  display: none;
+}
+details[data-skipped-for-safety] > summary .safety-caret {
+  transform: rotate(0deg);
+}
+details[data-skipped-for-safety][open] > summary .safety-caret {
+  transform: rotate(90deg);
+}

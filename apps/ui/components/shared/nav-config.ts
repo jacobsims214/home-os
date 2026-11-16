@@ -98,20 +98,20 @@ export const NAV_SECTIONS: readonly NavSection[] = [
   { id: "today", label: "Today", href: "/dashboard", icon: IconSun, group: "main", tab: true },
   { id: "calendar", label: "Calendar", href: "/dashboard/calendar", icon: IconCalendar, group: "main", tab: true, roles: SITTERS },
   { id: "lists", label: "Lists", href: "/dashboard/lists", icon: IconListCheck, group: "main", tab: true, comingSoon: true, roles: SITTERS },
-  // Meals is live as of #4567: the recipe box. The href is /dashboard/recipes
-  // because that page exists; /dashboard/meals (the week plan and the
-  // "what's for dinner" suggestions, #4568) is not built yet, and linking the
-  // tab to it would 404. `matches` keeps /dashboard/meals highlighted under
-  // Meals the moment #4568 lands, and #4568 should swap href to it then.
+  // Meals is the WEEK PLAN and the dinner suggestions (#4568), with the recipe
+  // box one tap away on its own tab (/dashboard/recipes). #4567 built the recipe
+  // pages and pointed this tab at them only because /dashboard/meals did not
+  // exist yet; #4568 built it, so the tab points here and the recipe box stays
+  // reachable from the Meals page's header button and its empty states.
   {
     id: "meals",
     label: "Meals",
-    href: "/dashboard/recipes",
+    href: "/dashboard/meals",
     icon: IconToolsKitchen,
     group: "main",
     tab: true,
     roles: SITTERS,
-    matches: ["/dashboard/meals"],
+    matches: ["/dashboard/recipes"],
   },
   { id: "documents", label: "Documents", href: "/dashboard/documents", icon: IconFileText, group: "household", comingSoon: true, roles: READERS },
   {
@@ -157,6 +157,7 @@ const ROUTE_TITLES: ReadonlyArray<[prefix: string, title: string]> = [
   ["/dashboard/bills", "Bills"],
   ["/dashboard/loans", "Loans"],
   ["/dashboard/admin", "Admin"],
+  ["/dashboard/meals", "Meals"],
   ["/dashboard/recipes", "Recipes"],
   ["/dashboard/search", "Search"],
 ];

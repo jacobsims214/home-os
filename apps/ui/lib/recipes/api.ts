@@ -25,7 +25,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 import { mealKeys, personKeys, recipeKeys } from "@/lib/query-keys";
-import type { DataEnvelope, Meal, MealFeedback, MealPlanResponse, Person, Recipe, RecipeInput } from "./types";
+import type { SuggestSummary } from "./suggestions";
+import type {
+  DataEnvelope,
+  GroceryResult,
+  Meal,
+  MealFeedback,
+  MealPlanResponse,
+  Person,
+  Recipe,
+  RecipeInput,
+} from "./types";
 
 /** The household's people, with allergies. Every role may read allergies (safety data). */
 export function usePeople() {
@@ -153,4 +163,161 @@ export function averageRating(feedback: readonly MealFeedback[] | undefined): { 
   const ratings = (feedback ?? []).map((f) => f.rating).filter((r): r is number => typeof r === "number" && r > 0);
   if (ratings.length === 0) return null;
   return { average: ratings.reduce((a, b) => a + b, 0) / ratings.length, count: ratings.length };
+}
+
+/**
+ * "Plan this recipe on a night" — PUT /meal-plans/{date}/{slot} upserts the
+ * slot and keeps feedback already on it (KB api/meals-recipes-meal-plans-feedback.md).
+ * The week view's suggestion sheet and its empty slots both use this.
+ */
+export function usePlanMeal() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ date, slot, recipeId, title, notes }: {
+      date: string;
+      slot: Meal["slot"];
+      recipeId?: string;
+      title?: string;
+      notes?: string;
+    }) =>
+      apiFetch<DataEnvelope<Meal>>(`/api/v1/meal-plans/${encodeURIComponent(date)}/${encodeURIComponent(slot)}`, {
+        method: "PUT",
+        body: { recipe_id: recipeId, title, notes: notes?.trim() || undefined },
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: mealKeys.all });
+    },
+  });
+}
+
+/**
+ * Clear a night: DELETE /meal-plans/{date}/{slot} is idempotent (204 even when
+ * the slot is already empty), so a second tap is harmless.
+ */
+export function useClearMeal() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ date, slot }: { date: string; slot: Meal["slot"] }) =>
+      apiFetch<void>(`/api/v1/meal-plans/${encodeURIComponent(date)}/${encodeURIComponent(slot)}`, { method: "DELETE" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: mealKeys.all });
+    },
+  });
+}
+
+/**
+ * Dinner suggestions for one date and slot — meal_suggest, over REST.
+ *
+ * THERE IS NO SUCH ENDPOINT YET. meal_suggest ships as an MCP tool (#4496) and
+ * the UI cannot call the MCP (it refuses `home-os-ui` tokens by audience,
+ * #4692), so GET /meal-plans/suggestions answers 404 today. This hook asks
+ * anyway, and `retry: false` plus a 404 → null mapping means the Meals page
+ * degrades to its recipe box with an explicit note instead of an error box.
+ *
+ * Why ask at all: the day the API gains the endpoint (the follow-up to #4891,
+ * which adds the same fields to /recipes), the sheet's ranked list and its
+ * SuggestionEmptyState light up with NO page change — and the e2e can prove
+ * that path now by stubbing the endpoint with meal_suggest's real payload
+ * shape. A component that has never been driven by a payload is not tested.
+ */
+export interface SuggestionQuery {
+  date: string;
+  slot: Meal["slot"];
+}
+
+export function useMealSuggestions(query: SuggestionQuery | null) {
+  return useQuery({
+    queryKey: [...mealKeys.all, "suggest", query?.date ?? "", query?.slot ?? ""],
+    queryFn: async () => {
+      try {
+        return await apiFetch<DataEnvelope<SuggestSummary>>("/api/v1/meal-plans/suggestions", {
+          params: { date: query!.date, slot: query!.slot },
+          redirectOn401: false,
+        });
+      } catch (err) {
+        // 404 = this Home OS build has no suggestions endpoint. That is stated
+        // on the page, not shown as a failure, and it must not send anyone to
+        // /login: it is not an auth problem.
+        if ((err as { status?: number })?.status === 404) return null;
+        throw err;
+      }
+    },
+    enabled: !!query,
+    retry: false,
+    staleTime: 60_000,
+  });
+}
+
+/** The grocery range the week view asks for: the week's dinners. */
+export interface GroceryRange {
+  from: string;
+  to: string;
+  slots?: string[];
+  listId?: string;
+}
+
+function groceryParams(range: GroceryRange): Record<string, string> {
+  const params: Record<string, string> = { from: range.from, to: range.to };
+  if (range.slots && range.slots.length > 0) params.slots = range.slots.join(",");
+  if (range.listId) params.list_id = range.listId;
+  return params;
+}
+
+/**
+ * The grocery merge PREVIEW: what "Add dinners to Groceries" would do. Writes
+ * nothing (the endpoint runs the merge in a rolled-back transaction), so it is
+ * safe to load the moment the preview page opens — including while someone
+ * else is checking items off the same list in store mode.
+ */
+export function useGroceryPreview(range: GroceryRange, enabled = true) {
+  return useQuery({
+    queryKey: [...mealKeys.all, "grocery", "preview", range.from, range.to, (range.slots ?? []).join(","), range.listId ?? ""],
+    queryFn: () => apiFetch<DataEnvelope<GroceryResult>>("/api/v1/meal-plans/grocery", { params: groceryParams(range) }),
+    enabled: enabled && !!range.from && !!range.to,
+    // A preview is a snapshot of a shared list: refetching it under the user
+    // while they read it would change the numbers under their thumb.
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/**
+ * The grocery merge APPLY. Idempotent server-side (an item whose words are
+ * already open on the list is not added again), so a double tap cannot
+ * duplicate the week — and the response says what really happened per row.
+ */
+export function useApplyGrocery() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (range: GroceryRange) =>
+      apiFetch<DataEnvelope<GroceryResult>>("/api/v1/meal-plans/grocery", {
+        method: "POST",
+        params: groceryParams(range),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [...mealKeys.all, "grocery"] });
+    },
+  });
+}
+
+/**
+ * Existing items on a list, for the recipe detail page's "on the plan" idea
+ * applied to grocery. Kept here rather than a new lists client: the Meals page
+ * is the only reader today.
+ */
+export interface GroceryListItem {
+  id: string;
+  text: string;
+  quantity?: number | null;
+  unit?: string | null;
+  checked: boolean;
+}
+
+export function useListItems(listId: string | undefined) {
+  return useQuery({
+    queryKey: [...mealKeys.all, "list-items", listId ?? ""],
+    queryFn: () => apiFetch<DataEnvelope<GroceryListItem[]>>(`/api/v1/lists/${encodeURIComponent(listId!)}/items`),
+    enabled: !!listId,
+    retry: false,
+  });
 }
