@@ -47,8 +47,16 @@ spec:
         {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         - name: config
           mountPath: /etc/dex
+        {{- if .Values.dex.grpcTLS.enabled }}
+        - name: dex-grpc-tls
+          mountPath: {{ include "home-os.dexGrpcTLSDir" . }}
+          readOnly: true
+        {{- end }}
       volumes:
       {{- include "home-os.tmpVolume" . | nindent 6 }}
       - name: config
         configMap:
           name: home-os-dex-config
+      {{- if .Values.dex.grpcTLS.enabled }}
+      {{- include "home-os.dexGrpcServerVolume" . | nindent 6 }}
+      {{- end }}

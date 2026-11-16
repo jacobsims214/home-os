@@ -45,6 +45,9 @@ spec:
           value: {{ include "home-os.publicUrl" . | quote }}
         - name: DEX_ISSUER
           value: {{ include "home-os.dexIssuer" . | quote }}
+        - name: DEX_GRPC_ADDR
+          value: "home-os-dex:5557"
+        {{- include "home-os.dexGrpcClientEnv" . | nindent 8 }}
         {{- with .Values.mcp.acceptedClientIDs }}
         {{- if has "home-os-ui" . }}
         {{- fail "mcp.acceptedClientIDs must not contain home-os-ui: the MCP accepts only tokens issued for itself (#4692)" }}
@@ -62,6 +65,9 @@ spec:
         {{- end }}
         volumeMounts:
         {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
+        {{- if .Values.dex.grpcTLS.enabled }}
+        {{- include "home-os.dexGrpcClientVolumeMount" . | nindent 8 }}
+        {{- end }}
         resources:
           {{- toYaml .Values.mcp.resources | nindent 10 }}
         readinessProbe:
@@ -78,3 +84,6 @@ spec:
           periodSeconds: 20
       volumes:
       {{- include "home-os.tmpVolume" . | nindent 6 }}
+      {{- if .Values.dex.grpcTLS.enabled }}
+      {{- include "home-os.dexGrpcClientVolume" . | nindent 6 }}
+      {{- end }}

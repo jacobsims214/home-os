@@ -1,0 +1,119 @@
+{{- if .Values.dex.grpcTLS.enabled }}
+{{- /*
+mTLS material for Dex's gRPC admin API (#697).
+
+Dex's gRPC API (port 5557: CreatePassword, CreateClient, RevokeRefresh, …) has
+no authentication of its own. Before this, the listener was plaintext, so any
+pod that could route to it could set the password of any Dex user — including
+the instance admin — and mint OAuth clients. Now Dex presents a server
+certificate and requires a client certificate from the same private CA; only
+the api and mcp Deployments are issued one.
+
+The issuer is cert-manager's selfSigned issuer, NOT the cluster's
+letsencrypt-cloudflare ClusterIssuer: these names (home-os-dex.home-os.svc) are
+in-cluster only and Let's Encrypt cannot validate them. The CA is a
+cert-manager CA Issuer layered on the self-signed root, so both sides verify
+against one bundle (ca.crt) instead of trusting each other's leaf.
+
+Renewal: cert-manager rewrites the Secrets in place ~30 days before expiry
+(90-day certs). Both the Dex pod and the clients re-read the files
+(newTLSReloader in Dex; reloadingCert in apps/api and apps/mcp), and the
+checksum annotation on the Dex pod rolls it on a Secret change anyway.
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: home-os-dex-grpc-selfsigned
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "home-os.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: home-os-dex-grpc-ca
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "home-os.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  commonName: home-os-dex-grpc-ca
+  secretName: {{ .Values.dex.grpcTLS.caSecretName }}
+  duration: {{ .Values.dex.grpcTLS.caDuration }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: home-os-dex-grpc-selfsigned
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: home-os-dex-grpc-ca
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "home-os.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ .Values.dex.grpcTLS.caSecretName }}
+---
+{{- /* Server certificate: Dex's gRPC listener on 5557. */}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: home-os-dex-grpc-server
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "home-os.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.dex.grpcTLS.serverSecretName }}
+  duration: {{ .Values.dex.grpcTLS.duration }}
+  # usages are spelled out because the default is not "server auth": without
+  # them cert-manager issues a certificate Dex would reject as a server.
+  usages:
+    - server auth
+  commonName: home-os-dex.{{ .Values.namespace }}.svc
+  dnsNames:
+    - home-os-dex
+    - home-os-dex.{{ .Values.namespace }}
+    - home-os-dex.{{ .Values.namespace }}.svc
+    - home-os-dex.{{ .Values.namespace }}.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: home-os-dex-grpc-ca
+    kind: Issuer
+    group: cert-manager.io
+---
+{{- /*
+Client certificate, shared by the api and mcp pods: both only ever call the
+same admin API over the same connection, and a separate identity per pod would
+buy nothing Dex can act on (its gRPC API authorizes nothing per client). One
+Certificate also means one renewal to reason about.
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: home-os-dex-grpc-client
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "home-os.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.dex.grpcTLS.clientSecretName }}
+  duration: {{ .Values.dex.grpcTLS.duration }}
+  usages:
+    - client auth
+  commonName: home-os-dex-grpc-client
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: home-os-dex-grpc-ca
+    kind: Issuer
+    group: cert-manager.io
+{{- end }}

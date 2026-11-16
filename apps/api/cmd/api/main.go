@@ -60,7 +60,7 @@ func main() {
 	// Must be created before SeedDemo and authHandler which may use it.
 	var dexClient *dex.Client
 	if cfg.DexGRPCAddr != "" {
-		dexClient, err = dex.NewClient(cfg.DexGRPCAddr)
+		dexClient, err = dex.NewClient(cfg.DexGRPCAddr, dex.TLSConfigFromEnv())
 		if err != nil {
 			slog.Warn("dex: failed to connect, password sync disabled", "addr", cfg.DexGRPCAddr, "error", err)
 		} else {
