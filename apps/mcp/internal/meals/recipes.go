@@ -1,9 +1,9 @@
 // Package meals provides the MCP recipe tools (catalog v2, KB
 // architecture/mcp-tool-catalog.md "recipe", ticket #4476): recipe_find (R),
 // recipe_get (R), recipe_create (C), recipe_update (U) and recipe_delete (X),
-// over migration 047's recipes table. The meal_* tools join this package
-// later (#4487 meal_set/meal_rate, #4496 meal_suggest, #4500
-// meal_build_grocery_list) and reuse its ingredient and allergy helpers.
+// over migration 047's recipes table. The meal plan tools (plan.go: meal_set,
+// meal_rate, #4487) share this package; meal_suggest (#4496) and the grocery
+// list (#4500) join later and reuse its ingredient and allergy helpers.
 //
 // Catalog words map to 047 columns: name -> title, notes -> description,
 // ingredients[].item -> ingredients[].name, steps[] -> steps (one step per
@@ -179,42 +179,57 @@ type recipeItem struct {
 
 type caller struct {
 	householdID uuid.UUID
+	userID      uuid.UUID // uuid.Nil for local-dev claims without a user
 	role        string
 	tz          string
 }
 
-// callerOf re-reads the caller's role from memberships (a demoted member
+// errNotSignedIn is callerInfo's "no household membership" result.
+var errNotSignedIn = errors.New("not signed in to a household")
+
+// callerInfo re-reads the caller's role from memberships (a demoted member
 // loses access at once, a removed one gets nothing) and the family timezone.
-// A non-nil result is the isError to return.
-func callerOf(ctx context.Context, pool *pgxpool.Pool) (caller, *mcp.CallToolResult) {
+// It returns errNotSignedIn when the caller has no household.
+func callerInfo(ctx context.Context, pool *pgxpool.Pool) (caller, error) {
 	c := server.ClaimsFromContext(ctx)
 	if c == nil {
-		return caller{}, notSignedIn()
+		return caller{}, errNotSignedIn
 	}
 	hid, err := uuid.Parse(c.HouseholdID)
 	if err != nil {
-		return caller{}, notSignedIn()
+		return caller{}, errNotSignedIn
 	}
 	out := caller{householdID: hid, role: c.Role}
 	uid, err := uuid.Parse(c.UserID)
 	if err != nil {
 		if c.AgentTokenID != "" {
-			return caller{}, notSignedIn()
+			return caller{}, errNotSignedIn
 		}
 		// Local-dev claims without a user: keep the claims' role.
 		err = pool.QueryRow(ctx, `SELECT timezone FROM households WHERE id = $1`, hid).Scan(&out.tz)
 	} else {
+		out.userID = uid
 		err = pool.QueryRow(ctx,
 			`SELECT m.role::text, h.timezone FROM memberships m JOIN households h ON h.id = m.household_id
 			  WHERE m.household_id = $1 AND m.user_id = $2`, hid, uid).Scan(&out.role, &out.tz)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
+		return caller{}, errNotSignedIn
+	}
+	return out, err
+}
+
+// callerOf is callerInfo for a tool handler: a non-nil result is the isError
+// to return.
+func callerOf(ctx context.Context, pool *pgxpool.Pool) (caller, *mcp.CallToolResult) {
+	c, err := callerInfo(ctx, pool)
+	if errors.Is(err, errNotSignedIn) {
 		return caller{}, notSignedIn()
 	}
 	if err != nil {
 		return caller{}, respond.Failed("check your access", err)
 	}
-	return out, nil
+	return c, nil
 }
 
 // canRead: API ResMeals read (rolesSitter). Unknown roles fail closed.
@@ -1301,6 +1316,11 @@ func resolveRecipe(ctx context.Context, q querier, hid uuid.UUID, args map[strin
 	}), nil
 }
 
+// planHint is the recipe tools' next step into the meal plan.
+func planHint(recipeID string) string {
+	return fmt.Sprintf(`Plan it with meal_set meals=[{"date":"…","slot":"dinner","recipe_id":"%s"}].`, recipeID)
+}
+
 func escapeLike(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
@@ -1602,6 +1622,7 @@ func NewRecipeGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		summary += warningSentence(d.AllergyWarnings)
 		return respond.OK(summary, d,
+			planHint(d.ID),
 			`Add the ingredients to the grocery list with list_add_items list_id="Grocery" items=[…].`,
 			fmt.Sprintf("Change it with recipe_update recipe_id=%s.", d.ID)), nil
 	}
@@ -1898,6 +1919,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
 			return respond.Failed("save the recipe", err), nil
 		}
 		next := []string{
+			planHint(d.ID),
 			`Add the ingredients to the grocery list with list_add_items list_id="Grocery" items=[…].`,
 			fmt.Sprintf("Fix anything with recipe_update recipe_id=%s.", d.ID),
 		}

@@ -175,6 +175,15 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 		{"maintenance_update", func(i int) map[string]any {
 			return map[string]any{"task_id": f.Task, "description": fmt.Sprintf("Updated %d", i)}
 		}},
+		{"meal_rate", func(i int) map[string]any {
+			return map[string]any{"date": day(-1 - i%30), "slot": "dinner", "person_id": f.Person, "rating": 1 + i%5}
+		}},
+		{"meal_set", func(i int) map[string]any {
+			return map[string]any{"meals": []any{
+				map[string]any{"date": day(i % 60), "slot": "lunch", "recipe_id": f.Recipe},
+				map[string]any{"date": day(i % 60), "slot": "snack", "text": fmt.Sprintf("Bench snack %d", i)},
+			}}
+		}},
 		{"note_create", func(i int) map[string]any {
 			return map[string]any{"title": fmt.Sprintf("Bench note %d", i), "content": "Remember the bench."}
 		}},

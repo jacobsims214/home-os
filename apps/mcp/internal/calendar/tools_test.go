@@ -1686,7 +1686,7 @@ func TestAgendaLists(t *testing.T) {
 
 	t.Run("lists is a default area", func(t *testing.T) {
 		res, text := call(t, ctxA, map[string]any{"from": day(1)})
-		if strings.Join(res.Areas, ",") != "events,bills,maintenance,lists" || strings.Contains(text, "Not available yet") {
+		if strings.Join(res.Areas, ",") != "events,bills,maintenance,meals,lists" || strings.Contains(text, "Not available yet") {
 			t.Errorf("areas = %v: %s", res.Areas, text)
 		}
 		if res.Lists == nil || len(res.Lists.Due) != 1 || res.Lists.Due[0].Text != "Mow lawn" {

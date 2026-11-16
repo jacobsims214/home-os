@@ -25,6 +25,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/bill"
+	"home-os/mcp/internal/meals"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 )
@@ -1428,12 +1429,12 @@ func freeSlots(busy []timeInterval, windowStart, windowEnd time.Time, duration t
 
 const maxAgendaDays = 31
 
-// agendaAreas are the areas agenda_get accepts. meals arrives with Stage 2
-// (#4487); asking for it reports it as unavailable.
+// agendaAreas are the areas agenda_get accepts. The meals area is the meal
+// plan (meals.AgendaMeals, #4487); the catalog has no separate meal-read tool.
 var (
 	agendaAreas      = []string{"events", "bills", "maintenance", "meals", "lists"}
-	agendaAvailable  = map[string]bool{"events": true, "bills": true, "maintenance": true, "lists": true}
-	agendaAreasOrder = []string{"events", "bills", "maintenance", "lists"}
+	agendaAvailable  = map[string]bool{"events": true, "bills": true, "maintenance": true, "meals": true, "lists": true}
+	agendaAreasOrder = []string{"events", "bills", "maintenance", "meals", "lists"}
 )
 
 // The lists area is kept small (the agenda is already large for a month):
@@ -1498,25 +1499,26 @@ type AgendaLists struct {
 // agendaResult is agenda_get's data. Every section is a list (empty when
 // nothing is due or the area was not asked for; areas says which were).
 type agendaResult struct {
-	From        string       `json:"from" jsonschema_description:"First day (YYYY-MM-DD)."`
-	To          string       `json:"to" jsonschema_description:"Last day, inclusive (YYYY-MM-DD)."`
-	Timezone    string       `json:"timezone"`
-	Areas       []string     `json:"areas" jsonschema_description:"The areas included."`
-	Events      []Event      `json:"events"`
-	Bills       []AgendaBill `json:"bills"`
-	Maintenance []AgendaTask `json:"maintenance"`
-	Lists       *AgendaLists `json:"lists,omitempty" jsonschema_description:"Present when the lists area was asked for."`
-	Unavailable []string     `json:"unavailable,omitempty" jsonschema_description:"Areas asked for that Home OS can't show yet."`
-	Warnings    []string     `json:"warnings,omitempty" jsonschema_description:"Sections that failed to load; don't assume they are empty."`
+	From        string              `json:"from" jsonschema_description:"First day (YYYY-MM-DD)."`
+	To          string              `json:"to" jsonschema_description:"Last day, inclusive (YYYY-MM-DD)."`
+	Timezone    string              `json:"timezone"`
+	Areas       []string            `json:"areas" jsonschema_description:"The areas included."`
+	Events      []Event             `json:"events"`
+	Bills       []AgendaBill        `json:"bills"`
+	Maintenance []AgendaTask        `json:"maintenance"`
+	Meals       []meals.PlannedMeal `json:"meals,omitempty" jsonschema_description:"Planned meals by date then slot, with ratings and allergy warnings."`
+	Lists       *AgendaLists        `json:"lists,omitempty" jsonschema_description:"Present when the lists area was asked for."`
+	Unavailable []string            `json:"unavailable,omitempty" jsonschema_description:"Areas asked for that Home OS can't show yet."`
+	Warnings    []string            `json:"warnings,omitempty" jsonschema_description:"Sections that failed to load; don't assume they are empty."`
 }
 
 // NewAgendaGetTool creates agenda_get (replaces get_daily_briefing).
 func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 	tool := mcp.NewTool("agenda_get", toolOptions(classR, "Get agenda",
-		mcp.WithDescription("What's on for a date or range: events, bills due, maintenance due and list items due (plus open lists when the range includes today), with weekdays. Use for \"what's this week look like?\"."),
+		mcp.WithDescription("What's on for a date or range: events, bills, maintenance and list items due, planned meals (plus open lists when the range includes today), with weekdays. Use for \"what's this week look like?\"."),
 		mcp.WithString("from", mcp.Description("First day, YYYY-MM-DD (default today)")),
 		mcp.WithString("to", mcp.Description(fmt.Sprintf("Last day, inclusive (default from; at most %d days)", maxAgendaDays))),
-		mcp.WithArray("areas", mcp.Description("Sections to include (default events, bills, maintenance, lists)"), mcp.WithStringEnumItems(agendaAreas)),
+		mcp.WithArray("areas", mcp.Description("Sections to include (default all)"), mcp.WithStringEnumItems(agendaAreas)),
 		respond.Schema[agendaResult](),
 	)...)
 
@@ -1557,6 +1559,7 @@ func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			Areas: []string{}, Events: []Event{}, Bills: []AgendaBill{}, Maintenance: []AgendaTask{},
 		}
 		requested := getStringSliceArg(args, "areas")
+		explicitAreas := len(requested) > 0
 		if len(requested) == 0 {
 			requested = agendaAreasOrder
 		}
@@ -1617,6 +1620,24 @@ func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 				res.Maintenance = tasks
 			}
 		}
+		if want["meals"] {
+			planned, allowed, err := meals.AgendaMeals(ctx, pool, first, last)
+			switch {
+			case err != nil:
+				slog.Error("agenda_get: query meals error", "error", err)
+				res.Warnings = append(res.Warnings, "Could not load the meal plan; do not assume nothing is planned.")
+			case !allowed:
+				// Vendors don't see the meal plan: drop the area (an
+				// explicit request says so).
+				res.Areas = slices.DeleteFunc(res.Areas, func(a string) bool { return a == "meals" })
+				delete(want, "meals")
+				if explicitAreas {
+					res.Warnings = append(res.Warnings, "The meal plan is not shared with your role.")
+				}
+			default:
+				res.Meals = planned
+			}
+		}
 		if want["lists"] {
 			today := todayIn(loc)
 			withOpen := !today.Before(first) && !today.After(last)
@@ -1657,6 +1678,23 @@ func agendaSummary(res agendaResult, days []time.Time, want map[string]bool) str
 	if want["maintenance"] {
 		parts = append(parts, count(len(res.Maintenance), "maintenance task", "maintenance tasks")+" due")
 	}
+	if want["meals"] {
+		p := count(len(res.Meals), "planned meal", "planned meals")
+		if n := len(res.Meals); n > 0 && n <= 7 {
+			lines := make([]string, n)
+			for i, m := range res.Meals {
+				lines[i] = meals.AgendaMealLine(m)
+			}
+			p += " (" + strings.Join(lines, "; ") + ")"
+		}
+		for _, m := range res.Meals {
+			if len(m.AllergyWarnings) > 0 {
+				p += " with allergy warnings"
+				break
+			}
+		}
+		parts = append(parts, p)
+	}
 	if want["lists"] && res.Lists != nil {
 		p := count(res.Lists.DueTotal, "list item", "list items") + " due"
 		if res.Lists.OpenTotal > 0 {
@@ -1684,6 +1722,10 @@ func agendaHints(res agendaResult) []string {
 	}
 	if len(res.Bills) > 0 {
 		out = append(out, fmt.Sprintf("Mark a bill paid with bill_pay bill_id=%s.", res.Bills[0].BillID))
+	}
+	if len(res.Meals) > 0 {
+		m := res.Meals[0]
+		out = append(out, fmt.Sprintf(`Change a meal with meal_set meals=[{"date":"%s","slot":"%s","text":"…"}].`, m.LocalDate, m.Slot))
 	}
 	if l := res.Lists; l != nil {
 		if len(l.Due) > 0 {

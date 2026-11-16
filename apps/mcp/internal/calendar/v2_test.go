@@ -438,6 +438,14 @@ func TestAgendaAreas(t *testing.T) {
 		`INSERT INTO maintenance_tasks (household_id, name, due_date) VALUES ($1, 'Change furnace filter', '2026-11-19')`, hh.HouseholdID); err != nil {
 		t.Fatalf("insert task: %v", err)
 	}
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO people (household_id, display_name, allergies) VALUES ($1, 'Nora', ARRAY['peanuts'])`, hh.HouseholdID); err != nil {
+		t.Fatalf("insert person: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO meal_plans (household_id, date, slot, title) VALUES ($1, '2026-11-19', 'dinner', 'Peanut noodles'), ($1, '2026-11-21', 'dinner', 'Pizza')`, hh.HouseholdID); err != nil {
+		t.Fatalf("insert meals: %v", err)
+	}
 
 	text, isErr := callTool(t, agenda, ctx, map[string]any{"from": "2026-11-18", "to": "2026-11-20", "areas": []any{"maintenance", "meals"}})
 	var a agendaResult
@@ -447,10 +455,16 @@ func TestAgendaAreas(t *testing.T) {
 	if len(a.Maintenance) != 1 || a.Maintenance[0].Weekday != "Thursday" || a.Maintenance[0].Status != "pending" || a.Maintenance[0].TaskID == "" {
 		t.Errorf("maintenance = %+v", a.Maintenance)
 	}
-	if strings.Join(a.Areas, ",") != "maintenance" || strings.Join(a.Unavailable, ",") != "meals" {
+	if strings.Join(a.Areas, ",") != "maintenance,meals" || len(a.Unavailable) != 0 {
 		t.Errorf("areas = %v unavailable = %v", a.Areas, a.Unavailable)
 	}
-	if !strings.Contains(a.From+a.To, "2026-11-182026-11-20") || !strings.Contains(text, "Not available yet: meals") {
+	// The meal plan (#4487): only the range's meals, with allergy warnings.
+	if len(a.Meals) != 1 || a.Meals[0].Title != "Peanut noodles" || a.Meals[0].Weekday != "Thursday" ||
+		len(a.Meals[0].AllergyWarnings) != 1 || a.Meals[0].AllergyWarnings[0] != "Nora (peanuts): Peanut noodles" {
+		t.Errorf("meals = %+v", a.Meals)
+	}
+	if !strings.Contains(a.From+a.To, "2026-11-182026-11-20") || !strings.Contains(text, "1 planned meal (Thu dinner Peanut noodles) with allergy warnings") ||
+		strings.Contains(text, "Not available yet") || !strings.Contains(text, "meal_set") {
 		t.Errorf("got %s", text)
 	}
 

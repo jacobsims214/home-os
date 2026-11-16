@@ -231,6 +231,10 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 		                          jsonb_build_object('name', 'rice', 'quantity', 2, 'unit', 'cup'),
 		                          jsonb_build_object('name', 'garlic', 'quantity', 3, 'unit', 'clove')),
 		        ARRAY['dinner'] FROM generate_series(1, 40) g`,
+		// A dinner for every day from 60 days ago to 30 days ahead (meal_rate, agenda_get).
+		`INSERT INTO meal_plans (household_id, date, slot, recipe_id)
+		 SELECT $1, current_date + g, 'dinner', (SELECT id FROM recipes WHERE household_id = $1 AND title = 'Recipe ' || (1 + abs(g) % 40))
+		   FROM generate_series(-60, 30) g`,
 		`INSERT INTO guides (household_id, title, summary, body, tags)
 		 SELECT $1, 'How to ' || g, 'Guide ' || g, repeat('Step. ', 20), ARRAY['howto'] FROM generate_series(1, 20) g`,
 
