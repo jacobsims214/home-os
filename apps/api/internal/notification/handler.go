@@ -113,9 +113,19 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.EntityID != nil {
+		if _, err := uuid.Parse(*req.EntityID); err != nil {
+			apierr.BadRequest(w, "invalid entity_id")
+			return
+		}
+	}
+
 	n, err := h.repo.Create(r.Context(), claims.HouseholdID, req.Type, req.Title, req.Body, req.EntityType, req.EntityID)
 	if err != nil {
-		apierr.InternalError(w, err)
+		// notifications.entity_type is entity_kind with an owner check
+		// (migration 070): an unknown kind is 400, a record of another
+		// family (or a missing one) 404.
+		apierr.DB(w, err)
 		return
 	}
 

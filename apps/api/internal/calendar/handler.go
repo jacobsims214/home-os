@@ -119,14 +119,16 @@ func parseRange(r *http.Request) (EventRange, string) {
 }
 
 // writeEventError answers a create/update error: 400 with the message for
-// invalid input (bad or unsupported RRULE, timezone, reminders), 500
-// otherwise.
+// invalid input (bad or unsupported RRULE, timezone, reminders), then
+// apierr.DB: an entity_type that is not a registered entity kind is 400
+// (calendar_objects.entity_type is entity_kind since migration 070), an
+// entity of another family or a missing one is 404. 500 otherwise.
 func writeEventError(w http.ResponseWriter, err error) {
 	if msg, ok := IsInvalidEvent(err); ok {
 		apierr.BadRequest(w, msg)
 		return
 	}
-	apierr.InternalError(w, err)
+	apierr.DB(w, err)
 }
 
 // ListEvents GET /api/v1/calendars/:id/events[?start=&end=]
@@ -244,6 +246,19 @@ func (h *Handler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if ev.EventType == "" {
 		ev.EventType = "custom"
+	}
+	// The linked record: both or neither, and the id a UUID. The kind is
+	// checked by the entity_kind domain and the family by the owner trigger
+	// (migration 070); writeEventError maps those to 400 and 404.
+	if (ev.EntityType == "") != (ev.EntityID == "") {
+		apierr.BadRequest(w, "entity_type and entity_id must be given together")
+		return
+	}
+	if ev.EntityID != "" {
+		if _, err := uuid.Parse(ev.EntityID); err != nil {
+			apierr.BadRequest(w, "invalid entity_id")
+			return
+		}
 	}
 	ev.remindersSet = true
 	created, err := h.repo.CreateEvent(r.Context(), calID, &ev, h.repo.HouseholdLocation(r.Context(), hid))
