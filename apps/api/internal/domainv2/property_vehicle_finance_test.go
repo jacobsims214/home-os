@@ -83,9 +83,9 @@ func TestPropertyFinanceFieldsLiveInLoansAndBills(t *testing.T) {
 	assert.Equal(t, 3, count(t, pool, `SELECT count(*) FROM bills WHERE property_id = $1 AND household_id = $2`, id, a))
 	assert.Equal(t, 1, count(t, pool, `SELECT count(*) FROM bills b JOIN vendors v ON v.id = b.vendor_id
 		WHERE b.property_id = $1 AND v.household_id = $2 AND v.name = 'State Farm' AND 'insurance' = ANY (v.trades)`, id, a))
-	assert.Equal(t, 1, count(t, pool, `SELECT count(*) FROM properties WHERE id = $1
-		AND mortgage_amount IS NULL AND mortgage_lender IS NULL AND property_tax_annual IS NULL
-		AND insurance_annual IS NULL AND insurance_provider IS NULL AND hoa_fee_monthly IS NULL`, id))
+	// Migration 069 (#4707) dropped the legacy columns from the property row.
+	assert.Equal(t, 0, count(t, pool, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'properties'
+		AND column_name IN ('mortgage_amount', 'mortgage_lender', 'property_tax_annual', 'insurance_annual', 'insurance_provider', 'hoa_fee_monthly')`))
 
 	// The UI sends back what it was shown (plus "" for blanks): nothing changes.
 	const billState = `SELECT string_agg(concat_ws('|', name, amount, frequency, due_date, notes, vendor_id), ',' ORDER BY name)
@@ -201,8 +201,9 @@ func TestVehicleFinanceFieldsLiveInLoansAndBills(t *testing.T) {
 	assert.Equal(t, 1, count(t, pool, `SELECT count(*) FROM loans WHERE vehicle_id = $1 AND name = '2022 Ford F-150 loan'`, id))
 	assert.Equal(t, 1, count(t, pool, `SELECT count(*) FROM bills WHERE vehicle_id = $1 AND name = '2022 Ford F-150 registration'
 		AND frequency = 'annual' AND EXTRACT(MONTH FROM due_date) = 5`, id))
-	assert.Equal(t, 1, count(t, pool, `SELECT count(*) FROM vehicles WHERE id = $1 AND lender IS NULL AND loan_amount IS NULL
-		AND monthly_payment IS NULL AND registration_cost IS NULL AND insurance_cost IS NULL AND insurance_provider IS NULL`, id))
+	// Migration 069 (#4707) dropped the legacy columns from the vehicle row.
+	assert.Equal(t, 0, count(t, pool, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'vehicles'
+		AND column_name IN ('lender', 'loan_amount', 'monthly_payment', 'registration_cost', 'insurance_cost', 'insurance_provider')`))
 
 	// The generic entity form sends null for blank fields: the loan and bills
 	// are left alone (the vehicle's own columns are still replaced).
