@@ -118,7 +118,7 @@ func NewPropertyFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 
 // findProperties loads one page of properties with their rooms, and the
 // total number of matches.
-func findProperties(ctx context.Context, pool *pgxpool.Pool, householdID string, in findInput) ([]propertyData, int, error) {
+func findProperties(ctx context.Context, pool querier, householdID string, in findInput) ([]propertyData, int, error) {
 	rows, err := pool.Query(ctx, propertySelect, householdID, in.id, escapeLike(in.query), in.limit, in.offset)
 	if err != nil {
 		return nil, 0, err
@@ -201,12 +201,15 @@ func findSummary(in findInput, page []propertyData, total int) string {
 func findNext(in findInput, page []propertyData) []string {
 	if len(page) == 0 {
 		if !in.filtered() {
-			return []string{"The family has not added a property yet; the user can add one in the Home OS app."}
+			return []string{"The family has not added a property yet. Add one with property_create name=… rooms=[…]."}
 		}
 		return []string{"Call property_find without query to list every property."}
 	}
 	p := page[0]
 	next := []string{fmt.Sprintf("See what is in %s with asset_find property_id=%s (or room_id from rooms).", p.Name, p.ID)}
+	if p.Counts.Rooms == 0 {
+		next = append(next, fmt.Sprintf("Add rooms with property_update property_id=%s add_rooms=[…].", p.ID))
+	}
 	if p.Counts.Loans > 0 {
 		next = append(next, fmt.Sprintf("See its mortgage and other loans with loan_find property_id=%s.", p.ID))
 	}
@@ -215,7 +218,7 @@ func findNext(in findInput, page []propertyData) []string {
 	} else if len(next) < 2 {
 		next = append(next, fmt.Sprintf("Tie a bill to it with bill_create property_id=%s.", p.ID))
 	}
-	return next
+	return next[:min(len(next), 3)]
 }
 
 // parseFindInput validates property_find arguments.

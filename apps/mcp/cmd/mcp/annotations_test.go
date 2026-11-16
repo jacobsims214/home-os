@@ -110,7 +110,11 @@ var wantToolClass = map[string]toolClass{
 	"pet_delete":              classX,
 	"pet_find":                classR,
 	"pet_update":              classU,
+	"property_create":         classC,
+	"property_delete":         classX,
 	"property_find":           classR,
+	"property_update":         classU,
+	"room_delete":             classX,
 	"search_all":              classR,
 	"vehicle_find":            classR,
 }

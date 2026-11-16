@@ -1,6 +1,8 @@
 // Package property provides the MCP property tools (catalog v2, KB
 // architecture/mcp-tool-catalog.md "property / room"). Stage 1 has one
 // tool, property_find, which replaces list_properties and get_property.
+// Stage 2 (#4462) adds property_create, property_update, property_delete
+// and room_delete (write.go, room.go).
 // Every result is built with internal/respond, and every tool declares all
 // four annotation hints and an outputSchema. All operations are scoped to
 // the authenticated household via JWT claims.
@@ -21,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/respond"
@@ -31,6 +35,13 @@ const (
 	defaultLimit = 25
 	maxLimit     = 100
 )
+
+// querier is what both a pool and a transaction offer.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
 // toolHandler is the signature every property tool handler has.
 type toolHandler = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)
@@ -67,6 +78,12 @@ type propertyData struct {
 	Counts        propertyCounts `json:"counts"`
 	CreatedAt     time.Time      `json:"created_at"`
 	UpdatedAt     time.Time      `json:"updated_at"`
+
+	// Set only by the write tools.
+	Duplicate    bool     `json:"duplicate,omitempty" jsonschema_description:"property_create: true when this property was added minutes ago and is returned instead of a copy."`
+	Changed      []string `json:"changed,omitempty" jsonschema_description:"property_update: the params that changed something."`
+	RoomsAdded   []string `json:"rooms_added,omitempty" jsonschema_description:"Rooms this call added."`
+	RoomsSkipped []string `json:"rooms_skipped,omitempty" jsonschema_description:"Room names the property already had; nothing was added for them."`
 }
 
 // describe is a short phrase for summaries, e.g. "at 12 Elm St, 5 rooms,

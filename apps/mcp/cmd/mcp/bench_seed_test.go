@@ -244,6 +244,13 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 		`INSERT INTO pets (household_id, name, species) SELECT $1, '` + benchDisposablePrefix + ` pet ' || g, 'fish' FROM generate_series(1, %[1]d) g`,
 		// People without a login and with nothing attached, for person_delete.
 		`INSERT INTO people (household_id, display_name, relationship) SELECT $1, '` + benchDisposablePrefix + ` person ' || g, 'other' FROM generate_series(1, %[1]d) g`,
+		// Properties with nothing attached, for property_delete, and empty
+		// rooms in a spare property, for room_delete.
+		`INSERT INTO properties (household_id, name) SELECT $1, '` + benchDisposablePrefix + ` property ' || g FROM generate_series(1, %[1]d) g`,
+		`INSERT INTO properties (household_id, name) VALUES ($1, 'Spare rooms')`,
+		`INSERT INTO rooms (property_id, household_id, name)
+		 SELECT p.id, $1, '` + benchDisposablePrefix + ` room ' || g
+		   FROM properties p, generate_series(1, %[1]d) g WHERE p.household_id = $1 AND p.name = 'Spare rooms'`,
 		`INSERT INTO list_items (list_id, household_id, text, position)
 		 SELECT l.id, $1, '` + benchDisposablePrefix + ` list item ' || g, 1000 + g
 		   FROM lists l, generate_series(1, %[1]d) g WHERE l.household_id = $1 AND l.name = 'Grocery'`,
@@ -280,7 +287,7 @@ type benchFixtures struct {
 
 	// Rows each measured call of a write tool consumes, in order.
 	DisposableAssets, DisposableBills, DisposableLoans, DisposableTasks, DisposableNotes, DisposableEvents []string
-	DisposableListItems, DisposablePeople, DisposablePets                                                  []string
+	DisposableListItems, DisposablePeople, DisposablePets, DisposableProperties, DisposableRooms           []string
 	PayableBills, PendingTasks, UnreadNotifications                                                        []string
 }
 
@@ -334,14 +341,16 @@ func loadFixtures(t testing.TB, pool *pgxpool.Pool, hh uuid.UUID) benchFixtures 
 		List:     one(`SELECT id::text FROM lists WHERE household_id = $1 AND name = 'Grocery'`),
 		ListItem: one(`SELECT i.id::text FROM list_items i JOIN lists l ON l.id = i.list_id WHERE l.household_id = $1 AND l.name = 'Grocery' AND i.text = 'Grocery item 1'`),
 
-		DisposableAssets:    disp("assets", "name"),
-		DisposableListItems: disp("list_items", "text"),
-		DisposableBills:     disp("bills", "name"),
-		DisposableLoans:     disp("loans", "name"),
-		DisposableTasks:     disp("maintenance_tasks", "name"),
-		DisposableNotes:     disp("notes", "title"),
-		DisposablePeople:    disp("people", "display_name"),
-		DisposablePets:      disp("pets", "name"),
+		DisposableAssets:     disp("assets", "name"),
+		DisposableListItems:  disp("list_items", "text"),
+		DisposableBills:      disp("bills", "name"),
+		DisposableLoans:      disp("loans", "name"),
+		DisposableTasks:      disp("maintenance_tasks", "name"),
+		DisposableNotes:      disp("notes", "title"),
+		DisposablePeople:     disp("people", "display_name"),
+		DisposablePets:       disp("pets", "name"),
+		DisposableProperties: disp("properties", "name"),
+		DisposableRooms:      disp("rooms", "name"),
 		DisposableEvents: many(`SELECT co.id::text FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
 		                         WHERE c.household_id = $1 AND co.ical_data LIKE '%` + benchDisposablePrefix + ` event%' ORDER BY co.id`),
 		PayableBills: many(`SELECT id::text FROM bills WHERE household_id = $1 AND paid_date IS NULL AND frequency = 'monthly'
