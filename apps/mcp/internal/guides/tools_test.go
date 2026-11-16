@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +40,7 @@ type env struct {
 		Fix     string `json:"fix"`
 		Field   string `json:"field"`
 	} `json:"error"`
+	raw string // the whole result text, for leak checks
 }
 
 func (e env) guide(t *testing.T) guideData {
@@ -155,6 +157,7 @@ func (w tool) run(t *testing.T, ctx context.Context, args map[string]any) env {
 	if len(e.Next) > 3 {
 		t.Errorf("%s gives %d next hints: %v", w.def.Name, len(e.Next), e.Next)
 	}
+	e.raw = text
 	return e
 }
 
@@ -671,6 +674,91 @@ func TestGuideRoles(t *testing.T) {
 			}
 		}
 	}
+	// A housesitter can't read vehicles, so guide_find's about_id never
+	// matches, lists or confirms a vehicle by name or VIN (#4769).
+	if _, err := pool.Exec(context.Background(), `UPDATE vehicles SET vin = '5FNRL6H78KB000001' WHERE id = $1`, f.van); err != nil {
+		t.Fatal(err)
+	}
+	insertID(t, pool, `INSERT INTO vehicles (household_id, year, make, model) VALUES ($1, 2021, 'Toyota', 'Sienna') RETURNING id`, f.hh.HouseholdID)
+	sctx, _ := memberCtx(t, pool, f.hh, "housesitter")
+	// leaks reports a vehicle name or VIN in e. The caller's own about_id
+	// may be echoed back; that tells them nothing.
+	leaks := func(t *testing.T, what string, e env, echo ...string) {
+		t.Helper()
+		raw := e.raw
+		for _, s := range echo {
+			raw = strings.ReplaceAll(raw, s, "")
+		}
+		for _, secret := range []string{"Honda", "Odyssey", "Toyota", "Sienna", "5FNRL6H78KB000001", "2019", "2021"} {
+			if strings.Contains(raw, secret) {
+				t.Errorf("housesitter %s leaks %q: %s", what, secret, e.raw)
+			}
+		}
+	}
+	for _, args := range []map[string]any{
+		{"about_id": "nope"},
+		{"about_id": "Honda Odyssey"},
+		{"about_id": "Odyssey"},
+		{"about_id": "5FNRL6H78KB000001"},
+		{"about_type": "vehicle"},
+	} {
+		e := w.find.run(t, sctx, args)
+		if e.OK {
+			t.Errorf("housesitter find %v matched: %s", args, e.raw)
+		}
+		echo, _ := args["about_id"].(string)
+		leaks(t, fmt.Sprint(args), e, echo)
+	}
+	// By name: refused the same way whether the vehicle exists or not.
+	hit := w.find.run(t, sctx, map[string]any{"about_type": "vehicle", "about_id": "Honda Odyssey"})
+	miss := w.find.run(t, sctx, map[string]any{"about_type": "car", "about_id": "Ford Pinto"})
+	hit.wantError(t, "about_id", "You can't look vehicles up by name")
+	if hit.raw != miss.raw {
+		t.Errorf("vehicle name hit and miss differ:\n%s\n%s", hit.raw, miss.raw)
+	}
+	leaks(t, "vehicle by name", hit, "Honda Odyssey")
+	vin := w.find.run(t, sctx, map[string]any{"about_type": "vehicle", "about_id": "5fnrl6h78kb000001"})
+	if vin.raw != miss.raw {
+		t.Errorf("VIN probe differs from a miss: %s", vin.raw)
+	}
+	// By id: the family's vehicle works, with no name.
+	for _, args := range []map[string]any{
+		{"about_type": "vehicle", "about_id": f.van.String()},
+		{"about_id": f.van.String()},
+	} {
+		e := w.find.run(t, sctx, args)
+		if !e.OK || len(e.Items) != 1 || e.Items[0].ID != oil.ID {
+			t.Errorf("housesitter find %v = %v / %s", args, e.titles(), e.raw)
+		}
+		leaks(t, "find by vehicle id", e)
+	}
+	// Another family's vehicle id and a made-up id get the same answer.
+	_, ohh := testutil.SeedHousehold(t, pool)
+	foreign := insertID(t, pool, `INSERT INTO vehicles (household_id, year, make, model) VALUES ($1, 2020, 'Ford', 'Transit') RETURNING id`, ohh.HouseholdID)
+	made := uuid.New()
+	fe := w.find.run(t, sctx, map[string]any{"about_type": "vehicle", "about_id": foreign.String()})
+	me := w.find.run(t, sctx, map[string]any{"about_type": "vehicle", "about_id": made.String()})
+	fe.wantError(t, "about_id", "No vehicle")
+	if strings.ReplaceAll(fe.raw, foreign.String(), "ID") != strings.ReplaceAll(me.raw, made.String(), "ID") {
+		t.Errorf("foreign and missing vehicle ids differ:\n%s\n%s", fe.raw, me.raw)
+	}
+	if strings.Contains(fe.raw, "Transit") {
+		t.Errorf("foreign vehicle leaks: %s", fe.raw)
+	}
+	// Properties and assets still resolve by name for a housesitter.
+	if e := w.find.run(t, sctx, map[string]any{"about_id": "furnace"}); !e.OK {
+		t.Errorf("housesitter find about furnace = %s", e.raw)
+	}
+
+	// Owner and viewer are unchanged: names, VINs and candidate lists.
+	vwctx, _ := memberCtx(t, pool, f.hh, "viewer")
+	for _, ctx := range []context.Context{f.ctx, vwctx} {
+		if e := w.find.run(t, ctx, map[string]any{"about_type": "vehicle", "about_id": "5FNRL6H78KB000001"}); !e.OK || len(e.Items) != 1 {
+			t.Errorf("find by VIN = %s", e.raw)
+		}
+		w.find.run(t, ctx, map[string]any{"about_id": "nope"}).wantError(t, "about_id", "vehicle 2019 Honda Odyssey")
+	}
+
 	vctx, _ := memberCtx(t, pool, f.hh, "vendor")
 	for _, c := range []struct {
 		w    tool

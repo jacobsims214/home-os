@@ -724,8 +724,10 @@ type subjectCandidate struct {
 }
 
 // loadSubjects lists the family's properties, assets and vehicles of kind
-// (all three when kind is "").
-func loadSubjects(ctx context.Context, q querier, hid uuid.UUID, kind string) ([]subjectCandidate, error) {
+// (all three when kind is ""). Vehicles are left out unless withVehicles:
+// a role that can't read vehicles must not see their names or VINs, not even
+// in a "Choose from" list.
+func loadSubjects(ctx context.Context, q querier, hid uuid.UUID, kind string, withVehicles bool) ([]subjectCandidate, error) {
 	rows, err := q.Query(ctx, `
 SELECT * FROM (
   SELECT 'property' AS kind, id, name AS label, ARRAY[name] AS names, 1 AS ord FROM properties WHERE household_id = $1
@@ -734,9 +736,9 @@ SELECT * FROM (
   UNION ALL
   SELECT 'vehicle', id, concat_ws(' ', year::text, make, model),
          ARRAY[concat_ws(' ', year::text, make, model), concat_ws(' ', make, model), COALESCE(model, ''), COALESCE(vin, '')], 3
-    FROM vehicles WHERE household_id = $1
+    FROM vehicles WHERE household_id = $1 AND $3
 ) s WHERE $2 = '' OR s.kind = $2
-ORDER BY s.ord, lower(s.label), s.id`, hid, kind)
+ORDER BY s.ord, lower(s.label), s.id`, hid, kind, withVehicles)
 	if err != nil {
 		return nil, err
 	}
@@ -748,12 +750,38 @@ ORDER BY s.ord, lower(s.label), s.id`, hid, kind)
 	})
 }
 
+// householdVehicle reports whether id is a vehicle of the family. It is the
+// only vehicle lookup open to a role that can't read vehicles: by id, never
+// by name, and it returns no name.
+func householdVehicle(ctx context.Context, q querier, hid, id uuid.UUID) (bool, error) {
+	var ok bool
+	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM vehicles WHERE id = $1 AND household_id = $2)`, id, hid).Scan(&ok)
+	return ok, err
+}
+
+// vehicleByNameRefused is the answer to a vehicle name from a role that can't
+// read vehicles. It is the same whether or not the name exists.
+func vehicleByNameRefused(example map[string]any) *mcp.CallToolResult {
+	return respond.Fail(respond.Error{
+		Message: "You can't look vehicles up by name; pass the vehicle id shown in guide_find's about.id.",
+		Fix:     "Call guide_find without about_id and pass a vehicle guide's about.id as about_id.",
+		Field:   "about_id",
+		Example: example,
+	})
+}
+
 // resolveAbout reads about_type and about_id. about_id is the subject's id
 // or its name ("Furnace", "Lake House", "Honda Odyssey"), any case; without
 // about_type all three kinds are searched. about_type=family, or about_id
 // null, means no subject. Several matches, or none, is an isError that lists
 // the candidates with their ids.
-func resolveAbout(ctx context.Context, q querier, hid uuid.UUID, args map[string]any, example map[string]any) (aboutArg, *mcp.CallToolResult, error) {
+//
+// A role that can't read vehicles (housesitter) never matches a vehicle by
+// name and never sees one in a candidate list: it may pass a vehicle's id
+// only, and an id that is not the family's vehicle gets the same answer
+// whether it doesn't exist or belongs to another family.
+func resolveAbout(ctx context.Context, q querier, hid uuid.UUID, role string, args map[string]any, example map[string]any) (aboutArg, *mcp.CallToolResult, error) {
+	vehicles := canSeeVehicles(role)
 	t, err := readAboutType(args)
 	if err != nil {
 		return aboutArg{}, invalid(err, example), nil
@@ -770,16 +798,38 @@ func resolveAbout(ctx context.Context, q querier, hid uuid.UUID, args map[string
 		return aboutArg{given: true, family: true}, nil, nil // about_id: null clears
 	case ref == nil && t == "":
 		return aboutArg{}, nil, nil
+	case ref == nil && t == "vehicle" && !vehicles:
+		return aboutArg{}, respond.Invalid("about_id", "about_id is required with about_type=vehicle.",
+			"Pass the vehicle id shown in guide_find's about.id as about_id.", example), nil
 	case ref == nil:
 		return aboutArg{}, respond.Invalid("about_id", fmt.Sprintf("about_id is required with about_type=%s.", t),
 			fmt.Sprintf("Pass the %s's name or id as about_id, e.g. %s.", t, aboutExample(t)), example), nil
 	}
 
-	all, err := loadSubjects(ctx, q, hid, t)
+	refID, idErr := uuid.Parse(*ref)
+	if !vehicles && t == "vehicle" {
+		if idErr != nil {
+			return aboutArg{}, vehicleByNameRefused(example), nil
+		}
+		ok, err := householdVehicle(ctx, q, hid, refID)
+		if err != nil {
+			return aboutArg{}, nil, err
+		}
+		if !ok {
+			return aboutArg{}, respond.Fail(respond.Error{
+				Message: fmt.Sprintf("No vehicle %s that you can see in this family.", refID),
+				Fix:     "Pass a vehicle guide's about.id from guide_find as about_id.",
+				Field:   "about_id",
+				Example: example,
+			}), nil
+		}
+		return aboutArg{given: true, subj: &subject{kind: "vehicle", id: refID}}, nil, nil
+	}
+
+	all, err := loadSubjects(ctx, q, hid, t, vehicles)
 	if err != nil {
 		return aboutArg{}, nil, err
 	}
-	refID, idErr := uuid.Parse(*ref)
 	var hits []subjectCandidate
 	for _, c := range all {
 		if idErr == nil {
@@ -795,9 +845,22 @@ func resolveAbout(ctx context.Context, q querier, hid uuid.UUID, args map[string
 			}
 		}
 	}
+	// A restricted role may still name a vehicle by its id without about_type.
+	if len(hits) == 0 && !vehicles && t == "" && idErr == nil {
+		ok, err := householdVehicle(ctx, q, hid, refID)
+		if err != nil {
+			return aboutArg{}, nil, err
+		}
+		if ok {
+			return aboutArg{given: true, subj: &subject{kind: "vehicle", id: refID}}, nil, nil
+		}
+	}
 	what := t
-	if what == "" {
+	switch {
+	case what == "" && vehicles:
 		what = "property, asset or vehicle"
+	case what == "":
+		what = "property or asset"
 	}
 	switch {
 	case len(hits) == 1:
@@ -827,10 +890,17 @@ func resolveAbout(ctx context.Context, q querier, hid uuid.UUID, args map[string
 	}
 	return aboutArg{}, respond.Fail(respond.Error{
 		Message: msg,
-		Fix:     "Pass about_id as one of these names or its id (property_find, asset_find or vehicle_find list ids).",
+		Fix:     notFoundFix(vehicles),
 		Field:   "about_id",
 		Example: example,
 	}), nil
+}
+
+func notFoundFix(vehicles bool) string {
+	if vehicles {
+		return "Pass about_id as one of these names or its id (property_find, asset_find or vehicle_find list ids)."
+	}
+	return "Pass about_id as one of these names or its id (property_find and asset_find list ids; a vehicle only by the about.id guide_find shows)."
 }
 
 func aboutExample(t string) string {
@@ -1319,7 +1389,7 @@ func NewGuideFindTool(pool *pgxpool.Pool, idx searchIndex) (string, mcp.Tool, to
 					"Pass next_cursor exactly as returned, or leave cursor out for the first page.", findExample), nil
 			}
 		}
-		f.about, bad, err = resolveAbout(ctx, pool, c.householdID, args, findExample)
+		f.about, bad, err = resolveAbout(ctx, pool, c.householdID, c.role, args, findExample)
 		if err != nil {
 			return respond.Failed("find guides", err), nil
 		} else if bad != nil {
@@ -1564,7 +1634,7 @@ func NewGuideCreateTool(pool *pgxpool.Pool, idx searchIndex) (string, mcp.Tool, 
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
 
-		about, bad, err := resolveAbout(ctx, tx, c.householdID, args, createExample)
+		about, bad, err := resolveAbout(ctx, tx, c.householdID, c.role, args, createExample)
 		if err != nil {
 			return respond.Failed("save the guide", err), nil
 		} else if bad != nil {
@@ -1714,7 +1784,7 @@ func NewGuideUpdateTool(pool *pgxpool.Pool, idx searchIndex) (string, mcp.Tool, 
 		} else if bad != nil {
 			return bad, nil
 		}
-		about, bad, err := resolveAbout(ctx, tx, c.householdID, args, updateExample)
+		about, bad, err := resolveAbout(ctx, tx, c.householdID, c.role, args, updateExample)
 		if err != nil {
 			return respond.Failed("update the guide", err), nil
 		} else if bad != nil {
