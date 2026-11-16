@@ -39,6 +39,21 @@
 //	                        (burst the same). Default 5.
 //	MCP_REGISTER_PER_HOUR   Dynamic client registrations per hour across all
 //	                        clients, per pod (burst the same). Default 60.
+//	MCP_RATE_LIMIT_PER_MINUTE  Authenticated /mcp requests per principal per
+//	                        minute (#4693). A principal is the agent token, else
+//	                        the user plus OAuth client. Default 120. 0 disables.
+//	MCP_RATE_LIMIT_BURST    Burst for MCP_RATE_LIMIT_PER_MINUTE. Default 40, so
+//	                        an agent can fire a 20-tool chain at once twice over.
+//	MCP_UNAUTH_RATE_LIMIT_PER_MINUTE  Unauthenticated or refused /mcp requests per
+//	                        client IP per minute (burst the same). Default 20.
+//	                        0 disables.
+//	MCP_REVEAL_RATE_LIMIT_PER_MINUTE  credential_reveal calls per principal per
+//	                        minute (burst the same). Default 10. 0 disables.
+//
+// The /mcp limits are 0 (off) in a zero Config: only Load applies their
+// defaults, so tests and the latency benchmark that build a Config by hand
+// are never throttled.
+//
 //	LOG_LEVEL               Default info.
 //	TYPESENSE_HOST, TYPESENSE_PORT, TYPESENSE_API_KEY  Optional search backend.
 package config
@@ -70,6 +85,14 @@ const (
 	DefaultTrustedProxies    = "10.244.0.0/16"
 	DefaultRegisterPerMinute = 5
 	DefaultRegisterPerHour   = 60
+)
+
+// Defaults for the /mcp limits (#4693), applied by Load.
+const (
+	DefaultRateLimitPerMinute       = 120
+	DefaultRateLimitBurst           = 40
+	DefaultUnauthRateLimitPerMinute = 20
+	DefaultRevealRateLimitPerMinute = 10
 )
 
 // Config holds all environment-driven configuration for the MCP server.
@@ -110,6 +133,18 @@ type Config struct {
 	// RegisterPerHour is the global /register ceiling per pod
 	// (MCP_REGISTER_PER_HOUR). Zero means DefaultRegisterPerHour.
 	RegisterPerHour int
+	// RateLimitPerMinute and RateLimitBurst bound authenticated /mcp
+	// requests per principal (MCP_RATE_LIMIT_PER_MINUTE,
+	// MCP_RATE_LIMIT_BURST). Zero RateLimitPerMinute disables the limit.
+	RateLimitPerMinute int
+	RateLimitBurst     int
+	// UnauthRateLimitPerMinute bounds unauthenticated or refused /mcp
+	// requests per client IP (MCP_UNAUTH_RATE_LIMIT_PER_MINUTE). Zero
+	// disables it.
+	UnauthRateLimitPerMinute int
+	// RevealRateLimitPerMinute bounds credential_reveal calls per principal
+	// (MCP_REVEAL_RATE_LIMIT_PER_MINUTE). Zero disables it.
+	RevealRateLimitPerMinute int
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -203,6 +238,19 @@ func Load() (*Config, error) {
 		errs = append(errs, err)
 	}
 	if cfg.RegisterPerHour, err = positiveIntEnv("MCP_REGISTER_PER_HOUR", DefaultRegisterPerHour); err != nil {
+		errs = append(errs, err)
+	}
+
+	if cfg.RateLimitPerMinute, err = nonNegativeIntEnv("MCP_RATE_LIMIT_PER_MINUTE", DefaultRateLimitPerMinute); err != nil {
+		errs = append(errs, err)
+	}
+	if cfg.RateLimitBurst, err = positiveIntEnv("MCP_RATE_LIMIT_BURST", DefaultRateLimitBurst); err != nil {
+		errs = append(errs, err)
+	}
+	if cfg.UnauthRateLimitPerMinute, err = nonNegativeIntEnv("MCP_UNAUTH_RATE_LIMIT_PER_MINUTE", DefaultUnauthRateLimitPerMinute); err != nil {
+		errs = append(errs, err)
+	}
+	if cfg.RevealRateLimitPerMinute, err = nonNegativeIntEnv("MCP_REVEAL_RATE_LIMIT_PER_MINUTE", DefaultRevealRateLimitPerMinute); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -304,4 +352,18 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// nonNegativeIntEnv reads a non-negative integer from key (0 means "off"),
+// or returns def when the variable is unset or empty.
+func nonNegativeIntEnv(key string, def int) (int, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("%s %q must be a non-negative integer (0 disables the limit)", key, v)
+	}
+	return n, nil
 }

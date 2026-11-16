@@ -27,6 +27,7 @@ import (
 	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/config"
 	"home-os/mcp/internal/metadata"
+	"home-os/mcp/internal/ratelimit"
 )
 
 // claimsCtxKey is an unexported type used for context keys to prevent
@@ -46,6 +47,8 @@ type Server struct {
 	pool       *pgxpool.Pool
 	verifier   *auth.Verifier
 	toolCount  int
+	// limits are the /mcp rate limits (ratelimit.go, #4693).
+	limits *mcpLimits
 }
 
 // Cache hints (SEP-2549) advertised on list/discover/read results to
@@ -64,6 +67,7 @@ func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) 
 		cfg:      cfg,
 		pool:     pool,
 		verifier: verifier,
+		limits:   newMCPLimits(cfg),
 	}
 
 	// Create the MCPServer with tool capabilities. mcp-go returns tools/list
@@ -78,6 +82,8 @@ func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) 
 		// answers 403 before the transport, this catches anything it could
 		// not see (e.g. an unparseable or unusual request shape).
 		server.WithToolHandlerMiddleware(s.requireWriteScope),
+		// Per-principal sub-limit on credential_reveal (#4693).
+		server.WithToolHandlerMiddleware(s.limitReveal),
 	)
 
 	s.httpServer = server.NewStreamableHTTPServer(s.mcpServer, s.StreamableHTTPOptions()...)
@@ -388,9 +394,13 @@ func originAllowed(origin string, allowed map[string]bool) bool {
 // a tools/call for any other tool is answered 403 with a clear message
 // before it reaches the transport.
 //
+// Requests are rate-limited (#4693, see ratelimit.go): refused requests per
+// client IP, authenticated ones per principal; past a limit the answer is
+// 429 with Retry-After and a JSON-RPC error, without a challenge.
+//
 // When the verifier is in disabled mode (no issuer URL configured), the middleware
-// passes through with an anonymous local-dev identity. This enables local development
-// without a running Dex instance.
+// passes through with an anonymous local-dev identity and no rate limit. This
+// enables local development without a running Dex instance.
 func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 	resourceMetadata := metadata.ResourceMetadataURL(s.cfg)
 	scope := strings.Join(metadata.ScopesSupported, " ")
@@ -413,9 +423,24 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
+			// Per-IP limit on refused requests: an IP that used up its
+			// budget is refused before its token costs a lookup.
+			ip := ""
+			refused := func() {}
+			if s.limits.unauth != nil {
+				ip = ratelimit.ClientIP(r, s.cfg.TrustedProxies)
+				if ex, wait := s.limits.unauth.Exhausted(ip); ex {
+					slog.Info("auth middleware: rate limited", "scope", "ip", "remote_ip", ip)
+					writeRateLimited(w, r, wait, "too many unauthenticated requests from this address")
+					return
+				}
+				refused = func() { s.limits.unauth.Allow(ip) }
+			}
+
 			scheme, token, _ := strings.Cut(r.Header.Get("Authorization"), " ")
 			token = strings.TrimSpace(token)
 			if !strings.EqualFold(scheme, "Bearer") || token == "" {
+				refused()
 				// No bearer credentials at all: RFC 6750 section 3.1 says to
 				// send the challenge without an error code.
 				challenge(w, false)
@@ -427,6 +452,7 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 			switch {
 			case err == nil:
 			case errors.Is(err, auth.ErrNoMembership):
+				refused()
 				slog.Warn("auth middleware: token valid but no household membership", "error", err)
 				writeJSONError(w, http.StatusForbidden, "authenticated, but this account is not a member of any household")
 				return
@@ -434,6 +460,7 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 				// Same treatment as a missing membership: 403 with no
 				// challenge, since signing in again cannot reactivate the
 				// account. users.active is read on every request.
+				refused()
 				slog.Warn("auth middleware: token valid but user is deactivated", "error", err)
 				writeJSONError(w, http.StatusForbidden, "authenticated, but this account has been deactivated")
 				return
@@ -442,10 +469,22 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 				writeJSONError(w, http.StatusInternalServerError, "could not resolve household membership")
 				return
 			default:
+				refused()
 				slog.Warn("auth middleware: token verification failed", "error", err)
 				challenge(w, true)
 				writeJSONError(w, http.StatusUnauthorized, "invalid or expired token")
 				return
+			}
+
+			if s.limits.principal != nil {
+				if ok, wait := s.limits.principal.Allow(principalKey(claims)); !ok {
+					slog.Warn("auth middleware: rate limited", "scope", "principal",
+						"user_id", claims.UserID, "token_id", claims.AgentTokenID, "client_id", claims.ClientID)
+					writeRateLimited(w, r, wait, fmt.Sprintf(
+						"rate limit exceeded: at most %d requests a minute (burst %d) per agent token or app",
+						s.cfg.RateLimitPerMinute, s.limits.principalBurst()))
+					return
+				}
 			}
 
 			if !claims.CanWrite() {

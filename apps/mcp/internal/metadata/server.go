@@ -31,6 +31,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"home-os/mcp/internal/config"
+	"home-os/mcp/internal/ratelimit"
 )
 
 // DynamicClientIDPrefix starts every client_id the /register endpoint mints
@@ -394,7 +395,7 @@ func newRegisterHandler(cfg *config.Config) http.Handler {
 
 // tooManyRequests answers 429 with Retry-After and an OAuth-style JSON error.
 func tooManyRequests(w http.ResponseWriter, wait time.Duration) {
-	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(wait)))
+	w.Header().Set("Retry-After", strconv.Itoa(ratelimit.RetryAfterSeconds(wait)))
 	jsonError(w, "temporarily_unavailable", "too many registration requests; retry later", http.StatusTooManyRequests)
 }
 

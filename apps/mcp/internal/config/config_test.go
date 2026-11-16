@@ -29,6 +29,8 @@ var configEnvVars = []string{
 	"MCP_ACCEPTED_AUDIENCES", "DEX_ISSUER", "DEX_JWKS_URL", "MCP_ALLOWED_ORIGINS",
 	"DEX_GRPC_ADDR", "LOG_LEVEL", "TYPESENSE_HOST", "TYPESENSE_PORT", "TYPESENSE_API_KEY",
 	"MCP_REGISTER_PER_MINUTE", "MCP_REGISTER_PER_HOUR",
+	"MCP_RATE_LIMIT_PER_MINUTE", "MCP_RATE_LIMIT_BURST",
+	"MCP_UNAUTH_RATE_LIMIT_PER_MINUTE", "MCP_REVEAL_RATE_LIMIT_PER_MINUTE",
 }
 
 // unsetEnvVars are cleared by unsetting rather than blanking, because an
@@ -275,6 +277,61 @@ func TestLoadRegisterRateLimit(t *testing.T) {
 			equal(t, tt.wantTrusted, cfg.TrustedProxies, "TrustedProxies")
 			equal(t, tt.wantMinute, cfg.RegisterPerMinute, "RegisterPerMinute")
 			equal(t, tt.wantHour, cfg.RegisterPerHour, "RegisterPerHour")
+		})
+	}
+}
+
+func TestLoadMCPRateLimit(t *testing.T) {
+	tests := []struct {
+		name                   string
+		env                    map[string]string
+		wantPerMin, wantBurst  int
+		wantUnauth, wantReveal int
+		wantErr                string
+	}{
+		{name: "defaults", wantPerMin: 120, wantBurst: 40, wantUnauth: 20, wantReveal: 10},
+		{
+			name: "explicit",
+			env: map[string]string{
+				"MCP_RATE_LIMIT_PER_MINUTE": "600", "MCP_RATE_LIMIT_BURST": "100",
+				"MCP_UNAUTH_RATE_LIMIT_PER_MINUTE": "5", "MCP_REVEAL_RATE_LIMIT_PER_MINUTE": "3",
+			},
+			wantPerMin: 600, wantBurst: 100, wantUnauth: 5, wantReveal: 3,
+		},
+		{
+			name: "zero disables",
+			env: map[string]string{
+				"MCP_RATE_LIMIT_PER_MINUTE": "0", "MCP_UNAUTH_RATE_LIMIT_PER_MINUTE": "0",
+				"MCP_REVEAL_RATE_LIMIT_PER_MINUTE": "0",
+			},
+			wantPerMin: 0, wantBurst: 40, wantUnauth: 0, wantReveal: 0,
+		},
+		{name: "negative per minute", env: map[string]string{"MCP_RATE_LIMIT_PER_MINUTE": "-1"}, wantErr: "MCP_RATE_LIMIT_PER_MINUTE"},
+		{name: "zero burst", env: map[string]string{"MCP_RATE_LIMIT_BURST": "0"}, wantErr: "MCP_RATE_LIMIT_BURST"},
+		{name: "non-numeric unauth", env: map[string]string{"MCP_UNAUTH_RATE_LIMIT_PER_MINUTE": "lots"}, wantErr: "MCP_UNAUTH_RATE_LIMIT_PER_MINUTE"},
+		{name: "negative reveal", env: map[string]string{"MCP_REVEAL_RATE_LIMIT_PER_MINUTE": "-3"}, wantErr: "MCP_REVEAL_RATE_LIMIT_PER_MINUTE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := map[string]string{"DATABASE_URL": "postgres://x"}
+			for k, v := range tt.env {
+				env[k] = v
+			}
+			setEnv(t, env)
+			cfg, err := Load()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Load error = %v, want one mentioning %s", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			equal(t, tt.wantPerMin, cfg.RateLimitPerMinute, "RateLimitPerMinute")
+			equal(t, tt.wantBurst, cfg.RateLimitBurst, "RateLimitBurst")
+			equal(t, tt.wantUnauth, cfg.UnauthRateLimitPerMinute, "UnauthRateLimitPerMinute")
+			equal(t, tt.wantReveal, cfg.RevealRateLimitPerMinute, "RevealRateLimitPerMinute")
 		})
 	}
 }
