@@ -93,6 +93,8 @@ func TestHandler_RegisterRejectsBadRedirectURIs(t *testing.T) {
 	cfg := &config.Config{
 		PublicBaseURL: "https://home.example",
 		DexGRPCAddr:   "127.0.0.1:1", // nothing listens: a Dex call fails fast
+		// Every case comes from 127.0.0.1; keep the per-IP limit out of the way.
+		RegisterPerMinute: 1000,
 	}
 	ts := httptest.NewServer(NewHandler(cfg))
 	t.Cleanup(ts.Close)

@@ -45,6 +45,14 @@ spec:
           value: {{ include "home-os.publicUrl" . | quote }}
         - name: DEX_ISSUER
           value: {{ include "home-os.dexIssuer" . | quote }}
+        {{- with .Values.mcp.registerRateLimit }}
+        - name: MCP_REGISTER_PER_MINUTE
+          value: {{ .perMinute | default 5 | quote }}
+        - name: MCP_REGISTER_PER_HOUR
+          value: {{ .perHour | default 60 | quote }}
+        - name: MCP_TRUSTED_PROXIES
+          value: {{ join "," (.trustedProxies | default (dig "rateLimit" "trustedProxies" list $.Values.api) | default list) | quote }}
+        {{- end }}
         volumeMounts:
         {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         resources:

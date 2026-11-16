@@ -24,6 +24,16 @@
 //	                        PUBLIC_BASE_URL. Requests without Origin and loopback
 //	                        origins are handled by the transport middleware.
 //	DEX_GRPC_ADDR           Dex gRPC API address. Default home-os-dex:5557.
+//	MCP_TRUSTED_PROXIES     Comma-separated CIDRs or IPs of the reverse proxies in
+//	                        front of the metadata server (Traefik, Envoy). Their
+//	                        X-Forwarded-For entries are believed when keying the
+//	                        /register rate limit. Default 10.244.0.0/16 (the Talos
+//	                        pod CIDR); set it to an empty value to trust none and
+//	                        key on the TCP peer only.
+//	MCP_REGISTER_PER_MINUTE Dynamic client registrations per client IP per minute
+//	                        (burst the same). Default 5.
+//	MCP_REGISTER_PER_HOUR   Dynamic client registrations per hour across all
+//	                        clients, per pod (burst the same). Default 60.
 //	LOG_LEVEL               Default info.
 //	TYPESENSE_HOST, TYPESENSE_PORT, TYPESENSE_API_KEY  Optional search backend.
 package config
@@ -31,14 +41,25 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 )
 
 // DefaultAcceptedAudiences are the Dex client IDs whose tokens the MCP accepts.
 // Dex puts the client_id in the aud claim.
 var DefaultAcceptedAudiences = []string{"home-os-ui", "home-os-mcp"}
+
+// Defaults for the dynamic client registration (/register) limits.
+const (
+	// DefaultTrustedProxies is the Talos pod CIDR, which covers Traefik and
+	// Envoy, the proxies between the internet and the metadata server.
+	DefaultTrustedProxies    = "10.244.0.0/16"
+	DefaultRegisterPerMinute = 5
+	DefaultRegisterPerHour   = 60
+)
 
 // Config holds all environment-driven configuration for the MCP server.
 type Config struct {
@@ -68,6 +89,16 @@ type Config struct {
 	// Kubernetes Secret, #4446). Empty disables credential_reveal. Never
 	// logged.
 	AgentCredentialsKey string
+	// TrustedProxies are the networks whose X-Forwarded-For entries are
+	// believed when finding the client IP for the /register rate limit
+	// (MCP_TRUSTED_PROXIES). Empty means the TCP peer is the client.
+	TrustedProxies []netip.Prefix
+	// RegisterPerMinute is the per-client-IP /register budget
+	// (MCP_REGISTER_PER_MINUTE). Zero means DefaultRegisterPerMinute.
+	RegisterPerMinute int
+	// RegisterPerHour is the global /register ceiling per pod
+	// (MCP_REGISTER_PER_HOUR). Zero means DefaultRegisterPerHour.
+	RegisterPerHour int
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -144,6 +175,26 @@ func Load() (*Config, error) {
 		cfg.AllowedOrigins = []string{strings.ToLower(cfg.PublicBaseURL)}
 	}
 
+	// An explicitly empty MCP_TRUSTED_PROXIES means "trust no proxy", so
+	// LookupEnv rather than getEnv.
+	proxies, ok := os.LookupEnv("MCP_TRUSTED_PROXIES")
+	if !ok {
+		proxies = DefaultTrustedProxies
+	}
+	if trusted, err := ParseTrustedProxies(proxies); err != nil {
+		errs = append(errs, fmt.Errorf("MCP_TRUSTED_PROXIES %q: %w", proxies, err))
+	} else {
+		cfg.TrustedProxies = trusted
+	}
+
+	var err error
+	if cfg.RegisterPerMinute, err = positiveIntEnv("MCP_REGISTER_PER_MINUTE", DefaultRegisterPerMinute); err != nil {
+		errs = append(errs, err)
+	}
+	if cfg.RegisterPerHour, err = positiveIntEnv("MCP_REGISTER_PER_HOUR", DefaultRegisterPerHour); err != nil {
+		errs = append(errs, err)
+	}
+
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("config: %w", errors.Join(errs...))
 	}
@@ -192,6 +243,48 @@ func splitList(v string) []string {
 		out = append(out, p)
 	}
 	return out
+}
+
+// ParseTrustedProxies parses a comma-separated list of CIDRs or bare IPs (a
+// bare IP is a /32 or /128). Empty input gives an empty list. Same format as
+// the calendar's CALDAV_TRUSTED_PROXIES.
+func ParseTrustedProxies(s string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "/") {
+			p, err := netip.ParsePrefix(part)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(part)
+		if err != nil {
+			return nil, err
+		}
+		a = a.Unmap()
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
+	}
+	return out, nil
+}
+
+// positiveIntEnv reads a positive integer from key, or returns def when the
+// variable is unset or empty.
+func positiveIntEnv(key string, def int) (int, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s %q must be a positive integer", key, v)
+	}
+	return n, nil
 }
 
 // getEnv returns the value of the environment variable if set, otherwise returns fallback.

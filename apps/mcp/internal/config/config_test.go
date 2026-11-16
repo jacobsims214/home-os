@@ -1,6 +1,8 @@
 package config
 
 import (
+	"net/netip"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -26,13 +28,22 @@ var configEnvVars = []string{
 	"DATABASE_URL", "PORT", "METADATA_PORT", "PUBLIC_BASE_URL", "MCP_RESOURCE_URL",
 	"MCP_ACCEPTED_AUDIENCES", "DEX_ISSUER", "DEX_JWKS_URL", "MCP_ALLOWED_ORIGINS",
 	"DEX_GRPC_ADDR", "LOG_LEVEL", "TYPESENSE_HOST", "TYPESENSE_PORT", "TYPESENSE_API_KEY",
+	"MCP_REGISTER_PER_MINUTE", "MCP_REGISTER_PER_HOUR",
 }
+
+// unsetEnvVars are cleared by unsetting rather than blanking, because an
+// empty value means something different from an unset one.
+var unsetEnvVars = []string{"MCP_TRUSTED_PROXIES"}
 
 // setEnv clears every config variable for the test, then applies env.
 func setEnv(t *testing.T, env map[string]string) {
 	t.Helper()
 	for _, k := range configEnvVars {
 		t.Setenv(k, "")
+	}
+	for _, k := range unsetEnvVars {
+		t.Setenv(k, "") // registers the restore at cleanup
+		os.Unsetenv(k)
 	}
 	for k, v := range env {
 		t.Setenv(k, v)
@@ -54,6 +65,9 @@ func TestLoadDefaults(t *testing.T) {
 	equal(t, []string{"http://localhost:8000"}, cfg.AllowedOrigins)
 	equal(t, "home-os-dex:5557", cfg.DexGRPCAddr)
 	equal(t, "info", cfg.LogLevel)
+	equal(t, []netip.Prefix{netip.MustParsePrefix("10.244.0.0/16")}, cfg.TrustedProxies)
+	equal(t, DefaultRegisterPerMinute, cfg.RegisterPerMinute)
+	equal(t, DefaultRegisterPerHour, cfg.RegisterPerHour)
 }
 
 func TestLoadDerivesFromPublicBaseURL(t *testing.T) {
@@ -204,4 +218,63 @@ func TestLoadBlankListsUseDefaults(t *testing.T) {
 	cfg := mustLoad(t)
 	equal(t, DefaultAcceptedAudiences, cfg.AcceptedAudiences)
 	equal(t, []string{"http://localhost:8000"}, cfg.AllowedOrigins)
+}
+
+func TestLoadRegisterRateLimit(t *testing.T) {
+	tests := []struct {
+		name        string
+		env         map[string]string
+		wantTrusted []netip.Prefix
+		wantMinute  int
+		wantHour    int
+		wantErr     string
+	}{
+		{
+			name:        "explicit empty trusts no proxy",
+			env:         map[string]string{"MCP_TRUSTED_PROXIES": ""},
+			wantTrusted: nil, wantMinute: 5, wantHour: 60,
+		},
+		{
+			name: "list of CIDRs and bare IPs",
+			env: map[string]string{
+				"MCP_TRUSTED_PROXIES":     " 10.244.0.0/16, 173.245.48.1/20 ,192.0.2.7, 2606:4700::/32",
+				"MCP_REGISTER_PER_MINUTE": "3",
+				"MCP_REGISTER_PER_HOUR":   "100",
+			},
+			wantTrusted: []netip.Prefix{
+				netip.MustParsePrefix("10.244.0.0/16"),
+				netip.MustParsePrefix("173.245.48.0/20"), // masked
+				netip.MustParsePrefix("192.0.2.7/32"),
+				netip.MustParsePrefix("2606:4700::/32"),
+			},
+			wantMinute: 3, wantHour: 100,
+		},
+		{name: "bad CIDR", env: map[string]string{"MCP_TRUSTED_PROXIES": "10.0.0.0/33"}, wantErr: "MCP_TRUSTED_PROXIES"},
+		{name: "bad IP", env: map[string]string{"MCP_TRUSTED_PROXIES": "not-an-ip"}, wantErr: "MCP_TRUSTED_PROXIES"},
+		{name: "zero per minute", env: map[string]string{"MCP_REGISTER_PER_MINUTE": "0"}, wantErr: "MCP_REGISTER_PER_MINUTE"},
+		{name: "negative per hour", env: map[string]string{"MCP_REGISTER_PER_HOUR": "-1"}, wantErr: "MCP_REGISTER_PER_HOUR"},
+		{name: "non-numeric per hour", env: map[string]string{"MCP_REGISTER_PER_HOUR": "lots"}, wantErr: "MCP_REGISTER_PER_HOUR"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := map[string]string{"DATABASE_URL": "postgres://x"}
+			for k, v := range tt.env {
+				env[k] = v
+			}
+			setEnv(t, env)
+			cfg, err := Load()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Load error = %v, want one mentioning %s", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			equal(t, tt.wantTrusted, cfg.TrustedProxies, "TrustedProxies")
+			equal(t, tt.wantMinute, cfg.RegisterPerMinute, "RegisterPerMinute")
+			equal(t, tt.wantHour, cfg.RegisterPerHour, "RegisterPerHour")
+		})
+	}
 }

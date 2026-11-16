@@ -10,6 +10,7 @@
 package metadata
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,8 +18,10 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -204,71 +207,7 @@ func NewHandler(cfg *config.Config) http.Handler {
 	})
 
 	// Dynamic Client Registration (RFC 7591).
-	// MCP clients (opencode, Claude Code) POST their redirect URIs and client
-	// metadata here. The handler creates a client in Dex via gRPC and returns
-	// a client_id that the client uses for the OAuth authorization code flow.
-	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			jsonError(w, "method_not_allowed", "POST required", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Parse registration request
-		var req struct {
-			RedirectURIs            []string `json:"redirect_uris"`
-			ClientName              string   `json:"client_name"`
-			TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
-			GrantTypes              []string `json:"grant_types"`
-			ResponseTypes           []string `json:"response_types"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid_request", err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		// Validate redirect URIs before anything reaches Dex: loopback HTTP or
-		// a reverse-DNS private-use scheme only (see ValidateRedirectURIs).
-		if err := ValidateRedirectURIs(req.RedirectURIs); err != nil {
-			jsonError(w, "invalid_redirect_uri", err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		// Connect to Dex gRPC and create client
-		conn, err := grpc.NewClient(cfg.DexGRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			jsonError(w, "server_error", "cannot connect to auth server", http.StatusInternalServerError)
-			return
-		}
-		defer conn.Close()
-
-		dexClient := dexapi.NewDexClient(conn)
-		clientID := DynamicClientIDPrefix + uuid.New().String()
-
-		_, err = dexClient.CreateClient(r.Context(), &dexapi.CreateClientReq{
-			Client: &dexapi.Client{
-				Id:           clientID,
-				Public:       true,
-				RedirectUris: req.RedirectURIs,
-				Name:         req.ClientName,
-			},
-		})
-		if err != nil {
-			jsonError(w, "server_error", "client registration failed", http.StatusInternalServerError)
-			return
-		}
-
-		// Return RFC 7591 response
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"client_id":                  clientID,
-			"client_id_issued_at":        time.Now().Unix(),
-			"redirect_uris":              req.RedirectURIs,
-			"token_endpoint_auth_method": "none",
-			"grant_types":                []string{"authorization_code", "refresh_token"},
-			"response_types":             []string{"code"},
-			"client_name":                req.ClientName,
-		})
-	})
+	mux.Handle("/register", newRegisterHandler(cfg))
 
 	// OAuth 2.0 Authorization Server Metadata (RFC 8414). Tells OAuth clients
 	// (opencode) where the authorization server's endpoints are. The issuer
@@ -306,6 +245,157 @@ func NewHandler(cfg *config.Config) http.Handler {
 	}
 
 	return mux
+}
+
+// Bounds on a registration request (#4691).
+const (
+	// MaxRegisterBodyBytes caps the /register request body.
+	MaxRegisterBodyBytes = 16 << 10
+	// MaxClientNameLen caps client_name, in characters.
+	MaxClientNameLen = 100
+	// dexCallTimeout bounds the Dex CreateClient call.
+	dexCallTimeout = 10 * time.Second
+)
+
+// dexClientCreator is the part of the Dex API /register uses.
+type dexClientCreator interface {
+	CreateClient(ctx context.Context, in *dexapi.CreateClientReq, opts ...grpc.CallOption) (*dexapi.CreateClientResp, error)
+}
+
+// dialDex builds the Dex API client. grpc.NewClient does not connect; the
+// connection is made on first use and re-established by gRPC as needed. It
+// is a variable so tests can substitute a fake and count calls.
+var dialDex = func(addr string) (dexClientCreator, error) {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	return dexapi.NewDexClient(conn), nil
+}
+
+// newRegisterHandler serves dynamic client registration (RFC 7591). MCP
+// clients (opencode, Claude Code) POST their redirect URIs and client
+// metadata, and get back a client_id for a new public client in Dex.
+//
+// It is public and unauthenticated, so it is bounded before anything
+// reaches Dex: a per-client-IP and a global rate limit (ratelimit.go), a
+// 16 KiB body cap, a client_name cap, and the redirect URI policy
+// (ValidateRedirectURIs, which also caps the URI count).
+//
+// The Dex gRPC client is built once here and shared by every request; the
+// handler (and so the connection) lives for the life of the process.
+//
+// Client ids are "mcp-" plus a UUIDv7, whose first 48 bits are the creation
+// time in Unix milliseconds. Dex's Client has no metadata field to carry a
+// timestamp, so a later janitor that deletes unused DCR clients can read
+// the creation time from the id instead.
+func newRegisterHandler(cfg *config.Config) http.Handler {
+	limiter := newRegisterLimiter(cfg)
+	dex, dexErr := dialDex(cfg.DexGRPCAddr)
+	if dexErr != nil {
+		slog.Error("dcr: cannot create Dex gRPC client", "addr", cfg.DexGRPCAddr, "error", dexErr)
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			jsonError(w, "method_not_allowed", "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ip := clientIP(r, limiter.trusted)
+		if ok, wait := limiter.allowIP(ip); !ok {
+			slog.Info("dcr: rate limited", "scope", "ip", "remote_ip", ip)
+			tooManyRequests(w, wait)
+			return
+		}
+
+		var req struct {
+			RedirectURIs            []string `json:"redirect_uris"`
+			ClientName              string   `json:"client_name"`
+			TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+			GrantTypes              []string `json:"grant_types"`
+			ResponseTypes           []string `json:"response_types"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, MaxRegisterBodyBytes)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				jsonError(w, "invalid_request", fmt.Sprintf("request body exceeds %d bytes", MaxRegisterBodyBytes), http.StatusRequestEntityTooLarge)
+				return
+			}
+			jsonError(w, "invalid_request", "request body is not valid JSON", http.StatusBadRequest)
+			return
+		}
+
+		if utf8.RuneCountInString(req.ClientName) > MaxClientNameLen {
+			jsonError(w, "invalid_client_metadata", fmt.Sprintf("client_name must be at most %d characters", MaxClientNameLen), http.StatusBadRequest)
+			return
+		}
+
+		// Validate redirect URIs before anything reaches Dex: loopback HTTP or
+		// a reverse-DNS private-use scheme only (see ValidateRedirectURIs).
+		if err := ValidateRedirectURIs(req.RedirectURIs); err != nil {
+			jsonError(w, "invalid_redirect_uri", err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// The global ceiling is spent only by registrations that would
+		// otherwise create a Dex client.
+		if ok, wait := limiter.allowGlobal(); !ok {
+			slog.Warn("dcr: global registration ceiling reached", "remote_ip", ip)
+			tooManyRequests(w, wait)
+			return
+		}
+
+		if dexErr != nil {
+			jsonError(w, "server_error", "cannot connect to auth server", http.StatusInternalServerError)
+			return
+		}
+
+		id, err := uuid.NewV7()
+		if err != nil {
+			jsonError(w, "server_error", "cannot generate client id", http.StatusInternalServerError)
+			return
+		}
+		clientID := DynamicClientIDPrefix + id.String()
+
+		ctx, cancel := context.WithTimeout(r.Context(), dexCallTimeout)
+		defer cancel()
+		_, err = dex.CreateClient(ctx, &dexapi.CreateClientReq{
+			Client: &dexapi.Client{
+				Id:           clientID,
+				Public:       true,
+				RedirectUris: req.RedirectURIs,
+				Name:         req.ClientName,
+			},
+		})
+		if err != nil {
+			slog.Error("dcr: Dex CreateClient failed", "remote_ip", ip, "error", err)
+			jsonError(w, "server_error", "client registration failed", http.StatusInternalServerError)
+			return
+		}
+
+		slog.Info("dcr: client registered", "client_id", clientID, "client_name", req.ClientName, "remote_ip", ip)
+
+		// RFC 7591 response.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"client_id":                  clientID,
+			"client_id_issued_at":        time.Now().Unix(),
+			"redirect_uris":              req.RedirectURIs,
+			"token_endpoint_auth_method": "none",
+			"grant_types":                []string{"authorization_code", "refresh_token"},
+			"response_types":             []string{"code"},
+			"client_name":                req.ClientName,
+		})
+	})
+}
+
+// tooManyRequests answers 429 with Retry-After and an OAuth-style JSON error.
+func tooManyRequests(w http.ResponseWriter, wait time.Duration) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(wait)))
+	jsonError(w, "temporarily_unavailable", "too many registration requests; retry later", http.StatusTooManyRequests)
 }
 
 // MaxRedirectURIs caps how many redirect URIs one registration may carry.

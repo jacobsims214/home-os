@@ -13,6 +13,7 @@ require (
 	github.com/mark3labs/mcp-go v1.5.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
+	golang.org/x/time v0.11.0
 	google.golang.org/grpc v1.83.0
 	home-os/icalx v0.0.0
 )

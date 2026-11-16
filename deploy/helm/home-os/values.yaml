@@ -167,6 +167,19 @@ mcp:
   image: mcp
   port: 8082
   metadataPort: 8083
+  # Limits on public dynamic client registration (/oauth/register; apps/mcp/
+  # internal/metadata/ratelimit.go, #4691). Past either budget it answers
+  # 429 + Retry-After before anything reaches Dex. In memory per pod.
+  registerRateLimit:
+    # Registrations per client IP per minute (burst the same).
+    perMinute: 5
+    # Registrations per hour across all clients, per pod (burst the same).
+    # Each one creates a permanent Dex client.
+    perHour: 60
+    # Proxies whose X-Forwarded-For is believed (rightmost untrusted hop is
+    # the client). Leave empty to use api.rateLimit.trustedProxies (pod CIDR
+    # + Cloudflare edge ranges), so the API and MCP agree on client IPs.
+    trustedProxies: []
   resources:
     requests: { cpu: 100m, memory: 64Mi }
     limits: { cpu: 500m, memory: 256Mi }
