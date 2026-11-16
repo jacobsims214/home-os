@@ -1428,12 +1428,22 @@ func freeSlots(busy []timeInterval, windowStart, windowEnd time.Time, duration t
 
 const maxAgendaDays = 31
 
-// agendaAreas are the areas agenda_get accepts. meals and lists arrive with
-// Stage 2 (#4487, #4473); asking for them reports them as unavailable.
+// agendaAreas are the areas agenda_get accepts. meals arrives with Stage 2
+// (#4487); asking for it reports it as unavailable.
 var (
 	agendaAreas      = []string{"events", "bills", "maintenance", "meals", "lists"}
-	agendaAvailable  = map[string]bool{"events": true, "bills": true, "maintenance": true}
-	agendaAreasOrder = []string{"events", "bills", "maintenance"}
+	agendaAvailable  = map[string]bool{"events": true, "bills": true, "maintenance": true, "lists": true}
+	agendaAreasOrder = []string{"events", "bills", "maintenance", "lists"}
+)
+
+// The lists area is kept small (the agenda is already large for a month):
+// at most agendaMaxListItems due items, and when the range includes today
+// at most agendaMaxOpenLists open lists with agendaListPreview item texts
+// each. list_get has the rest.
+const (
+	agendaMaxListItems = 20
+	agendaMaxOpenLists = 10
+	agendaListPreview  = 3
 )
 
 // AgendaBill is a bill due in the agenda's range.
@@ -1457,6 +1467,34 @@ type AgendaTask struct {
 	PropertyID  *string `json:"property_id,omitempty"`
 }
 
+// AgendaListItem is an open (unchecked) list item due in the agenda's range.
+type AgendaListItem struct {
+	ListID   string  `json:"list_id"`
+	ListName string  `json:"list_name"`
+	ItemID   string  `json:"item_id" jsonschema_description:"Pass it in item_ids to list_check_items."`
+	Text     string  `json:"text"`
+	DueDate  string  `json:"local_date" jsonschema_description:"Due date (YYYY-MM-DD)."`
+	Weekday  string  `json:"weekday"`
+	Assignee *string `json:"assignee_name,omitempty" jsonschema_description:"Who does it, if assigned."`
+}
+
+// AgendaOpenList is an active list with items still open.
+type AgendaOpenList struct {
+	ListID    string   `json:"list_id"`
+	Name      string   `json:"name"`
+	Kind      string   `json:"kind" jsonschema_description:"grocery, packing, shopping, todo, chores or other."`
+	OpenItems int      `json:"open_items" jsonschema_description:"Unchecked items on the list."`
+	Preview   []string `json:"preview" jsonschema_description:"The first few open items, in list order; list_get has them all."`
+}
+
+// AgendaLists is the agenda's lists section.
+type AgendaLists struct {
+	Due       []AgendaListItem `json:"due" jsonschema_description:"Open items due in the range, by date then list; at most 20."`
+	DueTotal  int              `json:"due_total" jsonschema_description:"All open items due in the range (more than due holds when capped)."`
+	Open      []AgendaOpenList `json:"open,omitempty" jsonschema_description:"Only when the range includes today: active lists with open items, by name; at most 10."`
+	OpenTotal int              `json:"open_total,omitempty" jsonschema_description:"Active lists with open items (more than open holds when capped)."`
+}
+
 // agendaResult is agenda_get's data. Every section is a list (empty when
 // nothing is due or the area was not asked for; areas says which were).
 type agendaResult struct {
@@ -1467,6 +1505,7 @@ type agendaResult struct {
 	Events      []Event      `json:"events"`
 	Bills       []AgendaBill `json:"bills"`
 	Maintenance []AgendaTask `json:"maintenance"`
+	Lists       *AgendaLists `json:"lists,omitempty" jsonschema_description:"Present when the lists area was asked for."`
 	Unavailable []string     `json:"unavailable,omitempty" jsonschema_description:"Areas asked for that Home OS can't show yet."`
 	Warnings    []string     `json:"warnings,omitempty" jsonschema_description:"Sections that failed to load; don't assume they are empty."`
 }
@@ -1474,10 +1513,10 @@ type agendaResult struct {
 // NewAgendaGetTool creates agenda_get (replaces get_daily_briefing).
 func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 	tool := mcp.NewTool("agenda_get", toolOptions(classR, "Get agenda",
-		mcp.WithDescription("What's on for a date or range: events, bills due and maintenance due, with weekdays. Use for \"what's this week look like?\"."),
+		mcp.WithDescription("What's on for a date or range: events, bills due, maintenance due and list items due (plus open lists when the range includes today), with weekdays. Use for \"what's this week look like?\"."),
 		mcp.WithString("from", mcp.Description("First day, YYYY-MM-DD (default today)")),
 		mcp.WithString("to", mcp.Description(fmt.Sprintf("Last day, inclusive (default from; at most %d days)", maxAgendaDays))),
-		mcp.WithArray("areas", mcp.Description("Sections to include (default events, bills, maintenance)"), mcp.WithStringEnumItems(agendaAreas)),
+		mcp.WithArray("areas", mcp.Description("Sections to include (default events, bills, maintenance, lists)"), mcp.WithStringEnumItems(agendaAreas)),
 		respond.Schema[agendaResult](),
 	)...)
 
@@ -1578,6 +1617,17 @@ func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 				res.Maintenance = tasks
 			}
 		}
+		if want["lists"] {
+			today := todayIn(loc)
+			withOpen := !today.Before(first) && !today.After(last)
+			lists, err := listsDueBetween(ctx, pool, claims.HouseholdID, first, last, withOpen)
+			if err != nil {
+				slog.Error("agenda_get: query lists error", "error", err)
+				res.Warnings = append(res.Warnings, "Could not load lists; do not assume nothing is due.")
+			} else {
+				res.Lists = lists
+			}
+		}
 
 		return respond.OK(agendaSummary(res, days, want), res, agendaHints(res)...), nil
 	}
@@ -1607,6 +1657,13 @@ func agendaSummary(res agendaResult, days []time.Time, want map[string]bool) str
 	if want["maintenance"] {
 		parts = append(parts, count(len(res.Maintenance), "maintenance task", "maintenance tasks")+" due")
 	}
+	if want["lists"] && res.Lists != nil {
+		p := count(res.Lists.DueTotal, "list item", "list items") + " due"
+		if res.Lists.OpenTotal > 0 {
+			p += fmt.Sprintf(" (%d open %s)", res.Lists.OpenTotal, plural(res.Lists.OpenTotal, "list", "lists"))
+		}
+		parts = append(parts, p)
+	}
 	s := when + ": " + strings.Join(parts, ", ") + "."
 	if len(parts) == 0 {
 		s = when + ": nothing requested that Home OS can show yet."
@@ -1627,6 +1684,23 @@ func agendaHints(res agendaResult) []string {
 	}
 	if len(res.Bills) > 0 {
 		out = append(out, fmt.Sprintf("Mark a bill paid with bill_pay bill_id=%s.", res.Bills[0].BillID))
+	}
+	if l := res.Lists; l != nil {
+		if len(l.Due) > 0 {
+			first := l.Due[0].ListID
+			ids := []string{}
+			for _, it := range l.Due {
+				if it.ListID == first && len(ids) < 5 {
+					ids = append(ids, strconv.Quote(it.ItemID))
+				}
+			}
+			out = append(out, fmt.Sprintf("Check items off with list_check_items list_id=%s item_ids=[%s].", first, strings.Join(ids, ",")))
+		}
+		if len(l.Open) > 0 {
+			out = append(out, fmt.Sprintf("See a whole list with list_get list_id=%s.", l.Open[0].ListID))
+		} else if len(l.Due) > 0 {
+			out = append(out, fmt.Sprintf("See the whole list with list_get list_id=%s.", l.Due[0].ListID))
+		}
 	}
 	if len(out) == 0 {
 		out = append(out, "Add something with event_create, or look further ahead with a later to.")
@@ -1718,6 +1792,80 @@ func maintenanceDueBetween(ctx context.Context, pool querier, householdID string
 		}
 		t.DueDate, t.Weekday = due.Format(dateLayout), due.Weekday().String()
 		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// listsDueBetween returns the agenda's lists section: the household's open
+// items due on a day from first to last inclusive, from active non-template
+// lists, by due date, list name and position (capped, with the total); and,
+// when withOpen, the active non-template lists that still have open items,
+// with their open count and the first few open item texts (capped, with
+// the total). Both queries filter lists and items by household.
+func listsDueBetween(ctx context.Context, pool querier, householdID string, first, last time.Time, withOpen bool) (*AgendaLists, error) {
+	civil := func(t time.Time) time.Time {
+		y, m, d := t.Date()
+		return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	}
+	out := &AgendaLists{Due: []AgendaListItem{}}
+	rows, err := pool.Query(ctx,
+		`SELECT l.id::text, l.name, i.id::text, i.text, i.due_date, pe.display_name, COUNT(*) OVER ()
+		 FROM list_items i
+		 JOIN lists l ON l.id = i.list_id AND l.household_id = i.household_id
+		 LEFT JOIN people pe ON pe.id = i.assignee_person_id AND pe.household_id = i.household_id
+		 WHERE i.household_id = $1 AND l.household_id = $1
+		   AND NOT i.checked AND i.due_date BETWEEN $2 AND $3
+		   AND NOT l.archived AND NOT l.is_template
+		 ORDER BY i.due_date, lower(l.name), l.id, i.position
+		 LIMIT $4`,
+		householdID, civil(first), civil(last), agendaMaxListItems,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var it AgendaListItem
+		var due time.Time
+		if err := rows.Scan(&it.ListID, &it.ListName, &it.ItemID, &it.Text, &due, &it.Assignee, &out.DueTotal); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan list item: %w", err)
+		}
+		it.DueDate, it.Weekday = due.Format(dateLayout), due.Weekday().String()
+		out.Due = append(out.Due, it)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if !withOpen {
+		return out, nil
+	}
+
+	rows, err = pool.Query(ctx,
+		`SELECT l.id::text, l.name, l.kind, COUNT(*)::int,
+		        (array_agg(i.text ORDER BY i.position, i.id))[1:$2],
+		        COUNT(*) OVER ()
+		 FROM lists l
+		 JOIN list_items i ON i.list_id = l.id AND i.household_id = l.household_id AND NOT i.checked
+		 WHERE l.household_id = $1 AND NOT l.archived AND NOT l.is_template
+		 GROUP BY l.id, l.name, l.kind
+		 ORDER BY lower(l.name), l.id
+		 LIMIT $3`,
+		householdID, agendaListPreview, agendaMaxOpenLists,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var l AgendaOpenList
+		if err := rows.Scan(&l.ListID, &l.Name, &l.Kind, &l.OpenItems, &l.Preview, &out.OpenTotal); err != nil {
+			return nil, fmt.Errorf("scan open list: %w", err)
+		}
+		if l.Preview == nil {
+			l.Preview = []string{}
+		}
+		out.Open = append(out.Open, l)
 	}
 	return out, rows.Err()
 }

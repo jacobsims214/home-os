@@ -1573,3 +1573,146 @@ func TestAgendaBills(t *testing.T) {
 }
 
 func intPtr(i int) *int { return &i }
+
+// TestAgendaLists covers the agenda's lists area: open items due in the
+// range from active non-template lists, open lists with counts when the
+// range includes today, the cap, and that another family's items never
+// appear.
+func TestAgendaLists(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctxA, a := testutil.SeedHousehold(t, pool)
+	ctxB, b := testutil.SeedHousehold(t, pool)
+	setHouseholdTimezone(t, pool, a.HouseholdID, "UTC")
+	setHouseholdTimezone(t, pool, b.HouseholdID, "UTC")
+	agenda := bind(t, NewAgendaGetTool, pool)
+	bg := context.Background()
+
+	today := time.Now().UTC()
+	day := func(n int) string { return today.AddDate(0, 0, n).Format("2006-01-02") }
+	insertID := func(t *testing.T, sql string, args ...any) string {
+		t.Helper()
+		var id string
+		if err := pool.QueryRow(bg, sql+" RETURNING id::text", args...).Scan(&id); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+		return id
+	}
+	list := func(t *testing.T, hh uuid.UUID, name, kind string, template, archived bool) string {
+		return insertID(t, `INSERT INTO lists (household_id, name, kind, is_template, archived) VALUES ($1, $2, $3, $4, $5)`,
+			hh, name, kind, template, archived)
+	}
+	item := func(t *testing.T, hh uuid.UUID, listID, text string, due *string, checked bool, assignee *string) string {
+		return insertID(t, `INSERT INTO list_items (list_id, household_id, text, due_date, checked, assignee_person_id) VALUES ($1, $2, $3, $4::date, $5, $6::uuid)`,
+			listID, hh, text, due, checked, assignee)
+	}
+
+	nora := insertID(t, `INSERT INTO people (household_id, display_name) VALUES ($1, 'Nora')`, a.HouseholdID)
+	chores := list(t, a.HouseholdID, "Weekend chores", "chores", false, false)
+	mow := item(t, a.HouseholdID, chores, "Mow lawn", ptr(day(1)), false, &nora)
+	item(t, a.HouseholdID, chores, "Rake leaves", ptr(day(1)), true, nil)
+	item(t, a.HouseholdID, chores, "Clean gutters", ptr(day(10)), false, nil)
+	item(t, a.HouseholdID, chores, "Sweep porch", nil, false, nil)
+	grocery := list(t, a.HouseholdID, "Grocery", "grocery", false, false)
+	milk := item(t, a.HouseholdID, grocery, "Milk", ptr(day(2)), false, nil)
+	old := list(t, a.HouseholdID, "Old chores", "chores", false, true)
+	item(t, a.HouseholdID, old, "Archived thing", ptr(day(1)), false, nil)
+	tpl := list(t, a.HouseholdID, "Packing", "packing", true, false)
+	item(t, a.HouseholdID, tpl, "Template thing", ptr(day(1)), false, nil)
+
+	groceryB := list(t, b.HouseholdID, "Grocery", "grocery", false, false)
+	secretB := item(t, b.HouseholdID, groceryB, "Other family item", ptr(day(1)), false, nil)
+
+	call := func(t *testing.T, ctx context.Context, args map[string]any) (agendaResult, string) {
+		t.Helper()
+		text, isErr := callTool(t, agenda, ctx, args)
+		var res agendaResult
+		if err := json.Unmarshal(data(t, text), &res); err != nil || isErr {
+			t.Fatalf("agenda_get %v: %s (%v)", args, text, err)
+		}
+		return res, text
+	}
+
+	t.Run("due open items in range and open lists, one family only", func(t *testing.T) {
+		res, text := call(t, ctxA, map[string]any{"from": day(0), "to": day(6), "areas": []any{"lists"}})
+		if strings.Join(res.Areas, ",") != "lists" || len(res.Unavailable) != 0 || res.Lists == nil {
+			t.Fatalf("areas = %v unavailable = %v lists = %v", res.Areas, res.Unavailable, res.Lists)
+		}
+		var got []string
+		for _, it := range res.Lists.Due {
+			who := ""
+			if it.Assignee != nil {
+				who = "@" + *it.Assignee
+			}
+			got = append(got, fmt.Sprintf("%s %s/%s%s %s", it.DueDate, it.ListName, it.Text, who, it.Weekday[:3]))
+		}
+		want := []string{
+			day(1) + " Weekend chores/Mow lawn@Nora " + today.AddDate(0, 0, 1).Weekday().String()[:3],
+			day(2) + " Grocery/Milk " + today.AddDate(0, 0, 2).Weekday().String()[:3],
+		}
+		if strings.Join(got, "|") != strings.Join(want, "|") || res.Lists.DueTotal != 2 {
+			t.Errorf("due = %v (total %d)\nwant %v", got, res.Lists.DueTotal, want)
+		}
+		if res.Lists.Due[0].ItemID != mow || res.Lists.Due[0].ListID != chores || res.Lists.Due[1].ItemID != milk {
+			t.Errorf("ids = %+v", res.Lists.Due)
+		}
+		var open []string
+		for _, l := range res.Lists.Open {
+			open = append(open, fmt.Sprintf("%s:%s:%d:%s", l.Name, l.Kind, l.OpenItems, strings.Join(l.Preview, ",")))
+		}
+		wantOpen := "Grocery:grocery:1:Milk|Weekend chores:chores:3:Mow lawn,Clean gutters,Sweep porch"
+		if strings.Join(open, "|") != wantOpen || res.Lists.OpenTotal != 2 {
+			t.Errorf("open = %v (total %d)\nwant %s", open, res.Lists.OpenTotal, wantOpen)
+		}
+		for _, leak := range []string{"Other family item", secretB, groceryB, "Archived thing", "Template thing", "Rake leaves", "Not available yet"} {
+			if strings.Contains(text, leak) {
+				t.Errorf("result contains %q:\n%s", leak, text)
+			}
+		}
+		if !strings.Contains(text, "2 list items due (2 open lists)") {
+			t.Errorf("summary: %s", text)
+		}
+		if !strings.Contains(text, fmt.Sprintf("list_check_items list_id=%s item_ids=[\\\"%s\\\"]", chores, mow)) ||
+			!strings.Contains(text, "list_get list_id="+grocery) {
+			t.Errorf("hints: %s", text)
+		}
+	})
+
+	t.Run("a range without today has no open lists", func(t *testing.T) {
+		res, _ := call(t, ctxA, map[string]any{"from": day(2), "to": day(3), "areas": []any{"lists"}})
+		if len(res.Lists.Due) != 1 || res.Lists.Due[0].Text != "Milk" || res.Lists.Open != nil || res.Lists.OpenTotal != 0 {
+			t.Errorf("lists = %+v", res.Lists)
+		}
+	})
+
+	t.Run("lists is a default area", func(t *testing.T) {
+		res, text := call(t, ctxA, map[string]any{"from": day(1)})
+		if strings.Join(res.Areas, ",") != "events,bills,maintenance,lists" || strings.Contains(text, "Not available yet") {
+			t.Errorf("areas = %v: %s", res.Areas, text)
+		}
+		if res.Lists == nil || len(res.Lists.Due) != 1 || res.Lists.Due[0].Text != "Mow lawn" {
+			t.Errorf("lists = %+v", res.Lists)
+		}
+	})
+
+	t.Run("the other family sees only its own items, capped with a total", func(t *testing.T) {
+		big := list(t, b.HouseholdID, "Big chores", "chores", false, false)
+		for i := 0; i < 25; i++ {
+			item(t, b.HouseholdID, big, fmt.Sprintf("Chore %02d", i), ptr(day(3)), false, nil)
+		}
+		res, text := call(t, ctxB, map[string]any{"from": day(0), "to": day(6), "areas": []any{"lists"}})
+		if res.Lists.DueTotal != 26 || len(res.Lists.Due) != agendaMaxListItems || res.Lists.Due[0].ItemID != secretB {
+			t.Errorf("due total %d, %d returned, first %+v", res.Lists.DueTotal, len(res.Lists.Due), res.Lists.Due[0])
+		}
+		for _, leak := range []string{"Mow lawn", "Milk", "Nora", chores, grocery} {
+			if strings.Contains(text, leak) {
+				t.Errorf("household B sees %q", leak)
+			}
+		}
+		if len(res.Lists.Open) != 2 || res.Lists.Open[0].Name != "Big chores" || len(res.Lists.Open[0].Preview) != agendaListPreview {
+			t.Errorf("open = %+v", res.Lists.Open)
+		}
+		if !strings.Contains(text, "26 list items due") {
+			t.Errorf("summary: %s", text)
+		}
+	})
+}
