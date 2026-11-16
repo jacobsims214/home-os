@@ -299,6 +299,15 @@ func (mealsPolicy) CanRateOthers(role string) bool {
 	return auth.Can(role, auth.ResMeals, auth.ActRateOthers)
 }
 
+// CanQuotePreferences: `checks` may quote a stored preference's own words only
+// for a role that may read preferences. Allergy text itself is people read
+// (every meals reader gets it, a housesitter included); the preference's value
+// and notes are preference read, which a housesitter does not have
+// (decisions/2026-11-15-role-policy.md).
+func (mealsPolicy) CanQuotePreferences(role string) bool {
+	return auth.Can(role, auth.ResPreferences, auth.ActRead)
+}
+
 // listsActions maps the lists handler's actions to policy actions.
 var listsActions = map[lists.Action]auth.Action{
 	lists.ActionRead:       auth.ActRead,

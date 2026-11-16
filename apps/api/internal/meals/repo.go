@@ -20,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/allergen"
 )
 
 var (
@@ -238,6 +240,24 @@ func (r *Repo) MemberRole(ctx context.Context, householdID, userID uuid.UUID) (s
 		return "", fmt.Errorf("member role: %w", err)
 	}
 	return role, nil
+}
+
+// FamilyAllergies loads the family's saved allergies as compiled matchers, plus
+// one checks line per allergy that could not be read as an allergen (#4803,
+// #4874). It is allergen.Load — the same engine apps/mcp/internal/meals calls —
+// so a recipe the assistant refuses and a recipe this API warns about cannot
+// disagree (#4891).
+//
+// quotePreferenceText must be false for a caller who may see allergies but not
+// people's preferences (a housesitter, KB decisions/2026-11-15-role-policy.md):
+// the allergy is still read and applied; the wording just stops short of the
+// stored preference's value and notes.
+func (r *Repo) FamilyAllergies(ctx context.Context, householdID uuid.UUID, quotePreferenceText bool) (matchers []allergen.Matcher, checks []string, err error) {
+	m, c, err := allergen.Load(ctx, r.pool, householdID, allergen.Options{QuotePreferenceText: quotePreferenceText})
+	if err != nil {
+		return nil, nil, fmt.Errorf("family allergies: %w", err)
+	}
+	return m, c, nil
 }
 
 // HouseholdTimezone returns the household's IANA timezone name ("UTC" if the

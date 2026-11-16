@@ -15,6 +15,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
 	golang.org/x/time v0.11.0
 	google.golang.org/grpc v1.83.0
+	home-os/allergen v0.0.0
 	home-os/billcal v0.0.0
 	home-os/icalx v0.0.0
 )
@@ -87,6 +88,8 @@ require (
 
 // Local modules (also listed in go.work). The replaces let the Docker build
 // (GOWORK=off, repository-root context) resolve it without the workspace.
+replace home-os/allergen => ../../packages/allergen
+
 replace home-os/icalx => ../../packages/icalx
 
 replace home-os/billcal => ../../packages/billcal

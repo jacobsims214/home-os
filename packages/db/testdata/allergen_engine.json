@@ -1,0 +1,207 @@
+{
+  "note": "Allergen engine contract (#4891). The vocabulary, the matchers and the check live once, in packages/allergen; apps/mcp/internal/meals and apps/api/internal/meals both call it. This fixture pins the engine's answers from BOTH modules (apps/api/internal/meals/allergen_fixture_test.go and apps/mcp/internal/meals/shared_allergy_test.go assert it), so a second copy of the vocabulary, or a divergence between the API's warnings and the assistant's exclusions, fails a test. Edit packages/allergen, this file and KB mcp/recipe-tools.md together. The matches list covers GROUP EXPANSION (satay under peanut, penne under gluten, mascarpone under dairy, calamari under shellfish) as well as the #4874 fail-closed wordings, so editing a group in packages/allergen without updating this file fails both apps' tests.",
+  "checks_wording": {
+    "no_ingredients": "no ingredients saved, can't check allergies",
+    "unchecked_allergy": "%s has an allergy saved as \"%s\" that could not be checked against recipes; confirm the meal is safe."
+  },
+  "matches": [
+    {
+      "allergy": "Deathly allergic to peanuts",
+      "ingredient": "peanut butter",
+      "matches": true
+    },
+    {
+      "allergy": "Deathly allergic to peanuts",
+      "ingredient": "chicken thighs",
+      "matches": false
+    },
+    {
+      "allergy": "extremely allergic to dairy",
+      "ingredient": "cheddar",
+      "matches": true
+    },
+    {
+      "allergy": "highly allergic to eggs",
+      "ingredient": "mayonnaise",
+      "matches": true
+    },
+    {
+      "allergy": "epi-pen for peanuts",
+      "ingredient": "peanuts",
+      "matches": true
+    },
+    {
+      "allergy": "allergic to peanuts, wears medicalert",
+      "ingredient": "peanut butter",
+      "matches": true
+    },
+    {
+      "allergy": "seafood",
+      "ingredient": "catfish fillets",
+      "matches": true
+    },
+    {
+      "allergy": "gluten",
+      "ingredient": "cornbread",
+      "matches": true
+    },
+    {
+      "allergy": "dairy",
+      "ingredient": "cheesecake",
+      "matches": true
+    },
+    {
+      "allergy": "egg",
+      "ingredient": "eggnog",
+      "matches": true
+    },
+    {
+      "allergy": "corn",
+      "ingredient": "cornflakes",
+      "matches": true
+    },
+    {
+      "allergy": "nut",
+      "ingredient": "coconut",
+      "matches": false
+    },
+    {
+      "allergy": "egg",
+      "ingredient": "eggplant",
+      "matches": false
+    },
+    {
+      "allergy": "dairy",
+      "ingredient": "peanut butter",
+      "matches": false
+    },
+    {
+      "allergy": "gluten",
+      "ingredient": "root beer",
+      "matches": false
+    },
+    {
+      "allergy": "red dye 40",
+      "ingredient": "red dye 40",
+      "matches": false
+    },
+    {
+      "allergy": "purple elephants",
+      "ingredient": "purple elephants",
+      "matches": false
+    },
+    {
+      "allergy": "tree nuts",
+      "ingredient": "cashews",
+      "matches": true
+    },
+    {
+      "allergy": "cow's milk",
+      "ingredient": "butter",
+      "matches": true
+    },
+    {
+      "allergy": "sesame seeds",
+      "ingredient": "tahini",
+      "matches": true
+    },
+    {
+      "allergy": "peanut",
+      "ingredient": "satay sauce",
+      "matches": true
+    },
+    {
+      "allergy": "peanut",
+      "ingredient": "groundnut oil",
+      "matches": true
+    },
+    {
+      "allergy": "gluten",
+      "ingredient": "penne",
+      "matches": true
+    },
+    {
+      "allergy": "gluten",
+      "ingredient": "panko breadcrumbs",
+      "matches": true
+    },
+    {
+      "allergy": "dairy",
+      "ingredient": "mascarpone",
+      "matches": true
+    },
+    {
+      "allergy": "milk",
+      "ingredient": "ghee",
+      "matches": true
+    },
+    {
+      "allergy": "shellfish",
+      "ingredient": "calamari",
+      "matches": true
+    },
+    {
+      "allergy": "fish",
+      "ingredient": "worcestershire sauce",
+      "matches": true
+    },
+    {
+      "allergy": "soy",
+      "ingredient": "edamame",
+      "matches": true
+    },
+    {
+      "allergy": "sesame",
+      "ingredient": "tahini",
+      "matches": true
+    },
+    {
+      "allergy": "corn",
+      "ingredient": "polenta",
+      "matches": true
+    },
+    {
+      "allergy": "celiac",
+      "ingredient": "malt vinegar",
+      "matches": true
+    },
+    {
+      "allergy": "wheat",
+      "ingredient": "malt vinegar",
+      "matches": false
+    }
+  ],
+  "recipe_check": {
+    "why": "One recipe checked by the engine: RecipeCheck checks the ingredients AND the recipe's own name (#4803), so \"Satay Bowl\" matches a peanut allergy through satay as well as through the peanuts ingredient. Both the API's allergy_warnings and the MCP's warning lines come from this.",
+    "title": "Satay Bowl",
+    "ingredients": [
+      "peanuts",
+      "rice noodles",
+      "coconut milk"
+    ],
+    "allergy": "Deathly allergic to peanuts",
+    "want_warnings": [
+      {
+        "person": "Nora",
+        "allergy": "peanuts",
+        "ingredient": "peanuts"
+      },
+      {
+        "person": "Nora",
+        "allergy": "peanuts",
+        "ingredient": "Satay Bowl"
+      }
+    ],
+    "want_checks": []
+  },
+  "no_ingredients_check": {
+    "why": "A recipe with no ingredients while someone has an allergy is checked against its name only, and says so (fail closed, #4803).",
+    "title": "Mystery Casserole",
+    "ingredients": [],
+    "allergy": "peanuts",
+    "want_warnings": [],
+    "want_checks": [
+      "no ingredients saved, can't check allergies"
+    ]
+  }
+}

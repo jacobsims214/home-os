@@ -242,7 +242,7 @@ func TestDietRules(t *testing.T) {
 		if !ok {
 			t.Fatalf("diet %q not applied", tc.diet)
 		}
-		got := slices.ContainsFunc(rs, func(r rule) bool { return r.m.matches(tc.item) })
+		got := slices.ContainsFunc(rs, func(r rule) bool { return r.m.Matches(tc.item) })
 		if got != tc.want {
 			t.Errorf("diet %q vs %q = %v, want %v", tc.diet, tc.item, got, tc.want)
 		}
@@ -624,11 +624,11 @@ func TestMealSuggestRoles(t *testing.T) {
 // neutered before #4875 — its ingredients were "catfish fillets", "cornmeal"
 // and "cream cheese", every one of which carries a literal group member.
 func wholeWordMatcher(personID, person, allergen string) allergyMatcher {
-	m := allergyMatcher{personID: personID, person: person, allergy: allergen}
-	m.own = compilePhrases([]string{allergen})
+	m := allergyMatcher{PersonID: personID, Person: person, Allergy: allergen}
+	m.Own = compilePhrases([]string{allergen})
 	for _, key := range allergyGroupKeys(allergen) {
-		m.group = append(m.group, compilePhrases(allergenGroups[key])...)
-		m.except = append(m.except, compilePhrases(allergenExceptions[key])...)
+		m.Group = append(m.Group, compilePhrases(allergenGroups[key])...)
+		m.Except = append(m.Except, compilePhrases(allergenExceptions[key])...)
 	}
 	return m
 }
@@ -698,7 +698,7 @@ func TestMealSuggestCompoundIngredients(t *testing.T) {
 	for _, c := range cases {
 		wm := wholeWordMatcher("p", "x", c.allergy)
 		for _, text := range append(append([]string{}, c.ingredients...), c.recipe) {
-			if wm.matches(text) {
+			if wm.Matches(text) {
 				t.Fatalf("fixture %q: %q matches the pre-#4805 whole-word matcher for %q, so this case does not guard compound matching; pick a different compound",
 					c.recipe, text, c.allergy)
 			}
@@ -743,6 +743,119 @@ func TestMealSuggestCompoundIngredients(t *testing.T) {
 	for _, c := range cases {
 		if !strings.Contains(reasons[c.recipe], c.reason) {
 			t.Errorf("%s reason %q lacks %q", c.recipe, reasons[c.recipe], c.reason)
+		}
+	}
+}
+
+// TestMealSuggestProbedWordings is #4874's end-to-end acceptance test, on real
+// Postgres, for the exact wordings the reviewer probed. Each of them used to
+// normalise to a phrase with a junk word glued on ("deathly peanuts"), or to a
+// stray fragment ("wears medicalert"), and newAllergyMatcher still said ok: the
+// junk phrase compiled, matched nothing, and because it "compiled" the person
+// never appeared in checks either. A person with allergies ["Deathly allergic
+// to peanuts"] was suggested a peanut recipe with SUGGESTED=[Satay Bowl] and
+// CHECKS=[].
+//
+// Every wording below has to end in one of two states, never a third:
+//   - the peanut/dairy/egg recipe is in excluded with a reason naming the
+//     person and the allergen, or
+//   - the allergy is visible in checks and the recipe is not suggested.
+func TestMealSuggestProbedWordings(t *testing.T) {
+	for _, tc := range []struct {
+		wording   string
+		wantLabel string // the allergen label the reason must name
+		wantIn    string // the ingredient the reason must name
+		recipe    string // the recipe that must not be suggested
+	}{
+		{"Deathly allergic to peanuts", "peanuts", "peanuts", "Satay Bowl"},
+		{"extremely allergic to dairy", "dairy", "cheddar", "Mac and Cheese"},
+		{"highly allergic to eggs", "eggs", "eggs", "Veggie Omelette"},
+		{"epi-pen for peanuts", "peanuts", "peanuts", "Satay Bowl"},
+		{"allergic to peanuts, wears medicalert", "peanuts", "peanuts", "Satay Bowl"},
+	} {
+		t.Run(tc.wording, func(t *testing.T) {
+			t.Parallel()
+			k := newKitchen(t)
+			k.person("Eve", tc.wording)
+			k.recipe("Satay Bowl", 25, nil, "rice noodles", "peanuts", "lime")
+			k.recipe("Mac and Cheese", 20, nil, "macaroni", "cheddar", "butter")
+			k.recipe("Veggie Omelette", 10, nil, "eggs", "spinach")
+			k.recipe("Chicken Tacos", 30, nil, "chicken thighs", "corn tortillas")
+
+			r := suggestTool(k.pool).run(t, k.ctx, map[string]any{"count": 10}).suggest(t)
+
+			if slices.Contains(suggested(r), tc.recipe) {
+				t.Fatalf("%q: SUGGESTED %s, which has %s: suggested=%v excluded=%v checks=%v",
+					tc.wording, tc.recipe, tc.wantIn, suggested(r), r.Excluded, r.Checks)
+			}
+			// Either the matcher read it (excluded, with a reason), or it could
+			// not and the allergy is visible. Never neither.
+			excludedWithReason := slices.ContainsFunc(r.Excluded, func(e excludedRecipe) bool {
+				return e.Name == tc.recipe && strings.Contains(e.Reason, "("+tc.wantLabel+"): ") &&
+					strings.Contains(e.Reason, tc.wantIn)
+			})
+			visible := slices.ContainsFunc(r.Checks, func(c string) bool {
+				return strings.Contains(c, "could not be checked against recipes")
+			})
+			if !excludedWithReason && !visible {
+				t.Errorf("%q: %s is neither excluded with a reason nor covered by an unchecked-allergy line: excluded=%+v checks=%v",
+					tc.wording, tc.recipe, r.Excluded, r.Checks)
+			}
+			// For these five the filler fix means it must actually have been
+			// read: the exclusion reason is the stronger outcome, and a checks
+			// line here would mean the allergy was still not honoured.
+			if !excludedWithReason {
+				t.Errorf("%q: not excluded with %q/%q; the normaliser still cannot read it: excluded=%+v checks=%v",
+					tc.wording, tc.wantLabel, tc.wantIn, r.Excluded, r.Checks)
+			}
+			// The safe recipe still comes through: failing closed must not
+			// empty the list.
+			if !slices.Contains(suggested(r), "Chicken Tacos") {
+				t.Errorf("%q: Chicken Tacos was not suggested: %v", tc.wording, suggested(r))
+			}
+		})
+	}
+}
+
+// TestMealSuggestUnreadableAllergyIsVisible is the other half of #4874: an
+// allergy whose food the vocabulary genuinely cannot read still cannot pass as
+// checked. Before, any multi-word phrase compiled and the person never
+// appeared in checks, so the safety line was empty and the allergy was
+// silently cleared.
+func TestMealSuggestUnreadableAllergyIsVisible(t *testing.T) {
+	t.Parallel()
+	k := newKitchen(t)
+	k.person("Eve", "Deathly allergic to peanuts") // readable: must still work
+	k.person("Ari", "red dye 40")                  // not: must be visible
+	k.person("Bo", "peanuts, blue 2 lake")         // half readable: both halves count
+	k.recipe("Satay Bowl", 25, nil, "rice noodles", "peanuts", "lime")
+	k.recipe("Chicken Tacos", 30, nil, "chicken thighs", "corn tortillas")
+
+	st := suggestTool(k.pool)
+	r := st.run(t, k.ctx, map[string]any{"count": 10}).suggest(t)
+
+	if slices.Contains(suggested(r), "Satay Bowl") {
+		t.Errorf("suggested Satay Bowl to a peanut-allergic person: %v", suggested(r))
+	}
+	for _, want := range []string{
+		`Ari has an allergy saved as "red dye 40" that could not be checked`,
+		`Bo has an allergy saved as "blue 2 lake" that could not be checked`,
+	} {
+		if !slices.ContainsFunc(r.Checks, func(c string) bool { return strings.Contains(c, want) }) {
+			t.Errorf("checks lack %q: %v", want, r.Checks)
+		}
+	}
+	// Bo's readable half still excludes the peanut recipe.
+	if !slices.ContainsFunc(r.Excluded, func(e excludedRecipe) bool {
+		return e.Name == "Satay Bowl" && strings.Contains(e.Reason, "Bo (peanuts): peanuts")
+	}) {
+		t.Errorf("Bo's peanut matcher was lost: %+v", r.Excluded)
+	}
+	// And the visible lines reach the summary a small model reads out.
+	e := st.run(t, k.ctx, map[string]any{})
+	for _, want := range []string{"red dye 40", "blue 2 lake"} {
+		if !strings.Contains(e.Summary, want) {
+			t.Errorf("summary lacks %q: %s", want, e.Summary)
 		}
 	}
 }
