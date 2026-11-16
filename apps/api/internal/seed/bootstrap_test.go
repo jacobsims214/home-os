@@ -2,8 +2,10 @@ package seed_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -11,8 +13,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 
 	"home-os/api/internal/config"
+	"home-os/api/internal/dex"
 	"home-os/api/internal/seed"
 )
 
@@ -267,4 +271,149 @@ func TestStarterListID_Stable(t *testing.T) {
 	assert.Equal(t, seed.StarterListID(hh, "beach-trip"), seed.StarterListID(hh, "beach-trip"))
 	assert.NotEqual(t, seed.StarterListID(hh, "beach-trip"), seed.StarterListID(hh, "ski-trip"))
 	assert.Len(t, seed.StarterListKeys(), 6)
+}
+
+// fakeDex behaves like Dex's password API: CreatePassword never overwrites
+// (dex.ErrPasswordExists), UpdatePassword replaces the hash of an existing
+// entry and keeps its user ID.
+type fakeDex struct {
+	mu        sync.Mutex
+	createErr error
+	updateErr error
+	passwords map[string]dexPassword
+	updates   int
+}
+
+type dexPassword struct{ hash, userID string }
+
+func (d *fakeDex) CreatePassword(_ context.Context, email, hash, userID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.createErr != nil {
+		return d.createErr
+	}
+	if d.passwords == nil {
+		d.passwords = map[string]dexPassword{}
+	}
+	if _, ok := d.passwords[email]; ok {
+		return dex.ErrPasswordExists
+	}
+	d.passwords[email] = dexPassword{hash: hash, userID: userID}
+	return nil
+}
+
+func (d *fakeDex) UpdatePassword(_ context.Context, email, hash string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.updates++
+	if d.updateErr != nil {
+		return d.updateErr
+	}
+	p, ok := d.passwords[email]
+	if !ok {
+		return dex.ErrPasswordNotFound
+	}
+	p.hash = hash
+	d.passwords[email] = p
+	return nil
+}
+
+func (d *fakeDex) get(email string) (dexPassword, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	p, ok := d.passwords[email]
+	return p, ok
+}
+
+func cleanupBootEmail(t *testing.T, pool *pgxpool.Pool, email string) {
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_, _ = pool.Exec(ctx,
+			`DELETE FROM households WHERE id IN (
+			   SELECT m.household_id FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = $1)`, email)
+		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE email = $1`, email)
+	})
+}
+
+func assertDexHolds(t *testing.T, d *fakeDex, email, password string) dexPassword {
+	t.Helper()
+	p, ok := d.get(email)
+	require.True(t, ok, "Dex has no password for %s", email)
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(p.hash), []byte(password)),
+		"Dex does not hold ADMIN_PASSWORD")
+	return p
+}
+
+func TestBootstrapAdmin_DexPassword(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	const pw = "admin-pw-123456"
+	stale := dexPassword{hash: "$2a$12$someone-elses-hash", userID: "stale-user-id"}
+
+	newCfg := func(t *testing.T) *config.Config {
+		email := "bootdex-" + uuid.NewString()[:8] + "@example.test"
+		cleanupBootEmail(t, pool, email)
+		return &config.Config{AdminEmail: email, AdminPassword: pw, AdminName: "Boot"}
+	}
+
+	t.Run("new admin without a Dex entry: created", func(t *testing.T) {
+		cfg := newCfg(t)
+		d := &fakeDex{}
+		require.NoError(t, seed.BootstrapAdmin(ctx, pool, cfg, d))
+		assertDexHolds(t, d, cfg.AdminEmail, pw)
+		assert.Zero(t, d.updates)
+	})
+
+	t.Run("new admin with a stale Dex entry: replaced", func(t *testing.T) {
+		cfg := newCfg(t)
+		d := &fakeDex{passwords: map[string]dexPassword{cfg.AdminEmail: stale}}
+		require.NoError(t, seed.BootstrapAdmin(ctx, pool, cfg, d))
+		assertDexHolds(t, d, cfg.AdminEmail, pw)
+		assert.Equal(t, 1, d.updates)
+	})
+
+	t.Run("existing admin: rotated ADMIN_PASSWORD reaches Dex", func(t *testing.T) {
+		cfg := newCfg(t)
+		d := &fakeDex{}
+		require.NoError(t, seed.BootstrapAdmin(ctx, pool, cfg, d))
+		first := assertDexHolds(t, d, cfg.AdminEmail, pw)
+
+		cfg.AdminPassword = "rotated-pw-654321"
+		require.NoError(t, seed.BootstrapAdmin(ctx, pool, cfg, d))
+		got := assertDexHolds(t, d, cfg.AdminEmail, "rotated-pw-654321")
+		assert.Equal(t, first.userID, got.userID, "the Dex user ID is kept")
+		assert.Equal(t, 1, d.updates)
+	})
+
+	t.Run("existing admin whose Dex password someone else set: replaced", func(t *testing.T) {
+		cfg := newCfg(t)
+		_, err := pool.Exec(ctx,
+			`INSERT INTO users (email, name, password_hash) VALUES ($1, 'Other', 'x')`, cfg.AdminEmail)
+		require.NoError(t, err)
+		d := &fakeDex{passwords: map[string]dexPassword{cfg.AdminEmail: stale}}
+		require.NoError(t, seed.BootstrapAdmin(ctx, pool, cfg, d))
+		assert.True(t, isInstanceAdmin(t, pool, cfg.AdminEmail))
+		assertDexHolds(t, d, cfg.AdminEmail, pw)
+	})
+
+	t.Run("existing Dex entry that cannot be replaced fails bootstrap", func(t *testing.T) {
+		cfg := newCfg(t)
+		_, err := pool.Exec(ctx,
+			`INSERT INTO users (email, name, password_hash) VALUES ($1, 'Other', 'x')`, cfg.AdminEmail)
+		require.NoError(t, err)
+		d := &fakeDex{passwords: map[string]dexPassword{cfg.AdminEmail: stale},
+			updateErr: errors.New("dex down")}
+		err = seed.BootstrapAdmin(ctx, pool, cfg, d)
+		require.Error(t, err)
+		got, _ := d.get(cfg.AdminEmail)
+		assert.Equal(t, stale, got)
+	})
+
+	t.Run("Dex unreachable is logged, not fatal", func(t *testing.T) {
+		cfg := newCfg(t)
+		d := &fakeDex{createErr: errors.New("connection refused")}
+		require.NoError(t, seed.BootstrapAdmin(ctx, pool, cfg, d))
+		assert.True(t, isInstanceAdmin(t, pool, cfg.AdminEmail))
+		assert.Zero(t, d.updates)
+	})
 }

@@ -100,7 +100,11 @@ func main() {
 	}
 
 	// Bootstrap admin user if this is a fresh installation with no users.
-	if err := seed.BootstrapAdmin(ctx, pool, cfg, dexClient); err != nil {
+	var bootstrapDex dex.PasswordSetter
+	if dexClient != nil { // a nil *dex.Client must not become a non-nil interface
+		bootstrapDex = dexClient
+	}
+	if err := seed.BootstrapAdmin(ctx, pool, cfg, bootstrapDex); err != nil {
 		slog.Error("failed to bootstrap admin", "error", err)
 		os.Exit(1)
 	}

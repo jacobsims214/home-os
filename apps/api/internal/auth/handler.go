@@ -361,12 +361,13 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sync the new password hash to Dex's password database.
-	// CreatePassword is an upsert — it creates or updates the entry.
+	// Sync the new password hash to Dex's password database. CreatePassword
+	// never overwrites, so dex.SetPassword updates the existing entry: the
+	// reset token proves this user owns the email.
 	if h.dexClient != nil {
 		user, err := h.repo.GetUserByID(r.Context(), userID)
 		if err == nil && user != nil {
-			if err := h.dexClient.CreatePassword(r.Context(), user.Email, hash, userID); err != nil {
+			if err := dex.SetPassword(r.Context(), h.dexClient, user.Email, hash, userID); err != nil {
 				slog.Warn("dex: failed to sync password after reset", "user_id", userID, "error", err)
 			}
 		}

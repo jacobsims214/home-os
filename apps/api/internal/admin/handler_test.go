@@ -27,6 +27,7 @@ import (
 
 	"home-os/api/internal/admin"
 	"home-os/api/internal/auth"
+	"home-os/api/internal/dex"
 	"home-os/api/internal/household"
 	"home-os/api/internal/middleware"
 )
@@ -79,8 +80,21 @@ func (d *fakeDex) CreatePassword(_ context.Context, email, hash, userID string) 
 	if d.passwords == nil {
 		d.passwords = map[string]dexPassword{}
 	}
+	if _, ok := d.passwords[email]; ok { // like Dex: never overwrite
+		return dex.ErrPasswordExists
+	}
 	d.passwords[email] = dexPassword{hash: hash, userID: userID}
 	return nil
+}
+
+// preset stores a password as if someone else had set it in Dex earlier.
+func (d *fakeDex) preset(email string, p dexPassword) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.passwords == nil {
+		d.passwords = map[string]dexPassword{}
+	}
+	d.passwords[email] = p
 }
 
 func (d *fakeDex) get(email string) (dexPassword, bool) {
@@ -495,6 +509,34 @@ func TestAdmin_CreateUserRejections(t *testing.T) {
 		f.dex.mu.Unlock()
 		rec = do(f.h, http.MethodPost, "/api/v1/admin/users", adm.token, body)
 		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	})
+
+	t.Run("existing dex password is 409, writes nothing, keeps dex entry", func(t *testing.T) {
+		email := "dexstale-" + uuid.NewString()[:8] + "@example.com"
+		f.cleanupEmail(email)
+		stale := dexPassword{hash: "someone-elses-hash", userID: "stale-user-id"}
+		f.dex.preset(email, stale)
+		body := map[string]any{"name": "S", "email": email, "password": "temp-pass-123",
+			"household_name": "Dex Stale Family"}
+		rec := do(f.h, http.MethodPost, "/api/v1/admin/users", adm.token, body)
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "an account with this email already exists")
+		var n int
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`SELECT (SELECT count(*) FROM users WHERE lower(email) = lower($1)) + (SELECT count(*) FROM households WHERE name = 'Dex Stale Family')`,
+			email).Scan(&n))
+		assert.Zero(t, n, "no user or family written")
+		got, _ := f.dex.get(email)
+		assert.Equal(t, stale, got, "the existing Dex password is left as it was")
+
+		// Into an existing family: the membership is not written either.
+		body = map[string]any{"name": "S", "email": email, "password": "temp-pass-123",
+			"household_id": f.hhID, "role": "viewer"}
+		rec = do(f.h, http.MethodPost, "/api/v1/admin/users", adm.token, body)
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM users WHERE lower(email) = lower($1)`, email).Scan(&n))
+		assert.Zero(t, n)
 	})
 
 	t.Run("no dex configured is 503", func(t *testing.T) {

@@ -2,6 +2,7 @@ package seed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -13,7 +14,19 @@ import (
 	"home-os/api/internal/dex"
 )
 
-func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, dexClient *dex.Client) error {
+// BootstrapAdmin makes sure the ADMIN_EMAIL user exists, is the instance
+// admin, and that Dex holds ADMIN_PASSWORD for that email.
+//
+// ADMIN_PASSWORD is authoritative: bootstrap is an operator reset of the
+// admin account, so when Dex already has a password for ADMIN_EMAIL (set
+// earlier, or by whoever created a stale entry) it is overwritten with
+// UpdatePassword rather than silently kept. A failure to overwrite an
+// existing entry is returned, not logged: otherwise whoever set that password
+// would keep instance-admin sign-in. Other Dex failures (Dex unreachable) are
+// logged and startup continues, as before.
+//
+// Pass a nil interface, not a nil *dex.Client, when Dex is unavailable.
+func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, dexClient dex.PasswordSetter) error {
 	if cfg.AdminEmail == "" || cfg.AdminPassword == "" {
 		slog.Info("bootstrap: ADMIN_EMAIL and ADMIN_PASSWORD not set, skipping admin bootstrap")
 		return nil
@@ -50,10 +63,8 @@ func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config,
 			if err != nil {
 				return fmt.Errorf("hash password for dex sync: %w", err)
 			}
-			if err := dexClient.CreatePassword(ctx, cfg.AdminEmail, string(hash), userID); err != nil {
-				slog.Warn("bootstrap: failed to sync password to Dex", "email", cfg.AdminEmail, "error", err)
-			} else {
-				slog.Info("bootstrap: synced admin password to Dex", "email", cfg.AdminEmail)
+			if err := syncAdminPassword(ctx, dexClient, cfg.AdminEmail, string(hash), userID); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -103,16 +114,35 @@ func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config,
 
 	// Sync to Dex
 	if dexClient != nil {
-		if err := dexClient.CreatePassword(ctx, cfg.AdminEmail, string(hash), userID); err != nil {
-			slog.Warn("bootstrap: failed to sync password to Dex", "email", cfg.AdminEmail, "error", err)
-		} else {
-			slog.Info("bootstrap: synced admin password to Dex", "email", cfg.AdminEmail)
+		if err := syncAdminPassword(ctx, dexClient, cfg.AdminEmail, string(hash), userID); err != nil {
+			return err
 		}
 	} else {
 		slog.Warn("bootstrap: Dex client not available, password not synced to Dex")
 	}
 
 	slog.Info("bootstrap: admin user setup complete", "email", cfg.AdminEmail, "user_id", userID, "household_id", householdID)
+	return nil
+}
+
+// syncAdminPassword stores hash as the Dex password for the admin email:
+// created when Dex has none, overwritten when it has one. Only an existing
+// entry that could not be overwritten is an error; any other Dex failure is
+// logged so the API still starts without Dex.
+func syncAdminPassword(ctx context.Context, d dex.PasswordSetter, email, hash, userID string) error {
+	err := d.CreatePassword(ctx, email, hash, userID)
+	switch {
+	case err == nil:
+		slog.Info("bootstrap: created admin password in Dex", "email", email)
+		return nil
+	case !errors.Is(err, dex.ErrPasswordExists):
+		slog.Warn("bootstrap: failed to sync password to Dex", "email", email, "error", err)
+		return nil
+	}
+	if err := d.UpdatePassword(ctx, email, hash); err != nil {
+		return fmt.Errorf("bootstrap: Dex already has a password for the admin email and it could not be replaced: %w", err)
+	}
+	slog.Info("bootstrap: replaced admin password in Dex", "email", email)
 	return nil
 }
 

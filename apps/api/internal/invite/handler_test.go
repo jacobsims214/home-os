@@ -22,6 +22,7 @@ import (
 
 	"home-os/api/internal/auth"
 	"home-os/api/internal/config"
+	"home-os/api/internal/dex"
 	"home-os/api/internal/household"
 	"home-os/api/internal/invite"
 	"home-os/api/internal/middleware"
@@ -47,8 +48,21 @@ func (d *fakeDex) CreatePassword(_ context.Context, email, hash, userID string) 
 	if d.passwords == nil {
 		d.passwords = map[string]dexPassword{}
 	}
+	if _, ok := d.passwords[email]; ok { // like Dex: never overwrite
+		return dex.ErrPasswordExists
+	}
 	d.passwords[email] = dexPassword{hash: hash, userID: userID}
 	return nil
+}
+
+// preset stores a password as if someone else had set it in Dex earlier.
+func (d *fakeDex) preset(email string, p dexPassword) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.passwords == nil {
+		d.passwords = map[string]dexPassword{}
+	}
+	d.passwords[email] = p
 }
 
 func (d *fakeDex) get(email string) (dexPassword, bool) {
@@ -261,6 +275,29 @@ func TestAcceptInvite_SignupRejections(t *testing.T) {
 		rec = do(f.h, http.MethodPost, "/api/v1/invites/accept", "",
 			map[string]string{"token": freshTok, "name": "Fresh", "password": pw})
 		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	})
+
+	t.Run("existing dex password is 409, writes nothing, keeps dex entry", func(t *testing.T) {
+		stalePw := "dexstale-" + suffix + "@example.com"
+		f.cleanupUser(t, stalePw)
+		staleTok := f.invite(t, stalePw, "viewer")
+		stale := dexPassword{hash: "someone-elses-hash", userID: "stale-user-id"}
+		dex.preset(stalePw, stale)
+
+		rec := do(f.h, http.MethodPost, "/api/v1/invites/accept", "",
+			map[string]string{"token": staleTok, "name": "Stale", "password": pw})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		// Same answer as an existing Home OS account: nothing new is revealed.
+		assert.Contains(t, rec.Body.String(), "an account with this email already exists")
+
+		var n int
+		require.NoError(t, f.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE lower(email) = $1`, stalePw).Scan(&n))
+		assert.Zero(t, n, "no user written")
+		var accepted *time.Time
+		require.NoError(t, f.pool.QueryRow(ctx, `SELECT accepted_at FROM invitations WHERE token = $1`, staleTok).Scan(&accepted))
+		assert.Nil(t, accepted, "invitation stays pending")
+		got, _ := dex.get(stalePw)
+		assert.Equal(t, stale, got, "the existing Dex password is left as it was")
 	})
 
 	t.Run("without Dex signup is unavailable", func(t *testing.T) {

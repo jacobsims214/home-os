@@ -24,11 +24,14 @@ import (
 
 	"home-os/api/internal/auth"
 	"home-os/api/internal/db"
+	"home-os/api/internal/dex"
 	"home-os/api/pkg/apierr"
 )
 
 // PasswordStore creates a password entry in Dex's local password database.
-// *dex.Client implements it. The hash is bcrypt; Dex does not hash.
+// *dex.Client implements it. The hash is bcrypt; Dex does not hash. It must
+// return dex.ErrPasswordExists, never overwrite, when the email already has a
+// password.
 type PasswordStore interface {
 	CreatePassword(ctx context.Context, email, hash, userID string) error
 }
@@ -183,7 +186,8 @@ type createUserRequest struct {
 //
 // Responses: 201 {"data": {user_id, email, name, household_id,
 // household_name, role, household_created}}; 400 validation; 404 unknown
-// household_id; 409 email already registered; 502 Dex failed; 503 Dex not
+// household_id; 409 email already registered (in Home OS, or Dex already
+// has a password for it); 502 Dex failed; 503 Dex not
 // configured.
 func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	var req createUserRequest
@@ -221,6 +225,13 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, ErrEmailTaken):
 		apierr.Conflict(w, "a user with this email already exists")
+		return
+	case errors.Is(dexErr, dex.ErrPasswordExists):
+		// Dex already has a password for this email (a stale entry, or one
+		// someone else set). Creating the user would leave that password in
+		// force, so refuse; the transaction rolled back.
+		slog.Warn("admin: dex already has a password for this email; nothing written", "email", in.Email)
+		apierr.Conflict(w, "an account with this email already exists")
 		return
 	case dexErr != nil:
 		slog.Error("admin: dex password creation failed; nothing written", "email", in.Email, "error", dexErr)

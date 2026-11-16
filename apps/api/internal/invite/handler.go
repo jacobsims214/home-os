@@ -17,6 +17,7 @@ import (
 
 	"home-os/api/internal/auth"
 	"home-os/api/internal/config"
+	"home-os/api/internal/dex"
 	"home-os/api/internal/middleware"
 	"home-os/api/pkg/apierr"
 	"home-os/api/pkg/smtp"
@@ -34,7 +35,9 @@ type Handler struct {
 }
 
 // PasswordStore creates a password entry in Dex's local password database.
-// *dex.Client implements it. The hash is bcrypt; Dex does not hash.
+// *dex.Client implements it. The hash is bcrypt; Dex does not hash. It must
+// return dex.ErrPasswordExists, never overwrite, when the email already has a
+// password.
 type PasswordStore interface {
 	CreatePassword(ctx context.Context, email, hash, userID string) error
 }
@@ -390,7 +393,16 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request, token, name, pa
 	}
 	res, err := h.repo.Signup(r.Context(), token, name, hash, now,
 		func(ctx context.Context, email, userID string) error {
-			if err := h.dex.CreatePassword(ctx, email, hash, userID); err != nil {
+			err := h.dex.CreatePassword(ctx, email, hash, userID)
+			if errors.Is(err, dex.ErrPasswordExists) {
+				// Dex already has a password for the invited email (a stale
+				// entry, or one someone else set). Fail closed with the same
+				// 409 as an existing Home OS account, so the response says
+				// nothing the invitation flow does not already say.
+				slog.Warn("invite signup: dex already has a password for the invited email; nothing written")
+				return ErrAccountExists
+			}
+			if err != nil {
 				return fmt.Errorf("%w: %w", errPasswordStore, err)
 			}
 			return nil
