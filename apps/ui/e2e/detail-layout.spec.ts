@@ -145,6 +145,21 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(main.getByRole("button", { name: "Save" })).toBeVisible();
       await expect(main.getByRole("button", { name: "Cancel" })).toBeVisible();
       expect(await noHorizontalScroll(page)).toBe(true);
+      // #4755: Cancel / Save are the edit flow's primary actions: 44 px touch targets on phones.
+      for (const name of ["Cancel", "Save"]) {
+        const b = (await main.getByRole("button", { name }).boundingBox())!;
+        expect(b.height, `${name} height`).toBeGreaterThanOrEqual(44);
+        expect(b.x + b.width, `${name} right edge`).toBeLessThanOrEqual(390);
+      }
+      // #4755: title + back + both buttons still fit the bar at 375 px.
+      await page.setViewportSize({ width: 375, height: 812 });
+      expect(await noHorizontalScroll(page)).toBe(true);
+      for (const name of ["Cancel", "Save"]) {
+        const b = (await main.getByRole("button", { name }).boundingBox())!;
+        expect(b.height, `${name} height at 375`).toBeGreaterThanOrEqual(44);
+        expect(b.x + b.width, `${name} right edge at 375`).toBeLessThanOrEqual(375);
+      }
+      await page.setViewportSize({ width: 390, height: 844 });
       // #4537: touch-sized inputs with 16 px text on phones.
       const input = main.getByRole("textbox", { name: "Account Number" });
       expect((await input.boundingBox())!.height).toBeGreaterThanOrEqual(44);
@@ -185,6 +200,13 @@ for (const colorScheme of ["light", "dark"] as const) {
       expect(value.x).toBeGreaterThanOrEqual(label.x + label.width + 16);
       expect(Math.abs(value.y - label.y)).toBeLessThan(2);
       await snap(page, testInfo, `detail-1440-${colorScheme}`);
+
+      // #4755: desktop keeps Mantine size sm (36 px) Cancel / Save.
+      await main.getByRole("button", { name: "Edit", exact: true }).click();
+      for (const name of ["Cancel", "Save"]) {
+        const b = (await main.getByRole("button", { name }).boundingBox())!;
+        expect(Math.round(b.height), `${name} height at 1440`).toBe(36);
+      }
     });
   });
 }

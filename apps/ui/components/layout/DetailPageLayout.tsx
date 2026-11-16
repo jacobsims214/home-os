@@ -86,10 +86,11 @@ export default function DetailPageLayout({
 
   const editButtons = (
     <>
-      <Button variant="default" size="sm" onClick={onCancel}>
+      {/* Size sm from md up; 44 px touch targets on phones. */}
+      <Button variant="default" size="sm" onClick={onCancel} className="max-md:min-h-11">
         Cancel
       </Button>
-      <Button size="sm" onClick={onSave} loading={isSaving}>
+      <Button size="sm" onClick={onSave} loading={isSaving} className="max-md:min-h-11">
         Save
       </Button>
     </>
