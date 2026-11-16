@@ -1440,7 +1440,7 @@ func NewGuideFindTool(pool *pgxpool.Pool, idx searchIndex) (string, mcp.Tool, to
 			Total:      total - offset,
 			NextCursor: respond.CursorAfter(end, total),
 			Narrow:     "Pass next_cursor as cursor for the next page, or add query, about_id or tag.",
-		}, findNext(query, f, page)...), nil
+		}, findNext(query, f, page, c.role)...), nil
 	}
 	return "guide_find", tool, handler
 }
@@ -1474,17 +1474,23 @@ func findSummary(query *string, f findFilter, byMeaning bool, page []guideItem, 
 	return fmt.Sprintf("Found %d guides.", total)
 }
 
-func findNext(query *string, f findFilter, page []guideItem) []string {
+// findNext suggests only calls role can make: guide_create and
+// maintenance_create are family-only (roles.go ResGuides and ResMaintenance
+// write), so a viewer or housesitter is never sent to a refusal (#4771).
+func findNext(query *string, f findFilter, page []guideItem, role string) []string {
 	if len(page) == 0 {
 		next := []string{}
 		if query != nil || f.about.given || f.tag != "" {
 			next = append(next, "Try other words, or call guide_find with no filters to list every guide.")
 		}
-		return append(next, "Write one with guide_create title=… body=… (markdown steps).")
+		if canWrite(role) {
+			next = append(next, "Write one with guide_create title=… body=… (markdown steps).")
+		}
+		return next
 	}
 	g := page[0]
 	next := []string{fmt.Sprintf("Read the steps with guide_get guide_id=%s.", g.ID)}
-	if p := g.About.subjectParam(); p != "" {
+	if p := g.About.subjectParam(); p != "" && canWrite(role) {
 		next = append(next, fmt.Sprintf("Schedule this job with maintenance_create name=… due_date=… %s.", p))
 	}
 	return next
@@ -1533,13 +1539,15 @@ func NewGuideGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			s += ", about " + d.About.label()
 		}
 		s += fmt.Sprintf(" (%s, last changed %s %s).", plural(d.RevisionCount, "saved version"), d.UpdatedWeekday, d.UpdatedLocalDate)
+		// Write hints only for roles that may write maintenance and guides
+		// (both rolesFamily); a read-only role gets none (#4771).
 		var next []string
-		if p := d.About.subjectParam(); p != "" {
-			next = append(next, fmt.Sprintf("Schedule this job with maintenance_create name=%q due_date=… %s.", d.Title, p))
-		} else {
-			next = append(next, fmt.Sprintf("Schedule this job with maintenance_create name=%q due_date=….", d.Title))
-		}
 		if canWrite(c.role) {
+			if p := d.About.subjectParam(); p != "" {
+				next = append(next, fmt.Sprintf("Schedule this job with maintenance_create name=%q due_date=… %s.", d.Title, p))
+			} else {
+				next = append(next, fmt.Sprintf("Schedule this job with maintenance_create name=%q due_date=….", d.Title))
+			}
 			next = append(next, fmt.Sprintf("Change the steps with guide_update guide_id=%s body=…; the old version is kept.", d.ID))
 		}
 		return respond.OK(s, d, next...), nil

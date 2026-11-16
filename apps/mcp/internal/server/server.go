@@ -84,6 +84,8 @@ func NewServer(cfg *config.Config, pool *pgxpool.Pool, verifier *auth.Verifier) 
 		server.WithToolHandlerMiddleware(s.requireWriteScope),
 		// Per-principal sub-limit on credential_reveal (#4693).
 		server.WithToolHandlerMiddleware(s.limitReveal),
+		// A caller who can't write is never pointed at a write tool (#4771).
+		server.WithToolHandlerMiddleware(s.dropWriteHints),
 	)
 
 	s.httpServer = server.NewStreamableHTTPServer(s.mcpServer, s.StreamableHTTPOptions()...)

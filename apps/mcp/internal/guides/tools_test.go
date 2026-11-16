@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -646,15 +647,50 @@ func TestGuideRoles(t *testing.T) {
 	w := newTools(pool, nil)
 	oil := w.create.run(t, f.ctx, oilGuide).guide(t)
 
+	// Next hints name only calls the role can make (#4771): family roles get
+	// maintenance_create with the subject param and guide_update; read-only
+	// roles get neither, nor guide_create on an empty result.
+	writeHint := func(next []string) string {
+		for _, n := range next {
+			for _, w := range []string{"maintenance_create", "guide_create", "guide_update", "guide_delete"} {
+				if strings.Contains(n, w) {
+					return n
+				}
+			}
+		}
+		return ""
+	}
+	vanParam := "vehicle_id=" + f.van.String()
 	for _, role := range []string{"family_manager", "family_member"} {
 		ctx, _ := memberCtx(t, pool, f.hh, role)
 		d := w.create.run(t, ctx, map[string]any{"title": "Guide by " + role, "body": "steps"}).guide(t)
 		w.update.run(t, ctx, map[string]any{"guide_id": d.ID, "body": "more steps"}).guide(t)
+		if e := w.get.run(t, ctx, map[string]any{"guide_id": oil.ID}); !slices.ContainsFunc(e.Next, func(n string) bool {
+			return strings.Contains(n, "maintenance_create") && strings.Contains(n, vanParam)
+		}) || !slices.ContainsFunc(e.Next, func(n string) bool { return strings.Contains(n, "guide_update") }) {
+			t.Errorf("%s guide_get next = %q, want maintenance_create %s and guide_update", role, e.Next, vanParam)
+		}
+		if e := w.find.run(t, ctx, map[string]any{"about_type": "vehicle", "about_id": f.van.String()}); !slices.ContainsFunc(e.Next, func(n string) bool {
+			return strings.Contains(n, "maintenance_create") && strings.Contains(n, vanParam)
+		}) {
+			t.Errorf("%s guide_find next = %q, want maintenance_create %s", role, e.Next, vanParam)
+		}
+		if e := w.find.run(t, ctx, map[string]any{"query": "zzqx nothing matches"}); !slices.ContainsFunc(e.Next, func(n string) bool { return strings.Contains(n, "guide_create") }) {
+			t.Errorf("%s empty guide_find next = %q, want guide_create", role, e.Next)
+		}
 	}
 	for _, role := range []string{"viewer", "housesitter"} {
 		ctx, _ := memberCtx(t, pool, f.hh, role)
 		if e := w.find.run(t, ctx, map[string]any{}); !e.OK || len(e.Items) != 3 {
 			t.Errorf("%s find = %v / %s", role, e.titles(), e.Summary)
+		}
+		for _, args := range []map[string]any{{"about_type": "vehicle"}, {"query": "oil"}, {"query": "zzqx nothing matches"}} {
+			if e := w.find.run(t, ctx, args); writeHint(e.Next) != "" {
+				t.Errorf("%s guide_find %v suggests a write tool: %q", role, args, writeHint(e.Next))
+			}
+		}
+		if e := w.get.run(t, ctx, map[string]any{"guide_id": oil.ID}); writeHint(e.Next) != "" {
+			t.Errorf("%s guide_get suggests a write tool: %q", role, writeHint(e.Next))
 		}
 		g := w.get.run(t, ctx, map[string]any{"guide_id": oil.ID}).guide(t)
 		if wantName := map[string]string{"viewer": "2019 Honda Odyssey", "housesitter": ""}[role]; g.About.Name != wantName || g.About.Type != "vehicle" {
