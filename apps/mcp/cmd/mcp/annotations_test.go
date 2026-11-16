@@ -61,6 +61,7 @@ var wantToolClass = map[string]toolClass{
 	"bill_find":               classR,
 	"bill_pay":                classU,
 	"bill_update":             classU,
+	"budget_set_category":     classU,
 	"budget_summary":          classR,
 	"calendar_create":         classC,
 	"calendar_find":           classR,

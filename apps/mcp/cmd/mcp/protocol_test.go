@@ -29,7 +29,7 @@ var wantTools = []string{
 	"activity_find", "agenda_get",
 	"asset_create", "asset_delete", "asset_find", "asset_update",
 	"bill_create", "bill_delete", "bill_find", "bill_pay", "bill_update",
-	"budget_summary",
+	"budget_set_category", "budget_summary",
 	"calendar_create", "calendar_find", "calendar_find_free_time",
 	"contact_create", "contact_delete", "contact_find", "contact_update",
 	"credential_find", "credential_reveal",

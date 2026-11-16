@@ -5,9 +5,10 @@
 // built with internal/respond; the tool declares all four annotation hints and
 // an outputSchema. Everything is scoped to the authenticated household.
 //
-// Stage 1 builds the obligations and net_worth sections. The budget and
-// due_soon sections are accepted (the enum is the catalog's) but come back in
-// `pending` until budget categories are read (#4470).
+// obligations and net_worth are built here; budget (every budget category
+// with budgeted, committed and remaining, line by line with each line's
+// source) and due_soon (the next 30 days) come from internal/budget (#4470).
+// Money is readable by the family roles and viewer only (budget.CanRead).
 package finance
 
 import (
@@ -21,8 +22,8 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/bill"
+	"home-os/mcp/internal/budget"
 	"home-os/mcp/internal/respond"
-	"home-os/mcp/internal/server"
 )
 
 // Section names, in the order the catalog lists them and results report them.
@@ -36,29 +37,18 @@ const (
 // allSections is the sections enum and the default when none are given.
 var allSections = []string{sectionObligations, sectionBudget, sectionDueSoon, sectionNetWorth}
 
-// pendingReasons explains, per section, why it is not built yet and what to
-// call instead. A section listed here is returned in `pending`, not as data.
-var pendingReasons = map[string]pendingSection{
-	sectionBudget: {
-		Section: sectionBudget,
-		Reason:  "Budget amounts per category aren't tracked by this tool yet.",
-		Instead: "Use the obligations section for what the family is committed to each month.",
-	},
-	sectionDueSoon: {
-		Section: sectionDueSoon,
-		Reason:  "Due-soon totals aren't part of budget_summary yet.",
-		Instead: "Use bill_find due_within_days=30 for bills due in the next 30 days.",
-	},
-}
+// dueSoonDays is the due_soon window: "what's due in the next 30 days".
+const dueSoonDays = 30
 
-// budgetSummary is budget_summary's data. Only the requested, built sections
-// are present; requested sections that are not built yet are in Pending.
+// budgetSummary is budget_summary's data. Only the requested sections are
+// present.
 type budgetSummary struct {
-	Month       string           `json:"month" jsonschema_description:"The month summarized, YYYY-MM"`
-	Sections    []string         `json:"sections" jsonschema_description:"The sections included in this result"`
-	Obligations *obligations     `json:"obligations,omitempty" jsonschema_description:"Monthly bills by category plus loan payments"`
-	NetWorth    *netWorth        `json:"net_worth,omitempty" jsonschema_description:"What the family owns minus what it owes, today"`
-	Pending     []pendingSection `json:"pending,omitempty" jsonschema_description:"Requested sections that are not available yet"`
+	Month       string          `json:"month" jsonschema_description:"The month summarized, YYYY-MM"`
+	Sections    []string        `json:"sections" jsonschema_description:"The sections included in this result"`
+	Obligations *obligations    `json:"obligations,omitempty" jsonschema_description:"Monthly bills by their category text plus loan payments"`
+	Budget      *budget.Report  `json:"budget,omitempty" jsonschema_description:"What the family owes each month grouped by budget category: budgeted, committed, remaining, and every bill and loan payment line with its source"`
+	DueSoon     *budget.DueSoon `json:"due_soon,omitempty" jsonschema_description:"Bills and loan payments due from today through the next 30 days"`
+	NetWorth    *netWorth       `json:"net_worth,omitempty" jsonschema_description:"What the family owns minus what it owes, today"`
 }
 
 // obligations is what the family pays each month. BillsByCategory is exactly
@@ -86,13 +76,6 @@ type netWorth struct {
 	OtherLoans        float64 `json:"other_loans" jsonschema_description:"Remaining balance of every other loan"`
 	TotalLiabilities  float64 `json:"total_liabilities" jsonschema_description:"Remaining balance of all loans"`
 	EstimatedNetWorth float64 `json:"estimated_net_worth" jsonschema_description:"total_value - total_liabilities"`
-}
-
-// pendingSection is a requested section that this stage does not build.
-type pendingSection struct {
-	Section string `json:"section"`
-	Reason  string `json:"reason"`
-	Instead string `json:"instead" jsonschema_description:"What to call or read instead"`
 }
 
 // summaryInput is the validated budget_summary arguments.
@@ -129,44 +112,56 @@ func NewBudgetSummaryTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx contex
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return respond.Fail(respond.Error{
-				Message: "You are not signed in to a family.",
-				Fix:     "Reconnect with a valid Home OS token, then call budget_summary again.",
-			}), nil
+		caller, res := budget.CallerOf(ctx, pool)
+		if res != nil {
+			return res, nil
 		}
+		if !budget.CanRead(caller.Role) {
+			return budget.CannotRead(caller.Role), nil
+		}
+		householdID := caller.HouseholdID
 
 		in, res := parseSummaryInput(req.GetArguments())
 		if res != nil {
 			return res, nil
 		}
 		if in.month.IsZero() {
-			m, err := householdMonth(ctx, pool, claims.HouseholdID)
+			m, err := householdMonth(ctx, pool, householdID)
 			if err != nil {
 				return respond.Failed("load the family's timezone", err), nil
 			}
 			in.month = m
 		}
 
-		out := budgetSummary{Month: in.month.Format("2006-01"), Sections: []string{}}
-		for _, s := range in.sections {
-			if p, ok := pendingReasons[s]; ok {
-				out.Pending = append(out.Pending, p)
-				continue
-			}
-			out.Sections = append(out.Sections, s)
-		}
+		out := budgetSummary{Month: in.month.Format("2006-01"), Sections: in.sections}
 
 		if in.wants(sectionObligations) {
-			ob, err := loadObligations(ctx, pool, claims.HouseholdID, in.month)
+			ob, err := loadObligations(ctx, pool, householdID, in.month)
 			if err != nil {
 				return respond.Failed("total the family's bills and loan payments", err), nil
 			}
 			out.Obligations = ob
 		}
+		if in.wants(sectionBudget) {
+			rep, err := budget.Load(ctx, pool, householdID, in.month)
+			if err != nil {
+				return respond.Failed("total the family's budget categories", err), nil
+			}
+			out.Budget = rep
+		}
+		if in.wants(sectionDueSoon) {
+			today, err := bill.HouseholdToday(ctx, pool, householdID)
+			if err != nil {
+				return respond.Failed("load the family's timezone", err), nil
+			}
+			ds, err := budget.LoadDueSoon(ctx, pool, householdID, today, dueSoonDays)
+			if err != nil {
+				return respond.Failed("list what is due soon", err), nil
+			}
+			out.DueSoon = ds
+		}
 		if in.wants(sectionNetWorth) {
-			nw, err := loadNetWorth(ctx, pool, claims.HouseholdID)
+			nw, err := loadNetWorth(ctx, pool, householdID)
 			if err != nil {
 				return respond.Failed("estimate the family's net worth", err), nil
 			}
@@ -355,20 +350,26 @@ func loadNetWorth(ctx context.Context, pool *pgxpool.Pool, householdID string) (
 func summarize(out budgetSummary) string {
 	month, _ := time.Parse("2006-01", out.Month)
 	parts := []string{month.Format("January 2006") + ":"}
-	if ob := out.Obligations; ob != nil {
-		if ob.BillCount == 0 && ob.LoanCount == 0 {
-			parts = append(parts, "no bills or loan payments recorded yet.")
-		} else {
-			parts = append(parts, fmt.Sprintf("%s a month in bills and loan payments (%s, %s).",
-				money(ob.MonthlyTotal), plural(ob.BillCount, "bill"), plural(ob.LoanCount, "loan")))
-		}
+	switch ob, rep := out.Obligations, out.Budget; {
+	case ob != nil && ob.BillCount == 0 && ob.LoanCount == 0,
+		ob == nil && rep != nil && rep.Totals.BillCount == 0 && rep.Totals.LoanCount == 0:
+		parts = append(parts, "no bills or loan payments recorded yet.")
+	case ob != nil:
+		parts = append(parts, fmt.Sprintf("%s a month in bills and loan payments (%s, %s).",
+			money(ob.MonthlyTotal), plural(ob.BillCount, "bill"), plural(ob.LoanCount, "loan")))
+	case rep != nil:
+		parts = append(parts, fmt.Sprintf("%s a month in bills and loan payments (%s, %s).",
+			budget.Money(rep.CommittedCents()), plural(rep.Totals.BillCount, "bill"), plural(rep.Totals.LoanCount, "loan")))
+	}
+	if rep := out.Budget; rep != nil {
+		parts = append(parts, rep.Describe())
+	}
+	if ds := out.DueSoon; ds != nil {
+		parts = append(parts, ds.Describe())
 	}
 	if nw := out.NetWorth; nw != nil {
 		parts = append(parts, fmt.Sprintf("Estimated net worth %s (%s owned, %s owed).",
 			money(nw.EstimatedNetWorth), money(nw.TotalValue), money(nw.TotalLiabilities)))
-	}
-	if out.Obligations == nil && out.NetWorth == nil {
-		parts = append(parts, "the requested sections aren't available yet; see pending.")
 	}
 	return strings.Join(parts, " ")
 }
@@ -376,11 +377,34 @@ func summarize(out budgetSummary) string {
 // nextHints suggests 1-3 follow-up calls that name real tools.
 func nextHints(out budgetSummary) []string {
 	var next []string
+	billCount := -1
 	if ob := out.Obligations; ob != nil {
+		billCount = ob.BillCount
+	} else if rep := out.Budget; rep != nil {
+		billCount = rep.Totals.BillCount
+	}
+	if billCount == 0 {
+		next = append(next, "No bills yet. Add one with bill_create; don't put bills on the calendar as events.")
+	}
+	if rep := out.Budget; rep != nil {
+		over := ""
+		for _, c := range rep.Categories {
+			if c.OverBudget {
+				over = c.Name
+				break
+			}
+		}
 		switch {
-		case ob.BillCount == 0:
-			next = append(next, "No bills yet. Add one with bill_create; don't put bills on the calendar as events.")
-		case len(ob.BillsByCategory) > 0:
+		case len(rep.Categories) == 0:
+			next = append(next, "No budget categories yet. Ask what the family wants to budget, then set each with budget_set_category category=… monthly_amount=….")
+		case over != "":
+			next = append(next, fmt.Sprintf("%s is over budget: if the family agrees, raise it with budget_set_category category=%q monthly_amount=…, or review its lines with bill_find and loan_find.", over, over))
+		default:
+			next = append(next, "Change a category's monthly budget with budget_set_category.")
+		}
+	}
+	if ob := out.Obligations; ob != nil {
+		if ob.BillCount > 0 && len(ob.BillsByCategory) > 0 {
 			next = append(next, fmt.Sprintf("See the bills behind a category with bill_find category=%q.", ob.BillsByCategory[0].Category))
 		}
 		if ob.LoansWithoutPayment > 0 {
@@ -388,10 +412,8 @@ func nextHints(out budgetSummary) []string {
 				pluralVerb(ob.LoansWithoutPayment, "loan has", "loans have")))
 		}
 	}
-	for _, p := range out.Pending {
-		if p.Section == sectionDueSoon {
-			next = append(next, p.Instead)
-		}
+	if ds := out.DueSoon; ds != nil && ds.BillCount > 0 {
+		next = append(next, "Record a payment with bill_pay bill_id=<id from due_soon.items>.")
 	}
 	if len(next) > 3 {
 		next = next[:3]

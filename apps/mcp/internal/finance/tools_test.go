@@ -14,7 +14,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/bill"
+	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/testutil"
 )
 
@@ -218,23 +220,25 @@ func TestBudgetSummary_Empty(t *testing.T) {
 
 	_, w := call(t, ctx, h, nil)
 	d := w.Data
-	if d == nil || d.Obligations == nil || d.NetWorth == nil {
+	if d == nil || d.Obligations == nil || d.NetWorth == nil || d.Budget == nil || d.DueSoon == nil {
 		t.Fatalf("data = %+v", d)
 	}
 	if want := time.Now().UTC().Format("2006-01"); d.Month != want {
 		// Household timezone is unset (UTC) in the seed.
 		t.Errorf("month = %s, want %s", d.Month, want)
 	}
-	if !reflect.DeepEqual(d.Sections, []string{"obligations", "net_worth"}) {
+	if !reflect.DeepEqual(d.Sections, allSections) {
 		t.Errorf("sections = %v", d.Sections)
 	}
-	if len(d.Pending) != 2 || d.Pending[0].Section != "budget" || d.Pending[1].Section != "due_soon" {
-		t.Errorf("pending = %+v, want budget and due_soon", d.Pending)
+	if len(d.Budget.Categories) != 0 || d.Budget.Totals.Committed != "0.00" || d.Budget.Currency != "USD" ||
+		len(d.DueSoon.Items) != 0 || d.DueSoon.Total != "0.00" || d.DueSoon.Days != 30 {
+		t.Errorf("budget/due_soon = %+v / %+v", d.Budget, d.DueSoon)
 	}
 	if d.Obligations.BillsByCategory == nil || len(d.Obligations.BillsByCategory) != 0 || d.Obligations.MonthlyTotal != 0 {
 		t.Errorf("obligations = %+v", d.Obligations)
 	}
-	if !strings.Contains(w.Summary, "no bills or loan payments recorded yet") || !strings.Contains(w.Summary, "Estimated net worth $0.00") {
+	if !strings.Contains(w.Summary, "no bills or loan payments recorded yet") || !strings.Contains(w.Summary, "Estimated net worth $0.00") ||
+		!strings.Contains(w.Summary, "No budget categories set yet.") || !strings.Contains(w.Summary, "Nothing falls due in the next 30 days.") {
 		t.Errorf("summary = %q", w.Summary)
 	}
 	if len(w.Next) == 0 || !strings.Contains(w.Next[0], "bill_create") {
@@ -296,7 +300,7 @@ func TestBudgetSummary_Obligations(t *testing.T) {
 	_, _, h := NewBudgetSummaryTool(pool)
 	_, w := call(t, ctx, h, map[string]any{"month": "2026-11", "sections": []any{"obligations"}})
 	d := w.Data
-	if d.Month != "2026-11" || d.NetWorth != nil || len(d.Pending) != 0 || !reflect.DeepEqual(d.Sections, []string{"obligations"}) {
+	if d.Month != "2026-11" || d.NetWorth != nil || d.Budget != nil || d.DueSoon != nil || !reflect.DeepEqual(d.Sections, []string{"obligations"}) {
 		t.Fatalf("data = %+v", d)
 	}
 	ob := d.Obligations
@@ -403,7 +407,9 @@ func TestBudgetSummary_NetWorth(t *testing.T) {
 	}
 }
 
-func TestBudgetSummary_PendingOnly(t *testing.T) {
+// TestBudgetSummary_DueSoonOnly: the default month and "today" both come
+// from the family's timezone, and only the asked-for section is built.
+func TestBudgetSummary_DueSoonOnly(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	if _, err := pool.Exec(context.Background(), `UPDATE households SET timezone = 'Pacific/Kiritimati' WHERE id = $1`, hh.HouseholdID); err != nil {
@@ -413,13 +419,115 @@ func TestBudgetSummary_PendingOnly(t *testing.T) {
 	_, w := call(t, ctx, h, map[string]any{"sections": []any{"due_soon"}})
 	d := w.Data
 	loc, _ := time.LoadLocation("Pacific/Kiritimati")
-	if want := time.Now().In(loc).Format("2006-01"); d.Month != want {
+	now := time.Now().In(loc)
+	if want := now.Format("2006-01"); d.Month != want {
 		t.Errorf("month = %s, want %s (family timezone)", d.Month, want)
 	}
-	if len(d.Sections) != 0 || d.Obligations != nil || d.NetWorth != nil || len(d.Pending) != 1 {
+	if !reflect.DeepEqual(d.Sections, []string{"due_soon"}) || d.Obligations != nil || d.NetWorth != nil || d.Budget != nil || d.DueSoon == nil {
 		t.Fatalf("data = %+v", d)
 	}
-	if !strings.Contains(w.Summary, "aren't available yet") || len(w.Next) != 1 || !strings.Contains(w.Next[0], "bill_find due_within_days=30") {
-		t.Errorf("summary/next = %q %v", w.Summary, w.Next)
+	if want := now.Format("2006-01-02"); d.DueSoon.From != want {
+		t.Errorf("due_soon.from = %s, want %s", d.DueSoon.From, want)
+	}
+	if !strings.Contains(w.Summary, "Nothing falls due in the next 30 days.") {
+		t.Errorf("summary = %q", w.Summary)
+	}
+}
+
+// TestBudgetSummary_WhatDoWeOweEachMonth: one call answers "what do we owe
+// each month?": the monthly total from bills + loans, grouped by budget
+// category with every line's source, and the budget section's committed
+// total is exactly the obligations section's monthly total.
+func TestBudgetSummary_WhatDoWeOweEachMonth(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	bg := context.Background()
+	var housing uuid.UUID
+	if err := pool.QueryRow(bg, `INSERT INTO budget_categories (household_id, name, monthly_amount) VALUES ($1, 'Housing', 2000) RETURNING id`,
+		hh.HouseholdID).Scan(&housing); err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{
+		`INSERT INTO bills (household_id, name, amount, frequency, due_date, category, budget_category_id) VALUES ($1, 'Home insurance', 1200, 'annual', '2027-03-01', 'Insurance', $2)`,
+		`INSERT INTO bills (household_id, name, amount, due_day, category) VALUES ($1, 'Electric', 142.5, 18, 'Utilities')`,
+		`INSERT INTO loans (household_id, name, original_amount, remaining_balance, monthly_payment, due_day, budget_category_id) VALUES ($1, 'Mortgage', 300000, 250000, 1850, 1, $2)`,
+	} {
+		args := []any{hh.HouseholdID}
+		if strings.Contains(sql, "$2") {
+			args = append(args, housing)
+		}
+		if _, err := pool.Exec(bg, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, _, h := NewBudgetSummaryTool(pool)
+	_, w := call(t, ctx, h, map[string]any{"month": "2026-11"})
+	d := w.Data
+	if d.Budget == nil || d.Obligations == nil || d.DueSoon == nil {
+		t.Fatalf("data = %+v", d)
+	}
+	b := d.Budget
+	if b.Totals.Committed != "2092.50" || b.Totals.Bills != "242.50" || b.Totals.LoanPayments != "1850.00" ||
+		fmt.Sprintf("%.2f", d.Obligations.MonthlyTotal) != b.Totals.Committed {
+		t.Errorf("totals = %+v, obligations monthly_total = %v", b.Totals, d.Obligations.MonthlyTotal)
+	}
+	if len(b.Categories) != 1 || b.Categories[0].Committed != "1950.00" || *b.Categories[0].Remaining != "50.00" || len(b.Categories[0].Lines) != 2 {
+		t.Errorf("Housing = %+v", b.Categories)
+	}
+	for _, l := range b.Categories[0].Lines {
+		if (l.Name == "Mortgage") != (l.Source == "loan") {
+			t.Errorf("line source = %+v", l)
+		}
+	}
+	if len(b.Uncategorized.Lines) != 1 || b.Uncategorized.Lines[0].Source != "bill" || b.Uncategorized.Lines[0].Name != "Electric" {
+		t.Errorf("uncategorized = %+v", b.Uncategorized)
+	}
+	if !strings.HasPrefix(w.Summary, "November 2026: $2,092.50 a month in bills and loan payments (2 bills, 1 loan). Budgets: $2,000.00 a month across 1 budgeted category, $1,950.00 committed against them; 1 line not in a budget category.") {
+		t.Errorf("summary = %q", w.Summary)
+	}
+	if len(w.Next) == 0 || !strings.Contains(w.Next[0], "budget_set_category") {
+		t.Errorf("next = %v", w.Next)
+	}
+
+	// Only the budget section still says what the month costs in total.
+	_, w = call(t, ctx, h, map[string]any{"month": "2026-11", "sections": []any{"budget"}})
+	if !strings.HasPrefix(w.Summary, "November 2026: $2,092.50 a month in bills and loan payments (2 bills, 1 loan). Budgets:") {
+		t.Errorf("budget-only summary = %q", w.Summary)
+	}
+}
+
+// TestBudgetSummary_Roles: money is hidden from housesitter and vendor,
+// viewers read it; the role is re-read from memberships.
+func TestBudgetSummary_Roles(t *testing.T) {
+	pool := testutil.NewPool(t)
+	_, hh := testutil.SeedHousehold(t, pool)
+	_, _, h := NewBudgetSummaryTool(pool)
+	member := func(role string) context.Context {
+		bg := context.Background()
+		email := role + "-" + uuid.NewString()[:8] + "@test.homeos.local"
+		var uid uuid.UUID
+		if err := pool.QueryRow(bg, `INSERT INTO users (email, name, password_hash) VALUES ($1, $2, 'x') RETURNING id`, email, role).Scan(&uid); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(bg, `INSERT INTO memberships (household_id, user_id, role) VALUES ($1, $2, $3)`, hh.HouseholdID, uid, role); err != nil {
+			t.Fatal(err)
+		}
+		// The claims say owner; memberships decide.
+		return server.ContextWithClaims(bg, &auth.Claims{
+			Identity: auth.Identity{Subject: uid.String(), Email: email}, UserID: uid.String(),
+			HouseholdID: hh.HouseholdID.String(), Role: "owner",
+		})
+	}
+	for _, role := range []string{"family_member", "viewer"} {
+		if res, w := call(t, member(role), h, nil); res.IsError {
+			t.Errorf("%s refused: %+v", role, w.Error)
+		}
+	}
+	for _, role := range []string{"housesitter", "vendor"} {
+		res, w := call(t, member(role), h, nil)
+		if !res.IsError || !strings.Contains(w.Error.Message, "The "+role+" role can't see the budget") {
+			t.Errorf("%s = %+v", role, w)
+		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"home-os/mcp/internal/activity"
 	"home-os/mcp/internal/asset"
 	"home-os/mcp/internal/bill"
+	"home-os/mcp/internal/budget"
 	"home-os/mcp/internal/calendar"
 	"home-os/mcp/internal/config"
 	"home-os/mcp/internal/credential"
@@ -53,6 +54,7 @@ var registrars = []func(*server.Server, server.Deps){
 	people.Register,
 	loan.Register,
 	finance.Register,
+	budget.Register,
 	credential.Register,
 	activity.Register,
 	prompts.Register,

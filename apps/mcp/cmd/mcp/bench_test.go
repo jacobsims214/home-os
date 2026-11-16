@@ -94,6 +94,9 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 		{"bill_find", static(map[string]any{"due_within_days": 14})},
 		{"bill_pay", func(i int) map[string]any { return map[string]any{"bill_id": pick(f.PayableBills, i)} }},
 		{"bill_update", func(i int) map[string]any { return map[string]any{"bill_id": f.Bill, "amount": 100 + i} }},
+		{"budget_set_category", func(i int) map[string]any {
+			return map[string]any{"category": "Groceries", "monthly_amount": 600 + i}
+		}},
 		{"budget_summary", static(map[string]any{"month": month})},
 		{"calendar_create", func(i int) map[string]any { return map[string]any{"name": fmt.Sprintf("Bench calendar %d", i)} }},
 		{"calendar_find", static(map[string]any{})},
