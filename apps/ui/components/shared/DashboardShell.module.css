@@ -1,20 +1,21 @@
 /*
  * App shell styles (#4528), per KB design/app-shell.md (artifact #75 v1).
- * Mantine theme values only (no hex), so the theme tokens from #4529 can
- * replace these variables in one place.
+ * Colours come from the semantic theme tokens in app/globals.css (#4529);
+ * the --shell-* names are kept as aliases so the shell's rules don't change.
  * Breakpoints: sm = 48em (768 px), md = 62em (992 px).
  */
 
 .shellVars {
-  --shell-accent: light-dark(var(--mantine-color-cyan-9), var(--mantine-color-cyan-3));
-  --shell-accent-soft: light-dark(var(--mantine-color-cyan-0), var(--mantine-color-cyan-light));
-  --shell-bg: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8));
-  --shell-surface: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
-  --shell-surface-2: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6));
-  --shell-line: var(--mantine-color-default-border);
-  --shell-ink: var(--mantine-color-text);
-  --shell-ink-2: light-dark(var(--mantine-color-gray-7), var(--mantine-color-dark-1));
-  --shell-ink-3: light-dark(var(--mantine-color-gray-7), var(--mantine-color-dark-2));
+  --shell-accent: var(--accent);
+  --shell-accent-soft: var(--accent-soft);
+  --shell-bg: var(--bg);
+  --shell-surface: var(--surface);
+  --shell-surface-2: var(--surface-2);
+  --shell-raised: var(--raised);
+  --shell-line: var(--line);
+  --shell-ink: var(--ink);
+  --shell-ink-2: var(--ink-2);
+  --shell-ink-3: var(--ink-3);
 }
 
 /* The tab bar's More sheet (BottomNav.module.css) renders in a portal,
@@ -228,7 +229,8 @@
 /* ---------- drawer ---------- */
 
 .drawerContent {
-  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-6));
+  background: var(--raised);
+  box-shadow: var(--shadow-lg);
 }
 
 .drawerHeader {

@@ -1,7 +1,7 @@
 /*
  * Phone tab bar and More sheet (#4536), per KB design/app-shell.md
- * (artifact #75 v1). Mantine theme values only, through the shell
- * variables in DashboardShell.module.css.
+ * (artifact #75 v1). Theme tokens only (app/globals.css, #4529), through
+ * the shell variables in DashboardShell.module.css.
  */
 
 /* ---------- tab bar ---------- */
@@ -89,8 +89,8 @@
   height: auto !important;
   max-height: 86%;
   border-radius: 16px;
-  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-6));
-  box-shadow: var(--mantine-shadow-xl);
+  background: var(--raised);
+  box-shadow: var(--shadow-lg);
   overflow-y: auto;
 }
 
@@ -256,7 +256,7 @@
   font-size: 11px;
   font-weight: 600;
   color: var(--mantine-color-white);
-  background: var(--mantine-color-red-8);
+  background: var(--badge);
 }
 
 .chevron {

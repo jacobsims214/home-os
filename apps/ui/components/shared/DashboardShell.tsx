@@ -48,6 +48,7 @@ import { IconBell, IconChevronDown, IconLogout, IconMenu2, IconSettings } from "
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import BottomNav from "@/components/shared/BottomNav";
+import ColorSchemeControl from "@/components/ui/ColorSchemeControl";
 import Sidebar from "@/components/shared/Sidebar";
 import { apiFetch } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
@@ -375,6 +376,14 @@ function UserMenu({ opened, onChange }: { opened: boolean; onChange: (opened: bo
         <Menu.Item component={Link} href="/dashboard/settings" leftSection={<IconSettings size={18} stroke={NAV_ICON_STROKE} />}>
           Settings
         </Menu.Item>
+        <Menu.Divider />
+        {/* Theme row from the shell spec's user menu (#4529). */}
+        <Box px="sm" py="xs">
+          <Text size="xs" fw={500} c="var(--shell-ink-2)" mb={6}>
+            Theme
+          </Text>
+          <ColorSchemeControl />
+        </Box>
         <Menu.Divider />
         {/* Native POST to /api/auth/logout (#4424): the route expires the
             session cookies and 303s to /login; the full page load drops the

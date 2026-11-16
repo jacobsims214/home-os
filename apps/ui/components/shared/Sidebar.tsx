@@ -5,8 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { useAuthStore } from "@/stores/auth";
 import { AppShell, NavLink, ScrollArea, TextInput, Group, Avatar, Text, Button, ActionIcon } from "@mantine/core";
 import { IconSearch, IconHome, IconBuilding, IconTool, IconCalendar, IconCar, IconPaw, IconBuildingStore, IconCash, IconUsers, IconSettings, IconMoon, IconSun, IconBell, IconCreditCard, IconShield } from "@tabler/icons-react";
-import { useLocalStorage } from "@mantine/hooks";
-import { useMantineColorScheme } from "@mantine/core";
+import { useComputedColorScheme, useMantineColorScheme } from "@mantine/core";
 import NotificationBell from "@/components/notifications/NotificationBell";
 
 interface NavItem {
@@ -36,11 +35,10 @@ export default function Sidebar() {
   const router = useRouter();
   const user = useAuthStore((s) => s.user);
   const [searchQuery, setSearchQuery] = useState("");
-  const { colorScheme, toggleColorScheme } = useMantineColorScheme();
-  const [darkMode, setDarkMode] = useLocalStorage({
-    key: "mantine-color-scheme",
-    defaultValue: "light",
-  });
+  // The scheme lives in Mantine's colour scheme manager (providers.tsx,
+  // #4529); toggling from "auto" flips whatever the system currently shows.
+  const { toggleColorScheme } = useMantineColorScheme();
+  const colorScheme = useComputedColorScheme("light");
 
   const handleSearch = useCallback(
     (e?: React.FormEvent) => {
@@ -69,11 +67,10 @@ export default function Sidebar() {
     return {
       active: active,
       styles: {
-        label: { color: active ? "#0891B2" : "#333" },
-        icon: { color: active ? "#0891B2" : "#999" },
-        body: {
-          backgroundColor: active ? "#e0f7fa" : "transparent",
-        },
+        // One highlight on the row (the root), not a second box on the body.
+        root: active ? { backgroundColor: "var(--accent-soft)" } : undefined,
+        label: { color: active ? "var(--accent)" : "var(--ink)" },
+        icon: { color: active ? "var(--accent)" : "var(--ink-2)" },
       },
     };
   };
@@ -82,8 +79,8 @@ export default function Sidebar() {
     <div>
       <AppShell.Section grow component={ScrollArea}>
         {/* Logo */}
-        <div className="flex h-16 items-center border-b border-gray-200 px-0">
-          <span className="text-lg font-bold text-cyan-600">Home OS</span>
+        <div className="flex h-16 items-center border-b border-line px-0">
+          <span className="text-lg font-bold text-accent">Home OS</span>
         </div>
 
         {/* Search */}
@@ -142,15 +139,11 @@ export default function Sidebar() {
             </Button>
           </form>
         </div>
-        <div className="flex items-center justify-center px-4 py-2 border-t border-gray-200">
+        <div className="flex items-center justify-center px-4 py-2 border-t border-line">
           <ActionIcon
             variant="outline"
             size="sm"
-            onClick={() => {
-              const newScheme = colorScheme === "dark" ? "light" : "dark";
-              setDarkMode(newScheme);
-              toggleColorScheme();
-            }}
+            onClick={() => toggleColorScheme()}
           >
             {colorScheme === "dark" ? <IconSun size={18} /> : <IconMoon size={18} />}
           </ActionIcon>
