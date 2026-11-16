@@ -145,22 +145,13 @@ export const vehicleConfig = {
     { name: "color", label: "Color", type: "text" },
     { name: "purchase_price", label: "Purchase Price", type: "currency" },
     { name: "purchase_date", label: "Purchase Date", type: "date" },
-    { name: "lender", label: "Lender", type: "text" },
-    { name: "loan_amount", label: "Loan Amount", type: "currency" },
-    { name: "loan_term_months", label: "Loan Term (months)", type: "number" },
-    { name: "monthly_payment", label: "Monthly Payment", type: "currency" },
-    { name: "registration_renewal_month", label: "Registration Renewal Month", type: "number" },
-    { name: "registration_cost", label: "Registration Cost", type: "currency" },
-    { name: "insurance_provider", label: "Insurance Provider", type: "text" },
-    { name: "insurance_cost", label: "Insurance Cost", type: "currency" },
+    // The loan, registration and insurance are the vehicle's linked loan and
+    // bills (#4704/#4706), never vehicle fields.
     { name: "notes", label: "Notes", type: "textarea" },
   ] as FieldConfig[],
   sections: [
     { title: "Vehicle Details", fields: ["year", "make", "model", "vin", "license_plate", "color"] },
     { title: "Purchase Info", fields: ["purchase_price", "purchase_date"] },
-    { title: "Financing", fields: ["lender", "loan_amount", "loan_term_months", "monthly_payment"] },
-    { title: "Registration", fields: ["registration_renewal_month", "registration_cost"] },
-    { title: "Insurance", fields: ["insurance_provider", "insurance_cost"] },
     { title: "Additional Info", fields: ["notes"] },
   ] as SectionConfig[],
   listColumns: [
@@ -225,12 +216,12 @@ export const propertyConfig = {
     { name: "purchase_price", label: "Purchase Price", type: "currency" },
     { name: "purchase_date", label: "Purchase Date", type: "date" },
     { name: "current_value", label: "Current Value", type: "currency" },
-    { name: "mortgage_amount", label: "Mortgage Amount", type: "currency" },
+    // The mortgage, tax, insurance and HOA are the property's linked loan and bills (#4706).
     { name: "notes", label: "Notes", type: "textarea" },
   ] as FieldConfig[],
   sections: [
     { title: "Basic Information", fields: ["name", "address", "property_type"] },
-    { title: "Financial Details", fields: ["purchase_price", "purchase_date", "current_value", "mortgage_amount"] },
+    { title: "Financial Details", fields: ["purchase_price", "purchase_date", "current_value"] },
     { title: "Additional Info", fields: ["notes"] },
   ] as SectionConfig[],
   listColumns: [

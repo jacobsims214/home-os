@@ -15,7 +15,8 @@ export interface Property {
   purchase_price?: string;
   purchase_date?: string;
   current_value?: string;
-  mortgage_amount?: string;
+  /** Read-only: derived from the property's mortgage loan (#4704). Never send it. */
+  readonly mortgage_amount?: string;
   notes?: string;
   created_at: string;
   updated_at: string;

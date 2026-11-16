@@ -17,17 +17,10 @@ import { Button } from "@/components/ui/Button";
 import type { PropertyDetailResponse, RoomListResponse } from "@/types/property";
 import type { Asset } from "@/lib/types/api";
 import type { MaintenanceTask } from "@/components/maintenance/types";
+import LinkedFinances, { useLinkedFinances } from "@/components/finance/LinkedFinances";
+import { monthlyBillAmount, pickMortgage, propertyEditBody, PROPERTY_EDIT_FIELDS } from "@/components/finance/linked-finance-utils";
 
 // ── Local type definitions (replacing deleted @/components/dashboard/dashboard-types) ──
-
-interface Bill {
-  id: string;
-  name: string;
-  amount: string;
-  property_id?: string;
-  category?: string;
-  due_day?: number;
-}
 
 interface CalendarEvent {
   id: string;
@@ -167,11 +160,9 @@ export default function PropertyDetailPage() {
     enabled: !!propertyId,
   });
 
-  const { data: billsData } = useQuery({
-    queryKey: ["bills", "property", propertyId],
-    queryFn: () => apiFetch<{ data: Bill[] }>("/api/v1/bills"),
-    enabled: !!propertyId,
-  });
+  // The property's loans and bills (property_id, #4704): its mortgage, tax,
+  // insurance and HOA. Same queries as the Loans & bills card below.
+  const linked = useLinkedFinances({ kind: "property", id: propertyId });
 
   const { data: calendarEvents = [] } = useQuery({
     queryKey: calendarKeys.eventsByProperty(propertyId),
@@ -181,7 +172,9 @@ export default function PropertyDetailPage() {
 
   const property = propData?.data;
   const rooms = roomsData?.data ?? [];
-  const bills = (billsData?.data ?? []).filter((b) => b.property_id === propertyId);
+  const bills = linked.bills.data ?? [];
+  const loans = linked.loans.data ?? [];
+  const mortgageLoan = pickMortgage(loans);
 
   // Calendar events (all, not filtered by month)
   const monthEvents = calendarEvents;
@@ -210,9 +203,11 @@ export default function PropertyDetailPage() {
   // ── Edit mutation ──────────────────────────────────────────
 
   const editMutation = useMutation({
+    // Only the form's own fields: the mortgage/tax/insurance/HOA fields are
+    // derived from the linked loan and bills and are never sent (#4706).
     mutationFn: (data: Record<string, string>) => apiFetch(`/api/v1/properties/${propertyId}`, {
       method: 'PUT',
-      body: JSON.stringify(data),
+      body: propertyEditBody(data),
     }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: propertyKeys.detail(propertyId) });
@@ -224,7 +219,7 @@ export default function PropertyDetailPage() {
   function startEditing() {
     if (!property) return;
     const f: Record<string, string> = {};
-    for (const k of ["name","address","property_type","notes","purchase_price","purchase_date","current_value","down_payment","mortgage_amount","mortgage_rate","mortgage_term_months","mortgage_start_date","mortgage_lender","mortgage_account_number","property_tax_annual","property_tax_due_months","insurance_annual","insurance_provider","hoa_fee_monthly"]) {
+    for (const k of PROPERTY_EDIT_FIELDS) {
       f[k] = ((property as unknown as Record<string, string | null>)[k]) ?? "";
     }
     setEditValues(f);
@@ -253,11 +248,13 @@ export default function PropertyDetailPage() {
   const equity = currentValue - remaining;
   const equityPct = currentValue > 0 ? (equity / currentValue) * 100 : 0;
 
-  const monthlyTax = num(property?.property_tax_annual) / 12;
-  const monthlyInsurance = num(property?.insurance_annual) / 12;
-  const monthlyHOA = num(property?.hoa_fee_monthly);
-  const monthlyBills = bills.reduce((sum, b) => sum + num(b.amount), 0);
-  const totalMonthlyCost = monthlyPayment + monthlyTax + monthlyInsurance + monthlyHOA + monthlyBills;
+  // Monthly cost: the loans' payments (the mortgage's own payment, else the
+  // amortized one) plus every linked bill per month. Tax, insurance and HOA
+  // are bills now, so they are counted once, in the bills.
+  const mortgageMonthly = num(String(mortgageLoan?.monthly_payment ?? "")) || monthlyPayment;
+  const otherLoansMonthly = loans.filter((l) => l !== mortgageLoan).reduce((sum, l) => sum + num(String(l.monthly_payment ?? "")), 0);
+  const monthlyBills = bills.reduce((sum, b) => sum + monthlyBillAmount(b), 0);
+  const totalMonthlyCost = mortgageMonthly + otherLoansMonthly + monthlyBills;
   const totalAssetValue = Array.isArray(assets) ? assets.reduce((sum, a) => sum + num(a.purchase_price), 0) : 0;
 
   const hasFinancialData = mortgagePrincipal > 0 || currentValue > 0 || num(property?.purchase_price) > 0;
@@ -360,18 +357,10 @@ export default function PropertyDetailPage() {
               <EditField label="Purchase Date" value={editValues.purchase_date ?? ""} onChange={(v) => setEditValues({ ...editValues, purchase_date: v })} type="date" />
               <EditField label="Current Value" value={editValues.current_value ?? ""} onChange={(v) => setEditValues({ ...editValues, current_value: v })} placeholder="$420,000" />
               <EditField label="Down Payment" value={editValues.down_payment ?? ""} onChange={(v) => setEditValues({ ...editValues, down_payment: v })} placeholder="$50,000" />
-              <EditField label="Mortgage Amount" value={editValues.mortgage_amount ?? ""} onChange={(v) => setEditValues({ ...editValues, mortgage_amount: v })} placeholder="$300,000" />
-              <EditField label="Mortgage Rate (%)" value={editValues.mortgage_rate ?? ""} onChange={(v) => setEditValues({ ...editValues, mortgage_rate: v })} placeholder="6.5" />
-              <EditField label="Mortgage Term (months)" value={editValues.mortgage_term_months ?? ""} onChange={(v) => setEditValues({ ...editValues, mortgage_term_months: v })} placeholder="360" />
-              <EditField label="Mortgage Start Date" value={editValues.mortgage_start_date ?? ""} onChange={(v) => setEditValues({ ...editValues, mortgage_start_date: v })} type="date" />
-              <EditField label="Mortgage Lender" value={editValues.mortgage_lender ?? ""} onChange={(v) => setEditValues({ ...editValues, mortgage_lender: v })} placeholder="Wells Fargo" />
-              <EditField label="Mortgage Account #" value={editValues.mortgage_account_number ?? ""} onChange={(v) => setEditValues({ ...editValues, mortgage_account_number: v })} />
-              <EditField label="Property Tax (annual)" value={editValues.property_tax_annual ?? ""} onChange={(v) => setEditValues({ ...editValues, property_tax_annual: v })} placeholder="$3,000" />
-              <EditField label="Tax Due Months" value={editValues.property_tax_due_months ?? ""} onChange={(v) => setEditValues({ ...editValues, property_tax_due_months: v })} placeholder="Jan, Jul" />
-              <EditField label="Insurance (annual)" value={editValues.insurance_annual ?? ""} onChange={(v) => setEditValues({ ...editValues, insurance_annual: v })} placeholder="$1,800" />
-              <EditField label="Insurance Provider" value={editValues.insurance_provider ?? ""} onChange={(v) => setEditValues({ ...editValues, insurance_provider: v })} placeholder="State Farm" />
-              <EditField label="HOA Fee (monthly)" value={editValues.hoa_fee_monthly ?? ""} onChange={(v) => setEditValues({ ...editValues, hoa_fee_monthly: v })} placeholder="$0" />
             </div>
+            <p className="mt-3 text-xs text-ink-3">
+              The mortgage, property tax, insurance and HOA are the loans and bills linked to this property. Change them under Loans &amp; bills.
+            </p>
           </div>
         </details>
 
@@ -488,25 +477,19 @@ export default function PropertyDetailPage() {
             </div>
 
             <dl className="mt-4 space-y-1.5">
-              {monthlyPayment > 0 && (
-                <div className="flex justify-between text-sm"><dt className="text-gray-500">Mortgage Payment</dt><dd className="font-medium text-gray-900">{fmtCurrencyPrecise(monthlyPayment.toFixed(2))}</dd></div>
+              {mortgageMonthly > 0 && (
+                <div className="flex justify-between text-sm"><dt className="text-gray-500">Mortgage Payment</dt><dd className="font-medium text-gray-900">{fmtCurrencyPrecise(mortgageMonthly.toFixed(2))}</dd></div>
               )}
-              {monthlyTax > 0 && (
-                <div className="flex justify-between text-sm"><dt className="text-gray-500">Property Tax</dt><dd className="font-medium text-gray-900">{fmtCurrencyPrecise(monthlyTax.toFixed(2))}</dd></div>
-              )}
-              {monthlyInsurance > 0 && (
-                <div className="flex justify-between text-sm"><dt className="text-gray-500">Insurance</dt><dd className="font-medium text-gray-900">{fmtCurrencyPrecise(monthlyInsurance.toFixed(2))}</dd></div>
-              )}
-              {monthlyHOA > 0 && (
-                <div className="flex justify-between text-sm"><dt className="text-gray-500">HOA</dt><dd className="font-medium text-gray-900">{fmtCurrencyPrecise(monthlyHOA.toFixed(2))}</dd></div>
+              {otherLoansMonthly > 0 && (
+                <div className="flex justify-between text-sm"><dt className="text-gray-500">Other Loans</dt><dd className="font-medium text-gray-900">{fmtCurrencyPrecise(otherLoansMonthly.toFixed(2))}</dd></div>
               )}
               {monthlyBills > 0 && (
-                <div className="flex justify-between text-sm"><dt className="text-gray-500">Bills (utilities etc.)</dt><dd className="font-medium text-gray-900">{fmtCurrencyPrecise(monthlyBills.toFixed(2))}</dd></div>
+                <div className="flex justify-between text-sm"><dt className="text-gray-500">Bills (tax, insurance, HOA, utilities)</dt><dd className="font-medium text-gray-900">{fmtCurrencyPrecise(monthlyBills.toFixed(2))}</dd></div>
               )}
             </dl>
 
-            {monthlyPayment === 0 && monthlyTax === 0 && monthlyInsurance === 0 && monthlyHOA === 0 && monthlyBills === 0 && (
-              <p className="mt-3 text-xs text-gray-400">No cost data set. Click Edit to add financial details.</p>
+            {totalMonthlyCost === 0 && (
+              <p className="mt-3 text-xs text-gray-400">No costs yet. Add the mortgage and bills under Loans &amp; bills.</p>
             )}
           </div>
         </div>
@@ -517,6 +500,11 @@ export default function PropertyDetailPage() {
         <div className="mt-8 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-semibold text-gray-900">Mortgage Amortization</h2>
+            {mortgageLoan && (
+              <Link href={`/dashboard/loans/${mortgageLoan.id}`} className="inline-flex min-h-11 items-center text-sm font-medium text-accent hover:underline md:min-h-0">
+                View loan
+              </Link>
+            )}
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-1 text-sm text-gray-600">
             {property.mortgage_lender && <span><span className="text-gray-400">Lender:</span> {property.mortgage_lender}</span>}
@@ -558,41 +546,13 @@ export default function PropertyDetailPage() {
         </div>
       )}
 
-      {/* ── Bills + Maintenance (side by side) ─────────────── */}
-      <div className="mt-8 grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* Bills */}
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-semibold text-gray-900">Bills</h2>
-            <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-700">{bills.length}</span>
-          </div>
-          <div className="mt-3">
-            {bills.length === 0 ? (
-              <p className="text-sm text-gray-400 py-4 text-center">No bills tracked</p>
-            ) : (
-              <>
-                <ul className="divide-y divide-gray-50">
-                  {bills.slice(0, 5).map((bill) => (
-                    <li key={bill.id} className="flex items-center justify-between py-2">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">{bill.name}</p>
-                        <p className="text-xs text-gray-400">{bill.category ?? "—"}{bill.due_day ? ` · Due day ${bill.due_day}` : ""}</p>
-                      </div>
-                      <p className="text-sm font-medium text-gray-900">{fmtCurrencyPrecise(bill.amount)}</p>
-                    </li>
-                  ))}
-                </ul>
-                {bills.length > 0 && (
-                  <div className="mt-2 flex justify-between border-t border-gray-100 pt-2 text-sm">
-                    <span className="font-medium text-gray-500">Monthly Total</span>
-                    <span className="font-bold text-gray-900">{fmtCurrencyPrecise(monthlyBills.toFixed(2))}</span>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </div>
+      {/* ── Loans & bills: the mortgage, tax, insurance and HOA live here (#4706) ── */}
+      <div className="mt-8">
+        <LinkedFinances framed subject={{ kind: "property", id: propertyId, name: property.name }} />
+      </div>
 
+      {/* ── Maintenance ─────────────────────────────────────── */}
+      <div className="mt-8 grid grid-cols-1 gap-4">
         {/* Maintenance */}
         <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between mb-4">

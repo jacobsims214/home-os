@@ -1,6 +1,14 @@
 "use client";
 
-import EntityDetail, { FieldConfig } from "@/components/entity/EntityDetail";
+import EntityDetail, { type FieldConfig } from "@/components/entity/EntityDetail";
+import LinkedFinances from "@/components/finance/LinkedFinances";
+
+// The vehicle's loan, registration and insurance are a loan and bills with
+// vehicle_id (#4704). The API still returns lender/loan_amount/... derived
+// from them, but this form never sends those fields (#4706, #4707 drops the
+// columns); they are shown and edited as the linked loan and bills.
+const vehicleName = (v: Record<string, unknown>) =>
+  [v.year, v.make, v.model].filter((x) => x != null && x !== "").join(" ") || "this vehicle";
 
 export default function VehicleDetailPage({ params }: { params: { id: string } }) {
   const fields: FieldConfig[] = [
@@ -14,19 +22,21 @@ export default function VehicleDetailPage({ params }: { params: { id: string } }
     { name: "purchase_price", label: "Purchase Price", type: "text" },
     { name: "current_value", label: "Current Value", type: "text" },
     { name: "purchase_date", label: "Purchase Date", type: "date" },
-    { name: "lender", label: "Lender", type: "text" },
-    { name: "loan_amount", label: "Loan Amount", type: "text" },
-    { name: "loan_term_months", label: "Loan Term (months)", type: "number" },
-    { name: "monthly_payment", label: "Monthly Payment", type: "text" },
-    { name: "registration_renewal_month", label: "Registration Renewal Month", type: "number" },
-    { name: "registration_cost", label: "Registration Cost", type: "text" },
-    { name: "insurance_provider", label: "Insurance Provider", type: "text" },
-    { name: "insurance_cost", label: "Insurance Cost", type: "text" },
+    {
+      name: "linked_finances",
+      label: "Loans & bills",
+      type: "custom",
+      readOnly: true,
+      renderView: (vehicle) => (
+        <LinkedFinances subject={{ kind: "vehicle", id: params.id, name: vehicleName(vehicle) }} />
+      ),
+    },
   ];
 
   const sections = [
     { title: "Details", fields: ["year", "make", "model", "vin", "license_plate", "color", "notes"] },
-    { title: "Financial", fields: ["purchase_price", "purchase_date", "current_value", "lender", "loan_amount", "loan_term_months", "monthly_payment", "registration_cost", "registration_renewal_month", "insurance_cost", "insurance_provider"] },
+    { title: "Purchase", fields: ["purchase_price", "purchase_date", "current_value"] },
+    { title: "Loans & bills", fields: ["linked_finances"] },
   ];
 
   return (

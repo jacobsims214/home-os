@@ -25,6 +25,12 @@ export interface FieldConfig {
   type: "text" | "textarea" | "select" | "number" | "date" | "boolean" | "custom";
   options?: { value: string; label: string }[];
   required?: boolean;
+  /**
+   * Shown, never edited or sent: it stays out of the form values and the PUT
+   * body, and edit mode shows renderView (e.g. a vehicle's linked loans and
+   * bills, #4706).
+   */
+  readOnly?: boolean;
   /** type "custom": the read-only value (default: the raw value as text). */
   renderView?: (entity: Record<string, unknown>) => ReactNode;
   /** type "custom": the edit control for this field's value (for example the pet's VetPicker, #4703). */
@@ -196,6 +202,7 @@ export default function EntityDetail({
     if (entity && Object.keys(entity).length > 0 && Object.keys(formValues).length === 0 && !isEditing) {
       const initialValues: Record<string, unknown> = {};
       (fields ?? []).forEach((field) => {
+        if (field.readOnly) return;
         initialValues[field.name] = getFieldValue(entity, field.name);
       });
       setFormValues(initialValues);
@@ -261,6 +268,9 @@ export default function EntityDetail({
 
   // Render field input in edit mode
   const renderFieldInput = (field: FieldConfig) => {
+    if (field.readOnly) {
+      return <div key={field.name}>{renderFieldValue(field.name)}</div>;
+    }
     if (field.type === "custom" && field.renderEdit) {
       return (
         <div key={field.name}>
@@ -400,13 +410,18 @@ export default function EntityDetail({
                 {section.fields.map((fieldName) => {
                   const field = getFieldConfig(fieldName);
                   if (!field) return null;
+                  // A read-only block (readOnly) is full width; the section title labels it.
                   return (
                     <div
                       key={fieldName}
                       data-field={fieldName}
-                      className="flex flex-col gap-1 py-2.5 md:grid md:grid-cols-[minmax(7rem,1fr)_minmax(0,2fr)] md:gap-x-6"
+                      className={
+                        field.readOnly
+                          ? "py-2.5"
+                          : "flex flex-col gap-1 py-2.5 md:grid md:grid-cols-[minmax(7rem,1fr)_minmax(0,2fr)] md:gap-x-6"
+                      }
                     >
-                      <dt className="text-sm font-medium text-ink-3">{field.label}</dt>
+                      <dt className={field.readOnly ? "sr-only" : "text-sm font-medium text-ink-3"}>{field.label}</dt>
                       <dd className="m-0 text-sm text-ink break-words [overflow-wrap:anywhere] whitespace-pre-line">
                         {renderFieldValue(fieldName)}
                       </dd>

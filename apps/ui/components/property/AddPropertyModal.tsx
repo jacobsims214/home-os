@@ -42,17 +42,6 @@ export default function AddPropertyModal({
   const [purchaseDate, setPurchaseDate] = useState("");
   const [currentValue, setCurrentValue] = useState("");
   const [downPayment, setDownPayment] = useState("");
-  const [mortgageAmount, setMortgageAmount] = useState("");
-  const [mortgageRate, setMortgageRate] = useState("");
-  const [mortgageTermMonths, setMortgageTermMonths] = useState("");
-  const [mortgageStartDate, setMortgageStartDate] = useState("");
-  const [mortgageLender, setMortgageLender] = useState("");
-  const [mortgageAccountNumber, setMortgageAccountNumber] = useState("");
-  const [propertyTaxAnnual, setPropertyTaxAnnual] = useState("");
-  const [propertyTaxDueMonths, setPropertyTaxDueMonths] = useState("");
-  const [insuranceAnnual, setInsuranceAnnual] = useState("");
-  const [insuranceProvider, setInsuranceProvider] = useState("");
-  const [hoaFeeMonthly, setHoaFeeMonthly] = useState("");
 
   const [error, setError] = useState("");
 
@@ -81,17 +70,6 @@ export default function AddPropertyModal({
     setPurchaseDate("");
     setCurrentValue("");
     setDownPayment("");
-    setMortgageAmount("");
-    setMortgageRate("");
-    setMortgageTermMonths("");
-    setMortgageStartDate("");
-    setMortgageLender("");
-    setMortgageAccountNumber("");
-    setPropertyTaxAnnual("");
-    setPropertyTaxDueMonths("");
-    setInsuranceAnnual("");
-    setInsuranceProvider("");
-    setHoaFeeMonthly("");
     setError("");
   }
 
@@ -117,17 +95,6 @@ export default function AddPropertyModal({
     if (purchaseDate) body.purchase_date = purchaseDate;
     if (currentValue) body.current_value = currentValue;
     if (downPayment) body.down_payment = downPayment;
-    if (mortgageAmount) body.mortgage_amount = mortgageAmount;
-    if (mortgageRate) body.mortgage_rate = mortgageRate;
-    if (mortgageTermMonths) body.mortgage_term_months = mortgageTermMonths;
-    if (mortgageStartDate) body.mortgage_start_date = mortgageStartDate;
-    if (mortgageLender.trim()) body.mortgage_lender = mortgageLender.trim();
-    if (mortgageAccountNumber.trim()) body.mortgage_account_number = mortgageAccountNumber.trim();
-    if (propertyTaxAnnual) body.property_tax_annual = propertyTaxAnnual;
-    if (propertyTaxDueMonths.trim()) body.property_tax_due_months = propertyTaxDueMonths.trim();
-    if (insuranceAnnual) body.insurance_annual = insuranceAnnual;
-    if (insuranceProvider.trim()) body.insurance_provider = insuranceProvider.trim();
-    if (hoaFeeMonthly) body.hoa_fee_monthly = hoaFeeMonthly;
 
     createMutation.mutate(body);
   };
@@ -242,102 +209,11 @@ export default function AddPropertyModal({
               />
             </div>
 
-            {/* Mortgage */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Input
-                label="Mortgage Amount"
-                type="text"
-                inputMode="decimal"
-                value={mortgageAmount}
-                onChange={(e) => setMortgageAmount(e.target.value)}
-                placeholder="$"
-              />
-              <Input
-                label="Mortgage Rate (%)"
-                type="text"
-                inputMode="decimal"
-                value={mortgageRate}
-                onChange={(e) => setMortgageRate(e.target.value)}
-                placeholder="e.g. 6.5"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Input
-                label="Mortgage Term (months)"
-                type="text"
-                inputMode="numeric"
-                value={mortgageTermMonths}
-                onChange={(e) => setMortgageTermMonths(e.target.value)}
-                placeholder="e.g. 360"
-              />
-              <Input
-                label="Mortgage Start Date"
-                type="date"
-                value={mortgageStartDate}
-                onChange={(e) => setMortgageStartDate(e.target.value)}
-              />
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Input
-                label="Mortgage Lender"
-                value={mortgageLender}
-                onChange={(e) => setMortgageLender(e.target.value)}
-                placeholder="e.g. Wells Fargo"
-              />
-              <Input
-                label="Mortgage Account #"
-                value={mortgageAccountNumber}
-                onChange={(e) => setMortgageAccountNumber(e.target.value)}
-              />
-            </div>
-
-            {/* Property tax */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Input
-                label="Property Tax (annual)"
-                type="text"
-                inputMode="decimal"
-                value={propertyTaxAnnual}
-                onChange={(e) => setPropertyTaxAnnual(e.target.value)}
-                placeholder="$"
-              />
-              <Input
-                label="Property Tax Due Months"
-                value={propertyTaxDueMonths}
-                onChange={(e) => setPropertyTaxDueMonths(e.target.value)}
-                placeholder="e.g. Jan, Jul"
-              />
-            </div>
-
-            {/* Insurance */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Input
-                label="Insurance (annual)"
-                type="text"
-                inputMode="decimal"
-                value={insuranceAnnual}
-                onChange={(e) => setInsuranceAnnual(e.target.value)}
-                placeholder="$"
-              />
-              <Input
-                label="Insurance Provider"
-                value={insuranceProvider}
-                onChange={(e) => setInsuranceProvider(e.target.value)}
-                placeholder="e.g. State Farm"
-              />
-            </div>
-
-            {/* HOA */}
-            <Input
-              label="HOA Fee (monthly)"
-              type="text"
-              inputMode="decimal"
-              value={hoaFeeMonthly}
-              onChange={(e) => setHoaFeeMonthly(e.target.value)}
-              placeholder="$"
-            />
+            {/* The mortgage, property tax, insurance and HOA are loans and
+                bills linked to the property (#4706): add them from its page. */}
+            <p className="text-xs text-ink-3">
+              Add the mortgage, property tax, insurance and HOA as loans and bills from the property&apos;s page once it&apos;s created.
+            </p>
           </div>
         </details>
 
