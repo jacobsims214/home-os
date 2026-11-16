@@ -428,3 +428,225 @@ func TestProcess(t *testing.T) {
 		}
 	})
 }
+
+// --- Role policy (#4872, code review #4499 Significant #2) ---
+
+// addCalendar inserts a calendar of the given type (family, bills,
+// maintenance, vehicles, ...) in the fixture's household.
+func (f fixture) addCalendar(t *testing.T, name, typ string) string {
+	t.Helper()
+	var id string
+	if err := f.pool.QueryRow(context.Background(),
+		`INSERT INTO calendars (household_id, name, type, caldav_uid)
+		 VALUES ($1, $2, $3::calendar_type, gen_random_uuid()::text) RETURNING id::text`,
+		f.hh, name, typ).Scan(&id); err != nil {
+		t.Fatalf("calendar %s: %v", name, err)
+	}
+	return id
+}
+
+// addObjectOn inserts a calendar object with stored iCalendar text on
+// calendarID and returns its id.
+func (f fixture) addObjectOn(t *testing.T, calendarID, uid, raw string) string {
+	t.Helper()
+	var id string
+	if err := f.pool.QueryRow(context.Background(),
+		`INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, ical_raw)
+		 VALUES ($1, $2, '{}', 'e', $3) RETURNING id::text`,
+		calendarID, uid, raw).Scan(&id); err != nil {
+		t.Fatalf("calendar object %s: %v", uid, err)
+	}
+	return id
+}
+
+// addSeat inserts a user and their membership in the fixture's household with
+// role, linked to the vendors row vendorID when that is not empty.
+func (f fixture) addSeat(t *testing.T, role, vendorID string) string {
+	t.Helper()
+	ctx := context.Background()
+	var uid string
+	if err := f.pool.QueryRow(ctx,
+		`INSERT INTO users (email, name, password_hash) VALUES ($1, 'm', 'x') RETURNING id::text`,
+		uuid.NewString()+"@example.com").Scan(&uid); err != nil {
+		t.Fatalf("user (%s): %v", role, err)
+	}
+	var vendor any // NULL unless the member is linked to a vendors row
+	if vendorID != "" {
+		vendor = vendorID
+	}
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO memberships (household_id, user_id, role, vendor_id)
+		 VALUES ($1, $2, $3::membership_role, $4::uuid)`, f.hh, uid, role, vendor); err != nil {
+		t.Fatalf("membership (%s): %v", role, err)
+	}
+	return uid
+}
+
+// markEvent sets the columns that make an event a mirror: event_type (which
+// candidatesSQL reads) and entity_type/entity_id (which the role policy's
+// objectKindSQL reads).
+func (f fixture) markEvent(t *testing.T, objectID, eventType, entityType, entityID string) {
+	t.Helper()
+	if _, err := f.pool.Exec(context.Background(),
+		`UPDATE calendar_objects SET event_type = $2, entity_type = $3::entity_kind, entity_id = $4::uuid
+		  WHERE id = $1`, objectID, eventType, entityType, entityID); err != nil {
+		t.Fatalf("mark event %s as %s/%s: %v", objectID, eventType, entityType, err)
+	}
+}
+
+// vevent builds a VEVENT with one DISPLAY alarm.
+func vevent(uid, summary, dtstart, dtend, trigger string) []string {
+	return []string{
+		"BEGIN:VEVENT", "UID:" + uid, "DTSTAMP:20261101T000000Z", "SUMMARY:" + summary,
+		dtstart, dtend,
+		"BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:Reminder", "TRIGGER:" + trigger, "END:VALARM",
+		"END:VEVENT",
+	}
+}
+
+// TestProcessFollowsRolePolicy is the regression test for #4872 (code review
+// #4499, Significant #2): insertSQL used to write a calendar_alarm for every
+// memberships row, so a housesitter was told ("Electric due", "Fix the
+// boiler") about events the role policy hides from them on every other read
+// path (CalDAV #4718, API #4807, MCP #4717), and a vendor login heard about
+// jobs that are not theirs (#4799). The alarm job must notify only the
+// members whose role may see the event, and must still notify everyone who
+// may.
+func TestProcessFollowsRolePolicy(t *testing.T) {
+	pool := newMigratedPool(t)
+	ctx := context.Background()
+	f := newFixture(t, pool, "America/New_York", 0)
+
+	billsCal := f.addCalendar(t, "Bills", "bills")
+	maintCal := f.addCalendar(t, "Maintenance", "maintenance")
+
+	vendor := func(name string) string {
+		t.Helper()
+		var id string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO vendors (household_id, name) VALUES ($1, $2) RETURNING id::text`,
+			f.hh, name).Scan(&id); err != nil {
+			t.Fatalf("vendor %s: %v", name, err)
+		}
+		return id
+	}
+	vendorA, vendorB := vendor("Ace Plumbing"), vendor("Bee Electric")
+	job := func(name, vendorID string) string {
+		t.Helper()
+		var id string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO maintenance_tasks (household_id, name, due_date, vendor_id)
+			 VALUES ($1, $2, '2026-11-18', $3) RETURNING id::text`,
+			f.hh, name, vendorID).Scan(&id); err != nil {
+			t.Fatalf("maintenance task %s: %v", name, err)
+		}
+		return id
+	}
+	ownJob, otherJob := job("Fix the boiler", vendorA), job("Rewire the garage", vendorB)
+	var billID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO bills (household_id, name, amount) VALUES ($1, 'Electric', 128.40) RETURNING id::text`,
+		f.hh).Scan(&billID); err != nil {
+		t.Fatalf("bill: %v", err)
+	}
+
+	owner := f.addSeat(t, "owner", "")
+	member := f.addSeat(t, "family_member", "")
+	viewer := f.addSeat(t, "viewer", "")
+	sitter := f.addSeat(t, "housesitter", "")
+	plumber := f.addSeat(t, "vendor", vendorA)
+	electrician := f.addSeat(t, "vendor", vendorB)
+	who := map[string]string{
+		owner: "owner", member: "family_member", viewer: "viewer", sitter: "housesitter",
+		plumber: "vendor-own", electrician: "vendor-other",
+	}
+
+	// One instant for every alarm, so one Process covers them all:
+	// 2026-11-17T14:00Z is 09:00 EST. A timed event's -PT30M alarm fires 30
+	// minutes before a 09:30 start; an all-day event's alarm is relative to
+	// midnight, the way the maintenance sync and the bill mirror write theirs
+	// (-PT15H and -P2DT15H both land at 09:00 on 2026-11-17).
+	now := mustTime(t, "2026-11-17T14:00:00Z")
+	timed := func(uid, summary string) string {
+		return ics(vevent(uid, summary,
+			"DTSTART;TZID=America/New_York:20261117T093000",
+			"DTEND;TZID=America/New_York:20261117T103000", "-PT30M")...)
+	}
+	allDay := func(uid, summary, day, trigger string) string {
+		return ics(vevent(uid, summary, "DTSTART;VALUE=DATE:"+day, "DTEND;VALUE=DATE:"+day, trigger)...)
+	}
+
+	// An ordinary family event: every role that may read the Family calendar
+	// keeps its reminder, the housesitter included.
+	f.addObjectOn(t, f.calendar, "family-dentist", timed("family-dentist", "Dentist"))
+
+	// A bill's mirror event (event_type 'bill') is bill_due's job (#4724) and
+	// produced no alarm before this fix either; it must stay that way.
+	mirror := f.addObjectOn(t, billsCal, "bill-mirror", allDay("bill-mirror", "Electric due", "20261120", "-P2DT15H"))
+	f.markEvent(t, mirror, "bill", "bill", billID)
+
+	// A person's event tied to a bill: event_type stays 'custom', so
+	// candidatesSQL keeps it, but the role policy reads it as a bill.
+	linked := f.addObjectOn(t, f.calendar, "bill-linked", timed("bill-linked", "Electric due"))
+	f.markEvent(t, linked, "custom", "bill", billID)
+
+	// A maintenance task's event on the Family calendar (where the API's
+	// maintenance sync falls back when the family has no Maintenance one):
+	// family roles and the viewer, no housesitter and no vendor.
+	onFamily := f.addObjectOn(t, f.calendar, "maintenance-family", allDay("maintenance-family", "Fix the boiler", "20261118", "-PT15H"))
+	f.markEvent(t, onFamily, "maintenance", "maintenance_task", ownJob)
+
+	// The same kind of event on the Maintenance calendar: a linked vendor is
+	// told about its own job only.
+	own := f.addObjectOn(t, maintCal, "maintenance-own-job", allDay("maintenance-own-job", "Fix the boiler", "20261118", "-PT15H"))
+	f.markEvent(t, own, "maintenance", "maintenance_task", ownJob)
+	other := f.addObjectOn(t, maintCal, "maintenance-other-job", allDay("maintenance-other-job", "Rewire the garage", "20261118", "-PT15H"))
+	f.markEvent(t, other, "maintenance", "maintenance_task", otherJob)
+
+	want := map[string][]string{
+		"family-dentist":        {"family_member", "housesitter", "owner", "viewer"},
+		"bill-linked":           {"family_member", "owner", "viewer"},
+		"maintenance-family":    {"family_member", "owner", "viewer"},
+		"maintenance-own-job":   {"family_member", "owner", "vendor-own", "viewer"},
+		"maintenance-other-job": {"family_member", "owner", "vendor-other", "viewer"},
+	}
+	total := 0
+	for _, w := range want {
+		total += len(w)
+	}
+	if n := process(t, New(pool), now); n != total {
+		t.Errorf("Process inserted %d notifications, want %d (one per member who may see the event)", n, total)
+	}
+
+	got := map[string][]string{}
+	rows, err := pool.Query(ctx,
+		`SELECT co.uid, n.user_id::text
+		   FROM notifications n
+		   JOIN calendar_objects co ON co.id = n.entity_id
+		  WHERE n.household_id = $1 AND n.type = 'calendar_alarm'`, f.hh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var uid, user string
+		if err := rows.Scan(&uid, &user); err != nil {
+			t.Fatal(err)
+		}
+		got[uid] = append(got[uid], who[user])
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, uid := range []string{"family-dentist", "bill-linked", "maintenance-family", "maintenance-own-job", "maintenance-other-job", "bill-mirror"} {
+		if _, ok := want[uid]; !ok && len(got[uid]) > 0 {
+			t.Errorf("%s: unexpected alarm notifications to %v", uid, got[uid])
+		}
+	}
+	for uid, w := range want {
+		sort.Strings(w)
+		sort.Strings(got[uid])
+		if strings.Join(got[uid], ",") != strings.Join(w, ",") {
+			t.Errorf("%s: notified %v, want %v", uid, got[uid], w)
+		}
+	}
+}
