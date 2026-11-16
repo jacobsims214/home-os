@@ -42,6 +42,13 @@ data:
     oauth2:
       skipApprovalScreen: true
       alwaysShowLoginScreen: false
+      # Every Home OS client is public (no client secret), so PKCE is what stops a
+      # stolen authorization code from being redeemed. Enforce it and refuse the
+      # weaker "plain" method: Dex otherwise accepts an authorize request that
+      # carries no challenge at all (see KB architecture/ui-login-pkce.md).
+      pkce:
+        enforce: true
+        codeChallengeMethodsSupported: ["S256"]
     
     staticClients:
     - id: home-os-ui
