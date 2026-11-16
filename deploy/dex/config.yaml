@@ -25,6 +25,14 @@ grpc:
 oauth2:
   skipApprovalScreen: true
   alwaysShowLoginScreen: false
+  # Same enforcement as the chart (#694). Keep this in step with
+  # deploy/helm/home-os/templates/dex/configmap.yaml: the UI and MCP clients
+  # both send S256, so a developer build should reject a no-challenge or
+  # "plain" authorize request exactly as production does. Only enforced by
+  # Dex >= v2.46.0, which is what docker-compose.yml pins.
+  pkce:
+    enforce: true
+    codeChallengeMethodsSupported: ["S256"]
 
 staticClients:
   # Public client: no secret, the UI uses PKCE (S256).

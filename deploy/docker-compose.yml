@@ -82,7 +82,9 @@ services:
   # ──────────────────────────────────────────────────────────────
 
   home-os-dex:
-    image: ghcr.io/dexidp/dex:v2.42.0
+    # Same pin as the Helm chart (dex.image). Must be >= v2.46.0 or the
+    # oauth2.pkce block is dropped and Dex enforces nothing (#694).
+    image: ghcr.io/dexidp/dex:v2.46.1
     restart: unless-stopped
     command: ["dex", "serve", "/etc/dex/config.yaml"]
     volumes:

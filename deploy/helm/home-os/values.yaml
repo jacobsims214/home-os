@@ -258,7 +258,26 @@ dex:
     - "http://127.0.0.1:19876/mcp/oauth/callback"
   replicas: 1
   # Pinned. The image runs as uid 1001.
-  image: ghcr.io/dexidp/dex:v2.42.0
+  #
+  # Keep this at >= v2.46.0. The `oauth2.pkce` block in
+  # templates/dex/configmap.yaml only exists from v2.46.0 (dexidp/dex#4638);
+  # older images drop the unknown key silently and enforce nothing (#694).
+  # v2.46.1 is the patch release of that line.
+  #
+  # Upgrading across this pin needs no config or storage change on our side:
+  #   - Storage: Dex applies its own SQL migrations at startup. v2.42.0 ->
+  #     v2.46.1 adds columns with defaults plus the auth_session and
+  #     user_identity tables (auth sessions and MFA sit behind
+  #     DEX_SESSIONS_ENABLED and stay off). Nothing existing is rewritten, so
+  #     passwords, clients and signing keys survive.
+  #   - Signer: leave `signer` unset. v2.46 falls back to the local signer keyed
+  #     off expiry.signingKeys (still 6h when unset), RS256, with the same
+  #     `keys` table layout as v2.42, so the existing signing key keeps
+  #     validating already-issued tokens.
+  #   - oauth2 / staticClients / expiry: every field we render still exists and
+  #     keeps its meaning; nothing we set was removed or renamed.
+  # See KB architecture/dex-image-and-pkce.md for the audit behind this.
+  image: ghcr.io/dexidp/dex:v2.46.1
   port: 5556
   grpcPort: 5557
   # Ingress NetworkPolicy on the Dex pods (#4682). The gRPC admin API on grpcPort
