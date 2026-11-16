@@ -33,7 +33,7 @@ var wantTools = []string{
 	"calendar_create", "calendar_find", "calendar_find_free_time",
 	"contact_create", "contact_delete", "contact_find", "contact_update",
 	"credential_find", "credential_reveal",
-	"document_find", "document_get", "document_upload",
+	"document_delete", "document_find", "document_get", "document_update", "document_upload",
 	"event_create", "event_delete", "event_find", "event_update",
 	"family_overview", "family_update",
 	"guide_create", "guide_delete", "guide_find", "guide_get", "guide_update",

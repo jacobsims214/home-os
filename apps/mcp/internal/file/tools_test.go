@@ -51,6 +51,11 @@ type wireDoc struct {
 		HasMore       bool   `json:"has_more"`
 		NextOffset    *int   `json:"next_offset"`
 	} `json:"text"`
+	Links []struct {
+		AboutType string    `json:"about_type"`
+		AboutID   uuid.UUID `json:"about_id"`
+		AboutName *string   `json:"about_name"`
+	} `json:"links"`
 	CreatedLocalDate string `json:"created_local_date"`
 	CreatedWeekday   string `json:"created_weekday"`
 	Duplicate        bool   `json:"duplicate"`
@@ -218,6 +223,7 @@ func runErrCases[T any](t *testing.T, c caller[T], cases []errCase) {
 func TestToolDefinitions(t *testing.T) {
 	type class struct{ readOnly, destructive, idempotent bool }
 	classR, classC := class{true, false, true}, class{false, false, false}
+	classU, classX := class{false, false, true}, class{false, true, true}
 	tests := []struct {
 		build    func() (string, mcp.Tool, handlerFunc)
 		name     string
@@ -226,13 +232,18 @@ func TestToolDefinitions(t *testing.T) {
 		optional []string
 		class    class
 	}{
-		{func() (string, mcp.Tool, handlerFunc) { return NewDocumentFindTool(nil) }, "document_find", "Find documents",
+		{func() (string, mcp.Tool, handlerFunc) { return NewDocumentFindTool(nil, nil) }, "document_find", "Find documents",
 			nil, []string{"query", "category", "person_id", "about_type", "about_id", "from", "to", "tag", "limit", "cursor"}, classR},
 		{func() (string, mcp.Tool, handlerFunc) { return NewDocumentGetTool(nil) }, "document_get", "Get document",
 			[]string{"document_id"}, []string{"text_offset"}, classR},
-		{func() (string, mcp.Tool, handlerFunc) { return NewDocumentUploadTool(nil) }, "document_upload", "Upload document",
+		{func() (string, mcp.Tool, handlerFunc) { return NewDocumentUploadTool(nil, nil) }, "document_upload", "Upload document",
 			[]string{"name"}, []string{"content_base64", "content_type", "text", "title", "category", "tags", "person_id",
 				"about_type", "about_id", "doc_date", "expires_on", "description"}, classC},
+		{func() (string, mcp.Tool, handlerFunc) { return NewDocumentUpdateTool(nil, nil) }, "document_update", "Update document",
+			[]string{"document_id"}, []string{"title", "category", "tags", "person_id", "doc_date", "expires_on", "description",
+				"about_type", "about_id", "add_links", "remove_links"}, classU},
+		{func() (string, mcp.Tool, handlerFunc) { return NewDocumentDeleteTool(nil, nil) }, "document_delete", "Delete document",
+			[]string{"document_id"}, nil, classX},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -354,7 +365,7 @@ func TestDocumentUpload(t *testing.T) {
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	_, other := testutil.SeedHousehold(t, pool)
 
-	name, tool, h := NewDocumentUploadTool(pool)
+	name, tool, h := NewDocumentUploadTool(pool, nil)
 	up := newCaller[wireDoc](t, name, tool, h)
 
 	vehicleID := seed(t, pool, `INSERT INTO vehicles (household_id, year, make, model) VALUES ($1, 2022, 'Honda', 'Odyssey') RETURNING id`, hh.HouseholdID)
@@ -468,9 +479,9 @@ func TestDocumentFindAndGet(t *testing.T) {
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	otherCtx, _ := testutil.SeedHousehold(t, pool)
 
-	upName, upTool, upH := NewDocumentUploadTool(pool)
+	upName, upTool, upH := NewDocumentUploadTool(pool, nil)
 	up := newCaller[wireDoc](t, upName, upTool, upH)
-	findName, findTool, findH := NewDocumentFindTool(pool)
+	findName, findTool, findH := NewDocumentFindTool(pool, nil)
 	find := newCaller[wireItem](t, findName, findTool, findH)
 	getName, getTool, getH := NewDocumentGetTool(pool)
 	get := newCaller[wireDoc](t, getName, getTool, getH)

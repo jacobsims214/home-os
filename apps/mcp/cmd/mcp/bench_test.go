@@ -110,8 +110,12 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 		}},
 		{"credential_find", static(map[string]any{"query": "wi-fi"})},
 		{"credential_reveal", static(map[string]any{"credential_id": f.Credential})},
+		{"document_delete", func(i int) map[string]any { return map[string]any{"document_id": pick(f.DisposableDocuments, i)} }},
 		{"document_find", static(map[string]any{"query": "insurance"})},
 		{"document_get", static(map[string]any{"document_id": f.Document})},
+		{"document_update", func(i int) map[string]any {
+			return map[string]any{"document_id": f.Document, "title": fmt.Sprintf("Bench policy %d", i), "tags": []string{"bench"}}
+		}},
 		{"document_upload", func(i int) map[string]any {
 			return map[string]any{"name": fmt.Sprintf("bench-%d.txt", i), "text": "Bench uploaded document " + strconv.Itoa(i), "category": "receipt"}
 		}},
@@ -253,7 +257,8 @@ func TestMCPLatency(t *testing.T) {
 		"disposable notes": fx.DisposableNotes, "disposable events": fx.DisposableEvents,
 		"disposable list items": fx.DisposableListItems, "disposable people": fx.DisposablePeople,
 		"disposable properties": fx.DisposableProperties, "disposable rooms": fx.DisposableRooms, "disposable vehicles": fx.DisposableVehicles,
-		"payable bills": fx.PayableBills, "pending tasks": fx.PendingTasks, "unread notifications": fx.UnreadNotifications,
+		"disposable documents": fx.DisposableDocuments,
+		"payable bills":        fx.PayableBills, "pending tasks": fx.PendingTasks, "unread notifications": fx.UnreadNotifications,
 	} {
 		if len(ids) < calls {
 			t.Fatalf("seed has %d %s, need %d (lower BENCH_N)", len(ids), name, calls)

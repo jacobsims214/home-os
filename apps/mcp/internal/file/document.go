@@ -1,7 +1,8 @@
 // Package file provides the MCP document tools of catalog v2 (KB
 // architecture/mcp-tool-catalog.md, "document: the private document hub"):
-// document_find, document_get and document_upload. document_update and
-// document_delete arrive with Stage 2 (#4477), together with semantic search.
+// document_find, document_get, document_upload, document_update and
+// document_delete (#4477 added the last two, hybrid semantic search and the
+// role rules of access.go).
 //
 // A document is a row of the files table (migration 023) with its bytes in
 // file_blobs, plus the hub metadata of migration 048 (title, category,
@@ -10,9 +11,14 @@
 // the same family; the DB rejects references to other families (038/039).
 // The worker extracts text into files.extracted_text and keeps retry state in
 // an ocr_error prefix ("[retry k/n next=...]", #4419); these tools turn that
-// into a clean text_status and never show the raw prefix. The worker also
-// indexes documents for semantic search (#4444), so this package does no
-// indexing of its own.
+// into a clean text_status and never show the raw prefix. The worker indexes
+// the extracted text into the files collection (#4444); this package keeps
+// each file's metadata document in household_search up to date on upload,
+// update and delete, exactly like the API (#4478), see typesense.go.
+//
+// Extra links (document_update add_links/remove_links) are document_links
+// rows of link_type 'file' (link_id = the file id) owned by the linked row;
+// the primary "about" stays files.entity_type/entity_id.
 //
 // Every result is built with internal/respond, every tool sets all four
 // annotation hints and declares an outputSchema with string ids. Extracted
@@ -35,7 +41,6 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/respond"
-	"home-os/mcp/internal/server"
 )
 
 // toolHandler is the signature every document tool handler has.
@@ -143,6 +148,7 @@ const documentColumns = `f.id, f.household_id, f.name, f.title, f.category, f.co
 		WHEN 'list'             THEN (SELECT x.name FROM lists x WHERE x.id = f.entity_id)
 		WHEN 'recipe'           THEN (SELECT x.title FROM recipes x WHERE x.id = f.entity_id)
 		WHEN 'guide'            THEN (SELECT x.title FROM guides x WHERE x.id = f.entity_id)
+		WHEN 'secret'           THEN (SELECT x.name FROM secrets x WHERE x.id = f.entity_id)
 	END`
 
 // documentFrom is the FROM clause documentColumns needs.
@@ -202,6 +208,85 @@ func loadDocument(ctx context.Context, q querier, id, householdID uuid.UUID) (do
 		id, householdID))
 }
 
+// loadVisible loads one document the caller may see: pgx.ErrNoRows when it
+// is missing, another family's, or attached to a credential and the caller
+// may not see those. forUpdate locks the row (inside a transaction).
+func loadVisible(ctx context.Context, q querier, c member, id uuid.UUID, forUpdate bool) (docRow, error) {
+	sql := `SELECT ` + documentColumns + documentFrom + ` WHERE f.id = $1 AND f.household_id = $2 AND ` + secretFileWhere(3)
+	if forUpdate {
+		sql += ` FOR UPDATE OF f`
+	}
+	return scanDocument(q.QueryRow(ctx, sql, id, c.householdID, c.seesSecretFiles()))
+}
+
+// docLink is one extra link of a document (a document_links row).
+type docLink struct {
+	AboutType string  `json:"about_type" jsonschema_description:"What the link points at: vehicle, property, ..."`
+	AboutID   string  `json:"about_id"`
+	AboutName *string `json:"about_name"`
+}
+
+// linkNameSQL names the linked row of a document_links row aliased l.
+const linkNameSQL = `CASE l.entity_type::text
+		WHEN 'household'        THEN (SELECT x.name FROM households x WHERE x.id = l.entity_id)
+		WHEN 'property'         THEN (SELECT x.name FROM properties x WHERE x.id = l.entity_id)
+		WHEN 'room'             THEN (SELECT x.name FROM rooms x WHERE x.id = l.entity_id)
+		WHEN 'asset'            THEN (SELECT x.name FROM assets x WHERE x.id = l.entity_id)
+		WHEN 'vehicle'          THEN (SELECT NULLIF(concat_ws(' ', x.year::text, x.make, x.model), '') FROM vehicles x WHERE x.id = l.entity_id)
+		WHEN 'pet'              THEN (SELECT x.name FROM pets x WHERE x.id = l.entity_id)
+		WHEN 'vendor'           THEN (SELECT x.name FROM vendors x WHERE x.id = l.entity_id)
+		WHEN 'bill'             THEN (SELECT x.name FROM bills x WHERE x.id = l.entity_id)
+		WHEN 'loan'             THEN (SELECT x.name FROM loans x WHERE x.id = l.entity_id)
+		WHEN 'maintenance_task' THEN (SELECT x.name FROM maintenance_tasks x WHERE x.id = l.entity_id)
+		WHEN 'person'           THEN (SELECT x.display_name FROM people x WHERE x.id = l.entity_id)
+		WHEN 'list'             THEN (SELECT x.name FROM lists x WHERE x.id = l.entity_id)
+		WHEN 'recipe'           THEN (SELECT x.title FROM recipes x WHERE x.id = l.entity_id)
+		WHEN 'guide'            THEN (SELECT x.title FROM guides x WHERE x.id = l.entity_id)
+		WHEN 'secret'           THEN (SELECT x.name FROM secrets x WHERE x.id = l.entity_id)
+	END`
+
+// loadLinks returns a document's extra links, oldest first. Links from a
+// credential are only listed for callers who may see credentials (by name,
+// never the value).
+func loadLinks(ctx context.Context, q querier, c member, fileID uuid.UUID) ([]docLink, error) {
+	rows, err := q.Query(ctx,
+		`SELECT l.entity_type::text, l.entity_id, `+linkNameSQL+`
+		   FROM document_links l
+		  WHERE l.household_id = $1 AND l.link_type = 'file' AND l.link_id = $2::text
+		    AND ($3::boolean OR l.entity_type::text <> 'secret')
+		  ORDER BY l.created_at, l.id`, c.householdID, fileID.String(), c.seesSecretFiles())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []docLink{}
+	for rows.Next() {
+		var kind string
+		var id uuid.UUID
+		var name *string
+		if err := rows.Scan(&kind, &id, &name); err != nil {
+			return nil, err
+		}
+		out = append(out, docLink{AboutType: catalogKind(kind), AboutID: id.String(), AboutName: name})
+	}
+	return out, rows.Err()
+}
+
+// catalogKind maps a DB entity_kind to its catalog about_type name. A
+// credential (secret) is reported as "credential"; kinds outside the catalog
+// come back raw.
+func catalogKind(kind string) string {
+	if kind == "secret" {
+		return "credential"
+	}
+	for about, k := range aboutToDB {
+		if k == kind {
+			return about
+		}
+	}
+	return kind
+}
+
 // displayTitle is the title people see: the title, or the file name.
 func (r docRow) displayTitle() string {
 	if r.Title != nil && strings.TrimSpace(*r.Title) != "" {
@@ -216,13 +301,7 @@ func (r docRow) about() (string, *string) {
 	if r.EntityType == nil || r.EntityID == nil {
 		return "family", nil
 	}
-	t := *r.EntityType
-	for about, kind := range aboutToDB {
-		if kind == t {
-			t = about
-			break
-		}
-	}
+	t := catalogKind(*r.EntityType)
 	if t == "family" {
 		return t, nil
 	}
@@ -356,6 +435,7 @@ type documentData struct {
 	NextRetryAt      *string   `json:"next_retry_at" jsonschema_description:"Earliest next attempt, family time (retrying only)."`
 	TextChars        int       `json:"text_chars" jsonschema_description:"Length of the whole extracted text in characters."`
 	Text             *textPage `json:"text,omitempty" jsonschema_description:"document_get only: one page of the extracted text."`
+	Links            []docLink `json:"links" jsonschema_description:"Other things this document is also linked to (document_update add_links)."`
 	CreatedAt        time.Time `json:"created_at" jsonschema_description:"When it was uploaded."`
 	CreatedLocalDate string    `json:"created_local_date" jsonschema_description:"created_at as YYYY-MM-DD in the family timezone."`
 	CreatedWeekday   string    `json:"created_weekday" jsonschema_description:"Weekday of created_local_date, e.g. Thu."`
@@ -394,7 +474,7 @@ func (r docRow) data() documentData {
 		Tags:       nonNil(r.Tags),
 		TextStatus: ts.Status, TextNote: ts.Note, TextError: ts.Error,
 		RetryAttempt: ts.RetryAttempt, RetryMax: ts.RetryMax, NextRetryAt: ts.NextRetryAt,
-		TextChars: r.TextChars,
+		TextChars: r.TextChars, Links: []docLink{},
 		CreatedAt: r.CreatedAt, CreatedLocalDate: r.CreatedLocal, CreatedWeekday: r.CreatedWeekday,
 		UpdatedAt: r.UpdatedAt,
 	}
@@ -659,16 +739,6 @@ func resolvePerson(ctx context.Context, q querier, householdID uuid.UUID, ref st
 	return uuid.Nil, "", respond.Invalid("person_id",
 		fmt.Sprintf("%d people are named %q: %s.", len(found), ref, strings.Join(parts, ", ")),
 		"Pass the person_id of the one you mean.", example), nil
-}
-
-// householdOf reads the household id from the caller's claims.
-func householdOf(ctx context.Context) (uuid.UUID, bool) {
-	claims := server.ClaimsFromContext(ctx)
-	if claims == nil {
-		return uuid.Nil, false
-	}
-	id, err := uuid.Parse(claims.HouseholdID)
-	return id, err == nil
 }
 
 // notSignedIn is the result for calls without household claims.

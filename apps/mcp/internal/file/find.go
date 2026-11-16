@@ -3,6 +3,7 @@ package file
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -13,19 +14,28 @@ import (
 )
 
 // NewDocumentFindTool creates document_find (catalog v2, class R; replaces
-// list_files and search_files). Every param is optional. query is a
-// case-insensitive substring match over title, file name, description,
-// category, tags and extracted text (semantic search is S2 #4477). Results
-// whose title or file name matches come first, then the newest document
-// date. from/to filter on the document date (the upload day when a document
-// has none), both inclusive. Items carry a snippet, never the whole text.
+// list_files and search_files). Every param is optional.
+//
+// query finds documents by meaning and by words: with Typesense configured
+// it runs a hybrid (keyword + local embedding) search over the household's
+// document metadata and extracted text, filtered by household_id in
+// Typesense, and every hit is re-checked in Postgres (same household, the
+// role's visibility, and all the other filters). A case-insensitive
+// substring match over title, file name, description, category, tags and
+// text is merged in, so a document Typesense has not indexed yet is still
+// found, and it is the whole search when Typesense is off or failing.
+// Semantic hits come first in Typesense's order, then substring hits whose
+// title or file name matches, then the newest document date.
+//
+// from/to filter on the document date (the upload day when a document has
+// none), both inclusive. Items carry a snippet, never the whole text.
 // Paging: limit (default 25, max 100) and an opaque cursor that a truncated
 // result hands back as next_cursor.
-func NewDocumentFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
+func NewDocumentFindTool(pool *pgxpool.Pool, ts *Typesense) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("document_find",
-		mcp.WithDescription("Find documents by words in them (\"car insurance\"), category, person, what they're about, or date. Returns title, category, dates and a snippet; read one with document_get."),
+		mcp.WithDescription("Find documents by meaning (\"car insurance\"), category, person, what they're about, or date. Returns title, category, dates and a snippet; read one with document_get."),
 		mcp.WithString("query",
-			mcp.Description("Words to find in the title, file name, tags or text, e.g. insurance"),
+			mcp.Description("What you're looking for in plain words, e.g. car insurance"),
 		),
 		mcp.WithString("category",
 			mcp.Description("Only this kind of document, e.g. receipt"),
@@ -66,10 +76,11 @@ func NewDocumentFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		householdID, ok := householdOf(ctx)
-		if !ok {
-			return notSignedIn(), nil
+		c, bad := readerOf(ctx, pool, "document_find")
+		if bad != nil {
+			return bad, nil
 		}
+		householdID := c.householdID
 		args := req.GetArguments()
 		example := map[string]any{"query": "insurance", "category": "insurance"}
 
@@ -142,8 +153,18 @@ func NewDocumentFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 
 		pattern := ""
+		semantic := []uuid.UUID{}
 		if query != "" {
 			pattern = likePattern(query)
+			ids, err := ts.searchFileIDs(ctx, householdID.String(), query)
+			if err != nil {
+				slog.Warn("document_find: semantic search failed; matching words only", "error", err)
+			}
+			for _, raw := range ids {
+				if id, err := uuid.Parse(raw); err == nil {
+					semantic = append(semantic, id)
+				}
+			}
 		}
 
 		// Family documents may still have a NULL entity until 056, so
@@ -160,7 +181,7 @@ func NewDocumentFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			     ELSE COALESCE(NULLIF(btrim(f.description), ''), f.extracted_text) END AS src) s
 			 CROSS JOIN LATERAL (SELECT GREATEST(CASE WHEN $3::text <> '' THEN strpos(lower(s.src), lower($3::text)) ELSE 0 END - 60, 1) AS start) st
 			 WHERE f.household_id = $1
-			   AND ($2::text = '' OR (
+			   AND ($2::text = '' OR f.id = ANY($13::uuid[]) OR (
 			         COALESCE(f.title, '') ILIKE $2 ESCAPE '\' OR f.name ILIKE $2 ESCAPE '\'
 			      OR COALESCE(f.description, '') ILIKE $2 ESCAPE '\' OR f.category ILIKE $2 ESCAPE '\'
 			      OR array_to_string(COALESCE(f.tags, '{}'::text[]), ' ') ILIKE $2 ESCAPE '\'
@@ -173,12 +194,15 @@ func NewDocumentFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			   AND ($8::date IS NULL OR COALESCE(f.document_date, (f.created_at AT TIME ZONE h.timezone)::date) >= $8::date)
 			   AND ($9::date IS NULL OR COALESCE(f.document_date, (f.created_at AT TIME ZONE h.timezone)::date) <= $9::date)
 			   AND ($10::text = '' OR EXISTS (SELECT 1 FROM unnest(f.tags) t WHERE lower(t) = lower($10::text)))
+			   AND `+secretFileWhere(14)+`
 			 ORDER BY
+			   COALESCE(array_position($13::uuid[], f.id), 2147483647),
 			   CASE WHEN $2::text <> '' AND (COALESCE(f.title, '') ILIKE $2 ESCAPE '\' OR f.name ILIKE $2 ESCAPE '\') THEN 0 ELSE 1 END,
 			   COALESCE(f.document_date, (f.created_at AT TIME ZONE h.timezone)::date) DESC,
 			   f.created_at DESC, f.id
 			 LIMIT $11 OFFSET $12`,
 			householdID, pattern, query, category, personID, kind, aboutID, from, to, tag, limit, offset,
+			semantic, c.seesSecretFiles(),
 		)
 		if err != nil {
 			return respond.Failed("find documents", err), nil

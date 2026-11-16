@@ -246,6 +246,14 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 		`INSERT INTO vendors (household_id, name, trades) SELECT $1, '` + benchDisposablePrefix + ` contact ' || g, ARRAY['handyman'] FROM generate_series(1, %[1]d) g`,
 		// Guides with nothing attached, for guide_delete.
 		`INSERT INTO guides (household_id, title, body) SELECT $1, '` + benchDisposablePrefix + ` guide ' || g, 'x' FROM generate_series(1, %[1]d) g`,
+		// Documents with nothing linked, for document_delete (named zz- so
+		// the Document fixture, the first file by name, stays a scan).
+		`WITH b AS (
+			INSERT INTO file_blobs (data, size) SELECT convert_to('disposable ' || g, 'UTF8'), 12 FROM generate_series(1, %[1]d) g RETURNING id
+		), nb AS (SELECT id, (row_number() OVER ())::int AS g FROM b)
+		INSERT INTO files (household_id, blob_id, name, content_type, size, entity_type, entity_id, extracted_text, ocr_status, title)
+		SELECT $1, nb.id, 'zz-disposable-' || g || '.txt', 'text/plain', 12, 'household', $1, 'disposable ' || g, 'done',
+		       '` + benchDisposablePrefix + ` doc ' || g FROM nb`,
 		// Vehicles with nothing attached, for vehicle_delete.
 		`INSERT INTO vehicles (household_id, make, model) SELECT $1, 'Junker', '` + benchDisposablePrefix + ` car ' || g FROM generate_series(1, %[1]d) g`,
 		// People without a login and with nothing attached, for person_delete.
@@ -294,7 +302,7 @@ type benchFixtures struct {
 	// Rows each measured call of a write tool consumes, in order.
 	DisposableAssets, DisposableBills, DisposableLoans, DisposableTasks, DisposableNotes, DisposableEvents []string
 	DisposableListItems, DisposablePeople, DisposablePets, DisposableProperties, DisposableRooms           []string
-	DisposableVehicles, DisposableContacts, DisposableGuides                                               []string
+	DisposableVehicles, DisposableContacts, DisposableGuides, DisposableDocuments                          []string
 	PayableBills, PendingTasks, UnreadNotifications                                                        []string
 }
 
@@ -363,6 +371,7 @@ func loadFixtures(t testing.TB, pool *pgxpool.Pool, hh uuid.UUID) benchFixtures 
 		DisposableVehicles:   disp("vehicles", "model"),
 		DisposableContacts:   disp("vendors", "name"),
 		DisposableGuides:     disp("guides", "title"),
+		DisposableDocuments:  disp("files", "title"),
 		DisposableEvents: many(`SELECT co.id::text FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
 		                         WHERE c.household_id = $1 AND co.ical_data LIKE '%` + benchDisposablePrefix + ` event%' ORDER BY co.id`),
 		PayableBills: many(`SELECT id::text FROM bills WHERE household_id = $1 AND paid_date IS NULL AND frequency = 'monthly'

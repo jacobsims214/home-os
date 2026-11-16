@@ -37,7 +37,11 @@ var billWords = []string{"invoice", "bill", "statement", "amount due", "balance 
 // optional title, category, tags, person, about link, document date, expiry
 // and description. Text uploads are searchable at once (extracted_text is
 // the text itself); byte uploads are queued for the worker's text
-// extraction. The result echoes the metadata, never the bytes or the text.
+// extraction (the worker indexes the text of both kinds into the files
+// collection once ocr_status is done). The metadata document is upserted
+// into household_search right after the commit, so the new document is found
+// by meaning at once. The result echoes the metadata, never the bytes or the
+// text. Only the family roles may upload (access.go).
 //
 // Loop guard: the same bytes under the same name about the same thing, filed
 // in the last 10 minutes, come back with duplicate:true instead of a second
@@ -45,7 +49,7 @@ var billWords = []string{"invoice", "bill", "statement", "amount due", "balance 
 // advisory lock on (household, name) makes parallel repeats safe.
 //
 // issuer and amount (catalog) have no DB columns yet and are not params.
-func NewDocumentUploadTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
+func NewDocumentUploadTool(pool *pgxpool.Pool, ts *Typesense) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("document_upload",
 		mcp.WithDescription("File a document from base64 bytes or plain text (e.g. a pasted receipt), with title, category and what it's about. Text is extracted for search."),
 		mcp.WithString("name",
@@ -100,10 +104,11 @@ func NewDocumentUploadTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		householdID, ok := householdOf(ctx)
-		if !ok {
-			return notSignedIn(), nil
+		c, bad := writerOf(ctx, pool, "document_upload")
+		if bad != nil {
+			return bad, nil
 		}
+		householdID := c.householdID
 		args := req.GetArguments()
 		example := map[string]any{"name": "costco-receipt.txt", "text": "Costco 2026-03-01 Total $142.50", "category": "receipt"}
 
@@ -322,6 +327,7 @@ func NewDocumentUploadTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		if err != nil {
 			return respond.Failed("read back the document", err), nil
 		}
+		ts.indexDocument(ctx, r)
 		summary := fmt.Sprintf("Filed %s, %s.", r.describe(), humanSize(r.Size))
 		if hasText {
 			summary += " Its text is searchable now."

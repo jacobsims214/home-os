@@ -18,8 +18,9 @@ import (
 // one page of its extracted text: textPageSize characters from text_offset
 // (default 0). The text is never returned all at once; the result's
 // text.next_offset and next hint name the call for the following page. The
-// file's bytes are never returned. A document of another family is reported
-// as not found.
+// file's bytes are never returned. A document of another family, or one
+// attached to a credential when the caller may not see those (viewer), is
+// reported as not found; housesitters and vendors get no documents.
 func NewDocumentGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("document_get",
 		mcp.WithDescription("Read a document's details and its extracted text one page (4000 characters) at a time, starting at text_offset; never all at once."),
@@ -40,9 +41,9 @@ func NewDocumentGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		householdID, ok := householdOf(ctx)
-		if !ok {
-			return notSignedIn(), nil
+		c, bad := readerOf(ctx, pool, "document_get")
+		if bad != nil {
+			return bad, nil
 		}
 		args := req.GetArguments()
 		example := map[string]any{"document_id": exampleDocumentID}
@@ -67,8 +68,8 @@ func NewDocumentGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		var content string
 		r, err := scanDocument(pool.QueryRow(ctx,
 			`SELECT `+documentColumns+`, COALESCE(substr(f.extracted_text, $3 + 1, $4), '')`+documentFrom+`
-			 WHERE f.id = $1 AND f.household_id = $2`,
-			id, householdID, offset, textPageSize,
+			 WHERE f.id = $1 AND f.household_id = $2 AND `+secretFileWhere(5),
+			id, c.householdID, offset, textPageSize, c.seesSecretFiles(),
 		), &content)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return respond.NotFound("document", raw, "Call document_find to find the document_id."), nil
@@ -84,6 +85,9 @@ func NewDocumentGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 
 		d := r.data()
+		if d.Links, err = loadLinks(ctx, pool, c, r.ID); err != nil {
+			return respond.Failed("get the document", err), nil
+		}
 		returned := len([]rune(content))
 		page := &textPage{Content: content, Offset: offset, ReturnedChars: returned, TotalChars: r.TextChars}
 		if end := offset + returned; end < r.TextChars {
