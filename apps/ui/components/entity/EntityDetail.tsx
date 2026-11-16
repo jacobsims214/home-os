@@ -16,6 +16,7 @@ import { Card, Text, Group, Stack, Button, Modal, Alert, Skeleton, Box, Textarea
 import { notifications } from "@mantine/notifications";
 import { TextInput, Select } from "@/components/ui";
 import DetailPageLayout from "@/components/layout/DetailPageLayout";
+import { BOOLEAN_OPTIONS, booleanToOption, optionToBoolean } from "./boolean-field";
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -340,16 +341,20 @@ export default function EntityDetail({
         );
       case "boolean":
         return (
+          // #4728: the record holds a boolean, the Select strings; map both
+          // ways so the saved value shows and a choice is sent as a boolean.
+          // No deselect: an untouched unset value stays unset (not sent).
           <Select
             key={field.name}
             {...baseProps}
-            onChange={(value: string | null) =>
-              handleFormChange(field.name, value ?? "")
-            }
-            data={[
-              { value: "true", label: "Yes" },
-              { value: "false", label: "No" },
-            ]}
+            value={booleanToOption(formValues[field.name])}
+            placeholder="Not set"
+            allowDeselect={false}
+            onChange={(value: string | null) => {
+              const next = optionToBoolean(value);
+              if (next !== undefined) handleFormChange(field.name, next);
+            }}
+            data={BOOLEAN_OPTIONS}
           />
         );
       case "text":

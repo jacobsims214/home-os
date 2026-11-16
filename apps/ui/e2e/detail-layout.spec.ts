@@ -188,3 +188,68 @@ for (const colorScheme of ["light", "dark"] as const) {
     });
   });
 }
+
+/**
+ * #4728: yes/no fields (Auto-pay) keep their saved value in edit mode. The
+ * Select shows Yes / No / the placeholder for true / false / unset, saving
+ * untouched sends the same boolean (unset is not sent at all), and a choice
+ * is sent as a boolean, not the string "true" / "false".
+ */
+test.describe("boolean field round-trip (#4728)", () => {
+  async function editAutopay(page: Page, isAutopay: boolean | undefined) {
+    const { is_autopay: _a, ...rest } = BILL;
+    const bill = isAutopay === undefined ? rest : { ...rest, is_autopay: isAutopay };
+    const puts: Record<string, unknown>[] = [];
+    await page.route("**/bff/bills/b1", (route) => {
+      if (route.request().method() === "PUT") {
+        puts.push(route.request().postDataJSON());
+        return route.fulfill({ json: { data: bill } });
+      }
+      return route.fulfill({ json: { data: bill } });
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoDetail(page);
+    const main = page.locator("main");
+    await main.getByRole("button", { name: /^Actions for/ }).click();
+    await page.getByRole("menuitem", { name: "Edit" }).click();
+    const select = main.getByRole("textbox", { name: "Auto-pay" });
+    await expect(select).toBeVisible();
+    const save = async () => {
+      await main.getByRole("button", { name: "Save" }).click();
+      await expect.poll(() => puts.length).toBe(1);
+      return puts[0];
+    };
+    return { main, select, save };
+  }
+
+  for (const [label, value, shown] of [
+    ["true", true, "Yes"],
+    ["false", false, "No"],
+  ] as const) {
+    test(`${label}: shows ${shown}, saving untouched keeps ${label}`, async ({ loggedInPage: page }) => {
+      const { select, save } = await editAutopay(page, value);
+      await expect(select).toHaveValue(shown);
+      // Phone touch target (#4537).
+      expect((await select.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      const body = await save();
+      expect(body.is_autopay).toBe(value);
+    });
+  }
+
+  test("unset: shows the placeholder, saving untouched does not send it", async ({ loggedInPage: page }) => {
+    const { select, save } = await editAutopay(page, undefined);
+    await expect(select).toHaveValue("");
+    await expect(select).toHaveAttribute("placeholder", "Not set");
+    const body = await save();
+    expect(body).not.toHaveProperty("is_autopay");
+  });
+
+  test("changing Yes to No sends the boolean false", async ({ loggedInPage: page }) => {
+    const { select, save } = await editAutopay(page, true);
+    await select.click();
+    await page.getByRole("option", { name: "No" }).click();
+    await expect(select).toHaveValue("No");
+    const body = await save();
+    expect(body.is_autopay).toBe(false);
+  });
+});
