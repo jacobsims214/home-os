@@ -27,7 +27,7 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 // index on vendors.trades (043).
 func (r *Repo) List(ctx context.Context, householdID uuid.UUID, trade string) ([]*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, name, trades, specialty, phone, email, website, notes, created_at, updated_at
+		`SELECT id, household_id, name, trades, specialty, phone, email, website, address, notes, created_at, updated_at
 		 FROM vendors
 		 WHERE household_id = $1 AND ($2::text = '' OR trades @> ARRAY[$2::text])
 		 ORDER BY created_at DESC`,
@@ -49,7 +49,7 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID, trade string) ([
 // Returns nil if not found.
 func (r *Repo) Get(ctx context.Context, householdID, id uuid.UUID) (*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, name, trades, specialty, phone, email, website, notes, created_at, updated_at
+		`SELECT id, household_id, name, trades, specialty, phone, email, website, address, notes, created_at, updated_at
 		 FROM vendors WHERE id = $1 AND household_id = $2`,
 		id, householdID,
 	)
@@ -71,10 +71,10 @@ func (r *Repo) Get(ctx context.Context, householdID, id uuid.UUID) (*Vendor, err
 // Create inserts a new vendor for the given household.
 func (r *Repo) Create(ctx context.Context, householdID uuid.UUID, v *Vendor) (*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
-		`INSERT INTO vendors (household_id, name, trades, specialty, phone, email, website, notes)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id, household_id, name, trades, specialty, phone, email, website, notes, created_at, updated_at`,
-		householdID, v.Name, nonNil(v.Trades), v.Specialty, v.Phone, v.Email, v.Website, v.Notes,
+		`INSERT INTO vendors (household_id, name, trades, specialty, phone, email, website, address, notes)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 RETURNING id, household_id, name, trades, specialty, phone, email, website, address, notes, created_at, updated_at`,
+		householdID, v.Name, nonNil(v.Trades), v.Specialty, v.Phone, v.Email, v.Website, v.Address, v.Notes,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create vendor: %w", err)
@@ -91,17 +91,20 @@ func (r *Repo) Create(ctx context.Context, householdID uuid.UUID, v *Vendor) (*V
 // Update modifies an existing vendor scoped to the given household.
 // A nil v.Trades keeps the stored trades (clients that predate trades send
 // none); an empty, non-nil slice clears them.
+// keepAddress keeps the stored address instead of writing v.Address
+// (clients that predate the address column, 065, do not send it).
 // Returns nil if the vendor was not found.
-func (r *Repo) Update(ctx context.Context, householdID, id uuid.UUID, v *Vendor) (*Vendor, error) {
+func (r *Repo) Update(ctx context.Context, householdID, id uuid.UUID, v *Vendor, keepAddress bool) (*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
 		`UPDATE vendors
 		 SET name = $1, specialty = $2, phone = $3, email = $4, website = $5, notes = $6,
 		     trades = COALESCE($9::text[], trades),
+		     address = CASE WHEN $10::bool THEN address ELSE $11 END,
 		     updated_at = NOW()
 		 WHERE id = $7 AND household_id = $8
-		 RETURNING id, household_id, name, trades, specialty, phone, email, website, notes, created_at, updated_at`,
+		 RETURNING id, household_id, name, trades, specialty, phone, email, website, address, notes, created_at, updated_at`,
 		v.Name, v.Specialty, v.Phone, v.Email, v.Website, v.Notes,
-		id, householdID, v.Trades,
+		id, householdID, v.Trades, keepAddress, v.Address,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update vendor: %w", err)

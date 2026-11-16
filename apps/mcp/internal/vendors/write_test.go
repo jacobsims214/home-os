@@ -271,9 +271,11 @@ func TestContactCreate(t *testing.T) {
 	if !strings.Contains(strings.Join(env.Next, " "), "maintenance_create contact_id="+d.ID) {
 		t.Errorf("next = %v", env.Next)
 	}
-	var stored string
-	if err := pool.QueryRow(context.Background(), `SELECT notes FROM vendors WHERE id = $1`, d.ID).Scan(&stored); err != nil || stored != "Address: 12 Main St\nAsk for Sam" {
-		t.Errorf("stored notes = %q (%v)", stored, err)
+	// address has its own column (065); notes no longer carry an Address: line.
+	var storedAddr, storedNotes string
+	if err := pool.QueryRow(context.Background(), `SELECT address, notes FROM vendors WHERE id = $1`, d.ID).
+		Scan(&storedAddr, &storedNotes); err != nil || storedAddr != "12 Main St" || storedNotes != "Ask for Sam" {
+		t.Errorf("stored address, notes = %q, %q (%v)", storedAddr, storedNotes, err)
 	}
 	if got := ct.findAll(t, ctx, map[string]any{"query": "main st"}); len(got) != 1 || got[0].ID != d.ID || *got[0].Address != "12 Main St" {
 		t.Errorf("find by address: %+v", got)
@@ -358,7 +360,7 @@ func TestContactCreateParallel(t *testing.T) {
 }
 
 // TestContactUpdate covers partial updates, trades replace/clear/keep,
-// clearing, address and notes sharing a column, name-or-id resolution and
+// clearing, address and notes as separate columns, name-or-id resolution and
 // household scoping.
 func TestContactUpdate(t *testing.T) {
 	t.Parallel()
@@ -407,7 +409,7 @@ func TestContactUpdate(t *testing.T) {
 		t.Errorf("clear email = %+v", d)
 	}
 
-	// address and notes are independent although they share a column.
+	// address and notes are independent columns (065).
 	d = ct.update.run(t, ctx, map[string]any{"contact_id": joe.ID, "address": "9 Elm St"}).contact(t)
 	if *d.Address != "9 Elm St" || *d.Notes != "Did the water heater" || fmt.Sprint(d.Changed) != "[address]" {
 		t.Errorf("set address = %+v", d)

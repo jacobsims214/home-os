@@ -328,18 +328,18 @@ func resolveContact(ctx context.Context, q querier, hid uuid.UUID, args map[stri
 
 // contactRow is a contact's stored fields, for update and delete.
 type contactRow struct {
-	name                                    string
-	trades                                  []string
-	specialty, phone, email, website, notes *string
+	name                                             string
+	trades                                           []string
+	specialty, phone, email, website, address, notes *string
 }
 
 // lockContact reads and row-locks one contact of the family.
 func lockContact(ctx context.Context, tx pgx.Tx, hid, id uuid.UUID) (contactRow, error) {
 	var r contactRow
 	err := tx.QueryRow(ctx,
-		`SELECT name, trades, specialty, phone, email, website, notes FROM vendors
+		`SELECT name, trades, specialty, phone, email, website, address, notes FROM vendors
 		  WHERE id = $1 AND household_id = $2 FOR UPDATE`, id, hid).
-		Scan(&r.name, &r.trades, &r.specialty, &r.phone, &r.email, &r.website, &r.notes)
+		Scan(&r.name, &r.trades, &r.specialty, &r.phone, &r.email, &r.website, &r.address, &r.notes)
 	if r.trades == nil {
 		r.trades = []string{}
 	}
@@ -428,11 +428,6 @@ func NewContactCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		if trades == nil {
 			trades = []string{}
 		}
-		notes := joinAddress(f.address.ptr(), f.notes.ptr())
-		if notes != nil && utf8.RuneCountInString(*notes) > maxNotesLen {
-			return respond.Invalid("notes", fmt.Sprintf("notes and address together must be at most %d characters.", maxNotesLen),
-				"Pass shorter notes.", createExample), nil
-		}
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -465,9 +460,10 @@ SELECT id FROM vendors
 
 		var id uuid.UUID
 		if err := tx.QueryRow(ctx, `
-INSERT INTO vendors (household_id, name, trades, specialty, phone, email, website, notes)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-			c.householdID, f.name.val, trades, f.specialty.ptr(), f.phone.ptr(), f.email.ptr(), f.website.ptr(), notes).Scan(&id); err != nil {
+INSERT INTO vendors (household_id, name, trades, specialty, phone, email, website, address, notes)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+			c.householdID, f.name.val, trades, f.specialty.ptr(), f.phone.ptr(), f.email.ptr(), f.website.ptr(),
+			f.address.ptr(), f.notes.ptr()).Scan(&id); err != nil {
 			return respond.Failed("add the contact", err), nil
 		}
 		var sameName int
@@ -576,29 +572,8 @@ func NewContactUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		text("phone", "phone", f.phone, cur.phone)
 		text("email", "email", f.email, cur.email)
 		text("website", "website", f.website, cur.website)
-		// address and notes share the notes column (splitAddress).
-		curAddr, curRest := splitAddress(cur.notes)
-		newAddr, newRest := curAddr, curRest
-		if f.address.given() {
-			newAddr = f.address.ptr()
-		}
-		if f.notes.given() {
-			newRest = f.notes.ptr()
-		}
-		if notes := joinAddress(newAddr, newRest); !samePtr(notes, cur.notes) {
-			if notes != nil && utf8.RuneCountInString(*notes) > maxNotesLen {
-				return respond.Invalid("notes", fmt.Sprintf("notes and address together must be at most %d characters.", maxNotesLen),
-					"Pass shorter notes.", updateExample), nil
-			}
-			vals = append(vals, notes)
-			sets = append(sets, fmt.Sprintf("notes = $%d", len(vals)))
-			if !samePtr(newAddr, curAddr) {
-				changed = append(changed, "address")
-			}
-			if !samePtr(newRest, curRest) {
-				changed = append(changed, "notes")
-			}
-		}
+		text("address", "address", f.address, cur.address)
+		text("notes", "notes", f.notes, cur.notes)
 
 		if len(sets) > 0 {
 			sets = append(sets, "updated_at = NOW()")

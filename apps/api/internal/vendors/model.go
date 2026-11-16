@@ -20,6 +20,7 @@ type Vendor struct {
 	Phone       *string
 	Email       *string
 	Website     *string
+	Address     *string // one line; 065 moved MCP's "Address: ..." notes line here
 	Notes       *string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -232,4 +233,99 @@ func TestVendorTradesCreateUpdateList(t *testing.T) {
 		code, _ = f.do(t, http.MethodGet, "/api/v1/vendors?trade="+string(bytes.Repeat([]byte("x"), 65)), nil)
 		assert.Equal(t, http.StatusBadRequest, code)
 	})
+}
+
+// TestVendorAddress pins #4766: address is its own column (065). POST and
+// GET round-trip it on one line; PUT without address keeps it (the UI
+// predates the column), null or "" clears it; notes stay separate.
+func TestVendorAddress(t *testing.T) {
+	f := setup(t)
+	type addrJSON struct {
+		ID      string  `json:"id"`
+		Address *string `json:"address"`
+		Notes   *string `json:"notes"`
+	}
+	decode := func(t *testing.T, data json.RawMessage) addrJSON {
+		t.Helper()
+		var v addrJSON
+		require.NoError(t, json.Unmarshal(data, &v))
+		return v
+	}
+	str := func(p *string) string {
+		if p == nil {
+			return "<nil>"
+		}
+		return *p
+	}
+
+	code, data := f.do(t, http.MethodPost, "/api/v1/vendors",
+		map[string]any{"name": "Joe", "address": "  12 Main St\n Springfield ", "notes": "Ask for Joe"})
+	require.Equal(t, http.StatusCreated, code)
+	joe := decode(t, data)
+	assert.Equal(t, "12 Main St Springfield", str(joe.Address), "one line, trimmed")
+	assert.Equal(t, "Ask for Joe", str(joe.Notes), "notes carry no Address: line")
+
+	var stored *string
+	require.NoError(t, f.pool.QueryRow(context.Background(), `SELECT address FROM vendors WHERE id = $1`, joe.ID).Scan(&stored))
+	assert.Equal(t, "12 Main St Springfield", str(stored))
+
+	code, data = f.do(t, http.MethodGet, "/api/v1/vendors/"+joe.ID, nil)
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "12 Main St Springfield", str(decode(t, data).Address))
+
+	code, data = f.do(t, http.MethodPut, "/api/v1/vendors/"+joe.ID, map[string]any{"name": "Joe", "notes": "New notes"})
+	require.Equal(t, http.StatusOK, code)
+	v := decode(t, data)
+	assert.Equal(t, "12 Main St Springfield", str(v.Address), "omitted address is kept")
+	assert.Equal(t, "New notes", str(v.Notes))
+
+	code, data = f.do(t, http.MethodPut, "/api/v1/vendors/"+joe.ID, map[string]any{"name": "Joe", "address": "9 Elm St"})
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "9 Elm St", str(decode(t, data).Address))
+
+	code, data = f.do(t, http.MethodPut, "/api/v1/vendors/"+joe.ID, map[string]any{"name": "Joe", "address": nil})
+	require.Equal(t, http.StatusOK, code)
+	assert.Nil(t, decode(t, data).Address, "null clears")
+
+	code, data = f.do(t, http.MethodPut, "/api/v1/vendors/"+joe.ID, map[string]any{"name": "Joe", "address": "1 A St"})
+	require.Equal(t, http.StatusOK, code)
+	code, data = f.do(t, http.MethodPut, "/api/v1/vendors/"+joe.ID, map[string]any{"name": "Joe", "address": "   "})
+	require.Equal(t, http.StatusOK, code)
+	assert.Nil(t, decode(t, data).Address, "blank clears")
+
+	long := string(bytes.Repeat([]byte("x"), 501))
+	code, _ = f.do(t, http.MethodPost, "/api/v1/vendors", map[string]any{"name": "Long", "address": long})
+	assert.Equal(t, http.StatusBadRequest, code)
+	code, _ = f.do(t, http.MethodPut, "/api/v1/vendors/"+joe.ID, map[string]any{"name": "Joe", "address": long})
+	assert.Equal(t, http.StatusBadRequest, code)
+	code, _ = f.do(t, http.MethodPut, "/api/v1/vendors/"+joe.ID, map[string]any{"name": "Joe", "address": 12})
+	assert.Equal(t, http.StatusBadRequest, code, "non-string address")
+}
+
+func TestNormalizeAddress(t *testing.T) {
+	s := func(v string) *string { return &v }
+	for _, tc := range []struct {
+		in   *string
+		want string
+		bad  bool
+	}{
+		{nil, "<nil>", false},
+		{s(""), "<nil>", false},
+		{s(" \n\t "), "<nil>", false},
+		{s(" 12  Main St\r\nApt 2 "), "12 Main St Apt 2", false},
+		{s(strings.Repeat("é", 500)), strings.Repeat("é", 500), false},
+		{s(strings.Repeat("é", 501)), "", true},
+	} {
+		got, msg := normalizeAddress(tc.in)
+		if tc.bad {
+			assert.NotEmpty(t, msg)
+			continue
+		}
+		assert.Empty(t, msg)
+		g := "<nil>"
+		if got != nil {
+			g = *got
+		}
+		assert.Equal(t, tc.want, g)
+	}
 }

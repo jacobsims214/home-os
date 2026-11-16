@@ -42,10 +42,12 @@ func (in findInput) filtered() bool { return in.id != nil || in.trade != "" || i
 // trade ($3-$5) matches a stored trade exactly (GIN index on trades), a
 // stored trade containing the text ("plumb" finds plumber), or the free-text
 // specialty containing it (vendors whose specialty 043 could not map).
-// query ($6) matches the name, specialty, any trade, notes, email or phone.
+// query ($6) matches the name, specialty, any trade, address, notes, email or phone.
+// The bills and maintenance_tasks counts use idx_bills_vendor_id and
+// idx_maintenance_tasks_vendor_id (065), not seq scans.
 // vendors.property_id is deliberately not selected (dropped in 056).
 const contactSelect = `
-	SELECT v.id, v.name, v.trades, v.specialty, v.phone, v.email, v.website, v.notes,
+	SELECT v.id, v.name, v.trades, v.specialty, v.phone, v.email, v.website, v.address, v.notes,
 	       v.created_at, v.updated_at,
 	       (SELECT count(*) FROM bills b WHERE b.vendor_id = v.id),
 	       (SELECT count(*) FROM maintenance_tasks m WHERE m.vendor_id = v.id
@@ -60,6 +62,7 @@ const contactSelect = `
 	       OR v.specialty ILIKE '%' || $4 || '%')
 	  AND ($6 = '' OR v.name ILIKE '%' || $6 || '%' OR v.specialty ILIKE '%' || $6 || '%'
 	       OR array_to_string(v.trades, ' ') ILIKE '%' || $6 || '%'
+	       OR v.address ILIKE '%' || $6 || '%'
 	       OR v.notes ILIKE '%' || $6 || '%' OR v.email ILIKE '%' || $6 || '%'
 	       OR v.phone ILIKE '%' || $6 || '%')
 	ORDER BY lower(v.name), v.created_at, v.id
@@ -135,11 +138,10 @@ func findContacts(ctx context.Context, q querier, householdID string, in findInp
 			d  contactData
 			id uuid.UUID
 		)
-		err := row.Scan(&id, &d.Name, &d.Trades, &d.Specialty, &d.Phone, &d.Email, &d.Website, &d.Notes,
+		err := row.Scan(&id, &d.Name, &d.Trades, &d.Specialty, &d.Phone, &d.Email, &d.Website, &d.Address, &d.Notes,
 			&d.CreatedAt, &d.UpdatedAt,
 			&d.Counts.Bills, &d.Counts.OpenMaintenance, &d.Counts.Pets, &total)
 		d.ID = id.String()
-		d.Address, d.Notes = splitAddress(d.Notes)
 		if d.Trades == nil {
 			d.Trades = []string{}
 		}

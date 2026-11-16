@@ -80,31 +80,3 @@ func TestTradeNormalizationMatchesAPI(t *testing.T) {
 		})
 	}
 }
-
-func TestSplitJoinAddress(t *testing.T) {
-	s := func(v string) *string { return &v }
-	str := func(p *string) string {
-		if p == nil {
-			return "<nil>"
-		}
-		return *p
-	}
-	for _, tc := range []struct {
-		notes         *string
-		address, rest string
-	}{
-		{nil, "<nil>", "<nil>"},
-		{s("ask for Joe"), "<nil>", "ask for Joe"},
-		{s("Address: 12 Main St"), "12 Main St", "<nil>"},
-		{s("Address: 12 Main St\nask for Joe\nline 2"), "12 Main St", "ask for Joe\nline 2"},
-		{s("Call first\nAddress: not first line"), "<nil>", "Call first\nAddress: not first line"},
-	} {
-		a, r := splitAddress(tc.notes)
-		if str(a) != tc.address || str(r) != tc.rest {
-			t.Errorf("splitAddress(%q) = %q, %q", str(tc.notes), str(a), str(r))
-		}
-		if j := joinAddress(a, r); str(j) != str(tc.notes) {
-			t.Errorf("joinAddress round trip of %q = %q", str(tc.notes), str(j))
-		}
-	}
-}

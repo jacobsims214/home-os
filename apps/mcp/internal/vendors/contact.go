@@ -208,45 +208,6 @@ func normalizeTrades(in []string) ([]string, error) {
 	return out, nil
 }
 
-// --- address ---
-
-// addressPrefix starts the first notes line that holds the address.
-// vendors has no address column (004), so contact_create/update keep the
-// address as the first notes line, "Address: 12 Main St", and every tool
-// shows it as address with the rest as notes.
-const addressPrefix = "Address: "
-
-// splitAddress separates the stored notes into the address and the rest.
-func splitAddress(notes *string) (address, rest *string) {
-	if notes == nil {
-		return nil, nil
-	}
-	first, after, _ := strings.Cut(*notes, "\n")
-	if !strings.HasPrefix(first, addressPrefix) {
-		return nil, notes
-	}
-	if a := strings.TrimSpace(strings.TrimPrefix(first, addressPrefix)); a != "" {
-		address = &a
-	}
-	if r := strings.TrimSpace(after); r != "" {
-		rest = &r
-	}
-	return address, rest
-}
-
-// joinAddress is the stored notes for an address and the rest of the notes.
-func joinAddress(address, rest *string) *string {
-	switch {
-	case address == nil:
-		return rest
-	case rest == nil:
-		s := addressPrefix + *address
-		return &s
-	}
-	s := addressPrefix + *address + "\n" + *rest
-	return &s
-}
-
 // --- argument parsing ---
 
 // argError is a bad argument: which field, what is wrong, how to fix it.

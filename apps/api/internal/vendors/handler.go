@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -87,11 +88,13 @@ type createVendorRequest struct {
 	Phone     *string  `json:"phone"`
 	Email     *string  `json:"email"`
 	Website   *string  `json:"website"`
+	Address   *string  `json:"address"`
 	Notes     *string  `json:"notes"`
 }
 
-// updateVendorRequest is a full replace, except trades: omitted (or null)
-// keeps the stored trades, [] clears them.
+// updateVendorRequest is a full replace, except trades and address: omitted
+// (or null) trades keep the stored trades, [] clears them; an omitted
+// address keeps the stored one, null or "" clears it.
 type updateVendorRequest struct {
 	Name      string    `json:"name"`
 	Trades    *[]string `json:"trades"`
@@ -99,6 +102,7 @@ type updateVendorRequest struct {
 	Phone     *string   `json:"phone"`
 	Email     *string   `json:"email"`
 	Website   *string   `json:"website"`
+	Address   optString `json:"address"`
 	Notes     *string   `json:"notes"`
 }
 
@@ -111,6 +115,7 @@ type vendorResponse struct {
 	Phone       *string  `json:"phone,omitempty"`
 	Email       *string  `json:"email,omitempty"`
 	Website     *string  `json:"website,omitempty"`
+	Address     *string  `json:"address,omitempty"`
 	Notes       *string  `json:"notes,omitempty"`
 	CreatedAt   string   `json:"created_at"`
 	UpdatedAt   string   `json:"updated_at"`
@@ -126,6 +131,7 @@ func toVendorResponse(v *Vendor) vendorResponse {
 		Phone:       v.Phone,
 		Email:       v.Email,
 		Website:     v.Website,
+		Address:     v.Address,
 		Notes:       v.Notes,
 		CreatedAt:   v.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   v.UpdatedAt.Format(time.RFC3339),
@@ -232,6 +238,11 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, msg)
 		return
 	}
+	address, msg := normalizeAddress(req.Address)
+	if msg != "" {
+		apierr.BadRequest(w, msg)
+		return
+	}
 
 	v := &Vendor{
 		Name:      req.Name,
@@ -240,6 +251,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		Phone:     req.Phone,
 		Email:     req.Email,
 		Website:   req.Website,
+		Address:   address,
 		Notes:     req.Notes,
 	}
 
@@ -282,12 +294,19 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	address, msg := normalizeAddress(req.Address.Val)
+	if msg != "" {
+		apierr.BadRequest(w, msg)
+		return
+	}
+
 	v := &Vendor{
 		Name:      req.Name,
 		Specialty: req.Specialty,
 		Phone:     req.Phone,
 		Email:     req.Email,
 		Website:   req.Website,
+		Address:   address,
 		Notes:     req.Notes,
 	}
 	if req.Trades != nil {
@@ -299,7 +318,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		v.Trades = trades // non-nil: replaces the stored trades
 	}
 
-	updated, err := h.repo.Update(r.Context(), hid, id, v)
+	updated, err := h.repo.Update(r.Context(), hid, id, v, !req.Address.Set)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -339,6 +358,50 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	h.deleteVendorIndex(r.Context(), id.String())
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- address ---
+
+// maxAddressLen matches the MCP contact tools' limit.
+const maxAddressLen = 500
+
+// optString is a JSON string that remembers whether it was sent at all, so
+// PUT can tell an omitted field (keep) from null (clear).
+type optString struct {
+	Set bool
+	Val *string
+}
+
+// UnmarshalJSON runs for any value present in the body, null included.
+func (o *optString) UnmarshalJSON(b []byte) error {
+	o.Set = true
+	o.Val = nil
+	if string(b) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	o.Val = &s
+	return nil
+}
+
+// normalizeAddress keeps an address on one line: whitespace runs (newlines
+// included) become one space and the ends are trimmed. Blank means no
+// address (nil). It returns a client error message when it is too long.
+func normalizeAddress(in *string) (*string, string) {
+	if in == nil {
+		return nil, ""
+	}
+	a := strings.Join(strings.Fields(*in), " ")
+	if a == "" {
+		return nil, ""
+	}
+	if utf8.RuneCountInString(a) > maxAddressLen {
+		return nil, "address must be at most 500 characters"
+	}
+	return &a, ""
 }
 
 // --- trades ---
