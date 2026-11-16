@@ -392,8 +392,12 @@ func TestItems_PatchAndFeed(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, c.do("PATCH", "/api/v1/lists/"+l.ID+"/items/"+uuid.NewString(),
 		map[string]any{"checked": true}).Code)
 
-	// The feed: items changed after `since`.
-	since := time.Now().UTC()
+	// The feed: items changed after `since`. updated_at comes from the
+	// database clock (trigger, NOW()), so `since` must too: the host clock
+	// can run ahead of the DB clock (Docker VM, CI service container).
+	var since time.Time
+	require.NoError(t, pool.QueryRow(context.Background(), `SELECT clock_timestamp()`).Scan(&since))
+	since = since.UTC()
 	time.Sleep(10 * time.Millisecond)
 	rec = c.do("PATCH", "/api/v1/lists/"+l.ID+"/items/"+flour.ID,
 		map[string]any{"quantity": nil, "unit": nil, "checked": true})
