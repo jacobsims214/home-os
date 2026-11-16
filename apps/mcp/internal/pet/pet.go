@@ -11,9 +11,9 @@
 // through vet_vendor_id: vet_contact_id names a contact, and vet_name /
 // vet_phone are resolved to a family contact (or saved as a new one with
 // trade vet) by the same rules as the API (#4700, KB apis/pets.md). They
-// never write the old pets.vet_name / vet_phone columns. pet_find still
-// falls back to those columns for a pet with no linked vendor (vetLegacy);
-// #4698 removes that fallback before #4705 drops the columns.
+// never write the old pets.vet_name / vet_phone columns, and pet_find never
+// reads them (#4698): the vet comes only from vet_vendor_id -> vendors in
+// the same household. #4705 drops the columns.
 //
 // Writes follow the household role policy (#4689): owner, family_manager
 // and family_member may change pets; viewer, housesitter and vendor may not.
@@ -42,11 +42,9 @@ const (
 	maxLimit     = 100
 )
 
-// Where a pet's vet came from.
-const (
-	vetContact = "contact" // pets.vet_vendor_id -> vendors
-	vetLegacy  = "legacy"  // pets.vet_name / vet_phone (kept by 056)
-)
+// vetContact is vetData.Source: the vet is always a saved contact
+// (pets.vet_vendor_id -> vendors). The field stays for output stability.
+const vetContact = "contact"
 
 // querier is what both a pool and a transaction offer.
 type querier interface {
@@ -61,11 +59,11 @@ type toolHandler = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 // vetData is a pet's vet. IDs are strings (a uuid.UUID would be advertised
 // as a byte array in the outputSchema).
 type vetData struct {
-	ContactID *string `json:"contact_id" jsonschema_description:"The vet's contact_id for contact_find id=...; null for an old unlinked vet."`
+	ContactID *string `json:"contact_id" jsonschema_description:"The vet's contact_id for contact_find id=...."`
 	Name      string  `json:"name"`
 	Phone     *string `json:"phone"`
 	Email     *string `json:"email"`
-	Source    string  `json:"source" jsonschema_description:"contact: a saved contact. legacy: only a name/phone typed on the pet."`
+	Source    string  `json:"source" jsonschema_description:"Always contact: the vet is a saved family contact."`
 }
 
 // petData is one pet in pet_find's output.

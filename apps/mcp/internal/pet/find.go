@@ -35,16 +35,16 @@ func (in findInput) filtered() bool { return in.id != nil || in.query != "" }
 // petSelect loads one page of the household's pets with their vet, and the
 // total before paging. The vet is the linked vendor (043 vet_vendor_id; the
 // composite FK keeps it in the pet's family, and the join repeats the
-// household check anyway), falling back to the old vet_name / vet_phone
-// columns until a later migration drops them (056 kept them). query matches the name, species, breed,
-// notes, microchip id, or the vet's name. Age is whole years in the
+// household check anyway). The old pets.vet_name / vet_phone columns are
+// never read (#4698): a pet with no linked vendor has no vet, so clearing
+// the vet never brings back a stale typed name. query matches the name,
+// species, breed, notes, microchip id, or the vet's name. Age is whole years in the
 // family's timezone.
 const petSelect = `
 	SELECT p.id, p.name, NULLIF(btrim(p.species), ''), NULLIF(btrim(p.breed), ''), p.date_of_birth,
 	       CASE WHEN p.date_of_birth IS NULL THEN NULL
 	            ELSE date_part('year', age((NOW() AT TIME ZONE h.timezone)::date, p.date_of_birth))::int END,
 	       v.id, v.name, NULLIF(btrim(v.phone), ''), NULLIF(btrim(v.email), ''),
-	       NULLIF(btrim(p.vet_name), ''), NULLIF(btrim(p.vet_phone), ''),
 	       p.microchip_id, p.registration_id, p.insurance_provider, p.insurance_policy, p.notes,
 	       p.created_at, p.updated_at,
 	       count(*) OVER ()
@@ -56,8 +56,7 @@ const petSelect = `
 	  AND ($3 = '' OR p.name ILIKE '%' || $3 || '%' OR p.species ILIKE '%' || $3 || '%'
 	       OR p.breed ILIKE '%' || $3 || '%' OR p.notes ILIKE '%' || $3 || '%'
 	       OR p.microchip_id ILIKE '%' || $3 || '%'
-	       OR v.name ILIKE '%' || $3 || '%'
-	       OR (v.id IS NULL AND p.vet_name ILIKE '%' || $3 || '%'))
+	       OR v.name ILIKE '%' || $3 || '%')
 	ORDER BY lower(p.name), p.created_at, p.id
 	LIMIT $4 OFFSET $5`
 
@@ -126,10 +125,9 @@ func findPets(ctx context.Context, q querier, householdID string, in findInput) 
 			vendorID             *uuid.UUID
 			vendorName           *string
 			vendorPhone, vendorE *string
-			oldName, oldPhone    *string
 		)
 		err := row.Scan(&id, &d.Name, &d.Species, &d.Breed, &born, &d.Age,
-			&vendorID, &vendorName, &vendorPhone, &vendorE, &oldName, &oldPhone,
+			&vendorID, &vendorName, &vendorPhone, &vendorE,
 			&d.MicrochipID, &d.RegistrationID, &d.InsuranceProvider, &d.InsurancePolicy, &d.Notes,
 			&d.CreatedAt, &d.UpdatedAt, &total)
 		d.ID = id.String()
@@ -137,33 +135,22 @@ func findPets(ctx context.Context, q querier, householdID string, in findInput) 
 			s := born.Format(time.DateOnly)
 			d.DateOfBirth = &s
 		}
-		d.Vet = vet(vendorID, vendorName, vendorPhone, vendorE, oldName, oldPhone)
+		d.Vet = vet(vendorID, vendorName, vendorPhone, vendorE)
 		return d, err
 	})
 	return page, total, err
 }
 
-// vet picks the pet's vet: the linked contact first, else the old columns
-// (kept by 056). A linked contact with no phone borrows the old vet_phone, so
-// a number typed on the pet is never hidden.
-func vet(vendorID *uuid.UUID, name, phone, email, oldName, oldPhone *string) *vetData {
-	if vendorID != nil {
-		id := vendorID.String()
-		v := &vetData{ContactID: &id, Phone: phone, Email: email, Source: vetContact}
-		if name != nil {
-			v.Name = *name
-		}
-		if v.Phone == nil {
-			v.Phone = oldPhone
-		}
-		return v
-	}
-	if oldName == nil && oldPhone == nil {
+// vet is the pet's linked vet contact, or nil when vet_vendor_id is unset
+// (or points outside the family, which the join already filters out).
+func vet(vendorID *uuid.UUID, name, phone, email *string) *vetData {
+	if vendorID == nil {
 		return nil
 	}
-	v := &vetData{Name: "Vet", Phone: oldPhone, Source: vetLegacy}
-	if oldName != nil {
-		v.Name = *oldName
+	id := vendorID.String()
+	v := &vetData{ContactID: &id, Phone: phone, Email: email, Source: vetContact}
+	if name != nil {
+		v.Name = *name
 	}
 	return v
 }

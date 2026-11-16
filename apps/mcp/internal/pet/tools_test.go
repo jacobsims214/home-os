@@ -209,8 +209,8 @@ func TestToolDefinition(t *testing.T) {
 	outputSchema(t)
 }
 
-// TestPetFind covers listing, the vet from the linked contact vs the old
-// vet_name/vet_phone fallback, id lookup (search_all's open hint), query,
+// TestPetFind covers listing, the vet from the linked contact only (no
+// fallback to a typed name, #4698), id lookup (search_all's open hint), query,
 // household scoping, pagination, aliases and validation.
 func TestPetFind(t *testing.T) {
 	t.Parallel()
@@ -230,14 +230,14 @@ func TestPetFind(t *testing.T) {
 	// A family vet contact, linked by 043's vet_vendor_id.
 	vetID := insertID(t, pool, `INSERT INTO vendors (household_id, name, phone, email, trades)
 		VALUES ($1, 'Dr. Paws Clinic', '555-0100', 'desk@paws.example', ARRAY['vet']) RETURNING id`, hh.HouseholdID)
-	// Rex: linked vet, plus stale old columns that must be ignored.
-	rex := insertID(t, pool, `INSERT INTO pets (household_id, name, species, breed, date_of_birth, vet_name, vet_phone,
+	// Rex: linked vet.
+	rex := insertID(t, pool, `INSERT INTO pets (household_id, name, species, breed, date_of_birth,
 			vet_vendor_id, microchip_id, notes)
-		VALUES ($1, 'Rex', 'dog', 'Beagle', (CURRENT_DATE - INTERVAL '4 years 2 months')::date, 'Old Vet', '555-9999',
+		VALUES ($1, 'Rex', 'dog', 'Beagle', (CURRENT_DATE - INTERVAL '4 years 2 months')::date,
 			$2, '985112003', 'allergic to chicken') RETURNING id`, hh.HouseholdID, vetID)
-	// Mittens: only the old columns (written by pre-043 code, not yet backfilled).
-	mittens := insertID(t, pool, `INSERT INTO pets (household_id, name, species, vet_name, vet_phone)
-		VALUES ($1, 'Mittens', 'cat', 'Whisker Hospital', '555-0200') RETURNING id`, hh.HouseholdID)
+	// Mittens: no vet.
+	mittens := insertID(t, pool, `INSERT INTO pets (household_id, name, species)
+		VALUES ($1, 'Mittens', 'cat') RETURNING id`, hh.HouseholdID)
 	// Bubbles: no vet at all, blank species.
 	bubbles := insertID(t, pool, `INSERT INTO pets (household_id, name, species) VALUES ($1, 'bubbles', '  ') RETURNING id`, hh.HouseholdID)
 
@@ -259,12 +259,12 @@ func TestPetFind(t *testing.T) {
 	if b.Species != nil || b.Vet != nil || b.Age != nil || b.DateOfBirth != nil {
 		t.Errorf("bubbles = %+v", b)
 	}
-	if m.Vet == nil || m.Vet.Source != vetLegacy || m.Vet.ContactID != nil || m.Vet.Name != "Whisker Hospital" || str(m.Vet.Phone) != "555-0200" {
-		t.Errorf("mittens vet (legacy fallback) = %+v", m.Vet)
+	if m.Vet != nil {
+		t.Errorf("mittens vet (none linked) = %+v", m.Vet)
 	}
 	if r.Vet == nil || r.Vet.Source != vetContact || str(r.Vet.ContactID) != vetID || r.Vet.Name != "Dr. Paws Clinic" ||
 		str(r.Vet.Phone) != "555-0100" || str(r.Vet.Email) != "desk@paws.example" {
-		t.Errorf("rex vet (linked contact wins) = %+v", r.Vet)
+		t.Errorf("rex vet (linked contact) = %+v", r.Vet)
 	}
 	if r.Age == nil || *r.Age != 4 || r.DateOfBirth == nil || len(*r.DateOfBirth) != 10 || str(r.Breed) != "Beagle" ||
 		str(r.MicrochipID) != "985112003" || str(r.Notes) != "allergic to chicken" {
@@ -293,27 +293,27 @@ func TestPetFind(t *testing.T) {
 		t.Errorf("bubbles summary = %q", env.Summary)
 	}
 
-	// Deleting the vet contact clears only the link; the old columns show again.
+	// Deleting the vet contact clears the link, and the pet has no vet.
 	if _, err := pool.Exec(context.Background(), `DELETE FROM vendors WHERE id = $1`, vetID); err != nil {
 		t.Fatal(err)
 	}
-	if got := call(t, ctx, find, map[string]any{"id": rex}).pets(t); got[0].Vet == nil || got[0].Vet.Source != vetLegacy || got[0].Vet.Name != "Old Vet" {
+	if got := call(t, ctx, find, map[string]any{"id": rex}).pets(t); got[0].Vet != nil {
 		t.Errorf("rex after vendor delete: %+v", got[0].Vet)
 	}
 	vetID = insertID(t, pool, `INSERT INTO vendors (household_id, name, trades) VALUES ($1, 'Dr. Paws Clinic', ARRAY['vet']) RETURNING id`, hh.HouseholdID)
 	if _, err := pool.Exec(context.Background(), `UPDATE pets SET vet_vendor_id = $1 WHERE id = $2`, vetID, rex); err != nil {
 		t.Fatal(err)
 	}
-	// A linked contact without a phone borrows the pet's old vet_phone.
-	if got := call(t, ctx, find, map[string]any{"id": rex}).pets(t); str(got[0].Vet.Phone) != "555-9999" || got[0].Vet.Source != vetContact {
-		t.Errorf("rex phone fallback: %+v", got[0].Vet)
+	// A linked contact without a phone has no phone.
+	if got := call(t, ctx, find, map[string]any{"id": rex}).pets(t); got[0].Vet == nil || got[0].Vet.Phone != nil || got[0].Vet.Source != vetContact {
+		t.Errorf("rex phoneless vet: %+v", got[0].Vet)
 	}
 
 	// query matches name, species, breed, notes, microchip and vet name;
 	// wildcards are literal.
 	for q, want := range map[string]string{
 		"rex": rex, "CAT": mittens, "beag": rex, "chicken": rex, "985112": rex,
-		"paws": rex, "whisker": mittens, "old vet": "", "100%": "", "_": "",
+		"paws": rex, "whisker": "", "old vet": "", "100%": "", "_": "",
 	} {
 		got := call(t, ctx, find, map[string]any{"query": q}).pets(t)
 		if want == "" {

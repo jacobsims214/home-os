@@ -280,9 +280,6 @@ func TestPetCreate(t *testing.T) {
 	if strings.Join(trades, ",") != "vet" || specialty != "Veterinarian" {
 		t.Errorf("vet vendor trades %v specialty %q", trades, specialty)
 	}
-	if n := count(t, pool, `SELECT count(*) FROM pets WHERE household_id = $1 AND (vet_name IS NOT NULL OR vet_phone IS NOT NULL)`, hh.HouseholdID); n != 0 {
-		t.Errorf("%d pets have legacy vet columns written", n)
-	}
 
 	// The same vet again (other case, same digits) is found, not saved twice.
 	env = create.run(t, ctx, map[string]any{"name": "Max", "species": "dog", "vet_name": "dr. paws clinic", "vet_phone": "555-010-0100"})
@@ -441,7 +438,7 @@ func TestPetUpdate(t *testing.T) {
 	if n := count(t, pool, `SELECT count(*) FROM vendors WHERE id = $1`, vetID); n != 1 {
 		t.Errorf("clearing the vet deleted the contact")
 	}
-	if n := count(t, pool, `SELECT count(*) FROM pets WHERE id = $1 AND vet_name IS NULL AND vet_phone IS NULL AND vet_vendor_id IS NULL`, b.ID); n != 1 {
+	if n := count(t, pool, `SELECT count(*) FROM pets WHERE id = $1 AND vet_vendor_id IS NULL`, b.ID); n != 1 {
 		t.Errorf("pet vet columns not clean after clear")
 	}
 
