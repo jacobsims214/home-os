@@ -127,6 +127,13 @@ type userResponse struct {
 	AvatarURL *string `json:"avatar_url,omitempty"`
 	CreatedAt string  `json:"created_at"`
 	UpdatedAt string  `json:"updated_at"`
+	// IsInstanceAdmin is users.is_instance_admin, read from the caller's own
+	// users row on every request (never from the token). It is the
+	// instance-wide admin flag, a different axis from the household role:
+	// the UI uses it only to show the instance-admin entry, and it says
+	// nothing about any household. Always present, so a client can tell
+	// "not an admin" from "field missing".
+	IsInstanceAdmin bool `json:"is_instance_admin"`
 }
 
 // Me returns the currently authenticated user based on the Bearer token.
@@ -148,12 +155,13 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apierr.JSON(w, http.StatusOK, userResponse{
-		ID:        user.ID.String(),
-		Email:     user.Email,
-		Name:      user.Name,
-		AvatarURL: user.AvatarURL,
-		CreatedAt: user.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
+		ID:              user.ID.String(),
+		Email:           user.Email,
+		Name:            user.Name,
+		AvatarURL:       user.AvatarURL,
+		CreatedAt:       user.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:       user.UpdatedAt.Format(time.RFC3339),
+		IsInstanceAdmin: user.IsInstanceAdmin,
 	})
 }
 

@@ -23,17 +23,24 @@ type Claims struct {
 
 // User represents a registered user from the users table.
 type User struct {
-	ID               uuid.UUID
-	Email            string
-	Name             string
-	PasswordHash     string
+	ID                 uuid.UUID
+	Email              string
+	Name               string
+	PasswordHash       string
 	CaldavPasswordHash *string
-	AvatarURL        *string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	AvatarURL          *string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	// IsInstanceAdmin is users.is_instance_admin (migration 037): someone
+	// who administers the whole instance (the admin routes: families and
+	// users). It is a property of the USER, a different axis from
+	// Membership.Role: it grants no extra rights inside a household they
+	// belong to, and no access at all to one they are not a member of.
+	IsInstanceAdmin bool
 }
 
 // Membership represents a user's membership in a household from the memberships table.
+// Its Role is the household role, a different axis from User.IsInstanceAdmin.
 type Membership struct {
 	ID          uuid.UUID
 	HouseholdID uuid.UUID
