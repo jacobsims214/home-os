@@ -192,6 +192,21 @@ func TestAllergensIn(t *testing.T) {
 		{"coeliac", []string{"celiac"}},
 		{"allergy", nil},
 		{"anaphylactic", nil},
+		// #4802: people.allergies entries are read with this same
+		// normaliser, so every wording below has to give an allergen.
+		{"Shrimp allergy", []string{"shrimp"}},
+		{"strawberry allergy", []string{"strawberry"}},
+		{"Severe peanut allergy", []string{"peanut"}},
+		{"allergic to peanuts", []string{"peanuts"}},
+		{"Peanuts - anaphylaxis", []string{"peanuts"}},
+		{"peanuts \u2013 anaphylaxis", []string{"peanuts"}},
+		{"peanuts: EpiPen", []string{"peanuts"}},
+		{"peanuts and tree nuts", []string{"peanuts", "tree nuts"}},
+		{"peanuts, tree nuts; sesame", []string{"peanuts", "tree nuts", "sesame"}},
+		{"shellfish (hives) - carries an EpiPen", []string{"shellfish"}},
+		{"  Peanuts  ", []string{"peanuts"}},
+		{"(carries an EpiPen)", nil},
+		{"severe", nil},
 	} {
 		if got := allergensIn(tc.in); !slices.Equal(got, tc.want) {
 			t.Errorf("allergensIn(%q) = %q, want %q", tc.in, got, tc.want)
@@ -328,6 +343,78 @@ func TestMealSuggestNeverSuggestsAllergens(t *testing.T) {
 		}
 	}
 	st.run(t, k.ctx, map[string]any{"person_ids": []any{"Zed"}}).wantError(t, "person_ids", "No person")
+}
+
+// TestMealSuggestWordedAllergies is #4802's acceptance test: people.allergies
+// entries are free text ("allergic to peanuts", "Shrimp allergy", "Peanuts -
+// anaphylaxis", "peanuts and tree nuts"), and they must exclude and warn like
+// a bare allergen does. Before this, every one of them matched no ingredient
+// and returned ok, so the exclusion silently did nothing.
+func TestMealSuggestWordedAllergies(t *testing.T) {
+	t.Parallel()
+	k := newKitchen(t)
+	k.person("Nora", "allergic to peanuts")
+	k.person("Sam", "Shrimp allergy")
+	k.person("Leo", "Peanuts - anaphylaxis")
+	k.person("Ada", "peanuts and tree nuts")
+	k.person("Kit", "peanuts: EpiPen")
+	k.person("Bea", "allergy") // normalises to nothing: must surface in checks
+
+	k.recipe("Satay Bowl", 25, nil, "rice noodles", "peanuts", "lime")
+	k.recipe("Garlic Shrimp", 20, nil, "shrimp", "linguine", "garlic")
+	k.recipe("Cashew Curry", 35, nil, "cashews", "coconut milk", "spinach")
+	k.recipe("Peanut Brittle", 40, nil) // no ingredients: the name still counts
+	k.recipe("Chicken Tacos", 30, nil, "chicken thighs", "corn tortillas")
+
+	st := suggestTool(k.pool)
+	r := st.run(t, k.ctx, map[string]any{"count": 10}).suggest(t)
+	got := suggested(r)
+	for _, bad := range []string{"Satay Bowl", "Garlic Shrimp", "Cashew Curry", "Peanut Brittle"} {
+		if slices.Contains(got, bad) {
+			t.Errorf("suggested %s, which has an allergen: %v", bad, got)
+		}
+		if !slices.Contains(excludedNames(r), bad) {
+			t.Errorf("%s not listed in excluded: %+v", bad, r.Excluded)
+		}
+	}
+	if !slices.Equal(got, []string{"Chicken Tacos"}) {
+		t.Errorf("suggestions = %v", got)
+	}
+	// The label in the reason stays the bare allergen, not the raw text.
+	reasons := map[string]string{}
+	for _, e := range r.Excluded {
+		reasons[e.Name] = e.Reason
+	}
+	for name, want := range map[string]string{
+		"Satay Bowl":     "(peanuts): peanuts",
+		"Garlic Shrimp":  "(shrimp): shrimp",
+		"Cashew Curry":   "(tree nuts): cashews",
+		"Peanut Brittle": "(peanuts): Peanut Brittle",
+	} {
+		if !strings.Contains(reasons[name], want) {
+			t.Errorf("%s reason %q lacks %q", name, reasons[name], want)
+		}
+	}
+	// An allergy that normalises to nothing is visible, not silent.
+	if !slices.ContainsFunc(r.Checks, func(c string) bool {
+		return strings.Contains(c, `Bea has an allergy saved as "allergy" that could not be checked`)
+	}) {
+		t.Errorf("checks = %v", r.Checks)
+	}
+	if e := st.run(t, k.ctx, map[string]any{}); !strings.Contains(e.Summary, `Bea has an allergy saved as "allergy"`) {
+		t.Errorf("summary lacks the unchecked allergy: %s", e.Summary)
+	}
+
+	// One entry can mean several allergens: Ada's "peanuts and tree nuts".
+	r = st.run(t, k.ctx, map[string]any{"person_ids": []any{"Ada"}, "count": 10}).suggest(t)
+	for _, bad := range []string{"Satay Bowl", "Cashew Curry"} {
+		if slices.Contains(suggested(r), bad) {
+			t.Errorf("Ada: suggested %s", bad)
+		}
+	}
+	if !slices.Contains(suggested(r), "Garlic Shrimp") {
+		t.Errorf("Ada has no shrimp allergy: %v", suggested(r))
+	}
 }
 
 // TestMealSuggestRanking: recipes eaten in the last 7 days rank lower,

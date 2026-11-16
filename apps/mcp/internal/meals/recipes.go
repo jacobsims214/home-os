@@ -148,6 +148,7 @@ type recipeData struct {
 	NextPlanned     *dayData         `json:"next_planned"`
 	Feedback        []feedbackData   `json:"feedback,omitempty" jsonschema_description:"recipe_get: the newest ratings and comments."`
 	AllergyWarnings []AllergyWarning `json:"allergy_warnings" jsonschema_description:"Ingredients matching someone's allergy. Always tell the user."`
+	Checks          []string         `json:"checks,omitempty" jsonschema_description:"Allergies that could not be checked; tell the user."`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
 
@@ -980,14 +981,50 @@ type allergyMatcher struct {
 	own, group, except        []*regexp.Regexp
 }
 
-// bareAllergen is the allergen of a stored allergy: the text before the
-// first "(" ("peanuts (carries an EpiPen)" -> "peanuts"). people.allergies
-// keeps notes that way since #4742 (KB mcp/people-tools.md).
-func bareAllergen(allergy string) string {
-	if i := strings.Index(allergy, "("); i > 0 {
-		allergy = allergy[:i]
+// ---------------------------------------------------------------------------
+// Reading allergy text
+// ---------------------------------------------------------------------------
+//
+// One normaliser, used for people.allergies entries and for preference text
+// (#4802). Both are free text a person or a small model typed, so both get
+// the same reading: "Shrimp allergy", "allergic to peanuts", "Peanuts -
+// anaphylaxis" and "peanuts: EpiPen" all mean an allergen.
+
+var (
+	// allergyMention spots allergy talk in a preference.
+	allergyMention = regexp.MustCompile(`(?i)\b(allerg\w*|anaphyla\w*|epi-?pens?|intoleran\w*|celiac|coeliac)\b`)
+
+	// allergyFiller is what is left out of "severe peanut allergy" to get the
+	// allergen. "celiac" and "lactose" stay: they are allergen group keys.
+	allergyFiller = regexp.MustCompile(`(?i)\b(severe(ly)?|mild|serious|life[- ]threatening|anaphylactic|anaphylaxis|food|foods|allergic|allergy|allergies|allergen|allergens|intolerant|intolerance|intolerances|sensitivity|sensitive|reaction|reactions|to|of|a|an|the|has|have|is|no|avoid|avoids|carries|carry|epi-?pens?|must|strictly|strict|very)\b`)
+
+	listSep = regexp.MustCompile(`(?i)\s*(?:,|;|/|&|\band\b|\bor\b|\+)\s*`)
+
+	freeSuffix = regexp.MustCompile(`(?i)[- ]free\b`)
+
+	// noteStart is where an allergy stops being the allergen and becomes a
+	// note: parentheses ("peanuts (carries an EpiPen)", #4742), a spaced dash
+	// ("peanuts - anaphylaxis", "peanuts – anaphylaxis") or a colon
+	// ("peanuts: EpiPen").
+	noteStart = regexp.MustCompile(`\([^)]*\)|\s[-–—]\s[^\n]*|:[^\n]*`)
+)
+
+// allergensIn reads the allergens out of allergy text: "Severe peanut
+// allergy" -> [peanut], "allergic to shrimp and crab" -> [shrimp, crab],
+// "nut-free (allergy)" -> [nut]. Empty when nothing is left to match.
+func allergensIn(text string) []string {
+	text = noteStart.ReplaceAllString(strings.ToLower(text), " ")
+	text = strings.ReplaceAll(text, "coeliac", "celiac")
+	text = freeSuffix.ReplaceAllString(text, " ")
+	text = allergyFiller.ReplaceAllString(text, " ")
+	var out []string
+	for _, p := range listSep.Split(text, -1) {
+		p = strings.Join(strings.Fields(p), " ")
+		if len(words(p)) > 0 && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
 	}
-	return strings.TrimSpace(allergy)
+	return out
 }
 
 // compilePhrases compiles each phrase's Go regex (phrasePatterns).
@@ -1001,24 +1038,45 @@ func compilePhrases(phrases []string) []*regexp.Regexp {
 	return out
 }
 
-// newAllergyMatcher builds the regexes for one allergy, e.g. "tree nuts".
-// A note in parentheses is not part of the allergen: "peanuts (carries an
-// EpiPen)" matches like "peanuts".
-func newAllergyMatcher(personID, person, allergy string) (allergyMatcher, bool) {
-	allergy = bareAllergen(allergy)
-	m := allergyMatcher{personID: personID, person: person, allergy: allergy}
+// newAllergyMatcher builds the regexes for one allergen, e.g. "tree nuts".
+// allergen is already normalised (allergensIn); it is both the phrase matched
+// against ingredient names and the label shown in warnings.
+func newAllergyMatcher(personID, person, allergen string) (allergyMatcher, bool) {
+	m := allergyMatcher{personID: personID, person: person, allergy: allergen}
 	key := strings.Join(func() []string {
-		ws := words(allergy)
+		ws := words(allergen)
 		for i, w := range ws {
 			ws[i] = singular(w)
 		}
 		return ws
 	}(), " ")
-	key = strings.TrimSuffix(strings.TrimSuffix(key, " allergy"), " allergie")
-	m.own = compilePhrases([]string{allergy})
+	m.own = compilePhrases([]string{allergen})
 	m.group = compilePhrases(allergenGroups[key])
 	m.except = compilePhrases(allergenExceptions[key])
 	return m, len(m.own) > 0
+}
+
+// allergyMatchers turns one stored allergy into the matchers it means. The
+// entry is read with allergensIn first, so ordinary wording works: "Shrimp
+// allergy" matches shrimp and "allergic to peanuts" matches peanuts. One
+// entry can mean several allergens ("peanuts and tree nuts"), and an entry
+// that normalises to nothing gives no matcher at all, so the caller can say
+// it could not be checked instead of silently matching nothing (#4802).
+func allergyMatchers(personID, person, allergy string) []allergyMatcher {
+	var out []allergyMatcher
+	for _, a := range allergensIn(allergy) {
+		if m, ok := newAllergyMatcher(personID, person, a); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// uncheckedAllergyLine says in one line that a saved allergy could not be
+// matched against anything. meal_suggest's checks and the recipe and meal
+// warnings use it, so the same problem reads the same everywhere.
+func uncheckedAllergyLine(person, allergy string) string {
+	return fmt.Sprintf("%s has an allergy saved as %q that could not be checked against recipes; confirm the meal is safe.", person, allergy)
 }
 
 func (m allergyMatcher) matches(item string) bool {
@@ -1038,28 +1096,31 @@ func (m allergyMatcher) matches(item string) bool {
 	return false
 }
 
-// familyAllergies loads every person's allergies as matchers.
-func familyAllergies(ctx context.Context, q querier, hid uuid.UUID) ([]allergyMatcher, error) {
+// familyAllergies loads every person's allergies as matchers. checks holds
+// one line per allergy that normalised to nothing: it matches no ingredient,
+// so the caller must show it rather than let the warning silently vanish.
+func familyAllergies(ctx context.Context, q querier, hid uuid.UUID) (matchers []allergyMatcher, checks []string, err error) {
 	rows, err := q.Query(ctx, `SELECT id::text, display_name, allergies FROM people
 	                            WHERE household_id = $1 AND cardinality(allergies) > 0 ORDER BY lower(display_name), id`, hid)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
-	var out []allergyMatcher
 	for rows.Next() {
 		var id, name string
 		var allergies []string
 		if err := rows.Scan(&id, &name, &allergies); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, a := range allergies {
-			if m, ok := newAllergyMatcher(id, name, a); ok {
-				out = append(out, m)
+			if ms := allergyMatchers(id, name, a); len(ms) > 0 {
+				matchers = append(matchers, ms...)
+			} else {
+				checks = append(checks, uncheckedAllergyLine(name, a))
 			}
 		}
 	}
-	return out, rows.Err()
+	return matchers, checks, rows.Err()
 }
 
 // AllergyWarnings lists the ingredients that match someone's allergy.
@@ -1088,6 +1149,15 @@ func warningSentence(ws []AllergyWarning) string {
 		return ""
 	}
 	return " Allergy warning: " + strings.Join(warningLines(ws), "; ") + "."
+}
+
+// checkSentence says which allergies could not be checked at all, for the
+// summaries that have no structured checks field to put them in.
+func checkSentence(checks []string) string {
+	if len(checks) == 0 {
+		return ""
+	}
+	return " " + strings.Join(checks, " ")
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,7 +1274,7 @@ func loadRecipe(ctx context.Context, q querier, hid, id uuid.UUID, today time.Ti
 	d.Rating = rating(avg, n)
 	d.LastMade, d.NextPlanned = day(last), day(next)
 
-	matchers, err := familyAllergies(ctx, q, hid)
+	matchers, checks, err := familyAllergies(ctx, q, hid)
 	if err != nil {
 		return d, err
 	}
@@ -1213,6 +1283,7 @@ func loadRecipe(ctx context.Context, q querier, hid, id uuid.UUID, today time.Ti
 		names[i] = s.Name
 	}
 	d.AllergyWarnings = AllergyWarnings(matchers, names)
+	d.Checks = checks
 
 	if withFeedback {
 		rows, err := q.Query(ctx, `
@@ -1499,7 +1570,7 @@ SELECT r.id, r.title, r.tags, r.servings, r.prep_minutes, r.cook_minutes,
 		}
 		defer rows.Close()
 
-		matchers, err := familyAllergies(ctx, pool, c.householdID)
+		matchers, allergyChecks, err := familyAllergies(ctx, pool, c.householdID)
 		if err != nil {
 			return respond.Failed("search recipes", err), nil
 		}
@@ -1586,6 +1657,7 @@ SELECT r.id, r.title, r.tags, r.servings, r.prep_minutes, r.cook_minutes,
 		if warned > 0 {
 			summary += fmt.Sprintf(" %s contain an allergen for someone in the family (see allergy_warnings).", plural(warned, "recipe"))
 		}
+		summary += checkSentence(allergyChecks)
 		return respond.List(summary, items, page,
 			fmt.Sprintf("Read ingredients and steps with recipe_get recipe_id=%s.", items[0].ID)), nil
 	}
@@ -1635,7 +1707,7 @@ func NewRecipeGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		if d.LastMade != nil {
 			summary += fmt.Sprintf(" Last made %s %s.", d.LastMade.Weekday, d.LastMade.LocalDate)
 		}
-		summary += warningSentence(d.AllergyWarnings)
+		summary += warningSentence(d.AllergyWarnings) + checkSentence(d.Checks)
 		return respond.OK(summary, d,
 			planHint(d.ID),
 			`Add the ingredients to the grocery list with list_add_items list_id="Grocery" items=[…].`,
@@ -1908,7 +1980,7 @@ func NewRecipeCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 				return respond.Failed("save the recipe", err), nil
 			}
 			d.Duplicate = true
-			return respond.OK(fmt.Sprintf("%s was already saved a few minutes ago; returned that recipe instead of a copy.%s", d.Name, warningSentence(d.AllergyWarnings)), d,
+			return respond.OK(fmt.Sprintf("%s was already saved a few minutes ago; returned that recipe instead of a copy.%s%s", d.Name, warningSentence(d.AllergyWarnings), checkSentence(d.Checks)), d,
 				fmt.Sprintf("Change it with recipe_update recipe_id=%s instead of saving it again.", d.ID)), nil
 		case !errors.Is(err, pgx.ErrNoRows):
 			return respond.Failed("save the recipe", err), nil
@@ -1941,7 +2013,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
 		if sameName > 0 {
 			next = append(next, fmt.Sprintf("Another recipe is also named %s; pass recipe ids, not the name, from now on.", d.Name))
 		}
-		return respond.OK(fmt.Sprintf("Saved recipe %s: %s.%s", d.Name, d.describe(), warningSentence(d.AllergyWarnings)), d, next...), nil
+		return respond.OK(fmt.Sprintf("Saved recipe %s: %s.%s%s", d.Name, d.describe(), warningSentence(d.AllergyWarnings), checkSentence(d.Checks)), d, next...), nil
 	}
 	return "recipe_create", tool, handler
 }
@@ -2079,7 +2151,7 @@ func NewRecipeUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		if len(changed) == 0 {
 			return respond.OK(fmt.Sprintf("Nothing changed: %s already has those details (%s).", d.Name, d.describe()), d, next...), nil
 		}
-		return respond.OK(fmt.Sprintf("Updated %s (%s): %s.%s", d.Name, strings.Join(changed, ", "), d.describe(), warningSentence(d.AllergyWarnings)), d, next...), nil
+		return respond.OK(fmt.Sprintf("Updated %s (%s): %s.%s%s", d.Name, strings.Join(changed, ", "), d.describe(), warningSentence(d.AllergyWarnings), checkSentence(d.Checks)), d, next...), nil
 	}
 	return "recipe_update", tool, handler
 }
