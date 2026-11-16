@@ -370,3 +370,45 @@ func TestPersonFindLiteralWildcards(t *testing.T) {
 		t.Fatalf(`query "%%" with no literal %%: got %+v`, env)
 	}
 }
+
+// TestPersonFindRoles: household role policy (#4689). A vendor sees no
+// people; a housesitter sees names and relationships but no ages, emails or
+// roles, and cannot match on emails.
+func TestPersonFindRoles(t *testing.T) {
+	pool := testutil.NewPool(t)
+	_, hh := testutil.SeedHousehold(t, pool)
+	_, tool, h := NewPersonFindTool(pool)
+	rs := outputSchema(t, tool)
+	ownerPerson := personIDOf(t, pool, hh.HouseholdID, hh.UserID.String())
+	birth := time.Now().UTC().AddDate(-40, 0, -1).Format("2006-01-02")
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE people SET relationship = 'parent', birthdate = $2 WHERE id = $1`, ownerPerson, birth); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("vendor is refused", func(t *testing.T) {
+		vctx := addMember(t, pool, hh, "vendor")
+		env, res := callEnvelope(t, vctx, h, rs, map[string]any{})
+		if env.OK || !res.IsError || len(env.Items) != 0 {
+			t.Fatalf("vendor got %+v", env)
+		}
+	})
+
+	t.Run("housesitter sees names only", func(t *testing.T) {
+		sctx := addMember(t, pool, hh, "housesitter")
+		env, _ := callEnvelope(t, sctx, h, rs, map[string]any{})
+		if !env.OK || len(env.Items) == 0 {
+			t.Fatalf("housesitter got %+v", env)
+		}
+		for _, p := range env.Items {
+			if p.Name == "" || p.Age != nil || p.Email != nil || p.Role != nil || p.UserID != nil {
+				t.Errorf("housesitter saw %+v", p)
+			}
+		}
+		// Searching by the owner's email finds nothing for a housesitter.
+		env, _ = callEnvelope(t, sctx, h, rs, map[string]any{"query": hh.Email})
+		if !env.OK || len(env.Items) != 0 {
+			t.Errorf("email query matched for a housesitter: %+v", env.Items)
+		}
+	})
+}

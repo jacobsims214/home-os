@@ -56,10 +56,25 @@ const (
 	ScopeWrite = "write"
 )
 
-// CanWrite reports whether the caller may call tools that change data. Dex
-// sessions (no AgentTokenID) always can; an agent token needs ScopeWrite.
+// readOnlyRoles may not change household data through the MCP (household
+// role policy, #4689; the API's policy is apps/api/internal/auth/roles.go).
+// The API lets a housesitter check off list items and add pet notes and a
+// vendor update a maintenance task's status; the MCP has no tool narrow
+// enough for that yet, so it refuses every write tool to these roles.
+var readOnlyRoles = map[string]bool{"viewer": true, "housesitter": true, "vendor": true}
+
+// RoleIsReadOnly reports whether role may only read through the MCP.
+func RoleIsReadOnly(role string) bool { return readOnlyRoles[role] }
+
+// CanWrite reports whether the caller may call tools that change data. The
+// member's role (re-read from memberships on every request, for Dex
+// sessions and agent tokens alike) must not be read-only; then a Dex
+// session can, and an agent token needs ScopeWrite.
 func (c *Claims) CanWrite() bool {
 	if c == nil {
+		return false
+	}
+	if readOnlyRoles[c.Role] {
 		return false
 	}
 	if c.AgentTokenID == "" {

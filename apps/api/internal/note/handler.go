@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
@@ -143,6 +144,11 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			apierr.BadRequest(w, "invalid entity_id")
 			return
 		}
+		// A record the role may not see has no notes it can see (#4689).
+		if !auth.CanSeeEntity(middleware.Role(r), entityType) {
+			apierr.NotFound(w, "entity not found")
+			return
+		}
 		notes, err := h.repo.ListByEntity(r.Context(), hid, entityType, entityID)
 		if err != nil {
 			apierr.DB(w, err)
@@ -157,6 +163,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
+	notes = visibleNotes(middleware.Role(r), notes)
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
 		"data": toNoteResponses(notes),
@@ -183,7 +190,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	if note == nil {
+	if note == nil || !auth.CanSeeEntity(middleware.Role(r), note.EntityType) {
 		apierr.NotFound(w, "note not found")
 		return
 	}
@@ -228,6 +235,18 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	entityID, err := uuid.Parse(req.EntityID)
 	if err != nil {
 		apierr.BadRequest(w, "invalid entity_id")
+		return
+	}
+
+	// Household role policy (#4689): family roles note anything they can
+	// see; a housesitter only pets. A record the role cannot see is 404.
+	role := middleware.Role(r)
+	if !auth.CanSeeEntity(role, req.EntityType) {
+		apierr.NotFound(w, "entity not found")
+		return
+	}
+	if !auth.CanAnnotateEntity(role, req.EntityType) {
+		apierr.Forbidden(w, "the "+role+" role cannot add notes on "+req.EntityType+" records")
 		return
 	}
 
@@ -290,8 +309,12 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	if existing == nil {
+	if existing == nil || !auth.CanSeeEntity(middleware.Role(r), existing.EntityType) {
 		apierr.NotFound(w, "note not found")
+		return
+	}
+	if !middleware.Can(r, auth.ResNotes, auth.ActWrite) {
+		apierr.Forbidden(w, middleware.DenyMessage(middleware.Role(r), auth.ResNotes, auth.ActWrite))
 		return
 	}
 
@@ -341,4 +364,17 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	h.deleteNoteIndex(r.Context(), id.String())
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// visibleNotes drops notes on records the role may not see (#4689): a
+// viewer sees no notes on secrets, a housesitter only notes on pets,
+// properties, rooms, assets, vendors, calendar, lists, meals and guides.
+func visibleNotes(role string, notes []*Note) []*Note {
+	out := notes[:0:0]
+	for _, n := range notes {
+		if auth.CanSeeEntity(role, n.EntityType) {
+			out = append(out, n)
+		}
+	}
+	return out
 }

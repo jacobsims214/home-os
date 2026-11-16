@@ -14,39 +14,17 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
-	"home-os/api/internal/activity"
 	"home-os/api/internal/admin"
-	"home-os/api/internal/agenttoken"
-	"home-os/api/internal/asset"
 	"home-os/api/internal/auth"
-	"home-os/api/internal/bill"
-	"home-os/api/internal/budget"
-	"home-os/api/internal/calendar"
 	"home-os/api/internal/config"
 	"home-os/api/internal/db"
 	"home-os/api/internal/dex"
-	"home-os/api/internal/file"
-	"home-os/api/internal/guides"
 	"home-os/api/internal/household"
 	"home-os/api/internal/invite"
-	"home-os/api/internal/link"
-	"home-os/api/internal/lists"
-	"home-os/api/internal/loan"
-	"home-os/api/internal/maintenance"
-	"home-os/api/internal/meals"
 	"home-os/api/internal/middleware"
-	"home-os/api/internal/note"
-	"home-os/api/internal/notification"
-	"home-os/api/internal/people"
-	"home-os/api/internal/pet"
-	"home-os/api/internal/property"
 	"home-os/api/internal/search"
-	"home-os/api/internal/secret"
 	"home-os/api/internal/seed"
-	"home-os/api/internal/vehicle"
-	"home-os/api/internal/vendors"
 	"home-os/api/pkg/apierr"
 	"home-os/api/pkg/smtp"
 )
@@ -225,171 +203,18 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(oidcVerifier))
 
-		// Household (Create is registered above, outside this group).
-		// /me/households lists the caller's families; X-Household-ID on any
-		// request in this group picks one (see middleware.RequireAuth).
-		r.Get("/api/v1/me/households", householdHandler.ListMine)
-		r.Get("/api/v1/households/me", householdHandler.GetMe)
-		r.Get("/api/v1/households/me/members", householdHandler.ListMembers)
-		r.Patch("/api/v1/households/me/members/{userId}", householdHandler.UpdateMemberRole)
-		r.Delete("/api/v1/households/me/members/{userId}", householdHandler.RemoveMember)
-
-		// Asset CRUD
-		assetRepo := asset.NewRepo(pool)
-		assetHandler := asset.NewHandler(assetRepo, cfg).WithSearchClient(searchClient)
-		r.Get("/api/v1/assets", assetHandler.List)
-		r.Post("/api/v1/assets", assetHandler.Create)
-		r.Get("/api/v1/assets/{id}", assetHandler.Get)
-		r.Put("/api/v1/assets/{id}", assetHandler.Update)
-		r.Delete("/api/v1/assets/{id}", assetHandler.Delete)
-
-		// Loan CRUD
-		loanRepo := loan.NewRepo(pool)
-		loanHandler := loan.NewHandler(loanRepo)
-		r.Get("/api/v1/loans", loanHandler.List)
-		r.Post("/api/v1/loans", loanHandler.Create)
-		r.Get("/api/v1/loans/{id}", loanHandler.Get)
-		r.Put("/api/v1/loans/{id}", loanHandler.Update)
-		r.Delete("/api/v1/loans/{id}", loanHandler.Delete)
-
-		// Vehicle CRUD
-		vehicleRepo := vehicle.NewRepo(pool)
-		vehicleHandler := vehicle.NewHandler(vehicleRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/vehicles", vehicleHandler.List)
-		r.Post("/api/v1/vehicles", vehicleHandler.Create)
-		r.Get("/api/v1/vehicles/{id}", vehicleHandler.Get)
-		r.Put("/api/v1/vehicles/{id}", vehicleHandler.Update)
-		r.Delete("/api/v1/vehicles/{id}", vehicleHandler.Delete)
-
-		// Pet CRUD
-		petRepo := pet.NewRepo(pool)
-		petHandler := pet.NewHandler(petRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/pets", petHandler.List)
-		r.Post("/api/v1/pets", petHandler.Create)
-		r.Get("/api/v1/pets/{id}", petHandler.Get)
-		r.Put("/api/v1/pets/{id}", petHandler.Update)
-		r.Delete("/api/v1/pets/{id}", petHandler.Delete)
-
-		// Vendor CRUD
-		vendorRepo := vendors.NewRepo(pool)
-		vendorHandler := vendors.NewHandler(vendorRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/vendors", vendorHandler.List)
-		r.Post("/api/v1/vendors", vendorHandler.Create)
-		r.Get("/api/v1/vendors/{id}", vendorHandler.Get)
-		r.Put("/api/v1/vendors/{id}", vendorHandler.Update)
-		r.Delete("/api/v1/vendors/{id}", vendorHandler.Delete)
-
-		// Calendar CRUD (must be before maintenance — maintenance handler needs calendarRepo)
-		calendarRepo := calendar.NewRepo(pool)
-		calendarHandler := calendar.NewHandler(calendarRepo)
-		r.Get("/api/v1/calendars", calendarHandler.ListCalendars)
-		r.Post("/api/v1/calendars", calendarHandler.CreateCalendar)
-		r.Get("/api/v1/calendars/events", calendarHandler.ListAllEvents)
-		r.Get("/api/v1/calendars/{id}/events", calendarHandler.ListEvents)
-		r.Post("/api/v1/calendars/{id}/events", calendarHandler.CreateEvent)
-		r.Patch("/api/v1/calendars/{id}/events/{eventId}", calendarHandler.UpdateEvent)
-		r.Delete("/api/v1/calendars/{id}/events/{eventId}", calendarHandler.DeleteEvent)
-
-		// Maintenance CRUD (with bidirectional calendar sync)
-		maintenanceRepo := maintenance.NewRepo(pool)
-		maintenanceHandler := maintenance.NewHandler(maintenanceRepo).WithCalendarRepo(calendarRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/maintenance/tasks", maintenanceHandler.ListTasks)
-		r.Post("/api/v1/maintenance/tasks", maintenanceHandler.CreateTask)
-		r.Patch("/api/v1/maintenance/tasks/{id}", maintenanceHandler.UpdateTask)
-		r.Delete("/api/v1/maintenance/tasks/{id}", maintenanceHandler.DeleteTask)
-		r.Get("/api/v1/maintenance/schedules", maintenanceHandler.ListSchedules)
-		r.Post("/api/v1/maintenance/schedules", maintenanceHandler.CreateSchedule)
-
-		// Property and Room CRUD
-		propertyRepo := property.NewRepo(pool)
-		propertyHandler := property.NewHandler(propertyRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/properties", propertyHandler.ListProperties)
-		r.Post("/api/v1/properties", propertyHandler.CreateProperty)
-		r.Get("/api/v1/properties/{id}", propertyHandler.GetProperty)
-		r.Put("/api/v1/properties/{id}", propertyHandler.UpdateProperty)
-		r.Delete("/api/v1/properties/{id}", propertyHandler.DeleteProperty)
-		r.Get("/api/v1/properties/{id}/rooms", propertyHandler.ListRooms)
-		r.Post("/api/v1/properties/{id}/rooms", propertyHandler.CreateRoom)
-
-		// Bill CRUD
-		billRepo := bill.NewRepo(pool)
-		billHandler := bill.NewHandler(billRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/bills", billHandler.List)
-		r.Post("/api/v1/bills", billHandler.Create)
-		r.Get("/api/v1/bills/{id}", billHandler.Get)
-		r.Put("/api/v1/bills/{id}", billHandler.Update)
-		r.Delete("/api/v1/bills/{id}", billHandler.Delete)
-
-		// Search
-		searchHandler := search.NewHandler(searchClient)
-		r.Get("/api/v1/search", searchHandler.Search)
-
-		// Note CRUD (polymorphic)
-		noteRepo := note.NewRepo(pool)
-		noteHandler := note.NewHandler(noteRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/notes", noteHandler.List)
-		r.Post("/api/v1/notes", noteHandler.Create)
-		r.Get("/api/v1/notes/{id}", noteHandler.Get)
-		r.Put("/api/v1/notes/{id}", noteHandler.Update)
-		r.Patch("/api/v1/notes/{id}", noteHandler.Update)
-		r.Delete("/api/v1/notes/{id}", noteHandler.Delete)
-
-		// Notification CRUD
-		notificationRepo := notification.NewRepo(pool)
-		notificationHandler := notification.NewHandler(notificationRepo, smtpClient)
-		r.Get("/api/v1/notifications", notificationHandler.List)
-		r.Post("/api/v1/notifications", notificationHandler.Create)
-		r.Patch("/api/v1/notifications/{id}/read", notificationHandler.MarkRead)
-
-		// File storage (polymorphic, bytea in Postgres)
-		fileRepo := file.NewRepo(pool)
-		fileHandler := file.NewHandler(fileRepo).WithSearch(searchClient)
-		r.Post("/api/v1/files/upload", fileHandler.UploadFile)
-		r.Get("/api/v1/files", fileHandler.ListFiles)
-		r.Get("/api/v1/files/{id}", fileHandler.GetFile)
-		r.Get("/api/v1/files/{id}/content", fileHandler.GetFileContent)
-		r.Patch("/api/v1/files/{id}", fileHandler.UpdateFile)
-		r.Delete("/api/v1/files/{id}", fileHandler.DeleteFile)
-
-		// Secret storage (zero-knowledge, encrypted client-side)
-		secretRepo := secret.NewRepo(pool)
-		secretHandler := secret.NewHandler(secretRepo).WithSearchClient(searchClient)
-		// "Shared with agents" (#4446): off unless AGENT_CREDENTIALS_KEY holds
-		// a valid key. A bad key leaves sharing off (503) and is logged
-		// without its value.
-		if agentKey, err := secret.ParseAgentKey(cfg.AgentCredentialsKey); err != nil {
-			slog.Error("secrets: agent credential sharing disabled", "error", err)
-		} else if agentKey != nil {
-			secretHandler.WithAgentKey(agentKey)
-		}
-		r.Post("/api/v1/secrets", secretHandler.CreateSecret)
-		r.Get("/api/v1/secrets", secretHandler.ListSecrets)
-		r.Get("/api/v1/secrets/{id}", secretHandler.GetSecret)
-		r.Patch("/api/v1/secrets/{id}", secretHandler.UpdateSecret)
-		r.Delete("/api/v1/secrets/{id}", secretHandler.DeleteSecret)
-		r.Post("/api/v1/secrets/setup", secretHandler.SetupKey)
-		r.Post("/api/v1/secrets/verify", secretHandler.VerifyKey)
-		r.Get("/api/v1/secrets/key", secretHandler.GetKeyInfo)
-		r.Put("/api/v1/secrets/{id}/agent-share", secretHandler.ShareWithAgents)
-		r.Delete("/api/v1/secrets/{id}/agent-share", secretHandler.UnshareWithAgents)
-
-		// Link CRUD (polymorphic)
-		linkRepo := link.NewRepo(pool)
-		linkHandler := link.NewHandler(linkRepo)
-		r.Post("/api/v1/links", linkHandler.Create)
-		r.Get("/api/v1/links", linkHandler.List)
-		r.Delete("/api/v1/links/{id}", linkHandler.Delete)
-
-		// Invite routes (accept is registered above, outside this group).
-		r.Post("/api/v1/invites", inviteHandler.CreateInvite)
-		r.Get("/api/v1/invites", inviteHandler.ListInvites)
-		r.Delete("/api/v1/invites/{id}", inviteHandler.RevokeInvite)
-
-		// Agent tokens: each member creates, lists and revokes their own.
-		agenttoken.NewHandler(agenttoken.NewRepo(pool)).RegisterRoutes(r)
-
-		// Stage 2 family routes: people, budget, lists, meals, activity, guides.
-		registerStage2Routes(r, pool, searchClient)
+		// Household role policy (#4689): every route below names the
+		// resource and action it needs (middleware/roles.go), checked against
+		// the one policy table in auth/roles.go. Unmapped routes answer 403.
+		r.Use(middleware.RequirePolicy)
+		registerProtectedRoutes(r, protectedDeps{
+			pool:             pool,
+			cfg:              cfg,
+			search:           searchClient,
+			smtp:             smtpClient,
+			householdHandler: householdHandler,
+			inviteHandler:    inviteHandler,
+		})
 	})
 
 	// Start the HTTP server.
@@ -418,23 +243,4 @@ func main() {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}
-}
-
-// registerStage2Routes mounts the Stage 2 family routes (#4489): people and
-// preferences (#4463), budget categories and obligations (#4471), lists
-// (#4472), recipes/meal plans/feedback (#4475), the activity feed (#4505) and
-// guides (#4479).
-//
-// r must already run middleware.RequireAuth, which resolves the caller's
-// household (X-Household-ID aware, #4429) and role. Each handler applies its
-// own role policy from that role (DefaultPolicy until #4689 plugs in the
-// household role policy via WithPolicy / WithReadPolicy), so nothing here
-// re-checks roles. index may be nil (guides are then not indexed).
-func registerStage2Routes(r chi.Router, pool *pgxpool.Pool, index guides.SearchIndex) {
-	people.NewHandler(people.NewRepo(pool)).RegisterRoutes(r)
-	budget.NewHandler(budget.NewRepo(pool)).RegisterRoutes(r)
-	lists.NewHandler(lists.NewRepo(pool)).RegisterRoutes(r)
-	meals.NewHandler(meals.NewRepo(pool)).RegisterRoutes(r)
-	activity.NewHandler(activity.NewRepo(pool)).RegisterRoutes(r)
-	guides.NewHandler(guides.NewRepo(pool)).WithSearch(index).RegisterRoutes(r)
 }

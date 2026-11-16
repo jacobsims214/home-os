@@ -201,7 +201,7 @@ func TestPolicy_Hook(t *testing.T) {
 		{"GET", "/api/v1/lists", nil, lists.ActionRead},
 		{"POST", "/api/v1/lists", map[string]any{"name": "x"}, lists.ActionManage},
 		{"POST", "/api/v1/lists/" + id + "/archive", nil, lists.ActionManage},
-		{"POST", "/api/v1/lists/" + id + "/items", map[string]any{"items": items("a")}, lists.ActionEditItems},
+		{"POST", "/api/v1/lists/" + id + "/items", map[string]any{"items": items("a")}, lists.ActionAddItems},
 		{"POST", "/api/v1/lists/" + id + "/items/check", map[string]any{"item_ids": []string{item}}, lists.ActionCheckItems},
 		{"PATCH", "/api/v1/lists/" + id + "/items/" + item, map[string]any{"checked": true}, lists.ActionCheckItems},
 		{"PATCH", "/api/v1/lists/" + id + "/items/" + item, map[string]any{"checked": true, "text": "y"}, lists.ActionEditItems},

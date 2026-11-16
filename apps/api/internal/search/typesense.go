@@ -116,6 +116,10 @@ type SearchResult struct {
 	Title      string  `json:"title"`
 	Body       string  `json:"body"`
 	Score      float64 `json:"score"`
+	// DocID is the index document id ("secret-<uuid>", "guide-<uuid>", ...).
+	// Not part of the API response; the handler uses it to drop documents
+	// the caller's role may not see (#4689).
+	DocID string `json:"-"`
 }
 
 // NewClient creates a new search client connected to the Typesense server
@@ -592,6 +596,7 @@ func toResults(hits []searchHit) []SearchResult {
 		results = append(results, SearchResult{
 			EntityType: str("entity_type"),
 			EntityID:   str("entity_id"),
+			DocID:      str("id"),
 			// Files collection uses "name" instead of "title", "extracted_text" instead of "body"
 			Title: str("title", "name"),
 			Body:  str("body", "extracted_text"),

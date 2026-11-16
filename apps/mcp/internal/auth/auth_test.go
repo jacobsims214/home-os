@@ -334,3 +334,45 @@ func TestVerifyTokenAndEnrich_AgentTokenPath(t *testing.T) {
 		t.Fatalf("dex claims = %+v", c)
 	}
 }
+
+// TestClaims_CanWrite_Roles: the household role decides first (#4689):
+// viewer, housesitter and vendor never write, whether they come with a Dex
+// session or an agent token carrying the write scope. Family roles write
+// with a Dex session, and with an agent token only when it has the write
+// scope.
+func TestClaims_CanWrite_Roles(t *testing.T) {
+	tests := []struct {
+		role                    string
+		dex, readToken, rwToken bool
+	}{
+		{"owner", true, false, true},
+		{"family_manager", true, false, true},
+		{"family_member", true, false, true},
+		{"viewer", false, false, false},
+		{"housesitter", false, false, false},
+		{"vendor", false, false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.role, func(t *testing.T) {
+			dex := &auth.Claims{Role: tc.role}
+			read := &auth.Claims{Role: tc.role, AgentTokenID: "t1", Scopes: []string{auth.ScopeRead}}
+			rw := &auth.Claims{Role: tc.role, AgentTokenID: "t2", Scopes: []string{auth.ScopeRead, auth.ScopeWrite}}
+			if got := dex.CanWrite(); got != tc.dex {
+				t.Errorf("Dex session CanWrite = %v, want %v", got, tc.dex)
+			}
+			if got := read.CanWrite(); got != tc.readToken {
+				t.Errorf("read token CanWrite = %v, want %v", got, tc.readToken)
+			}
+			if got := rw.CanWrite(); got != tc.rwToken {
+				t.Errorf("read+write token CanWrite = %v, want %v", got, tc.rwToken)
+			}
+			if got := auth.RoleIsReadOnly(tc.role); got == tc.dex {
+				t.Errorf("RoleIsReadOnly = %v", got)
+			}
+		})
+	}
+	var nilClaims *auth.Claims
+	if nilClaims.CanWrite() {
+		t.Error("nil claims must not write")
+	}
+}

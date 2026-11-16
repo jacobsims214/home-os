@@ -165,25 +165,34 @@ func TestStage2Routes_Registered(t *testing.T) {
 	assert.Equal(t, want, walked)
 }
 
-// TestStage2Routes_MountedOnceInMain guards against main.go mounting a Stage 2
-// route outside registerStage2Routes (a duplicate chi would silently
-// overwrite, possibly outside RequireAuth).
+// TestStage2Routes_MountedOnceInMain guards against mounting a Stage 2 route
+// outside registerStage2Routes (a duplicate chi would silently overwrite,
+// possibly outside RequireAuth / RequirePolicy). main.go mounts the protected
+// group, which calls registerProtectedRoutes (routes.go), which calls
+// registerStage2Routes once.
 func TestStage2Routes_MountedOnceInMain(t *testing.T) {
-	src, err := os.ReadFile("main.go")
+	mainSrc, err := os.ReadFile("main.go")
 	require.NoError(t, err)
-	s := string(src)
+	routesSrc, err := os.ReadFile("routes.go")
+	require.NoError(t, err)
+	m, rs := string(mainSrc), string(routesSrc)
 
-	assert.Equal(t, 1, strings.Count(s, "registerStage2Routes(r, pool, searchClient)"),
-		"main.go must call registerStage2Routes exactly once")
-	callAt := strings.Index(s, "registerStage2Routes(r, pool, searchClient)")
-	groupAt := strings.Index(s, "r.Use(middleware.RequireAuth(oidcVerifier))")
-	require.Positive(t, groupAt)
-	assert.Greater(t, callAt, groupAt, "Stage 2 routes must be inside the RequireAuth group")
+	authAt := strings.Index(m, "r.Use(middleware.RequireAuth(oidcVerifier))")
+	policyAt := strings.Index(m, "r.Use(middleware.RequirePolicy)")
+	callAt := strings.Index(m, "registerProtectedRoutes(r, protectedDeps{")
+	require.Positive(t, authAt)
+	assert.Greater(t, policyAt, authAt, "RequirePolicy must run after RequireAuth")
+	assert.Greater(t, callAt, policyAt, "protected routes must be inside the RequireAuth + RequirePolicy group")
+	assert.Equal(t, 1, strings.Count(m, "registerProtectedRoutes("), "main.go must mount the protected routes once")
+	assert.Equal(t, 1, strings.Count(rs, "registerStage2Routes(r, d.pool, d.search)"),
+		"routes.go must call registerStage2Routes exactly once")
 
 	literal := regexp.MustCompile(`"/api/v1/(people|budget|lists|recipes|meal-plans|meals|activity|guides)\b`)
-	assert.Empty(t, literal.FindAllString(s, -1), "Stage 2 paths must only be mounted by their packages")
+	assert.Empty(t, literal.FindAllString(m, -1), "Stage 2 paths must only be mounted by their packages")
+	assert.Empty(t, literal.FindAllString(rs, -1), "Stage 2 paths must only be mounted by their packages")
 	for _, pkg := range []string{"people", "budget", "lists", "meals", "activity", "guides"} {
-		assert.Equalf(t, 1, strings.Count(s, pkg+".NewHandler("), "%s handler must be built once", pkg)
+		assert.Equalf(t, 1, strings.Count(rs, pkg+".NewHandler("), "%s handler must be built once", pkg)
+		assert.Equalf(t, 0, strings.Count(m, pkg+".NewHandler("), "%s handler must not be built in main.go", pkg)
 	}
 }
 
@@ -215,6 +224,7 @@ func newStage2Fixture(t *testing.T) *stage2Fixture {
 	r := chi.NewRouter()
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(v))
+		r.Use(middleware.RequirePolicy)
 		registerStage2Routes(r, pool, nil)
 	})
 	return &stage2Fixture{pool: pool, h: r, key: key}

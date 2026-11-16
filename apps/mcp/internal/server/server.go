@@ -118,6 +118,18 @@ func (s *Server) StreamableHTTPOptions() []server.StreamableHTTPOption {
 // that may change data.
 const readOnlyScopeMessage = "this agent token is read-only: tool %q can change data and needs an agent token with the write scope"
 
+// readOnlyRoleMessage is the error a member with a read-only household role
+// (viewer, housesitter, vendor) gets for a tool that may change data.
+const readOnlyRoleMessage = "the %s role is read-only: tool %q can change data"
+
+// writeDeniedMessage explains why c may not call write tool name.
+func writeDeniedMessage(c *auth.Claims, name string) string {
+	if c != nil && auth.RoleIsReadOnly(c.Role) {
+		return fmt.Sprintf(readOnlyRoleMessage, c.Role, name)
+	}
+	return fmt.Sprintf(readOnlyScopeMessage, name)
+}
+
 // toolIsReadOnly reports whether a registered tool may be called with a
 // read-only agent token: it must be annotated readOnlyHint=true and not
 // destructiveHint=true. Tools without annotations count as writes.
@@ -138,7 +150,7 @@ func (s *Server) toolIsReadOnly(name string) bool {
 func (s *Server) requireWriteScope(next server.ToolHandlerFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if c := ClaimsFromContext(ctx); c != nil && !c.CanWrite() && !s.toolIsReadOnly(req.Params.Name) {
-			return mcp.NewToolResultError(fmt.Sprintf(readOnlyScopeMessage, req.Params.Name)), nil
+			return mcp.NewToolResultError(writeDeniedMessage(c, req.Params.Name)), nil
 		}
 		return next(ctx, req)
 	}
@@ -495,11 +507,12 @@ func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 				}
 				r.Body = io.NopCloser(bytes.NewReader(body))
 				if tool := s.writeToolCalled(body); tool != "" {
-					slog.Info("auth middleware: read-only agent token refused a write tool",
-						"token_id", claims.AgentTokenID, "tool", tool)
+					slog.Info("auth middleware: read-only caller refused a write tool",
+						"token_id", claims.AgentTokenID, "role", claims.Role, "tool", tool)
 					// No WWW-Authenticate step-up challenge: agent tokens are
-					// static secrets, so no OAuth flow can widen their scope.
-					writeJSONError(w, http.StatusForbidden, fmt.Sprintf(readOnlyScopeMessage, tool))
+					// static secrets and a role is not an OAuth scope, so no
+					// OAuth flow can widen either.
+					writeJSONError(w, http.StatusForbidden, writeDeniedMessage(claims, tool))
 					return
 				}
 			}

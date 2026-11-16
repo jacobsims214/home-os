@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/middleware"
 	"home-os/api/pkg/apierr"
 )
@@ -189,6 +190,20 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		apierr.BadRequest(w, err.Error())
 		return
+	}
+	// Household role policy (#4689): housesitters and vendors get no agent
+	// tokens, viewers only read-scoped ones. The MCP re-reads the member's
+	// role on every call too, so a later demotion also limits old tokens.
+	role := middleware.Role(r)
+	if !auth.Can(role, auth.ResAgentTokens, auth.ActCreate) {
+		apierr.Forbidden(w, middleware.DenyMessage(role, auth.ResAgentTokens, auth.ActCreate))
+		return
+	}
+	for _, sc := range scopes {
+		if sc == ScopeWrite && !auth.Can(role, auth.ResAgentTokens, auth.ActWriteScope) {
+			apierr.Forbidden(w, "the "+role+" role can only create read-scoped agent tokens")
+			return
+		}
 	}
 	if req.ExpiresAt != nil && !req.ExpiresAt.After(h.now()) {
 		apierr.BadRequest(w, "expires_at must be in the future")

@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/calendar"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
@@ -186,6 +187,15 @@ type updateTaskRequest struct {
 	Cost     *string `json:"cost,omitempty"`
 	VendorID *string `json:"vendor_id,omitempty"`
 	Notes    *string `json:"notes,omitempty"`
+}
+
+// statusOnly reports whether the request changes nothing but status,
+// completed_at and notes (what a vendor may change).
+func (req updateTaskRequest) statusOnly() bool {
+	f := req.Fields
+	return req.Name == nil && req.Description == nil && req.DueDate == nil && req.ScheduleID == nil &&
+		req.Cost == nil && req.VendorID == nil &&
+		f.PropertyID == nil && f.VehicleID == nil && f.AssetID == nil && f.EntityType == nil && f.EntityID == nil
 }
 
 type taskResponse struct {
@@ -509,6 +519,19 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		apierr.BadRequest(w, "invalid request body")
 		return
+	}
+
+	// Household role policy (#4689): a role with only update_status (a
+	// vendor) may change status, completion and notes, nothing else.
+	if !middleware.Can(r, auth.ResMaintenance, auth.ActWrite) {
+		if !middleware.Can(r, auth.ResMaintenance, auth.ActUpdateStatus) {
+			apierr.Forbidden(w, middleware.DenyMessage(claims.Role, auth.ResMaintenance, auth.ActWrite))
+			return
+		}
+		if !req.statusOnly() {
+			apierr.Forbidden(w, "the "+claims.Role+" role can only change a task's status, completed_at and notes")
+			return
+		}
 	}
 
 	updates := &Task{}

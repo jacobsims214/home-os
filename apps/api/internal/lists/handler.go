@@ -36,8 +36,11 @@ const (
 	ActionRead Action = "read"
 	// ActionManage: create, rename, re-subject, archive, delete lists.
 	ActionManage Action = "manage"
-	// ActionEditItems: add, edit, remove and reorder items.
+	// ActionEditItems: edit, remove and reorder items.
 	ActionEditItems Action = "edit_items"
+	// ActionAddItems: add items (e.g. a housesitter adding to the shopping
+	// list).
+	ActionAddItems Action = "add_items"
 	// ActionCheckItems: check and uncheck items (e.g. a housesitter working
 	// through a chores list).
 	ActionCheckItems Action = "check_items"
@@ -670,7 +673,7 @@ func (h *Handler) Items(w http.ResponseWriter, r *http.Request) {
 // AddItems appends items to a list, all or none.
 // POST /api/v1/lists/{id}/items  {"items": [{"text": "milk", ...}]}
 func (h *Handler) AddItems(w http.ResponseWriter, r *http.Request) {
-	hid, ok := h.authorize(w, r, ActionEditItems)
+	hid, ok := h.authorize(w, r, ActionAddItems)
 	if !ok {
 		return
 	}

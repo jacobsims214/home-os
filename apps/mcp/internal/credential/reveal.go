@@ -22,7 +22,7 @@ import (
 // read a credential the family shared with agents.
 //
 // Order of checks, each a refusal with no value:
-//  1. a current member of the household, not housesitter/vendor;
+//  1. a current member of the household, not viewer/housesitter/vendor;
 //  2. an agent token needs the read scope (Dex sessions have full rights);
 //  3. the credential exists in this household (another household's id is
 //     plain "not found");

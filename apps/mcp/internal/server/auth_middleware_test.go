@@ -503,6 +503,40 @@ func TestAgentTokens_EndToEnd(t *testing.T) {
 		}
 	})
 
+	// Household role policy (#4689): the role is re-read on every call, so
+	// demoting the member to a read-only role stops even a write-scoped
+	// token from writing, while read tools keep working.
+	for _, role := range []string{"viewer", "housesitter", "vendor"} {
+		t.Run("write token refused write tool as "+role, func(t *testing.T) {
+			if _, err := pool.Exec(context.Background(),
+				`UPDATE memberships SET role = $3 WHERE household_id = $1 AND user_id = $2`,
+				h.HouseholdID, h.UserID, role); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_, _ = pool.Exec(context.Background(),
+					`UPDATE memberships SET role = 'owner' WHERE household_id = $1 AND user_id = $2`, h.HouseholdID, h.UserID)
+			})
+			before := writeCalls
+			resp, body := rpcPost(t, ts.URL, rwTok, mcp.MethodToolsCall, "add_note",
+				map[string]any{"name": "add_note", "arguments": map[string]any{}})
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403: %s", resp.StatusCode, body)
+			}
+			if !strings.Contains(string(body), "the "+role+" role is read-only") {
+				t.Fatalf("403 body %s lacks the role message", body)
+			}
+			if writeCalls != before {
+				t.Fatal("write tool ran for a read-only role")
+			}
+			resp, body = rpcPost(t, ts.URL, rwTok, mcp.MethodToolsCall, "whoami",
+				map[string]any{"name": "whoami", "arguments": map[string]any{}})
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("read tool status = %d: %s", resp.StatusCode, body)
+			}
+		})
+	}
+
 	ctx := context.Background()
 	revokedTok, revokedID := seedAgentToken(t, pool, h, []string{"read", "write"}, nil)
 	if _, err := pool.Exec(ctx, `UPDATE agent_tokens SET revoked_at = NOW() WHERE id = $1`, revokedID); err != nil {
@@ -659,5 +693,34 @@ func TestAuth_DeactivatedUser(t *testing.T) {
 		if resp, body := call(t, tok); resp.StatusCode != http.StatusOK {
 			t.Fatalf("%s after reactivation: status = %d: %s", name, resp.StatusCode, body)
 		}
+	}
+}
+
+// TestRequireWriteScope_ReadOnlyRoles: a Dex session (no agent token) of a
+// viewer, housesitter or vendor cannot run a write tool (#4689); the tool
+// error names the role.
+func TestRequireWriteScope_ReadOnlyRoles(t *testing.T) {
+	for _, role := range []string{"viewer", "housesitter", "vendor"} {
+		t.Run(role, func(t *testing.T) {
+			s := server.NewServer(testConfig(), nil, testutil.NewTokenIssuer(t).Verifier(nil))
+			ran := false
+			s.RegisterTool("add_note", mcp.NewTool("add_note", mcp.WithDescription("w")),
+				func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+					ran = true
+					return mcp.NewToolResultText("written"), nil
+				})
+			ctx := server.ContextWithClaims(context.Background(), &auth.Claims{UserID: "u", HouseholdID: "h", Role: role})
+			msg, _ := json.Marshal(map[string]any{
+				"jsonrpc": "2.0", "id": 1, "method": mcp.MethodToolsCall,
+				"params": map[string]any{"name": "add_note", "arguments": map[string]any{}},
+			})
+			out, _ := json.Marshal(s.MCPServer().HandleMessage(ctx, msg))
+			if ran {
+				t.Fatal("write tool ran for a read-only role")
+			}
+			if !strings.Contains(string(out), "the "+role+" role is read-only") {
+				t.Fatalf("response %s lacks the role message", out)
+			}
+		})
 	}
 }

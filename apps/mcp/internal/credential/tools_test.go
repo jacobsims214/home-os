@@ -254,8 +254,8 @@ func TestReveal_Refusals(t *testing.T) {
 		t.Fatalf("no key: %s", r.text)
 	}
 
-	// housesitter and vendor get nothing, not even names.
-	for _, role := range []string{"housesitter", "vendor"} {
+	// viewer, housesitter and vendor get nothing, not even names (#4689).
+	for _, role := range []string{"viewer", "housesitter", "vendor"} {
 		mustExec(t, f.pool, `UPDATE memberships SET role = $3 WHERE household_id = $1 AND user_id = $2`, f.hh.HouseholdID, f.hh.UserID, role)
 		if r := call(t, f.reveal, f.agentCtx(auth.ScopeRead), map[string]any{"credential_id": sid.String()}); !r.isError || r.hasValue() {
 			t.Fatalf("%s reveal: %s", role, r.text)

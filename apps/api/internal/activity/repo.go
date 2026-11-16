@@ -142,6 +142,8 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID, f Filter) (entri
 	}
 	if len(f.ExcludeEntityTypes) > 0 {
 		add("a.entity_type <> ALL(?)", f.ExcludeEntityTypes)
+		// A record attached to a hidden one (a note on a secret) is hidden too.
+		add("(a.parent_type IS NULL OR a.parent_type <> ALL(?))", f.ExcludeEntityTypes)
 	}
 	args = append(args, f.Limit+1)
 

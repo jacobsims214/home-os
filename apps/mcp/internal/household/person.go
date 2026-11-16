@@ -110,6 +110,16 @@ func NewPersonFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		if claims == nil {
 			return notSignedIn(), nil
 		}
+		// Household role policy (#4689, same as the API's people routes): a
+		// vendor sees no people; a housesitter sees names and relationships
+		// but not ages (birthdates), emails or roles.
+		if claims.Role == "vendor" {
+			return respond.Fail(respond.Error{
+				Message: "Members with the vendor role can't see the family's people.",
+				Fix:     "Tell the user to ask an owner or family manager; retrying will not help.",
+			}), nil
+		}
+		basicOnly := claims.Role == "housesitter"
 		args := req.GetArguments()
 		id := strings.TrimSpace(str(args, "id"))
 		query := strings.TrimSpace(str(args, "query"))
@@ -150,7 +160,11 @@ func NewPersonFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		if query != "" {
 			// Escaped so "%" and "_" match literally, not as wildcards.
-			add(`(p.display_name ILIKE $%[1]d ESCAPE '\' OR u.email ILIKE $%[1]d ESCAPE '\')`, sqlutil.ContainsPattern(query))
+			if basicOnly { // no matching on emails it may not see
+				add(`p.display_name ILIKE $%d ESCAPE '\'`, sqlutil.ContainsPattern(query))
+			} else {
+				add(`(p.display_name ILIKE $%[1]d ESCAPE '\' OR u.email ILIKE $%[1]d ESCAPE '\')`, sqlutil.ContainsPattern(query))
+			}
 		}
 		if relationship != "" {
 			add("lower(p.relationship) = lower($%d)", relationship)
@@ -165,6 +179,11 @@ func NewPersonFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		items, total, err := scanPeople(rows)
 		if err != nil {
 			return respond.Failed("find people", err), nil
+		}
+		if basicOnly {
+			for i := range items {
+				items[i].Age, items[i].UserID, items[i].Email, items[i].Role = nil, nil, nil, nil
+			}
 		}
 
 		if id != "" {

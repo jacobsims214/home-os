@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/middleware"
 	"home-os/api/pkg/apierr"
 )
@@ -49,6 +50,7 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
+	results = VisibleResults(claims.Role, results)
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
@@ -57,4 +59,23 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 			"query":   query,
 		},
 	})
+}
+
+// VisibleResults drops hits the role may not see under the household role
+// policy (#4689): records of hidden kinds, and credential documents (indexed
+// as "secret-<uuid>" under their parent record's type) for roles without
+// secrets read, so a viewer never sees credential names in search.
+func VisibleResults(role string, results []SearchResult) []SearchResult {
+	canSecrets := auth.Can(role, auth.ResSecrets, auth.ActRead)
+	out := make([]SearchResult, 0, len(results))
+	for _, res := range results {
+		if !canSecrets && strings.HasPrefix(res.DocID, "secret-") {
+			continue
+		}
+		if res.EntityType != "" && !auth.CanSeeEntity(role, res.EntityType) {
+			continue
+		}
+		out = append(out, res)
+	}
+	return out
 }

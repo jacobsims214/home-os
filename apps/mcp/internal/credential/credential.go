@@ -13,7 +13,7 @@
 //     of the household (Dex session, or an agent token with the read scope),
 //     and writes an activity_log row (action 'read': who, which agent token,
 //     which credential; never the value) before it returns anything.
-//   - housesitter and vendor members get no credential tools at all.
+//   - viewer, housesitter and vendor members get no credential tools at all.
 //   - Values are never logged, indexed, put in notifications or echoed into
 //     summaries or next hints.
 package credential
@@ -34,8 +34,8 @@ import (
 )
 
 // deniedRoles may not see household credentials, not even their names
-// (role policy, #4689).
-var deniedRoles = map[string]bool{"housesitter": true, "vendor": true}
+// (role policy, #4689: the API hides credentials from viewers too).
+var deniedRoles = map[string]bool{"viewer": true, "housesitter": true, "vendor": true}
 
 // Credential is one credential as the tools return it. Value is set only by
 // credential_reveal, for a credential shared with agents.

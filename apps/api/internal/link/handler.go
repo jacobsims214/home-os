@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/middleware"
 	"home-os/api/pkg/apierr"
 )
@@ -192,7 +193,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	if !owned {
+	if !owned || !auth.CanSeeEntity(claims.Role, entityType) {
 		apierr.NotFound(w, "entity not found")
 		return
 	}
@@ -211,6 +212,11 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	// of being silently dropped.
 	grouped := linksGroupedResponse{}
 	for _, l := range links {
+		// Household role policy (#4689): links to records the role may not
+		// see (a credential, for a viewer) are left out.
+		if !auth.CanSeeEntity(claims.Role, l.LinkType) && l.LinkType != "url" {
+			continue
+		}
 		resp := linkToResponse(l)
 		grouped.Other = append(grouped.Other, resp)
 	}

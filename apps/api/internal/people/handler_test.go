@@ -422,18 +422,27 @@ func TestPeople_RolePermissions(t *testing.T) {
 	hh := f.household(t)
 	owner := f.member(t, hh, "owner")
 	kid := f.createKid(t, owner, "Kid")
+	readKid := f.createKid(t, owner, "Read Kid") // never edited, for the read checks
 	other := f.member(t, hh, "family_member")
 
+	// Household role policy (#4689): managers change anyone; a family member
+	// changes only their own record; viewers read everything read-only; a
+	// housesitter reads names, relationship and allergies only (no
+	// birthdates, schools, notes or preferences); a vendor sees no people.
 	tests := []struct {
-		role    string
-		manager bool
+		role      string
+		manager   bool
+		editsSelf bool
+		read      int // GET people / person
+		readFull  bool
+		readPrefs int // GET preferences
 	}{
-		{"owner", true},
-		{"family_manager", true},
-		{"family_member", false},
-		{"viewer", false},
-		{"housesitter", false},
-		{"vendor", false},
+		{"owner", true, true, http.StatusOK, true, http.StatusOK},
+		{"family_manager", true, true, http.StatusOK, true, http.StatusOK},
+		{"family_member", false, true, http.StatusOK, true, http.StatusOK},
+		{"viewer", false, false, http.StatusOK, true, http.StatusOK},
+		{"housesitter", false, false, http.StatusOK, false, http.StatusForbidden},
+		{"vendor", false, false, http.StatusForbidden, false, http.StatusForbidden},
 	}
 	for _, tt := range tests {
 		t.Run(tt.role, func(t *testing.T) {
@@ -443,14 +452,32 @@ func TestPeople_RolePermissions(t *testing.T) {
 				writeCode = http.StatusOK
 			}
 
-			// Any member reads people and preferences.
-			for _, path := range []string{"/api/v1/people", "/api/v1/people/" + kid.ID, "/api/v1/people/" + kid.ID + "/preferences"} {
-				rec := f.do(t, req{method: http.MethodGet, path: path, as: m})
-				assert.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
+			rec := f.do(t, req{method: http.MethodGet, path: "/api/v1/people", as: m})
+			assert.Equal(t, tt.read, rec.Code, rec.Body.String())
+			rec = f.do(t, req{method: http.MethodGet, path: "/api/v1/people/" + readKid.ID, as: m})
+			assert.Equal(t, tt.read, rec.Code, rec.Body.String())
+			if tt.read == http.StatusOK {
+				got := decode[personJSON](t, rec)
+				assert.Equal(t, "Read Kid", got.DisplayName)
+				assert.Equal(t, []string{"peanuts", "penicillin"}, got.Allergies, "allergies are visible to every reader")
+				if tt.readFull {
+					assert.NotNil(t, got.Birthdate)
+					assert.NotNil(t, got.School)
+					assert.NotNil(t, got.Preferences)
+				} else {
+					assert.Nil(t, got.Birthdate, "birthdate hidden")
+					assert.Nil(t, got.School, "school hidden")
+					assert.Nil(t, got.Grade, "grade hidden")
+					assert.Nil(t, got.Preferences, "preferences hidden")
+					assert.NotContains(t, rec.Body.String(), "Maple Elementary")
+					assert.NotContains(t, rec.Body.String(), "2016-04-09")
+				}
 			}
+			rec = f.do(t, req{method: http.MethodGet, path: "/api/v1/people/" + readKid.ID + "/preferences", as: m})
+			assert.Equal(t, tt.readPrefs, rec.Code, rec.Body.String())
 
 			// Create: managers only.
-			rec := f.do(t, req{method: http.MethodPost, path: "/api/v1/people", as: m, body: kidBody("New " + tt.role)})
+			rec = f.do(t, req{method: http.MethodPost, path: "/api/v1/people", as: m, body: kidBody("New " + tt.role)})
 			if tt.manager {
 				assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 			} else {
@@ -471,19 +498,27 @@ func TestPeople_RolePermissions(t *testing.T) {
 				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 			}
 
-			// Every member edits their own record and preferences.
+			// Family roles edit their own record and preferences; read-only
+			// roles cannot, not even their own.
 			rec = f.do(t, req{method: http.MethodPut, path: "/api/v1/people/" + m.personID, as: m,
 				body: map[string]any{"display_name": "Me (" + tt.role + ")", "allergies": []string{"cats"}}})
-			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			rec = f.do(t, req{method: http.MethodPost, path: "/api/v1/people/" + m.personID + "/preferences", as: m,
-				body: map[string]any{"kind": "dislike", "category": "food", "value": "olives"}})
-			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-			own := decode[prefJSON](t, rec)
-			rec = f.do(t, req{method: http.MethodPut, path: "/api/v1/people/" + m.personID + "/preferences/" + own.ID, as: m,
-				body: map[string]any{"kind": "like", "category": "food", "value": "olives"}})
-			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			rec = f.do(t, req{method: http.MethodDelete, path: "/api/v1/people/" + m.personID + "/preferences/" + own.ID, as: m})
-			assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+			if !tt.editsSelf {
+				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+				rec = f.do(t, req{method: http.MethodPost, path: "/api/v1/people/" + m.personID + "/preferences", as: m,
+					body: map[string]any{"kind": "dislike", "category": "food", "value": "olives"}})
+				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			} else {
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				rec = f.do(t, req{method: http.MethodPost, path: "/api/v1/people/" + m.personID + "/preferences", as: m,
+					body: map[string]any{"kind": "dislike", "category": "food", "value": "olives"}})
+				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+				own := decode[prefJSON](t, rec)
+				rec = f.do(t, req{method: http.MethodPut, path: "/api/v1/people/" + m.personID + "/preferences/" + own.ID, as: m,
+					body: map[string]any{"kind": "like", "category": "food", "value": "olives"}})
+				assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				rec = f.do(t, req{method: http.MethodDelete, path: "/api/v1/people/" + m.personID + "/preferences/" + own.ID, as: m})
+				assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+			}
 
 			// Delete a kid: managers only (non-managers get 403 before anything).
 			victim := f.createKid(t, owner, "Delete me "+tt.role)

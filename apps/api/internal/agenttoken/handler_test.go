@@ -283,3 +283,54 @@ func TestAgentTokens_RequireAuth(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, tc.method+" "+tc.path)
 	}
 }
+
+// TestAgentTokens_RolePolicy: under the household role policy (#4689) the
+// family roles may create read and write tokens, a viewer read-only tokens,
+// and a housesitter or vendor none at all. The handler checks this itself
+// (the route-level middleware.RequirePolicy is not mounted here), and every
+// role may still list and revoke its own tokens.
+func TestAgentTokens_RolePolicy(t *testing.T) {
+	pool, h, key := setup(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		role               string
+		wantRead, wantBoth int
+	}{
+		{auth.RoleOwner, http.StatusCreated, http.StatusCreated},
+		{auth.RoleFamilyManager, http.StatusCreated, http.StatusCreated},
+		{auth.RoleFamilyMember, http.StatusCreated, http.StatusCreated},
+		{auth.RoleViewer, http.StatusCreated, http.StatusForbidden},
+		{auth.RoleHousesitter, http.StatusForbidden, http.StatusForbidden},
+		{auth.RoleVendor, http.StatusForbidden, http.StatusForbidden},
+	}
+	for _, tc := range tests {
+		t.Run(tc.role, func(t *testing.T) {
+			token, userID, hhID := member(t, pool, key, "")
+			_, err := pool.Exec(ctx, `UPDATE memberships SET role = $3 WHERE household_id = $1 AND user_id = $2`,
+				hhID, userID, tc.role)
+			require.NoError(t, err)
+
+			rec := call(t, h, http.MethodPost, "/api/v1/agent-tokens", token,
+				map[string]any{"name": "read", "scopes": []string{"read"}})
+			assert.Equal(t, tc.wantRead, rec.Code, rec.Body.String())
+			rec = call(t, h, http.MethodPost, "/api/v1/agent-tokens", token,
+				map[string]any{"name": "rw", "scopes": []string{"read", "write"}})
+			assert.Equal(t, tc.wantBoth, rec.Code, rec.Body.String())
+			if tc.wantBoth == http.StatusForbidden {
+				assert.Contains(t, rec.Body.String(), tc.role)
+			}
+
+			// A token minted before a demotion can still be listed and revoked.
+			var tokenID string
+			require.NoError(t, pool.QueryRow(ctx,
+				`INSERT INTO agent_tokens (household_id, user_id, name, token_prefix, token_hash, scopes)
+				 VALUES ($1, $2, 'old', 'hos_oldtoken', $3, ARRAY['read','write']) RETURNING id::text`,
+				hhID, userID, agenttoken.HashToken("hos_old-"+uuid.NewString())).Scan(&tokenID))
+			rec = call(t, h, http.MethodGet, "/api/v1/agent-tokens", token, nil)
+			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			rec = call(t, h, http.MethodDelete, "/api/v1/agent-tokens/"+tokenID, token, nil)
+			assert.Less(t, rec.Code, 300, rec.Body.String())
+		})
+	}
+}

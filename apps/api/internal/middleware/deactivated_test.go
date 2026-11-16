@@ -47,8 +47,9 @@ func readSource(t *testing.T, rel string) string {
 	return string(b)
 }
 
-// apiRoutes reads cmd/api/main.go and returns the routes registered inside
-// the RequireAuth group (plus agent tokens, which register there) and the
+// apiRoutes reads cmd/api/main.go and cmd/api/routes.go and returns the
+// routes registered inside the RequireAuth group (registerProtectedRoutes,
+// plus agent tokens, which register there) and the
 // ones registered outside it. Reading the source keeps the walk complete as
 // routes are added: a new protected route is walked automatically, and a new
 // route outside RequireAuth fails the test until it is classified below.
@@ -59,8 +60,16 @@ func apiRoutes(t *testing.T) (protected, outside []route) {
 	require.Positive(t, start, "RequireAuth group not found in cmd/api/main.go")
 	end := strings.Index(src[start:], "\n\t})\n")
 	require.Positive(t, end, "end of RequireAuth group not found")
-	protected = parseRoutes(t, src[start:start+end])
-	require.Contains(t, src[start:start+end], "agenttoken.NewHandler(", "agent tokens moved; update this test")
+	// The group mounts registerProtectedRoutes (cmd/api/routes.go, #4689).
+	require.Contains(t, src[start:start+end], "registerProtectedRoutes(r,", "protected routes moved; update this test")
+	routesSrc := readSource(t, "cmd/api/routes.go")
+	pstart := strings.Index(routesSrc, "func registerProtectedRoutes(")
+	require.Positive(t, pstart, "registerProtectedRoutes not found in cmd/api/routes.go")
+	pend := strings.Index(routesSrc[pstart:], "\n}\n")
+	require.Positive(t, pend, "end of registerProtectedRoutes not found")
+	body := routesSrc[pstart : pstart+pend]
+	protected = parseRoutes(t, body)
+	require.Contains(t, body, "agenttoken.NewHandler(", "agent tokens moved; update this test")
 	protected = append(protected, parseRoutes(t, readSource(t, "internal/agenttoken/handler.go"))...)
 
 	outside = parseRoutes(t, src[:start])

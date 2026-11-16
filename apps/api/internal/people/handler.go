@@ -252,9 +252,38 @@ type caller struct {
 
 func (c caller) isManager() bool { return auth.CanManageMembers(c.role) }
 
-// canEdit: managers may edit anyone; everyone else only their own record.
+// canEdit: managers may edit anyone; other roles with people write (family
+// members) only their own record. Viewers, housesitters and vendors edit
+// nobody, not even themselves (household role policy, #4689).
 func (c caller) canEdit(p *Person) bool {
+	if !auth.Can(c.role, auth.ResPeople, auth.ActWrite) {
+		return false
+	}
 	return c.isManager() || (p.UserID != nil && *p.UserID == c.userID)
+}
+
+// canReadFull: the role may see birthdates, schools, grades and notes. A
+// housesitter sees names, relationship and allergies only (read_basic).
+func (c caller) canReadFull() bool { return auth.Can(c.role, auth.ResPeople, auth.ActRead) }
+
+// canReadPreferences: the role may see people's preferences.
+func (c caller) canReadPreferences() bool {
+	return auth.Can(c.role, auth.ResPreferences, auth.ActRead)
+}
+
+// view returns p as the caller may see it: everything for roles with people
+// read, otherwise only the basic fields (id, name, relationship, whether
+// they log in, allergies).
+func (c caller) view(p *Person) personResponse {
+	out := toPersonResponse(p)
+	if !c.canReadFull() {
+		out.UserID = nil
+		out.Birthdate = nil
+		out.School = nil
+		out.Grade = nil
+		out.Notes = nil
+	}
+	return out
 }
 
 // resolveCaller reads the household the request resolved to and the caller's
@@ -280,6 +309,11 @@ func (h *Handler) resolveCaller(w http.ResponseWriter, r *http.Request) (caller,
 	}
 	if role == "" {
 		apierr.Forbidden(w, "not a member of this household")
+		return caller{}, false
+	}
+	// Household role policy (#4689): a vendor sees no people at all.
+	if !auth.Can(role, auth.ResPeople, auth.ActReadBasic) {
+		apierr.Forbidden(w, middleware.DenyMessage(role, auth.ResPeople, auth.ActRead))
 		return caller{}, false
 	}
 	return caller{householdID: hid, userID: uid, role: role}, true
@@ -316,6 +350,10 @@ func (h *Handler) loadPerson(w http.ResponseWriter, r *http.Request, c caller) (
 func forbidEdit(w http.ResponseWriter, c caller, p *Person, action string) {
 	slog.Warn("people: refused "+action, "user_id", c.userID, "household_id", c.householdID,
 		"role", c.role, "person_id", p.ID)
+	if !auth.Can(c.role, auth.ResPeople, auth.ActWrite) {
+		apierr.Forbidden(w, middleware.DenyMessage(c.role, auth.ResPeople, auth.ActWrite))
+		return
+	}
 	apierr.Forbidden(w, "only owners and family managers can change other people's records")
 }
 
@@ -335,7 +373,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]personResponse, 0, len(people))
 	for _, p := range people {
-		out = append(out, toPersonResponse(p))
+		out = append(out, c.view(p))
 	}
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": out})
 }
@@ -351,14 +389,16 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	prefs, err := h.repo.ListPreferences(r.Context(), c.householdID, p.ID)
-	if err != nil {
-		apierr.InternalError(w, err)
-		return
+	out := c.view(p)
+	if c.canReadPreferences() {
+		prefs, err := h.repo.ListPreferences(r.Context(), c.householdID, p.ID)
+		if err != nil {
+			apierr.InternalError(w, err)
+			return
+		}
+		list := toPreferenceResponses(prefs)
+		out.Preferences = &list
 	}
-	out := toPersonResponse(p)
-	list := toPreferenceResponses(prefs)
-	out.Preferences = &list
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": out})
 }
 
@@ -465,6 +505,10 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListPreferences(w http.ResponseWriter, r *http.Request) {
 	c, ok := h.resolveCaller(w, r)
 	if !ok {
+		return
+	}
+	if !c.canReadPreferences() {
+		apierr.Forbidden(w, middleware.DenyMessage(c.role, auth.ResPreferences, auth.ActRead))
 		return
 	}
 	p, ok := h.loadPerson(w, r, c)
