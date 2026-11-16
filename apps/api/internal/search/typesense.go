@@ -116,6 +116,11 @@ type SearchResult struct {
 	Title      string  `json:"title"`
 	Body       string  `json:"body"`
 	Score      float64 `json:"score"`
+	// FileID is set on hits that are a stored file: an OCR chunk from the
+	// files collection, or a file's metadata document ("document-<id>") in
+	// household_search. The handler uses it to collapse both kinds of hit
+	// for one file and to check the file still exists and is visible.
+	FileID string `json:"file_id,omitempty"`
 	// DocID is the index document id ("secret-<uuid>", "guide-<uuid>", ...).
 	// Not part of the API response; the handler uses it to drop documents
 	// the caller's role may not see (#4689).
@@ -454,6 +459,10 @@ func (c *Client) DeleteFileDocuments(ctx context.Context, fileID string) error {
 
 // --- search -----------------------------------------------------------------
 
+// documentEntityType is the entity_type of a file's metadata document in
+// household_search (indexed by the file handler, apps/api/internal/file).
+const documentEntityType = "document"
+
 // Search queries all indexed collections (household_search + files), scoped to
 // a single household. Each collection is queried in hybrid mode (keyword +
 // semantic, fused by Typesense's rank fusion). Results from all collections
@@ -557,14 +566,16 @@ func (c *Client) searchCollection(ctx context.Context, collName, householdID, qu
 	if err != nil {
 		return nil, fmt.Errorf("search %s: %w", collName, err)
 	}
-	return toResults(resp.Hits), nil
+	return toResults(resp.Hits, collName == filesCollectionName), nil
 }
 
 // toResults maps Typesense hits to SearchResults. Score is the rank-fusion
 // score for hybrid hits (0..1) and the text-match score otherwise. Hits
 // carrying a file_id (chunks of one file in the files collection) are
 // collapsed to the first, best-ranked one, whose body is the matching chunk.
-func toResults(hits []searchHit) []SearchResult {
+// fromFiles marks hits of the files collection, whose documents are files
+// (chunk 0's id is the file id when it has no file_id).
+func toResults(hits []searchHit, fromFiles bool) []SearchResult {
 	results := make([]SearchResult, 0, len(hits))
 	seenFiles := map[string]bool{}
 	for _, hit := range hits {
@@ -593,7 +604,15 @@ func toResults(hits []searchHit) []SearchResult {
 		case hit.TextMatchInfo != nil:
 			score, _ = strconv.ParseFloat(hit.TextMatchInfo.Score, 64)
 		}
+		fileID := ""
+		switch {
+		case fromFiles:
+			fileID = str("file_id", "id")
+		case str("entity_type") == documentEntityType:
+			fileID = str("entity_id")
+		}
 		results = append(results, SearchResult{
+			FileID:     fileID,
 			EntityType: str("entity_type"),
 			EntityID:   str("entity_id"),
 			DocID:      str("id"),

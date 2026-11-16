@@ -146,7 +146,9 @@ func registerProtectedRoutes(r chi.Router, d protectedDeps) {
 	r.Delete("/api/v1/bills/{id}", billHandler.Delete)
 
 	// Search
-	searchHandler := search.NewHandler(d.search)
+	// File hits are re-checked against Postgres (deleted files, and files
+	// attached to credentials for roles that cannot read credentials).
+	searchHandler := search.NewHandler(d.search).WithFileChecker(file.NewRepo(d.pool))
 	r.Get("/api/v1/search", searchHandler.Search)
 
 	// Note CRUD (polymorphic)

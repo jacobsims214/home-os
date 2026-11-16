@@ -203,7 +203,7 @@ func TestToResultsCollapsesFileChunks(t *testing.T) {
 		hit(map[string]any{"file_id": "f1", "name": "Policy.pdf", "extracted_text": "premiums"}, 0.7),
 		hit(map[string]any{"title": "Note A", "body": "x"}, 0.6),
 		hit(map[string]any{"title": "Note B", "body": "y"}, 0.5),
-	})
+	}, false)
 	if assert.Len(t, got, 4) {
 		assert.Equal(t, "burst pipe clause", got[0].Body)
 		assert.Equal(t, "Rex.txt", got[1].Title)

@@ -86,19 +86,25 @@ func (r *Repo) CreateFile(ctx context.Context, householdID uuid.UUID, f *File, d
 		f.EntityType, f.EntityID = EntityTypeHousehold, householdID
 	}
 
-	// Insert the metadata row referencing the blob we just created.
-	var created File
-	err = tx.QueryRow(ctx,
-		`INSERT INTO files (household_id, blob_id, name, content_type, size, entity_type, entity_id, tags)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id, household_id, blob_id, name, content_type, size, entity_type, entity_id,
-		           extracted_text, ocr_status, ocr_error, tags, created_at, updated_at`,
+	category := f.Category
+	if category == "" {
+		category = CategoryOther
+	}
+
+	// Insert the metadata row referencing the blob we just created. Dates
+	// arrive as validated "YYYY-MM-DD" strings and are cast here.
+	rows, err := tx.Query(ctx,
+		`INSERT INTO files AS f (household_id, blob_id, name, content_type, size, entity_type, entity_id, tags,
+		                         title, category, document_date, expires_on, description, person_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::date, $12::date, $13, $14)
+		 RETURNING `+fileColumns,
 		householdID, blobID, f.Name, f.ContentType, int64(len(data)), f.EntityType, f.EntityID, f.Tags,
-	).Scan(
-		&created.ID, &created.HouseholdID, &created.BlobID, &created.Name, &created.ContentType,
-		&created.Size, &created.EntityType, &created.EntityID, &created.ExtractedText,
-		&created.OCRStatus, &created.OCRError, &created.Tags, &created.CreatedAt, &created.UpdatedAt,
+		f.Title, category, f.DocumentDate, f.ExpiresOn, f.Description, f.PersonID,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("create file: insert metadata: %w", err)
+	}
+	created, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[File])
 	if err != nil {
 		return nil, fmt.Errorf("create file: insert metadata: %w", err)
 	}
@@ -106,7 +112,7 @@ func (r *Repo) CreateFile(ctx context.Context, householdID uuid.UUID, f *File, d
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("create file: commit: %w", err)
 	}
-	return &created, nil
+	return created, nil
 }
 
 // GetFile returns the metadata for a single file by ID, scoped to the given
@@ -117,10 +123,9 @@ func (r *Repo) CreateFile(ctx context.Context, householdID uuid.UUID, f *File, d
 // yours" (matching note/repo.go and the CalDAV tenant-isolation pattern).
 func (r *Repo) GetFile(ctx context.Context, householdID, id uuid.UUID) (*File, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, blob_id, name, content_type, size, entity_type, entity_id,
-		        extracted_text, ocr_status, ocr_error, tags, created_at, updated_at
-		 FROM files
-		 WHERE id = $1 AND household_id = $2`,
+		`SELECT `+fileColumns+`
+		 FROM files f
+		 WHERE f.id = $1 AND f.household_id = $2`,
 		id, householdID,
 	)
 	if err != nil {
@@ -177,35 +182,34 @@ func (r *Repo) GetFileContent(ctx context.Context, householdID, id uuid.UUID) ([
 	return data, nil
 }
 
-// ListFiles returns all files for a household, optionally narrowed to a
-// specific (entity_type, entity_id) polymorphic association. Results are
-// ordered newest-first to match the dashboard "recent files" use case
-// (idx_files_household_created backs this ordering).
-//
-// When entityType and entityID are both non-empty the query is scoped to
-// files attached to that entity; otherwise the entire household is listed.
-// An empty result set returns a non-nil empty slice (not nil) so JSON
+// ListFiles returns a household's files, newest first
+// (idx_files_household_created backs this ordering), narrowed by the
+// optional filter: an (entity_type, entity_id) association, a category
+// (idx_files_household_category), a person (idx_files_person), and entity
+// kinds to hide. An empty result is a non-nil empty slice so JSON
 // marshalling produces [] rather than null.
-func (r *Repo) ListFiles(ctx context.Context, householdID uuid.UUID, entityType string, entityID uuid.UUID) ([]*File, error) {
-	var (
-		query string
-		args  []any
-	)
-	if entityType != "" && entityID != uuid.Nil {
-		query = `SELECT id, household_id, blob_id, name, content_type, size, entity_type, entity_id,
-		                extracted_text, ocr_status, ocr_error, tags, created_at, updated_at
-		         FROM files
-		         WHERE household_id = $1 AND entity_type = $2 AND entity_id = $3
-		         ORDER BY created_at DESC`
-		args = []any{householdID, entityType, entityID}
-	} else {
-		query = `SELECT id, household_id, blob_id, name, content_type, size, entity_type, entity_id,
-		                extracted_text, ocr_status, ocr_error, tags, created_at, updated_at
-		         FROM files
-		         WHERE household_id = $1
-		         ORDER BY created_at DESC`
-		args = []any{householdID}
+func (r *Repo) ListFiles(ctx context.Context, householdID uuid.UUID, flt ListFilter) ([]*File, error) {
+	where := []string{"f.household_id = $1"}
+	args := []any{householdID}
+	add := func(cond string, v any) {
+		args = append(args, v)
+		where = append(where, fmt.Sprintf(cond, len(args)))
 	}
+	if flt.EntityType != "" && flt.EntityID != uuid.Nil {
+		add("f.entity_type = $%d", flt.EntityType)
+		add("f.entity_id = $%d", flt.EntityID)
+	}
+	if flt.Category != "" {
+		add("f.category = $%d", flt.Category)
+	}
+	if flt.PersonID != uuid.Nil {
+		add("f.person_id = $%d", flt.PersonID)
+	}
+	if len(flt.HideEntityTypes) > 0 {
+		add("NOT (f.entity_type::text = ANY($%d))", flt.HideEntityTypes)
+	}
+	query := `SELECT ` + fileColumns + ` FROM files f WHERE ` + strings.Join(where, " AND ") +
+		` ORDER BY f.created_at DESC`
 
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -221,6 +225,90 @@ func (r *Repo) ListFiles(ctx context.Context, householdID uuid.UUID, entityType 
 		files = []*File{}
 	}
 	return files, nil
+}
+
+// PersonName returns the display name of a person in the household, or ""
+// when personID is nil or not found. Search documents carry it so "Jo's
+// report card" finds a school document filed for Jo.
+func (r *Repo) PersonName(ctx context.Context, householdID uuid.UUID, personID *uuid.UUID) (string, error) {
+	if personID == nil {
+		return "", nil
+	}
+	var name string
+	err := r.pool.QueryRow(ctx,
+		`SELECT display_name FROM people WHERE id = $1 AND household_id = $2`,
+		*personID, householdID,
+	).Scan(&name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("person name: %w", err)
+	}
+	return name, nil
+}
+
+// VisibleFileIDs returns which of ids are files of the household, leaving
+// out files attached to a credential unless includeSecretFiles. Search uses
+// it to re-check hits against Postgres (search.FileChecker), so a stale
+// index never shows a deleted file or a credential's file to a viewer.
+// Ids that are not UUIDs are ignored.
+func (r *Repo) VisibleFileIDs(ctx context.Context, householdID string, ids []string, includeSecretFiles bool) (map[string]bool, error) {
+	out := map[string]bool{}
+	hid, err := uuid.Parse(householdID)
+	if err != nil {
+		return out, fmt.Errorf("visible files: household id: %w", err)
+	}
+	uids := make([]uuid.UUID, 0, len(ids))
+	for _, s := range ids {
+		if u, err := uuid.Parse(s); err == nil {
+			uids = append(uids, u)
+		}
+	}
+	if len(uids) == 0 {
+		return out, nil
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT id FROM files
+		 WHERE household_id = $1 AND id = ANY($2)
+		   AND ($3 OR entity_type::text <> 'secret')`,
+		hid, uids, includeSecretFiles)
+	if err != nil {
+		return out, fmt.Errorf("visible files: %w", err)
+	}
+	ok, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return out, fmt.Errorf("visible files: collect: %w", err)
+	}
+	for _, u := range ok {
+		out[u.String()] = true
+	}
+	return out, nil
+}
+
+// AllForIndex calls fn for every file of every household with its person's
+// display name, for cmd/reindex. It is the only cross-household read in
+// this package and exists only for the offline reindex tool.
+func (r *Repo) AllForIndex(ctx context.Context, fn func(f *File, personName string) error) error {
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+fileColumns+`, COALESCE(p.display_name, '')
+		 FROM files f
+		 LEFT JOIN people p ON p.id = f.person_id AND p.household_id = f.household_id`)
+	if err != nil {
+		return fmt.Errorf("all files: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var f File
+		var person string
+		if err := rows.Scan(append(f.scanTargets(), &person)...); err != nil {
+			return fmt.Errorf("all files: scan: %w", err)
+		}
+		if err := fn(&f, person); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 // DeleteFile removes a file, scoped to household_id. Its blob goes in the
@@ -281,64 +369,90 @@ func (r *Repo) UpdateOCRStatus(ctx context.Context, householdID, id uuid.UUID, o
 	return nil
 }
 
-// UpdateFile patches the user-editable metadata of a file — its name and/or
-// tags — scoped to household_id. It backs the PATCH /api/v1/files/{id}
-// endpoint (task #1201's handler).
+// UpdateFile patches the user-editable fields of a file, scoped to
+// household_id. It backs PATCH /api/v1/files/{id}.
 //
 // Semantics:
-//   - name == nil  → name column is left unchanged.
-//   - name != nil  → name is set to *name (may be set to "" to clear it).
-//   - tags == nil  → tags array is left unchanged.
-//   - tags != nil  → tags array is replaced wholesale (pass an empty slice to
-//     clear all tags). A nil element is not special; pgx encodes []string as a
-//     text[].
+//   - Name nil leaves the name alone; Tags nil leaves tags alone, a non-nil
+//     slice replaces them wholesale (empty slice clears).
+//   - The metadata fields (jsonopt.Field) are left alone unless Set; Set with a nil
+//     Value writes NULL. Category is never NULL (the handler rejects it).
 //
-// At least one of name / tags should be non-nil; the handler rejects an
-// all-nil PATCH with 400 before reaching here.
+// The SET clause is built dynamically so untouched columns are not
+// written (a COALESCE approach could not tell "absent" from "null", and a
+// nil []string encodes as '{}' under pgx, which would wipe tags).
 //
-// Returns the fully-populated updated *File, or (nil, nil) if the file does not
-// exist or belongs to a different household — same not-found-vs-forbidden
-// contract as GetFile so callers translate both to 404 without leaking
-// cross-tenant existence.
-func (r *Repo) UpdateFile(ctx context.Context, householdID, id uuid.UUID, name *string, tags []string) (*File, error) {
-	// Build the SET clause dynamically so unset fields are not touched. This
-	// avoids the nil-[]string encoding ambiguity that a COALESCE/CASE approach
-	// would introduce (a nil slice marshals as '{}' under pgx, which would
-	// wrongly wipe existing tags).
+// Returns the updated *File, or (nil, nil) if the file does not exist or
+// belongs to a different household, so callers answer 404 either way.
+// Constraint violations (a person from another family: 23503; expires_on
+// before document_date: 23514) come back as the pg error for apierr.DB.
+func (r *Repo) UpdateFile(ctx context.Context, householdID, id uuid.UUID, p Patch) (*File, error) {
 	setParts := []string{"updated_at = NOW()"}
 	args := []any{householdID, id} // $1 = household_id, $2 = id
-	next := 3
-	if name != nil {
-		setParts = append(setParts, fmt.Sprintf("name = $%d", next))
-		args = append(args, *name)
-		next++
+	set := func(col string, v any) {
+		args = append(args, v)
+		setParts = append(setParts, fmt.Sprintf("%s = $%d", col, len(args)))
 	}
-	if tags != nil {
-		setParts = append(setParts, fmt.Sprintf("tags = $%d", next))
-		args = append(args, tags)
-		next++
+	if p.Name != nil {
+		set("name", *p.Name)
+	}
+	if p.Tags != nil {
+		set("tags", p.Tags)
+	}
+	if p.Title.Set {
+		set("title", p.Title.Value)
+	}
+	if p.Category.Set && p.Category.Value != nil {
+		set("category", *p.Category.Value)
+	}
+	if p.DocumentDate.Set {
+		args = append(args, p.DocumentDate.Value)
+		setParts = append(setParts, fmt.Sprintf("document_date = $%d::date", len(args)))
+	}
+	if p.ExpiresOn.Set {
+		args = append(args, p.ExpiresOn.Value)
+		setParts = append(setParts, fmt.Sprintf("expires_on = $%d::date", len(args)))
+	}
+	if p.Description.Set {
+		set("description", p.Description.Value)
+	}
+	if p.PersonID.Set {
+		set("person_id", p.PersonID.Value)
 	}
 
 	query := fmt.Sprintf(`
-		UPDATE files
+		UPDATE files AS f
 		SET %s
-		WHERE id = $2 AND household_id = $1
-		RETURNING id, household_id, blob_id, name, content_type, size, entity_type, entity_id,
-		          extracted_text, ocr_status, ocr_error, tags, created_at, updated_at`,
+		WHERE f.id = $2 AND f.household_id = $1
+		RETURNING `+fileColumns,
 		strings.Join(setParts, ", "),
 	)
 
-	var updated File
-	err := r.pool.QueryRow(ctx, query, args...).Scan(
-		&updated.ID, &updated.HouseholdID, &updated.BlobID, &updated.Name, &updated.ContentType,
-		&updated.Size, &updated.EntityType, &updated.EntityID, &updated.ExtractedText,
-		&updated.OCRStatus, &updated.OCRError, &updated.Tags, &updated.CreatedAt, &updated.UpdatedAt,
-	)
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("update file: %w", err)
+	}
+	updated, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[File])
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("update file: %w", err)
 	}
-	return &updated, nil
+	return updated, nil
+}
+
+// fileColumns is the select list matching File's field order, for
+// pgx.RowToAddrOfStructByPos. The files table is always aliased f. DATE
+// columns come back as "YYYY-MM-DD" text.
+const fileColumns = `f.id, f.household_id, f.blob_id, f.name, f.content_type, f.size, f.entity_type, f.entity_id,
+	f.extracted_text, f.ocr_status, f.ocr_error, f.tags, f.created_at, f.updated_at,
+	f.title, f.category, to_char(f.document_date, 'YYYY-MM-DD'), to_char(f.expires_on, 'YYYY-MM-DD'),
+	f.description, f.person_id`
+
+// scanTargets returns pointers to f's fields in fileColumns order.
+func (f *File) scanTargets() []any {
+	return []any{&f.ID, &f.HouseholdID, &f.BlobID, &f.Name, &f.ContentType, &f.Size, &f.EntityType, &f.EntityID,
+		&f.ExtractedText, &f.OCRStatus, &f.OCRError, &f.Tags, &f.CreatedAt, &f.UpdatedAt,
+		&f.Title, &f.Category, &f.DocumentDate, &f.ExpiresOn, &f.Description, &f.PersonID}
 }

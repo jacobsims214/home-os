@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/api/internal/config"
+	"home-os/api/internal/file"
 	"home-os/api/internal/guides"
 	"home-os/api/internal/search"
 )
@@ -103,6 +104,20 @@ func main() {
 		return nil
 	}); err != nil {
 		log.Printf("skip guides: %v", err)
+	}
+
+	// Document metadata (048): one household_search document per file, built
+	// by the same function the file handler uses on upload/PATCH. The OCR
+	// text stays in the worker's files collection.
+	if err := file.NewRepo(pool).AllForIndex(ctx, func(f *file.File, person string) error {
+		if err := sc.IndexDocument(ctx, file.SearchDocument(f, person)); err != nil {
+			log.Printf("ERR files/%s: %v", f.ID, err)
+		} else {
+			total++
+		}
+		return nil
+	}); err != nil {
+		log.Printf("skip files: %v", err)
 	}
 
 	fmt.Printf("Indexed %d documents\n", total)

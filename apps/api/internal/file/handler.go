@@ -21,9 +21,21 @@
 //	ListFiles(ctx, householdID uuid.UUID, entityType string, entityID uuid.UUID) ([]*File, error)
 //	    When entityType == "" / entityID == uuid.Nil the entity filter is
 //	    ignored and all household files are returned.
-//	UpdateFile(ctx, householdID, id uuid.UUID, name *string, tags []string) (*File, error)
-//	    PATCH for name and/or tags. nil name leaves name unchanged; a non-nil
-//	    tags slice replaces the tags array. Returns nil if not found.
+//	UpdateFile(ctx, householdID, id uuid.UUID, p Patch) (*File, error)
+//	    PATCH for name, tags and the 048 document metadata. Returns nil if
+//	    not found.
+//
+// Document metadata (#4478, migration 048): upload takes optional form
+// fields title, category, document_date, expires_on, description and
+// person_id; PATCH takes the same keys as JSON, where null clears a field
+// (category cannot be cleared). Dates are "YYYY-MM-DD". Each create/PATCH
+// also upserts the file's metadata document into household_search (see
+// search.go) so hybrid search matches on the metadata; delete removes it.
+//
+// Role rules (#4689): the route policy already limits who reaches these
+// handlers (files are hidden from housesitter and vendor). On top of that a
+// role that cannot read credentials (viewer) never sees a file attached to
+// a secret: it is omitted from lists and 404 on get/content/patch.
 package file
 
 import (
@@ -42,8 +54,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/middleware"
+	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
+	"home-os/api/pkg/jsonopt"
 )
 
 // maxUploadBytes caps the size of a single upload request body. The product
@@ -56,10 +71,18 @@ const maxUploadBytes = 25 << 20 // 25 MB
 // the worker retries it; a slow Typesense must not slow the request.
 const searchDeleteTimeout = 5 * time.Second
 
-// SearchIndex removes a file's documents from search.
-// *search.Client satisfies it (DeleteFileDocuments).
+// searchIndexTimeout bounds the metadata document upsert after a create or
+// PATCH. Indexing failures are logged, never fail the request; cmd/reindex
+// rebuilds every document.
+const searchIndexTimeout = 10 * time.Second
+
+// SearchIndex keeps search in step with files: the worker-owned files
+// collection on delete, and the file's metadata document in
+// household_search on create/PATCH/delete. *search.Client satisfies it.
 type SearchIndex interface {
 	DeleteFileDocuments(ctx context.Context, fileID string) error
+	IndexDocument(ctx context.Context, doc search.SearchDocument) error
+	DeleteDocument(ctx context.Context, id string) error
 }
 
 // Handler holds dependencies for file HTTP handlers.
@@ -82,12 +105,92 @@ func (h *Handler) WithSearch(idx SearchIndex) *Handler {
 
 // --- request / response types ---
 
-// updateFileRequest is the JSON body for PATCH /api/v1/files/{id}. Both fields
-// are optional (pointer / nil-tagged) so a caller can update just tags, just
-// name, or both. Omitted fields are left unchanged.
+// updateFileRequest is the JSON body for PATCH /api/v1/files/{id}. Every
+// field is optional; omitted fields are left unchanged. The metadata fields
+// accept null to clear (except category).
 type updateFileRequest struct {
-	Name *string  `json:"name,omitempty"`
-	Tags []string `json:"tags,omitempty"`
+	Name         *string                  `json:"name,omitempty"`
+	Tags         []string                 `json:"tags,omitempty"`
+	Title        jsonopt.Field[string]    `json:"title"`
+	Category     jsonopt.Field[string]    `json:"category"`
+	DocumentDate jsonopt.Field[string]    `json:"document_date"`
+	ExpiresOn    jsonopt.Field[string]    `json:"expires_on"`
+	Description  jsonopt.Field[string]    `json:"description"`
+	PersonID     jsonopt.Field[uuid.UUID] `json:"person_id"`
+}
+
+// canSeeSecretFiles reports whether the caller may see files attached to a
+// credential: only roles with secrets read (not viewer).
+func canSeeSecretFiles(r *http.Request) bool {
+	claims := middleware.ClaimsFromContext(r.Context())
+	return claims != nil && auth.Can(claims.Role, auth.ResSecrets, auth.ActRead)
+}
+
+// visible reports whether the caller may see f at all.
+func visible(r *http.Request, f *File) bool {
+	return f.EntityType != EntityTypeSecret || canSeeSecretFiles(r)
+}
+
+// validDate checks a "YYYY-MM-DD" date.
+func validDate(s string) bool {
+	_, err := time.Parse(time.DateOnly, s)
+	return err == nil
+}
+
+// normText trims s; blank becomes nil (048 rejects a blank title, and
+// "no description" has one spelling too).
+func normText(s *string) *string {
+	if s == nil {
+		return nil
+	}
+	t := strings.TrimSpace(*s)
+	if t == "" {
+		return nil
+	}
+	return &t
+}
+
+// validateMeta checks the metadata a client sent. Empty strings mean "not
+// given" for upload form fields.
+func validateMeta(category string, docDate, expires *string) string {
+	if category != "" && !ValidCategory(category) {
+		return "invalid category: must be one of " + strings.Join(Categories, ", ")
+	}
+	if docDate != nil && !validDate(*docDate) {
+		return "invalid document_date: use YYYY-MM-DD"
+	}
+	if expires != nil && !validDate(*expires) {
+		return "invalid expires_on: use YYYY-MM-DD"
+	}
+	if docDate != nil && expires != nil && *expires < *docDate {
+		return "expires_on must not be before document_date"
+	}
+	return ""
+}
+
+// formOpt returns a pointer to the trimmed form value, or nil when blank.
+func formOpt(r *http.Request, key string) *string {
+	v := r.FormValue(key)
+	return normText(&v)
+}
+
+// indexDocument upserts f's metadata document into household_search. It
+// is detached from the request (a client hang-up must not cancel it) and
+// bounded; a failure is logged and the request still succeeds.
+func (h *Handler) indexDocument(r *http.Request, f *File) {
+	if h.search == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), searchIndexTimeout)
+	defer cancel()
+	person, err := h.repo.PersonName(ctx, f.HouseholdID, f.PersonID)
+	if err != nil {
+		slog.Warn("file saved but its person could not be read for search", "file_id", f.ID, "error", err)
+	}
+	if err := h.search.IndexDocument(ctx, SearchDocument(f, person)); err != nil {
+		slog.Warn("file saved but its metadata is not yet searchable; run reindex",
+			"file_id", f.ID, "error", err)
+	}
 }
 
 // householdID extracts the household UUID from the JWT claims in the request
@@ -166,19 +269,39 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rec := &File{
-		HouseholdID: hid,
-		Name:        fh.Filename,
-		ContentType: contentType,
-		Size:        int64(len(data)),
-		EntityType:  entityType,
-		EntityID:    entityID,
+		HouseholdID:  hid,
+		Name:         fh.Filename,
+		ContentType:  contentType,
+		Size:         int64(len(data)),
+		EntityType:   entityType,
+		EntityID:     entityID,
+		Title:        formOpt(r, "title"),
+		Category:     strings.TrimSpace(r.FormValue("category")),
+		DocumentDate: formOpt(r, "document_date"),
+		ExpiresOn:    formOpt(r, "expires_on"),
+		Description:  formOpt(r, "description"),
+	}
+	if msg := validateMeta(rec.Category, rec.DocumentDate, rec.ExpiresOn); msg != "" {
+		apierr.BadRequest(w, msg)
+		return
+	}
+	if p := formOpt(r, "person_id"); p != nil {
+		pid, err := uuid.Parse(*p)
+		if err != nil {
+			apierr.BadRequest(w, "invalid person_id")
+			return
+		}
+		rec.PersonID = &pid
 	}
 
+	// A person from another family fails 048's same-family FK (23503) and
+	// answers 404 via apierr.DB, like any cross-family reference.
 	created, err := h.repo.CreateFile(r.Context(), hid, rec, data)
 	if err != nil {
 		apierr.DB(w, err)
 		return
 	}
+	h.indexDocument(r, created)
 
 	apierr.JSON(w, http.StatusCreated, map[string]any{
 		"data": created,
@@ -186,10 +309,12 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListFiles returns files for the authenticated household. Optional
-// entity_type + entity_id query params filter to a specific entity; without
-// them every file in the household is returned.
+// entity_type + entity_id query params filter to a specific entity;
+// category and person_id narrow further. Without them every file in the
+// household is returned (minus files attached to credentials for roles that
+// cannot read credentials).
 //
-// GET /api/v1/files?entity_type=property&entity_id=<uuid>
+// GET /api/v1/files?entity_type=property&entity_id=<uuid>&category=tax&person_id=<uuid>
 func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	hid, err := householdID(r)
 	if err != nil {
@@ -216,8 +341,29 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	// When entityType == "" the repo ignores the entity filter and returns all
 	// household files (entityID is uuid.Nil / disregarded).
+	flt := ListFilter{EntityType: entityType, EntityID: entityID}
+	if c := r.URL.Query().Get("category"); c != "" {
+		if !ValidCategory(c) {
+			apierr.BadRequest(w, "invalid category: must be one of "+strings.Join(Categories, ", "))
+			return
+		}
+		flt.Category = c
+	}
+	if p := r.URL.Query().Get("person_id"); p != "" {
+		if flt.PersonID, err = uuid.Parse(p); err != nil {
+			apierr.BadRequest(w, "invalid person_id")
+			return
+		}
+	}
+	if !canSeeSecretFiles(r) {
+		if entityType == EntityTypeSecret {
+			apierr.JSON(w, http.StatusOK, map[string]any{"data": []*File{}})
+			return
+		}
+		flt.HideEntityTypes = []string{EntityTypeSecret}
+	}
 
-	files, err := h.repo.ListFiles(r.Context(), hid, entityType, entityID)
+	files, err := h.repo.ListFiles(r.Context(), hid, flt)
 	if err != nil {
 		apierr.DB(w, err)
 		return
@@ -249,7 +395,7 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	if fl == nil {
+	if fl == nil || !visible(r, fl) {
 		apierr.NotFound(w, "file not found")
 		return
 	}
@@ -286,7 +432,7 @@ func (h *Handler) GetFileContent(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	if fl == nil {
+	if fl == nil || !visible(r, fl) {
 		apierr.NotFound(w, "file not found")
 		return
 	}
@@ -378,22 +524,59 @@ func (h *Handler) UpdateFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	p := Patch{
+		Name: req.Name, Tags: req.Tags,
+		Title: req.Title, Category: req.Category, DocumentDate: req.DocumentDate,
+		ExpiresOn: req.ExpiresOn, Description: req.Description, PersonID: req.PersonID,
+	}
 	// Reject an empty patch so the endpoint doesn't return a no-op 200 that
 	// hides caller mistakes.
-	if req.Name == nil && req.Tags == nil {
-		apierr.BadRequest(w, "nothing to update: provide name and/or tags")
+	if p.Empty() {
+		apierr.BadRequest(w, "nothing to update: provide name, tags or document metadata")
+		return
+	}
+	if p.Category.Set && p.Category.Value == nil {
+		apierr.BadRequest(w, "category cannot be null; use \"other\"")
+		return
+	}
+	p.Title.Value = normText(p.Title.Value)
+	p.Description.Value = normText(p.Description.Value)
+	var category string
+	if p.Category.Value != nil {
+		category = *p.Category.Value
+		if category == "" {
+			apierr.BadRequest(w, "invalid category: must be one of "+strings.Join(Categories, ", "))
+			return
+		}
+	}
+	// Only the dates sent are checked here; expires_on before an already
+	// stored document_date is caught by 048's CHECK (23514 -> 400).
+	if msg := validateMeta(category, p.DocumentDate.Value, p.ExpiresOn.Value); msg != "" {
+		apierr.BadRequest(w, msg)
 		return
 	}
 
-	updated, err := h.repo.UpdateFile(r.Context(), hid, id, req.Name, req.Tags)
+	// A file the caller may not see is absent: check before writing.
+	cur, err := h.repo.GetFile(r.Context(), hid, id)
 	if err != nil {
 		apierr.InternalError(w, err)
+		return
+	}
+	if cur == nil || !visible(r, cur) {
+		apierr.NotFound(w, "file not found")
+		return
+	}
+
+	updated, err := h.repo.UpdateFile(r.Context(), hid, id, p)
+	if err != nil {
+		apierr.DB(w, err)
 		return
 	}
 	if updated == nil {
 		apierr.NotFound(w, "file not found")
 		return
 	}
+	h.indexDocument(r, updated)
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
 		"data": updated,
@@ -443,6 +626,13 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		if err := h.search.DeleteFileDocuments(ctx, id.String()); err != nil {
 			slog.Warn("file deleted but not yet removed from search; the worker will retry",
 				"file_id", id, "error", err)
+		}
+		_, docIDs := SearchDocIDs(&File{ID: id})
+		for _, docID := range docIDs {
+			if err := h.search.DeleteDocument(ctx, docID); err != nil {
+				slog.Warn("file deleted but its metadata document is still in search; run reindex",
+					"file_id", id, "doc_id", docID, "error", err)
+			}
 		}
 		cancel()
 	}

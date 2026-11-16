@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"home-os/api/pkg/jsonopt"
 )
 
 // OCRStatus constants track the lifecycle of text extraction (OCR) for a file.
@@ -51,20 +53,63 @@ const (
 // plus its polymorphic entity association, OCR state, and tags.
 // Columns match migration 023_create_files.up.sql.
 type File struct {
-	ID            uuid.UUID  `json:"id"`
-	HouseholdID   uuid.UUID  `json:"household_id"`
-	BlobID        uuid.UUID  `json:"blob_id"`
-	Name          string     `json:"name"`
-	ContentType   string     `json:"content_type"`
-	Size          int64      `json:"size"`
-	EntityType    string     `json:"entity_type"`
-	EntityID      uuid.UUID  `json:"entity_id"`
-	ExtractedText *string    `json:"extracted_text,omitempty"`
-	OCRStatus     string     `json:"ocr_status"`
-	OCRError      *string    `json:"ocr_error,omitempty"`
-	Tags          []string   `json:"tags"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID            uuid.UUID `json:"id"`
+	HouseholdID   uuid.UUID `json:"household_id"`
+	BlobID        uuid.UUID `json:"blob_id"`
+	Name          string    `json:"name"`
+	ContentType   string    `json:"content_type"`
+	Size          int64     `json:"size"`
+	EntityType    string    `json:"entity_type"`
+	EntityID      uuid.UUID `json:"entity_id"`
+	ExtractedText *string   `json:"extracted_text,omitempty"`
+	OCRStatus     string    `json:"ocr_status"`
+	OCRError      *string   `json:"ocr_error,omitempty"`
+	Tags          []string  `json:"tags"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+
+	// Document metadata (migration 048). Dates are "YYYY-MM-DD" strings:
+	// the columns are DATE and the repo selects them with to_char, so no
+	// time zone ever shifts a receipt to the previous day.
+	Title        *string    `json:"title"`
+	Category     string     `json:"category"`
+	DocumentDate *string    `json:"document_date"`
+	ExpiresOn    *string    `json:"expires_on"`
+	Description  *string    `json:"description"`
+	PersonID     *uuid.UUID `json:"person_id"`
+}
+
+// Categories is the allowed set of files.category values (048's
+// files_category_check). CategoryOther is the column default.
+var Categories = []string{
+	"receipt", "tax", "insurance", "medical", "manual", "warranty",
+	"school", "legal", "vehicle", "home", CategoryOther,
+}
+
+// CategoryOther is the default category for a file uploaded without one.
+const CategoryOther = "other"
+
+// ValidCategory reports whether c is one of Categories.
+func ValidCategory(c string) bool {
+	for _, v := range Categories {
+		if v == c {
+			return true
+		}
+	}
+	return false
+}
+
+// EntityTypeSecret is a file attached to a credential. Such files are
+// hidden from roles that cannot read credentials (viewer, #4689).
+const EntityTypeSecret = "secret"
+
+// DisplayTitle is the title the UI and search show: the metadata title, or
+// the uploaded file name when there is none.
+func (f *File) DisplayTitle() string {
+	if f.Title != nil && *f.Title != "" {
+		return *f.Title
+	}
+	return f.Name
 }
 
 // FileBlob represents a row from the file_blobs table — the raw byte payload
@@ -75,4 +120,36 @@ type FileBlob struct {
 	Data      []byte    `json:"-"` // raw bytes; never serialized to JSON
 	Size      int64     `json:"size"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// Patch is a PATCH /files/{id} update. Name and Tags keep their original
+// semantics (nil = unchanged, tags replace wholesale); the metadata fields
+// use jsonopt.Field so a client can clear them with null. Category cannot be cleared
+// (the column is NOT NULL): null is rejected by the handler.
+type Patch struct {
+	Name         *string
+	Tags         []string
+	Title        jsonopt.Field[string]
+	Category     jsonopt.Field[string]
+	DocumentDate jsonopt.Field[string]
+	ExpiresOn    jsonopt.Field[string]
+	Description  jsonopt.Field[string]
+	PersonID     jsonopt.Field[uuid.UUID]
+}
+
+// Empty reports whether the patch changes nothing.
+func (p *Patch) Empty() bool {
+	return p.Name == nil && p.Tags == nil && !p.Title.Set && !p.Category.Set &&
+		!p.DocumentDate.Set && !p.ExpiresOn.Set && !p.Description.Set && !p.PersonID.Set
+}
+
+// ListFilter narrows ListFiles. Zero values mean "no filter".
+type ListFilter struct {
+	EntityType string
+	EntityID   uuid.UUID
+	Category   string
+	PersonID   uuid.UUID
+	// HideEntityTypes drops files attached to these entity kinds (a viewer
+	// never sees files attached to a credential).
+	HideEntityTypes []string
 }
