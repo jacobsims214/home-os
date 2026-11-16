@@ -1,15 +1,23 @@
 // Package pet provides the MCP pet tools (catalog v2, KB
-// architecture/mcp-tool-catalog.md "pet"). Stage 1 has one tool, pet_find,
-// which replaces list_pets and get_pet. Every result is built with
-// internal/respond, and every tool declares all four annotation hints and an
-// outputSchema. Pets belong to the family: all operations are scoped to the
-// authenticated household via JWT claims.
+// architecture/mcp-tool-catalog.md "pet"): pet_find (class R, replacing
+// list_pets and get_pet) and the write tools pet_create (C), pet_update (U)
+// and pet_delete (X) (#4461). Every result is built with internal/respond,
+// and every tool declares all four annotation hints and an outputSchema.
+// Pets belong to the family: all operations are scoped to the authenticated
+// household.
 //
 // The vet follows migration 043: pets.vet_vendor_id links a family vendor
-// (a contact, usually with trade 'vet'). The old pets.vet_name / vet_phone
-// columns stay (056, #4601, kept them: api, mcp and ui still use them), so a
-// pet with no linked vendor falls back to them. The migration that drops them
-// should delete that fallback (vetLegacy) with the columns.
+// (a contact, usually with trade 'vet'). The write tools set the vet only
+// through vet_vendor_id: vet_contact_id names a contact, and vet_name /
+// vet_phone are resolved to a family contact (or saved as a new one with
+// trade vet) by the same rules as the API (#4700, KB apis/pets.md). They
+// never write the old pets.vet_name / vet_phone columns. pet_find still
+// falls back to those columns for a pet with no linked vendor (vetLegacy);
+// #4698 removes that fallback before #4705 drops the columns.
+//
+// Writes follow the household role policy (#4689): owner, family_manager
+// and family_member may change pets; viewer, housesitter and vendor may not.
+// The role is re-read from memberships on every write call.
 package pet
 
 import (
@@ -21,6 +29,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/respond"
@@ -37,6 +47,13 @@ const (
 	vetContact = "contact" // pets.vet_vendor_id -> vendors
 	vetLegacy  = "legacy"  // pets.vet_name / vet_phone (kept by 056)
 )
+
+// querier is what both a pool and a transaction offer.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
 // toolHandler is the signature every pet tool handler has.
 type toolHandler = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)
@@ -67,6 +84,13 @@ type petData struct {
 	Notes             *string   `json:"notes"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+
+	// Set by the write tools only.
+	Duplicate      bool     `json:"duplicate,omitempty" jsonschema_description:"pet_create only: true when the same pet was added minutes ago and was returned instead."`
+	VetCreated     bool     `json:"vet_created,omitempty" jsonschema_description:"true when this call saved the vet as a new contact."`
+	Changed        []string `json:"changed,omitempty" jsonschema_description:"pet_update only: the fields that changed."`
+	DocumentsMoved *int     `json:"documents_moved,omitempty" jsonschema_description:"pet_delete only: documents about the pet, now family-level."`
+	NotesDeleted   *int     `json:"notes_deleted,omitempty" jsonschema_description:"pet_delete only: notes about the pet, deleted with it."`
 }
 
 // describe is a short phrase for summaries, e.g. "dog (Beagle), 4 years

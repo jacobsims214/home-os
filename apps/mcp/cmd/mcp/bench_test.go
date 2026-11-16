@@ -176,7 +176,14 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 			return map[string]any{"person_id": f.Person, "grade": strconv.Itoa(1 + i%12),
 				"add_preferences": []any{map[string]any{"kind": "like", "item": fmt.Sprintf("Bench food %d", i%5)}}}
 		}},
+		{"pet_create", func(i int) map[string]any {
+			return map[string]any{"name": fmt.Sprintf("Bench pup %d", i), "species": "dog", "vet_name": "Bench Vet Clinic"}
+		}},
+		{"pet_delete", func(i int) map[string]any { return map[string]any{"pet_id": pick(f.DisposablePets, i)} }},
 		{"pet_find", static(map[string]any{})},
+		{"pet_update", func(i int) map[string]any {
+			return map[string]any{"pet_id": f.Pet, "notes": fmt.Sprintf("Bench note %d", i)}
+		}},
 		{"property_find", static(map[string]any{})},
 		{"search_all", static(map[string]any{"query": "insurance"})},
 		{"vehicle_find", static(map[string]any{})},

@@ -43,7 +43,8 @@ var wantTools = []string{
 	"note_create", "note_delete", "note_find", "note_get", "note_update",
 	"notification_find", "notification_mark_read",
 	"person_create", "person_delete", "person_find", "person_get", "person_update",
-	"pet_find", "property_find", "search_all", "vehicle_find",
+	"pet_create", "pet_delete", "pet_find", "pet_update",
+	"property_find", "search_all", "vehicle_find",
 }
 
 // TestLegacyInitializeClient proves that a pre-2026-07-28 client (one that

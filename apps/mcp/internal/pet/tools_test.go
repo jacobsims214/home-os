@@ -223,7 +223,7 @@ func TestPetFind(t *testing.T) {
 	if got := env.pets(t); len(got) != 0 || env.Summary != "No pets yet." || env.Total == nil || *env.Total != 0 {
 		t.Fatalf("empty: %+v", env)
 	}
-	if len(env.Next) != 1 || !strings.Contains(env.Next[0], "Home OS app") {
+	if len(env.Next) != 1 || !strings.Contains(env.Next[0], "pet_create name=…") {
 		t.Errorf("empty next = %v", env.Next)
 	}
 

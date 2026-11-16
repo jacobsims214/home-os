@@ -110,9 +110,10 @@ func NewPetFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	return "pet_find", tool, handler
 }
 
-// findPets loads one page of pets and the total number of matches.
-func findPets(ctx context.Context, pool *pgxpool.Pool, householdID string, in findInput) ([]petData, int, error) {
-	rows, err := pool.Query(ctx, petSelect, householdID, in.id, escapeLike(in.query), in.limit, in.offset)
+// findPets loads one page of pets and the total number of matches. q is the
+// pool, or the write tools' transaction.
+func findPets(ctx context.Context, q querier, householdID string, in findInput) ([]petData, int, error) {
+	rows, err := q.Query(ctx, petSelect, householdID, in.id, escapeLike(in.query), in.limit, in.offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -197,7 +198,7 @@ func findSummary(in findInput, page []petData, total int) string {
 func findNext(in findInput, page []petData) []string {
 	if len(page) == 0 {
 		if !in.filtered() {
-			return []string{"The family has not added a pet yet; the user can add one in the Home OS app."}
+			return []string{"The family has not added a pet yet; add one with pet_create name=… species=…."}
 		}
 		return []string{"Call pet_find without query to list every pet."}
 	}
