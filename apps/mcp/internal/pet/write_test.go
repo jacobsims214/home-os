@@ -176,8 +176,8 @@ func TestWriteToolDefinitions(t *testing.T) {
 			[]string{"pet_id"},
 			[]string{"pet_id", "name", "species", "breed", "date_of_birth", "vet_contact_id", "vet_name", "vet_phone", "notes"},
 			false, false, true},
-		{del, "Delete a pet. Its documents move to the family.", "Delete pet",
-			[]string{"pet_id"}, []string{"pet_id"}, false, true, true},
+		{del, "Delete a pet. Its documents move to the family; its notes are deleted (needs confirm:true if it has any).", "Delete pet",
+			[]string{"pet_id"}, []string{"pet_id", "confirm"}, false, true, true},
 	} {
 		tool := tc.w.tool
 		if tool.Description != tc.desc || len(tool.Description) > 200 {
@@ -491,7 +491,30 @@ func TestPetDelete(t *testing.T) {
 	file := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id)
 		VALUES ($1, $2, 'vaccines.pdf', 1, 'pet', $3) RETURNING id`, hh.HouseholdID, blob, b.ID)
 
+	// Notes would be deleted: refused without confirm, nothing deleted.
 	env := del.run(t, ctx, map[string]any{"pet_id": "Biscuit"})
+	env.wantError(t, "confirm")
+	if env.Error.Message != "Biscuit has 1 note; pass confirm:true to delete it." {
+		t.Errorf("refusal message = %q", env.Error.Message)
+	}
+	if ex := env.Error.Example; ex["pet_id"] != b.ID || ex["confirm"] != true {
+		t.Errorf("refusal example = %#v", env.Error.Example)
+	}
+	for _, a := range []map[string]any{{"pet_id": "Biscuit", "confirm": false}, {"pet_id": "Biscuit", "confirm": "no"}} {
+		del.run(t, ctx, a).wantError(t, "confirm")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM pets WHERE id = $1`, b.ID); n != 1 {
+		t.Fatalf("refused delete removed the pet")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM notes WHERE entity_type = 'pet' AND entity_id = $1`, b.ID); n != 1 {
+		t.Fatalf("refused delete removed the note")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM files WHERE id = $1 AND entity_type = 'pet' AND entity_id = $2`, file, b.ID); n != 1 {
+		t.Fatalf("refused delete moved the document")
+	}
+
+	// confirm:true ("true" as text counts) deletes it.
+	env = del.run(t, ctx, map[string]any{"pet_id": "Biscuit", "confirm": "true"})
 	d := env.pet(t)
 	if d.ID != b.ID || d.Name != "Biscuit" || d.DocumentsMoved == nil || *d.DocumentsMoved != 1 || d.NotesDeleted == nil || *d.NotesDeleted != 1 {
 		t.Fatalf("deleted = %+v", d)
@@ -528,6 +551,18 @@ func TestPetDelete(t *testing.T) {
 		t.Errorf("foreign pet deleted")
 	}
 	del.run(t, ctx, map[string]any{}).wantError(t, "pet_id")
+
+	// No notes: deleted without confirm, even with a document.
+	m := create.run(t, ctx, map[string]any{"name": "Mittens", "species": "cat"}).pet(t)
+	insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id)
+		VALUES ($1, $2, 'adoption.pdf', 1, 'pet', $3) RETURNING id`, hh.HouseholdID, blob, m.ID)
+	env = del.run(t, ctx, map[string]any{"pet_id": m.ID})
+	if d := env.pet(t); d.NotesDeleted == nil || *d.NotesDeleted != 0 || d.DocumentsMoved == nil || *d.DocumentsMoved != 1 {
+		t.Errorf("no-notes delete = %+v", d)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM pets WHERE id = $1`, m.ID); n != 0 {
+		t.Errorf("pet without notes not deleted")
+	}
 }
 
 // TestPetWriteRoles: owner, family_manager and family_member write; viewer,

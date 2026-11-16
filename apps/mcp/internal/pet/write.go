@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -748,12 +749,16 @@ func sameID(a, b *uuid.UUID) bool {
 // NewPetDeleteTool creates the pet_delete MCP tool (catalog v2, class X). It
 // deletes one pet of the family and returns it as it was, with what went
 // with it: documents about it move to the family and notes about it are
-// deleted (rehome_entity_refs, 038). Its vet contact stays. A missing or
-// already deleted pet is reported as not found, so a repeat call is safe.
+// deleted (rehome_entity_refs, 038). Its vet contact stays. Notes are often
+// medical, so a pet with notes is deleted only with confirm:true (the
+// confirm-only-when-attached pattern of vehicle_delete and contact_delete);
+// documents only move and need no confirm. A missing or already deleted pet
+// is reported as not found, so a repeat call is safe.
 func NewPetDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	opts := []mcp.ToolOption{
-		mcp.WithDescription("Delete a pet. Its documents move to the family."),
+		mcp.WithDescription("Delete a pet. Its documents move to the family; its notes are deleted (needs confirm:true if it has any)."),
 		mcp.WithString("pet_id", mcp.Description("The pet's id from pet_find, or its name, e.g. Biscuit"), mcp.Required()),
+		mcp.WithBoolean("confirm", mcp.Description("true once the user agreed to delete its notes too")),
 		respond.Schema[petData](),
 	}
 	tool := mcp.NewTool("pet_delete", append(opts, annotations("Delete pet", false, true, true)...)...)
@@ -767,6 +772,7 @@ func NewPetDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			return cannotWrite(c.role, "pet_delete"), nil
 		}
 		args := withAliases(req.GetArguments(), writeAliases)
+		confirm := boolArg(args, "confirm")
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -796,6 +802,15 @@ func NewPetDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			id, c.householdID).Scan(&docs, &notes); err != nil {
 			return respond.Failed("delete the pet", err), nil
 		}
+		if notes > 0 && !confirm {
+			return respond.Fail(respond.Error{
+				Message: fmt.Sprintf("%s has %s; pass confirm:true to delete it.", d.Name, plural(notes, "note")),
+				Fix: "Ask the user to confirm, then call pet_delete again with confirm:true. Its notes are deleted; " +
+					"documents move to the family; its vet contact stays.",
+				Field:   "confirm",
+				Example: map[string]any{"pet_id": id.String(), "confirm": true},
+			}), nil
+		}
 		if _, err := tx.Exec(ctx, `DELETE FROM pets WHERE id = $1 AND household_id = $2`, id, c.householdID); err != nil {
 			return respond.Failed("delete the pet", err), nil
 		}
@@ -818,4 +833,17 @@ func NewPetDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		return respond.OK(summary, d, "List the pets that are left with pet_find."), nil
 	}
 	return "pet_delete", tool, handler
+}
+
+// boolArg reads a boolean argument; "true" as text counts, as in the other
+// packages, since small models often send booleans as strings.
+func boolArg(args map[string]any, key string) bool {
+	switch v := args[key].(type) {
+	case bool:
+		return v
+	case string:
+		b, _ := strconv.ParseBool(strings.TrimSpace(v))
+		return b
+	}
+	return false
 }
