@@ -1180,7 +1180,14 @@ var (
 
 	// allergyFiller is what is left out of "severe peanut allergy" to get the
 	// allergen. "celiac" and "lactose" stay: they are allergen group keys.
-	allergyFiller = regexp.MustCompile(`(?i)\b(severe(ly)?|mild|serious|life[- ]threatening|anaphylactic|anaphylaxis|food|foods|allergic|allergy|allergies|allergen|allergens|intolerant|intolerance|intolerances|sensitivity|sensitive|reaction|reactions|to|of|a|an|the|has|have|is|no|avoid|avoids|carries|carry|epi-?pens?|must|strictly|strict|very)\b`)
+	//
+	// The intensifiers, connectors and medical-ID words are #4874: without
+	// them "Deathly allergic to peanuts" normalised to "deathly peanuts", a
+	// phrase that matches no ingredient, so the peanut allergy silently did
+	// nothing. Every word here has to be one that is never a food. "and" and
+	// "or" are deliberately absent: listSep splits on them after this runs, so
+	// "peanuts and tree nuts" stays two allergens.
+	allergyFiller = regexp.MustCompile(`(?i)\b(severe(ly)?|mild|moderate|major|minor|serious|terrible|awful|horrible|horribly|life[- ]threatening|anaphylactic|anaphylaxis|food|foods|allergic|allergy|allergies|allergen|allergens|intolerant|intolerance|intolerances|sensitivity|sensitive|sensitised|sensitized|reaction|reactions|reacts|reacting|reacted|gets|gives|causes|cause|caused|to|of|for|a|an|the|has|have|is|no|avoid|avoids|carries|carry|wears|wear|epi-?pens?|medicalert|medic[- ]?alert|medic[- ]?id|medical([- ]id)?|medication|medicines?|meds?|prescribed|prescription|antihistamines?|epinephrine|adrenaline|inhaler|bracelet|alert|must|strictly|strict|very|really|extremely|highly|strongly|slightly|badly|possibly|all|deathly|deadly|super|totally|absolutely|incredibly|insanely|ridiculously)\b`)
 
 	listSep = regexp.MustCompile(`(?i)\s*(?:,|;|/|&|\band\b|\bor\b|\+)\s*`)
 
@@ -1241,6 +1248,13 @@ func compileGroupPhrases(phrases []string) []*regexp.Regexp {
 // newAllergyMatcher builds the regexes for one allergen, e.g. "tree nuts".
 // allergen is already normalised (allergensIn); it is both the phrase matched
 // against ingredient names and the label shown in warnings.
+//
+// ok=false means the phrase has no words at all, or it is multi-word and the
+// vocabulary does not know it (knownAllergyPhrase). Before #4874 the only test
+// was "has a word", so any junk phrase compiled, matched nothing, and was
+// treated as a checked allergy. The matcher is still built, so a caller
+// matching text that is not an allergy (a dislike) can use it as before; an
+// allergy caller must report the phrase instead of trusting it.
 func newAllergyMatcher(personID, person, allergen string) (allergyMatcher, bool) {
 	m := allergyMatcher{personID: personID, person: person, allergy: allergen}
 	m.own = compilePhrases([]string{allergen})
@@ -1250,27 +1264,70 @@ func newAllergyMatcher(personID, person, allergen string) (allergyMatcher, bool)
 		m.group = append(m.group, compileGroupPhrases(allergenGroups[key])...)
 		m.except = append(m.except, compilePhrases(allergenExceptions[key])...)
 	}
-	return m, len(m.own) > 0
+	return m, len(m.own) > 0 && knownAllergyPhrase(allergen)
 }
 
 // possessive is the "'s" in "cow's milk": a group key is built from the words
 // alone, so "cow's milk" and "cows milk" both key to "cow milk" (#4804).
 var possessive = strings.NewReplacer("'s", "", "\u2019s", "", "'", "", "\u2019", "")
 
-// allergyGroupKeys is the group keys an allergen means: its own key (its
-// words, singularised) and, when it is a synonym, the groups it stands for
-// ("crustaceans" -> crustacean, "seafood" -> fish and shellfish). One lookup
-// over allergenGroups/allergenAliases, so a synonym is data and not a second
-// matcher (#4804).
-func allergyGroupKeys(allergen string) []string {
-	// "cow's milk" is one allergen, not "cow s milk": drop the possessive
-	// before the key is built.
-	plain := possessive.Replace(strings.ToLower(allergen))
-	ws := words(plain)
+// allergyKey is what the group and alias maps are looked up with: the
+// allergen's words, singularised and with the possessive dropped, so "cow's
+// milk" is one allergen and not "cow s milk" (#4804).
+func allergyKey(allergen string) string {
+	ws := words(possessive.Replace(strings.ToLower(allergen)))
 	for i, w := range ws {
 		ws[i] = singular(w)
 	}
-	key := strings.Join(ws, " ")
+	return strings.Join(ws, " ")
+}
+
+// knownAllergyPhrase reports whether the vocabulary can vouch for an allergen.
+// A single word always can: it is its own phrase, and "strawberry" is a real
+// allergy whether or not a group lists it. A multi-word phrase has to be a
+// food the vocabulary already names, in one of the four places it names them:
+// a group key ("tree nuts"), an alias ("cow's milk", "sesame seeds"), a food
+// listed in a group ("fish sauce", "sea bass") or a food listed in an
+// exception ("peanut butter", "coconut milk" — words that do not carry the
+// group allergen, but that people do save as an allergy). Anything else is
+// opaque: "deathly peanuts" compiles to a regex that matches no ingredient,
+// and reading that as "this person has no allergy" is how a peanut recipe gets
+// suggested to a peanut-allergic person (#4874).
+//
+// Accepting an exception word is safe in the only direction that matters: its
+// matcher is the literal phrase and nothing else (an exception word has no
+// group key), so it can over-warn on that one dish and can never clear a real
+// allergen.
+func knownAllergyPhrase(allergen string) bool {
+	key := allergyKey(allergen)
+	if !strings.Contains(key, " ") {
+		return true
+	}
+	if _, ok := allergenGroups[key]; ok {
+		return true
+	}
+	if _, ok := allergenAliases[key]; ok {
+		return true
+	}
+	for _, foods := range []map[string][]string{allergenGroups, allergenExceptions} {
+		for _, list := range foods {
+			for _, food := range list {
+				if allergyKey(food) == key {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// allergyGroupKeys is the group keys an allergen means: its own key and, when
+// it is a synonym, the groups it stands for ("crustaceans" -> crustacean,
+// "seafood" -> fish and shellfish). One lookup over
+// allergenGroups/allergenAliases, so a synonym is data and not a second
+// matcher (#4804).
+func allergyGroupKeys(allergen string) []string {
+	key := allergyKey(allergen)
 	keys := []string{key}
 	for _, alias := range allergenAliases[key] {
 		if !slices.Contains(keys, alias) {
@@ -1286,10 +1343,31 @@ func allergyGroupKeys(allergen string) []string {
 // entry can mean several allergens ("peanuts and tree nuts"), and an entry
 // that normalises to nothing gives no matcher at all, so the caller can say
 // it could not be checked instead of silently matching nothing (#4802).
-func allergyMatchers(personID, person, allergy string) []allergyMatcher {
-	var out []allergyMatcher
+//
+// unchecked holds the fragments the matcher would not vouch for, so a caller
+// can report them. It is per fragment, not per entry: "peanuts, red dye 40"
+// keeps the peanut matcher and still surfaces the half it could not read
+// (#4874).
+func allergyMatchers(personID, person, allergy string) (matchers []allergyMatcher, unchecked []string) {
 	for _, a := range allergensIn(allergy) {
 		if m, ok := newAllergyMatcher(personID, person, a); ok {
+			matchers = append(matchers, m)
+		} else {
+			unchecked = append(unchecked, a)
+		}
+	}
+	return matchers, unchecked
+}
+
+// preferenceMatchers reads text that is a like or a dislike rather than an
+// allergy. It is best-effort, so a phrase the vocabulary does not know ("ice
+// cream") keeps its matcher: a dislike that matched nothing is a ranking
+// detail, and there is no checks list to report it in. Only allergy text goes
+// through the fail-closed allergyMatchers (#4874).
+func preferenceMatchers(personID, person, text string) []allergyMatcher {
+	var out []allergyMatcher
+	for _, a := range allergensIn(text) {
+		if m, _ := newAllergyMatcher(personID, person, a); len(m.own) > 0 {
 			out = append(out, m)
 		}
 	}
@@ -1353,10 +1431,18 @@ func allergySources(ctx context.Context, q querier, hid uuid.UUID, personIDs []s
 		}
 		names[id] = name
 		for _, a := range allergies {
-			if ms := allergyMatchers(id, name, a); len(ms) > 0 {
-				matchers = append(matchers, ms...)
-			} else {
-				checks = append(checks, uncheckedAllergyLine(name, a))
+			ms, unchecked := allergyMatchers(id, name, a)
+			matchers = append(matchers, ms...)
+			if len(ms) == 0 && len(unchecked) == 0 {
+				// Nothing in the entry was readable at all ("allergy",
+				// "anaphylactic"): report it as it was saved (#4802).
+				unchecked = []string{a}
+			}
+			// One line per fragment the matcher would not vouch for, so the
+			// allergy is visible in checks instead of silently matching
+			// nothing (#4874).
+			for _, u := range unchecked {
+				checks = append(checks, uncheckedAllergyLine(name, u))
 			}
 		}
 	}
@@ -1398,9 +1484,11 @@ SELECT person_id::text, kind::text, value, coalesce(notes, '')
 			if m, ok := newAllergyMatcher(personID, name, a); ok {
 				matchers = append(matchers, m)
 				added++
+			} else {
+				checks = append(checks, uncheckedAllergyLine(name, a))
 			}
 		}
-		if added == 0 {
+		if added == 0 && len(found) == 0 {
 			checks = append(checks, fmt.Sprintf("%s has an allergy note %q that could not be read as an allergen; confirm the meal is safe.", name, strings.TrimSpace(value+" "+notes)))
 		}
 	}
