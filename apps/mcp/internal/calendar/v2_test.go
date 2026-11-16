@@ -34,7 +34,7 @@ func TestToolDefinitions(t *testing.T) {
 		{NewEventUpdateTool, "event_update", u, []string{"event_id"}, []string{"title", "start", "end", "all_day", "location", "description", "event_type", "calendar_id", "scope", "occurrence_date", "person_ids", "repeat", "except_dates", "reminder_minutes"}},
 		{NewEventDeleteTool, "event_delete", x, []string{"event_id"}, []string{"scope", "occurrence_date"}},
 		{NewCalendarFindFreeTimeTool, "calendar_find_free_time", r, []string{"from", "duration_minutes"}, []string{"to", "start_hour", "end_hour", "calendar_ids"}},
-		{NewAgendaGetTool, "agenda_get", r, nil, []string{"from", "to", "areas"}},
+		{NewAgendaGetTool, "agenda_get", r, nil, []string{"from", "to", "areas", "detail", "max_per_day"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -455,16 +455,17 @@ func TestAgendaAreas(t *testing.T) {
 	if len(a.Maintenance) != 1 || a.Maintenance[0].Weekday != "Thursday" || a.Maintenance[0].Status != "pending" || a.Maintenance[0].TaskID == "" {
 		t.Errorf("maintenance = %+v", a.Maintenance)
 	}
-	if strings.Join(a.Areas, ",") != "maintenance,meals" || len(a.Unavailable) != 0 {
-		t.Errorf("areas = %v unavailable = %v", a.Areas, a.Unavailable)
+	if strings.Join(a.Coverage.Areas, ",") != "maintenance,meals" {
+		t.Errorf("areas = %v", a.Coverage.Areas)
 	}
 	// The meal plan (#4487): only the range's meals, with allergy warnings.
 	if len(a.Meals) != 1 || a.Meals[0].Title != "Peanut noodles" || a.Meals[0].Weekday != "Thursday" ||
 		len(a.Meals[0].AllergyWarnings) != 1 || a.Meals[0].AllergyWarnings[0] != "Nora (peanuts): Peanut noodles" {
 		t.Errorf("meals = %+v", a.Meals)
 	}
-	if !strings.Contains(a.From+a.To, "2026-11-182026-11-20") || !strings.Contains(text, "1 planned meal (Thu dinner Peanut noodles) with allergy warnings") ||
-		strings.Contains(text, "Not available yet") || !strings.Contains(text, "meal_set") {
+	if a.Coverage.From != "2026-11-18" || a.Coverage.To != "2026-11-20" ||
+		!strings.Contains(text, "1 planned meal (Thu dinner Peanut noodles) with allergy warnings") ||
+		!strings.Contains(text, "meal_set") {
 		t.Errorf("got %s", text)
 	}
 
