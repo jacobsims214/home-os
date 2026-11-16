@@ -708,3 +708,138 @@ func TestSearchAllDocumentMetadata(t *testing.T) {
 		t.Errorf("description search got %v, want [%s]", got, titled)
 	}
 }
+
+// TestSearchAllRoles checks search_all against the household role policy
+// (#4689, #4696): credentials, and notes/documents attached to a secret, only
+// reach owner, family_manager and family_member; housesitter and vendor only
+// search the areas they may read. The role is re-read from memberships on
+// every call (the claims in ctx keep saying "owner").
+func TestSearchAllRoles(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, h := testutil.SeedHousehold(t, pool)
+
+	for _, seed := range seeders {
+		seed(t, pool, h.HouseholdID, "Quokka item")
+	}
+	cal := seedCalendar(t, pool, h.HouseholdID, "Family")
+	seedEvent(t, pool, cal, `{"title":"Quokka item","start":"2026-11-18T17:00:00Z","end":"2026-11-18T18:00:00Z"}`)
+	chase := seeders["credential"](t, pool, h.HouseholdID, "Chase online banking")
+	secretNote := mustExec(t, pool,
+		`INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'secret', $2, 'Quokka PIN hint', 'b') RETURNING id::text`,
+		h.HouseholdID, chase)
+	blob := mustExec(t, pool, `INSERT INTO file_blobs (data, size) VALUES ('x', 1) RETURNING id::text`)
+	secretDoc := mustExec(t, pool,
+		`INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'Quokka recovery codes', 1, 'secret', $3) RETURNING id::text`,
+		h.HouseholdID, blob, chase)
+	// A person matched only through a field a housesitter may not see.
+	schoolOnly := mustExec(t, pool,
+		`INSERT INTO people (household_id, display_name, school) VALUES ($1, 'Robin', 'Quokka Elementary') RETURNING id::text`,
+		h.HouseholdID)
+
+	setRole := func(role string) {
+		t.Helper()
+		mustExec(t, pool, `UPDATE memberships SET role = $3 WHERE household_id = $1 AND user_id = $2 RETURNING role::text`,
+			h.HouseholdID, h.UserID, role)
+	}
+	types := func(env envelope) []string {
+		out := []string{}
+		for _, g := range env.Data.Groups {
+			out = append(out, g.Type)
+		}
+		sort.Strings(out)
+		return out
+	}
+	has := func(env envelope, typ, id string) bool {
+		for _, got := range ids(group(env, typ)) {
+			if got == id {
+				return true
+			}
+		}
+		return false
+	}
+	all := append([]string{}, areaNames...)
+	without := func(drop ...string) []string {
+		out := []string{}
+		for _, a := range all {
+			if !slicesContains(drop, a) {
+				out = append(out, a)
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	cases := []struct {
+		role        string
+		want        []string // groups for "quokka"
+		credentials bool
+	}{
+		{"owner", without(), true},
+		{"family_manager", without(), true},
+		{"family_member", without(), true},
+		{"viewer", without("credential"), false},
+		{"housesitter", []string{"asset", "contact", "event", "list", "person", "pet", "property", "recipe", "room"}, false},
+		{"vendor", []string{"asset", "maintenance", "property", "room"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			setRole(tc.role)
+			env := search(t, ctx, pool, map[string]any{"query": "quokka", "limit": maxPerType})
+			if got := types(env); strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("groups = %v, want %v", got, tc.want)
+			}
+			for _, s := range env.Data.Searched {
+				if !canSearch(tc.role, s) {
+					t.Errorf("searched lists hidden area %q", s)
+				}
+			}
+			if got := has(env, "note", secretNote) || has(env, "document", secretDoc); got != tc.credentials {
+				t.Errorf("records attached to a secret visible = %v, want %v", got, tc.credentials)
+			}
+			if got := has(env, "person", schoolOnly); got != (tc.role != "housesitter" && tc.role != "vendor") {
+				t.Errorf("person matched by school visible = %v", got)
+			}
+
+			// The credential's exact name.
+			env = search(t, ctx, pool, map[string]any{"query": "Chase online banking"})
+			if got := has(env, "credential", chase); got != tc.credentials {
+				t.Errorf("credential hit for its exact name = %v, want %v (%+v)", got, tc.credentials, env.Data)
+			}
+			if !tc.credentials && (strings.Contains(env.Summary, "credential") || strings.Contains(strings.Join(env.Next, " "), "credential_find")) {
+				t.Errorf("summary/next mention credentials: %q %q", env.Summary, env.Next)
+			}
+
+			// Asking for credentials only.
+			isErr, env := call(t, ctx, pool, map[string]any{"query": "Chase", "types": []string{"credential"}})
+			if tc.credentials {
+				if isErr || !has(env, "credential", chase) {
+					t.Errorf("types=[credential]: %+v", env)
+				}
+			} else if !isErr || env.Error == nil || !strings.Contains(env.Error.Message, tc.role) || strings.Contains(env.Error.Message, "Chase") {
+				t.Errorf("types=[credential] for %s: isErr=%v %+v", tc.role, isErr, env)
+			}
+		})
+	}
+
+	t.Run("unknown or removed member gets nothing", func(t *testing.T) {
+		mustExec(t, pool, `DELETE FROM memberships WHERE household_id = $1 AND user_id = $2 RETURNING role::text`, h.HouseholdID, h.UserID)
+		isErr, env := call(t, ctx, pool, map[string]any{"query": "Chase"})
+		if !isErr || len(env.Data.Groups) != 0 {
+			t.Errorf("removed member: isErr=%v %+v", isErr, env)
+		}
+		for _, a := range areaNames {
+			if canSearch("", a) || canSearch("superuser", a) {
+				t.Errorf("unknown role can search %s", a)
+			}
+		}
+	})
+}
+
+func slicesContains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}

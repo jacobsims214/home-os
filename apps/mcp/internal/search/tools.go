@@ -9,6 +9,11 @@
 // are escaped, so "%" or "_" match literally. The catalog row does not call
 // for semantic search; the Typesense hybrid index is meant for document_find
 // (S2 #4477). All queries are scoped to the caller's household.
+//
+// Results follow the household role policy (KB decisions/2026-11-15-role-
+// policy.md, #4689; see role.go): credentials, and notes or documents
+// attached to them, only reach owner, family_manager and family_member;
+// housesitter and vendor only search the areas they may read.
 package search
 
 import (
@@ -54,6 +59,13 @@ type area struct {
 	OpenRef string
 	Open    string // fmt template with one %s for OpenRef
 	Sort    string // newest first within the same title/text rank
+
+	// SecretWhere, when set, is an extra condition applied for callers who
+	// may not see credentials, dropping records attached to a secret.
+	SecretWhere string
+	// SitterDoc, when set, replaces Doc for the housesitter role, who may
+	// only see part of the record.
+	SitterDoc string
 }
 
 // areas lists every area search_all covers, in result order (the catalog's
@@ -63,7 +75,9 @@ type area struct {
 var areas = []area{
 	{Name: "person", Plural: "people", From: "people t", Scope: "t.household_id",
 		Title: "t.display_name", Doc: "concat_ws(' ', t.display_name, t.relationship, t.school, t.notes)",
-		OpenRef: "t.id", Open: "person_find id=%s", Sort: "t.created_at"},
+		// A housesitter sees names and relationship only (role policy).
+		SitterDoc: "concat_ws(' ', t.display_name, t.relationship)",
+		OpenRef:   "t.id", Open: "person_find id=%s", Sort: "t.created_at"},
 	{Name: "event", Plural: "events"},
 	{Name: "bill", Plural: "bills", From: "bills t", Scope: "t.household_id",
 		Title: "t.name", Doc: "concat_ws(' ', t.name, t.category, t.notes)",
@@ -79,7 +93,8 @@ var areas = []area{
 		OpenRef: "t.id", Open: "contact_find id=%s", Sort: "t.created_at"},
 	{Name: "note", Plural: "notes", From: "notes t", Scope: "t.household_id",
 		Title: "COALESCE(NULLIF(btrim(t.title), ''), '(untitled)')", Doc: "concat_ws(' ', t.title, t.body)",
-		OpenRef: "t.id", Open: "note_get note_id=%s", Sort: "t.updated_at"},
+		SecretWhere: "t.entity_type::text <> 'secret'",
+		OpenRef:     "t.id", Open: "note_get note_id=%s", Sort: "t.updated_at"},
 	{Name: "list", Plural: "lists", From: "lists t", Scope: "t.household_id",
 		Title:   "t.name",
 		Doc:     "concat_ws(' ', t.name, (SELECT string_agg(i.text, ' ' ORDER BY i.position) FROM list_items i WHERE i.list_id = t.id))",
@@ -93,9 +108,10 @@ var areas = []area{
 	{Name: "document", Plural: "documents", From: "files t", Scope: "t.household_id",
 		// 048 document metadata: title (falls back to the file name),
 		// category and description are searched before the extracted text.
-		Title:   "COALESCE(NULLIF(btrim(t.title), ''), t.name)",
-		Doc:     "concat_ws(' ', t.title, t.name, t.category, t.description, array_to_string(t.tags, ' '), t.extracted_text)",
-		OpenRef: "t.id", Open: "document_get document_id=%s", Sort: "t.created_at"},
+		Title:       "COALESCE(NULLIF(btrim(t.title), ''), t.name)",
+		Doc:         "concat_ws(' ', t.title, t.name, t.category, t.description, array_to_string(t.tags, ' '), t.extracted_text)",
+		SecretWhere: "t.entity_type::text <> 'secret'",
+		OpenRef:     "t.id", Open: "document_get document_id=%s", Sort: "t.created_at"},
 	{Name: "asset", Plural: "things", From: "assets t", Scope: "t.household_id",
 		Title: "t.name", Doc: "concat_ws(' ', t.name, t.category, t.manufacturer, t.model, t.notes)",
 		OpenRef: "t.id", Open: "asset_find id=%s", Sort: "t.created_at"},
@@ -117,6 +133,7 @@ var areas = []area{
 		OpenRef: "t.property_id", Open: "property_find id=%s", Sort: "t.created_at"},
 	// Credentials: only the name and type are searched or returned, never the
 	// secret value (neither encrypted_data nor agent_ciphertext is read).
+	// Only roles that may use credential_find search them (role.go).
 	// credential_find says where it lives and whether agents may read it.
 	{Name: "credential", Plural: "credentials", From: "secrets t", Scope: "t.household_id",
 		Title: "t.name", Doc: "concat_ws(' ', t.name, t.secret_type)",
@@ -194,10 +211,7 @@ func NewSearchTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Conte
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		claims := server.ClaimsFromContext(ctx)
 		if claims == nil || claims.HouseholdID == "" {
-			return respond.Fail(respond.Error{
-				Message: "You are not signed in to a household.",
-				Fix:     "Tell the user to reconnect Home OS; retrying will not help.",
-			}), nil
+			return notSignedIn(), nil
 		}
 
 		args := req.GetArguments()
@@ -221,11 +235,28 @@ func NewSearchTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Conte
 				map[string]any{"query": query, "limit": defaultPerType}), nil
 		}
 
-		want := map[string]bool{}
+		role, fail := callerRole(ctx, pool, claims)
+		if fail != nil {
+			return fail, nil
+		}
+		visible := []string{}
 		for _, t := range types {
+			if canSearch(role, t) {
+				visible = append(visible, t)
+			}
+		}
+		if len(visible) == 0 {
+			return respond.Fail(respond.Error{
+				Message: fmt.Sprintf("Members with the %s role can't search %s.", roleLabel(role), strings.Join(types, ", ")),
+				Fix:     "Tell the user to ask an owner or family manager; retrying will not help.",
+			}), nil
+		}
+
+		want := map[string]bool{}
+		for _, t := range visible {
 			want[t] = true
 		}
-		out := searchResult{Query: query, Searched: types, Groups: []searchGroup{}}
+		out := searchResult{Query: query, Searched: visible, Groups: []searchGroup{}}
 		for _, a := range areas {
 			if !want[a.Name] {
 				continue
@@ -234,7 +265,7 @@ func NewSearchTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Conte
 			if a.Name == "event" {
 				g, err = searchEventGroup(ctx, pool, claims.HouseholdID, query, limit)
 			} else {
-				g, err = searchArea(ctx, pool, a, claims.HouseholdID, query, limit)
+				g, err = searchArea(ctx, pool, forRole(a, role), claims.HouseholdID, query, limit)
 			}
 			if err != nil {
 				return respond.Failed("search "+a.Plural, err), nil
@@ -255,6 +286,10 @@ func NewSearchTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Conte
 // searchArea runs the escaped ILIKE search over one SQL area. Records whose
 // title matches come first, then the newest.
 func searchArea(ctx context.Context, pool *pgxpool.Pool, a area, householdID, query string, limit int) (searchGroup, error) {
+	where := ""
+	if a.SecretWhere != "" {
+		where = " AND " + a.SecretWhere
+	}
 	sql := fmt.Sprintf(`
 		SELECT s.id, s.title, s.open_ref,
 		       substr(s.doc, greatest(m.pos - %[7]d, 1), %[8]d),
@@ -265,13 +300,13 @@ func searchArea(ctx context.Context, pool *pgxpool.Pool, a area, householdID, qu
 			SELECT %[1]s::text AS id, COALESCE(%[2]s, '') AS title, %[3]s::text AS open_ref,
 			       COALESCE(%[4]s, '') AS doc, %[5]s AS sort_at
 			FROM %[6]s
-			WHERE %[9]s = $1
+			WHERE %[9]s = $1%[10]s
 		) s
 		CROSS JOIN LATERAL (SELECT strpos(lower(s.doc), lower($3)) AS pos) m
 		WHERE s.doc ILIKE $2 ESCAPE '\'
 		ORDER BY (s.title ILIKE $2 ESCAPE '\') DESC, s.sort_at DESC, s.id
 		LIMIT $4`,
-		"t.id", a.Title, a.OpenRef, a.Doc, a.Sort, a.From, snippetBefore, snippetLen, a.Scope)
+		"t.id", a.Title, a.OpenRef, a.Doc, a.Sort, a.From, snippetBefore, snippetLen, a.Scope, where)
 
 	rows, err := pool.Query(ctx, sql, householdID, sqlutil.ContainsPattern(query), query, limit)
 	if err != nil {
