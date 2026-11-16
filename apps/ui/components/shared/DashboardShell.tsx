@@ -263,68 +263,70 @@ function HeaderBell({ opened, onChange: setOpened }: { opened: boolean; onChange
   const label = unread > 0 ? `Notifications, ${unread} unread` : "Notifications";
 
   return (
-    <Popover
-      opened={opened}
-      onChange={setOpened}
-      position="bottom-end"
-      width={380}
-      shadow="lg"
-      radius="md"
-      trapFocus
-      returnFocus
+    // The ActionIcon is the Popover target, so Mantine puts aria-haspopup="dialog",
+    // aria-expanded, aria-controls and the id on the <button>. The Indicator stays
+    // outside the target: as the target, its <div> carried those attributes
+    // (axe critical aria-allowed-attr, #4752).
+    <Indicator
+      disabled={unread === 0}
+      label={unread > 99 ? "99+" : unread}
+      size={18}
+      offset={11}
+      color="red.8"
+      withBorder
+      styles={{ indicator: { fontSize: 11, fontWeight: 600 } }}
     >
-      <Popover.Target>
-        <Indicator
-          disabled={unread === 0}
-          label={unread > 99 ? "99+" : unread}
-          size={18}
-          offset={11}
-          color="red.8"
-          withBorder
-          styles={{ indicator: { fontSize: 11, fontWeight: 600 } }}
-        >
+      <Popover
+        opened={opened}
+        onChange={setOpened}
+        position="bottom-end"
+        width={380}
+        shadow="lg"
+        radius="md"
+        trapFocus
+        returnFocus
+      >
+        <Popover.Target>
           <ActionIcon
             variant="subtle"
             color="gray"
             className={classes.iconButton}
             onClick={() => setOpened(!opened)}
             aria-label={label}
-            aria-haspopup="dialog"
-            aria-expanded={opened}
           >
             <IconBell size={24} stroke={NAV_ICON_STROKE} />
           </ActionIcon>
-        </Indicator>
-      </Popover.Target>
-      <Popover.Dropdown
-        role="dialog"
-        aria-label="Notifications"
-        style={{ maxWidth: "calc(100vw - 16px)", maxHeight: "70vh", overflowY: "auto" }}
-      >
-        <Text fw={600} size="md" mb="xs">
-          Notifications
-        </Text>
-        {items.length === 0 ? (
-          <Text size="sm" py="md" ta="center" c="var(--shell-ink-3)">
-            You&apos;re all caught up.
+        </Popover.Target>
+        <Popover.Dropdown
+          role="dialog"
+          aria-label="Notifications"
+          style={{ maxWidth: "calc(100vw - 16px)", maxHeight: "70vh", overflowY: "auto" }}
+        >
+          <Text fw={600} size="md" mb="xs">
+            Notifications
           </Text>
-        ) : (
-          <Stack gap="sm">
-            {items.map((n) => (
-              <div key={n.id}>
-                <Text size="sm" fw={n.is_read ? 500 : 600} lineClamp={2}>
-                  {!n.is_read && <VisuallyHidden>Unread: </VisuallyHidden>}
-                  {n.title}
-                </Text>
-                <Text size="xs" c="var(--shell-ink-3)">
-                  {dayjs(n.created_at).fromNow()}
-                </Text>
-              </div>
-            ))}
-          </Stack>
-        )}
-      </Popover.Dropdown>
-    </Popover>
+          {items.length === 0 ? (
+            <Text size="sm" py="md" ta="center" c="var(--shell-ink-3)">
+              You&apos;re all caught up.
+            </Text>
+          ) : (
+            <Stack gap="sm">
+              {items.map((n) => (
+                <div key={n.id}>
+                  <Text size="sm" fw={n.is_read ? 500 : 600} lineClamp={2}>
+                    {!n.is_read && <VisuallyHidden>Unread: </VisuallyHidden>}
+                    {n.title}
+                  </Text>
+                  <Text size="xs" c="var(--shell-ink-3)">
+                    {dayjs(n.created_at).fromNow()}
+                  </Text>
+                </div>
+              ))}
+            </Stack>
+          )}
+        </Popover.Dropdown>
+      </Popover>
+    </Indicator>
   );
 }
 

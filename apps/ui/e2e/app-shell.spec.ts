@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import { test, expect, expectNoHorizontalOverflow } from "./fixtures";
 
 /**
@@ -224,3 +225,75 @@ test.describe("role-aware navigation", () => {
     await expectNoHorizontalOverflow(page);
   });
 });
+
+// ─── Header bell and axe (#4752) ──────────────────────────────
+
+/**
+ * Runs axe-core (WCAG 2.x A/AA rules) over the shell (header, navigation,
+ * popovers and dialogs; <main> is excluded, page content is the page's own
+ * spec's job) and fails on any critical or serious violation, listing the
+ * rule ids and offending elements.
+ */
+async function expectNoSeriousAxeViolations(page: Page) {
+  const { violations } = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .exclude("main")
+    .analyze();
+  const bad = violations
+    .filter((v) => v.impact === "critical" || v.impact === "serious")
+    .map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => `${n.target.join(" ")} ${n.html.slice(0, 160)}`).join(" | ")}`);
+  expect(bad, "critical/serious axe violations").toEqual([]);
+}
+
+for (const width of [390, 1440]) {
+  test.describe(`header bell ${width}px`, () => {
+    test.use({ viewport: { width, height: width < 768 ? 844 : 900 } });
+
+    test("the bell button owns the popover ARIA, opens and closes, and axe finds nothing critical/serious", async ({ loggedInPage: page }) => {
+      await page.route("**/bff/notifications", (route) =>
+        route.fulfill({
+          json: { data: [{ id: "n1", title: "Water bill due Friday", is_read: false, created_at: "2026-11-16T09:00:00Z" }] },
+        }),
+      );
+      await gotoHome(page);
+      const header = page.locator("header");
+      const bell = header.getByRole("button", { name: "Notifications, 1 unread" });
+      await expect(bell).toBeVisible();
+
+      // Badge still renders on the bell's top-right corner.
+      const badge = header.locator(".mantine-Indicator-indicator");
+      await expect(badge).toHaveText("1");
+      const [bb, ib] = [await bell.boundingBox(), await badge.boundingBox()];
+      expect(ib!.x + ib!.width / 2).toBeGreaterThan(bb!.x + bb!.width / 2);
+      expect(ib!.y + ib!.height / 2).toBeLessThan(bb!.y + bb!.height / 2);
+
+      // Only the button carries the popup attributes (the Indicator's <div> did, axe aria-allowed-attr).
+      await expect(bell).toHaveAttribute("aria-haspopup", "dialog");
+      await expect(bell).toHaveAttribute("aria-expanded", "false");
+      await expect(header.locator("[aria-haspopup]:not(button)")).toHaveCount(0);
+      await expect(header.locator("[aria-expanded]:not(button)")).toHaveCount(0);
+      await expectNoSeriousAxeViolations(page);
+
+      // Opens; aria-controls points at the dialog.
+      await bell.click();
+      const dialog = page.getByRole("dialog", { name: "Notifications" });
+      await expect(dialog).toBeVisible();
+      await expect(bell).toHaveAttribute("aria-expanded", "true");
+      const controls = await bell.getAttribute("aria-controls");
+      expect(controls).toBeTruthy();
+      expect(await dialog.getAttribute("id")).toBe(controls);
+      await expect(dialog.getByText("Water bill due Friday")).toBeVisible();
+      await expectNoSeriousAxeViolations(page);
+
+      // Esc closes it and focus returns to the bell; clicking toggles it again.
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      await expect(bell).toBeFocused();
+      await expect(bell).toHaveAttribute("aria-expanded", "false");
+      await bell.click();
+      await expect(dialog).toBeVisible();
+      await bell.click();
+      await expect(dialog).toBeHidden();
+    });
+  });
+}

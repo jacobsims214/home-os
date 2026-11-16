@@ -349,11 +349,14 @@ function SidebarAccount() {
   return (
     <Menu position="top-start" width={236} shadow="lg" radius="md" withinPortal offset={6}>
       <Menu.Target>
-        <UnstyledButton className={classes.userButton} aria-label={`Account menu for ${name}`} aria-haspopup="menu">
-          <Avatar size={32} radius="xl" color="cyan.9" variant="filled" src={user?.avatar_url ?? undefined}>
+        {/* Named by its content, not aria-label, so the visible name and email are part of
+            the accessible name (WCAG 2.5.3, axe label-content-name-mismatch, #4752). */}
+        <UnstyledButton className={classes.userButton} aria-haspopup="menu">
+          <Avatar size={32} radius="xl" color="cyan.9" variant="filled" src={user?.avatar_url ?? undefined} aria-hidden>
             {initials}
           </Avatar>
           <span className={classes.userText}>
+            <VisuallyHidden>Account menu for </VisuallyHidden>
             <span className={classes.userName}>{name}</span>
             {user?.email && <span className={classes.userEmail}>{user.email}</span>}
           </span>
