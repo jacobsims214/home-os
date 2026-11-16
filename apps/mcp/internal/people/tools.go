@@ -7,7 +7,8 @@
 // grandparents and nannies who don't) and person_preferences. The catalog's
 // preference kinds map onto them as follows:
 //
-//	allergy -> people.allergies (text[]; housesitters may see these)
+//	allergy -> people.allergies (text[]; housesitters may see these; notes
+//	           are kept in the entry: "peanuts (carries an EpiPen)")
 //	diet    -> person_preferences kind 'dietary'
 //	like    -> 'like'
 //	dislike -> 'dislike'
@@ -679,7 +680,36 @@ type prefChange struct {
 	notes    *string
 }
 
-func (c prefChange) label() string { return c.kind + ": " + c.item }
+func (c prefChange) label() string { return c.kind + ": " + c.value() }
+
+// value is what is stored. An allergy keeps its notes in people.allergies as
+// "peanuts (carries an EpiPen)", because that array is the only allergy
+// storage and housesitters see it (they do not see notes or preferences).
+// Other kinds store notes in person_preferences.notes.
+func (c prefChange) value() string {
+	if c.kind == "allergy" && c.notes != nil {
+		return c.item + " (" + *c.notes + ")"
+	}
+	return c.item
+}
+
+// allergen is the bare allergen of a stored or given allergy: the part before
+// " (", so "peanuts (carries an EpiPen)" is "peanuts".
+func allergen(s string) string {
+	base, _, _ := strings.Cut(strings.TrimSpace(s), " (")
+	return strings.TrimSpace(base)
+}
+
+// allergyIndex returns the index of the first stored allergy whose value or
+// bare allergen equals the given allergen (ignoring case), or -1.
+func allergyIndex(list []string, item string) int {
+	for i, v := range list {
+		if strings.EqualFold(strings.TrimSpace(v), item) || strings.EqualFold(allergen(v), allergen(item)) {
+			return i
+		}
+	}
+	return -1
+}
 
 // prefSchema is the JSON schema of one preference entry.
 var prefSchema = map[string]any{
@@ -687,8 +717,8 @@ var prefSchema = map[string]any{
 	"properties": map[string]any{
 		"kind":     map[string]any{"type": "string", "enum": prefKinds, "description": "allergy, diet, dislike, like or note"},
 		"item":     map[string]any{"type": "string", "description": "What it is, e.g. peanuts"},
-		"category": map[string]any{"type": "string", "description": "Optional topic, e.g. food (not used for allergy)"},
-		"notes":    map[string]any{"type": "string", "description": "Optional detail, e.g. carries an EpiPen"},
+		"category": map[string]any{"type": "string", "description": "Optional topic, e.g. food (ignored for allergy)"},
+		"notes":    map[string]any{"type": "string", "description": "Optional detail, e.g. carries an EpiPen. For an allergy it is kept with it as peanuts (carries an EpiPen); adding the allergy again with a new note replaces the note"},
 	},
 	"required": []string{"kind", "item"},
 }
@@ -727,7 +757,7 @@ func readPrefs(args map[string]any, key string) ([]prefChange, *mcp.CallToolResu
 		return bad(fmt.Sprintf("%s has %d entries; at most %d per call.", key, len(list), maxPrefChanges))
 	}
 	var out []prefChange
-	seen := map[string]bool{}
+	seen := map[string]int{} // key -> index in out
 	for i, e := range list {
 		m, ok := e.(map[string]any)
 		if !ok {
@@ -752,22 +782,30 @@ func readPrefs(args map[string]any, key string) ([]prefChange, *mcp.CallToolResu
 			return bad(fmt.Sprintf("%s[%d].item is longer than %d characters.", key, i, maxItem))
 		}
 		c := prefChange{kind: kind, item: item}
-		if kind != "allergy" {
+		if kind != "allergy" { // category is ignored for allergies
 			if cat, _ := m["category"].(string); strings.TrimSpace(cat) != "" {
 				c.category = strings.ToLower(strings.TrimSpace(cat))
 				if len([]rune(c.category)) > maxCategory {
 					return bad(fmt.Sprintf("%s[%d].category is longer than %d characters.", key, i, maxCategory))
 				}
 			}
-			if n, _ := m["notes"].(string); strings.TrimSpace(n) != "" {
-				n = strings.TrimSpace(n)
-				c.notes = &n
-			}
+		}
+		if n, _ := m["notes"].(string); strings.TrimSpace(n) != "" {
+			n = strings.Join(strings.Fields(n), " ")
+			c.notes = &n
+		}
+		if kind == "allergy" && len([]rune(c.value())) > maxItem {
+			return bad(fmt.Sprintf("%s[%d] allergy with its notes is longer than %d characters.", key, i, maxItem))
 		}
 		k := c.kind + "\x00" + strings.ToLower(c.item) + "\x00" + c.category
-		if !seen[k] {
-			seen[k] = true
+		if kind == "allergy" {
+			k = c.kind + "\x00" + strings.ToLower(allergen(c.item))
+		}
+		if j, ok := seen[k]; !ok {
+			seen[k] = len(out)
 			out = append(out, c)
+		} else if out[j].notes == nil && c.notes != nil {
+			out[j] = c // keep the entry that carries detail
 		}
 	}
 	return out, nil
@@ -778,16 +816,6 @@ func valueOr(v, def any) any {
 		return def
 	}
 	return v
-}
-
-// containsFold returns the index of s in list ignoring case, or -1.
-func containsFold(list []string, s string) int {
-	for i, v := range list {
-		if strings.EqualFold(strings.TrimSpace(v), s) {
-			return i
-		}
-	}
-	return -1
 }
 
 // textOrNil turns a textArg into the value to store: nil clears.
@@ -1127,25 +1155,41 @@ func NewPersonUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 			if a.kind != "allergy" {
 				continue
 			}
-			if containsFold(allergies, a.item) >= 0 {
+			i := allergyIndex(allergies, a.item)
+			switch {
+			case i < 0:
+				allergies = append(allergies, a.value())
+				added = append(added, a.label())
+			case strings.EqualFold(strings.TrimSpace(allergies[i]), a.value()):
 				unchanged = append(unchanged, a.label()+" (already listed)")
 				continue
+			case a.notes == nil:
+				// A bare re-add never drops the detail already stored.
+				unchanged = append(unchanged, "allergy: "+allergies[i]+" (already listed)")
+				continue
+			default: // same allergen, new note: replace, don't duplicate
+				added = append(added, a.label()+", replacing "+allergies[i])
+				allergies[i] = a.value()
 			}
-			allergies = append(allergies, a.item)
-			added = append(added, a.label())
 			allergiesChanged = true
 		}
 		for _, r := range removes {
 			if r.kind != "allergy" {
 				continue
 			}
-			i := containsFold(allergies, r.item)
-			if i < 0 {
-				unchanged = append(unchanged, r.label()+" (was not listed)")
+			// Match by the bare allergen, so "peanuts" removes
+			// "peanuts (carries an EpiPen)"; any duplicates go too.
+			if allergyIndex(allergies, r.item) < 0 {
+				unchanged = append(unchanged, r.kind+": "+r.item+" (was not listed)")
 				continue
 			}
-			removed = append(removed, r.kind+": "+allergies[i])
-			allergies = slices.Delete(allergies, i, i+1)
+			allergies = slices.DeleteFunc(allergies, func(v string) bool {
+				if allergyIndex([]string{v}, r.item) < 0 {
+					return false
+				}
+				removed = append(removed, r.kind+": "+v)
+				return true
+			})
 			allergiesChanged = true
 		}
 		if allergiesChanged {

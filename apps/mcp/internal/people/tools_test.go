@@ -335,6 +335,114 @@ func TestAllergyRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAllergyNotes covers #4742: an allergy's notes are kept in the entry
+// ("peanuts (carries an EpiPen)") so they are never dropped and housesitters
+// see them; the bare allergen still matches it on add and remove.
+func TestAllergyNotes(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	tl := newTools(t, pool)
+	nora := insertKid(t, pool, hh.HouseholdID, "Nora")
+	const epi = "peanuts (carries an EpiPen)"
+
+	stored := func(t *testing.T) []string {
+		t.Helper()
+		var got []string
+		if err := pool.QueryRow(context.Background(), `SELECT allergies FROM people WHERE id = $1`, nora).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	env := tl.update.call(t, ctx, map[string]any{
+		"person_id": "Nora",
+		"add_preferences": []any{map[string]any{"kind": "allergy", "item": "peanuts", "notes": " carries  an EpiPen ",
+			"category": "food"}}, // category is ignored for allergies
+	})
+	if !env.OK || !slices.Equal(env.Data.Allergies, []string{epi}) || !slices.Equal(env.Data.Added, []string{"allergy: " + epi}) ||
+		!strings.Contains(env.Summary, epi) {
+		t.Fatalf("add with notes = %+v", env)
+	}
+	if got := stored(t); !slices.Equal(got, []string{epi}) {
+		t.Fatalf("stored = %v", got)
+	}
+
+	t.Run("owner and housesitter see the note", func(t *testing.T) {
+		got := tl.get.call(t, ctx, map[string]any{"person_id": "Nora"})
+		if !got.OK || !slices.Equal(got.Data.Allergies, []string{epi}) || !strings.Contains(got.Summary, "Allergies: "+epi+".") {
+			t.Fatalf("owner get = %+v", got)
+		}
+		sitterCtx, _ := addMember(t, pool, hh, "housesitter", "Sam")
+		sit := tl.get.call(t, sitterCtx, map[string]any{"person_id": nora})
+		if !sit.OK || !sit.Data.Limited || !slices.Equal(sit.Data.Allergies, []string{epi}) || !strings.Contains(sit.Summary, "carries an EpiPen") {
+			t.Fatalf("housesitter get = %+v", sit)
+		}
+	})
+
+	t.Run("bare re-add keeps the note", func(t *testing.T) {
+		env := tl.update.call(t, ctx, map[string]any{"person_id": "Nora",
+			"add_preferences": []any{map[string]any{"kind": "allergy", "item": "PEANUTS"}}})
+		up := env.Data
+		if !env.OK || len(up.Added) != 0 || len(up.Changed) != 0 || !slices.Equal(up.Unchanged, []string{"allergy: " + epi + " (already listed)"}) ||
+			!slices.Equal(stored(t), []string{epi}) {
+			t.Fatalf("bare re-add = %+v", env)
+		}
+		// The same allergen and note again is unchanged too.
+		again := tl.update.mustOK(t, ctx, map[string]any{"person_id": "Nora",
+			"add_preferences": []any{map[string]any{"kind": "allergy", "item": "Peanuts", "notes": "Carries an EpiPen"}}})
+		if len(again.Added) != 0 || len(again.Unchanged) != 1 || !slices.Equal(stored(t), []string{epi}) {
+			t.Fatalf("same note again = %+v", again)
+		}
+	})
+
+	t.Run("new note replaces, no duplicate", func(t *testing.T) {
+		const two = "peanuts (carries two EpiPens)"
+		up := tl.update.mustOK(t, ctx, map[string]any{"person_id": "Nora",
+			"add_preferences": []any{map[string]any{"kind": "allergy", "item": "peanuts", "notes": "carries two EpiPens"}}})
+		if !slices.Equal(up.Allergies, []string{two}) || !slices.Equal(up.Changed, []string{"allergies"}) ||
+			!slices.Equal(up.Added, []string{"allergy: " + two + ", replacing " + epi}) || len(up.Unchanged) != 0 {
+			t.Fatalf("replace = %+v", up)
+		}
+		// A bare allergen gets a note the same way.
+		tl.update.mustOK(t, ctx, map[string]any{"person_id": "Nora", "add_preferences": []any{map[string]any{"kind": "allergy", "item": "milk"}}})
+		up = tl.update.mustOK(t, ctx, map[string]any{"person_id": "Nora",
+			"add_preferences": []any{map[string]any{"kind": "allergy", "item": "milk", "notes": "hives only"}}})
+		if got := stored(t); !slices.Equal(got, []string{two, "milk (hives only)"}) || len(up.Added) != 1 {
+			t.Fatalf("note on bare allergen: stored %v, update %+v", got, up)
+		}
+	})
+
+	t.Run("remove by bare allergen", func(t *testing.T) {
+		up := tl.update.mustOK(t, ctx, map[string]any{"person_id": "Nora",
+			"remove_preferences": []any{map[string]any{"kind": "allergy", "item": "Peanuts"}, map[string]any{"kind": "allergy", "item": "kiwi"}}})
+		if !slices.Equal(up.Removed, []string{"allergy: peanuts (carries two EpiPens)"}) || !slices.Equal(up.Unchanged, []string{"allergy: kiwi (was not listed)"}) ||
+			!slices.Equal(stored(t), []string{"milk (hives only)"}) {
+			t.Fatalf("remove = %+v", up)
+		}
+		// The full stored text matches too.
+		up = tl.update.mustOK(t, ctx, map[string]any{"person_id": "Nora",
+			"remove_preferences": []any{map[string]any{"kind": "allergy", "item": "Milk (hives only)"}}})
+		if len(up.Removed) != 1 || len(stored(t)) != 0 {
+			t.Fatalf("remove full text = %+v", up)
+		}
+	})
+
+	t.Run("within one call the entry with notes wins", func(t *testing.T) {
+		up := tl.update.mustOK(t, ctx, map[string]any{"person_id": "Nora", "add_preferences": []any{
+			map[string]any{"kind": "allergy", "item": "eggs"},
+			map[string]any{"kind": "allergy", "item": "Eggs", "notes": "baked is fine"},
+		}})
+		if !slices.Equal(stored(t), []string{"Eggs (baked is fine)"}) || len(up.Added) != 1 {
+			t.Fatalf("in-call duplicate = %+v", up)
+		}
+	})
+
+	t.Run("too long with notes", func(t *testing.T) {
+		tl.update.mustFail(t, ctx, map[string]any{"person_id": "Nora", "add_preferences": []any{
+			map[string]any{"kind": "allergy", "item": "peanuts", "notes": strings.Repeat("x", maxItem)}}}, "add_preferences")
+	})
+}
+
 func TestPersonGet(t *testing.T) {
 	pool := testutil.NewPool(t)
 	ctx, hh := testutil.SeedHousehold(t, pool)
