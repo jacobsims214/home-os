@@ -75,17 +75,19 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 }
 
 // GetCalendarByIDForHousehold returns the calendar with the given ID if it
-// exists AND belongs to the given household. Returns (nil, nil) when the
-// calendar does not exist or is owned by a different household — callers MUST
-// treat both cases as 404 Not Found so that an attacker cannot distinguish
-// "no such calendar" from "calendar exists but isn't yours" (matching the
-// CalDAV-side pattern in apps/calendar/internal/db/repo.go).
-func (r *Repo) GetCalendarByIDForHousehold(ctx context.Context, calendarID, householdID uuid.UUID) (*Calendar, error) {
+// exists, belongs to the given household AND the caller's role may see its
+// kind (access.go). Returns (nil, nil) when the calendar does not exist, is
+// owned by a different household, or is hidden from the role — callers MUST
+// treat all of them as 404 Not Found so that an attacker cannot distinguish
+// "no such calendar" from "calendar exists but isn't yours or isn't for you"
+// (matching the CalDAV-side pattern in apps/calendar/internal/db/repo.go).
+func (r *Repo) GetCalendarByIDForHousehold(ctx context.Context, calendarID, householdID uuid.UUID, role string) (*Calendar, error) {
 	var c Calendar
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, household_id, property_id, name, type, COALESCE(color,'#6366f1'), created_at, updated_at
-		 FROM calendars WHERE id = $1 AND household_id = $2`,
-		calendarID, householdID,
+		`SELECT c.id, c.household_id, c.property_id, c.name, c.type, COALESCE(c.color,'#6366f1'), c.created_at, c.updated_at
+		 FROM calendars c WHERE c.id = $1 AND c.household_id = $2
+		   AND `+calendarVisibleSQL("$3"),
+		calendarID, householdID, role,
 	).Scan(&c.ID, &c.HouseholdID, &c.PropertyID, &c.Name, &c.Type, &c.Color, &c.CreatedAt, &c.UpdatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -115,12 +117,16 @@ func (r *Repo) GetEventCalendarID(ctx context.Context, eventID uuid.UUID) (uuid.
 	return calendarID, nil
 }
 
-// ListCalendars returns all calendars for a household.
-func (r *Repo) ListCalendars(ctx context.Context, householdID uuid.UUID) ([]Calendar, error) {
+// ListCalendars returns the calendars of a household that the caller's role
+// may see (access.go): a housesitter gets the Family, Properties and custom
+// calendars and not the Bills, Maintenance or Vehicles ones.
+func (r *Repo) ListCalendars(ctx context.Context, householdID uuid.UUID, role string) ([]Calendar, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, property_id, name, type, COALESCE(color,'#6366f1'), created_at, updated_at
-		 FROM calendars WHERE household_id = $1 ORDER BY name`,
-		householdID)
+		`SELECT c.id, c.household_id, c.property_id, c.name, c.type, COALESCE(c.color,'#6366f1'), c.created_at, c.updated_at
+		 FROM calendars c WHERE c.household_id = $1
+		   AND `+calendarVisibleSQL("$2")+`
+		 ORDER BY c.name`,
+		householdID, role)
 	if err != nil {
 		return nil, fmt.Errorf("list calendars: %w", err)
 	}
@@ -251,8 +257,15 @@ func collectEvents(rows pgx.Rows, rg EventRange, loc *time.Location, what string
 // events come back as their occurrences in the range (RECURRENCE-ID
 // overrides and EXDATEs applied), sorted by start; otherwise series are
 // returned once, as stored.
-func (r *Repo) ListEvents(ctx context.Context, calendarID uuid.UUID, rg EventRange, loc *time.Location) ([]Event, error) {
-	query, args := rangeFilter(`SELECT `+eventColumns+` FROM calendar_objects co WHERE co.calendar_id = $1`, []any{calendarID}, rg)
+func (r *Repo) ListEvents(ctx context.Context, calendarID uuid.UUID, rg EventRange, loc *time.Location, role string) ([]Event, error) {
+	// The calendars join is what makes the event's calendar kind checkable
+	// (access.go): an event is visible only when the role may see both its
+	// calendar's kind and its own.
+	query, args := rangeFilter(`SELECT `+eventColumns+`
+		FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
+		WHERE co.calendar_id = $1`, []any{calendarID}, rg)
+	query = visibleToRole(query, fmt.Sprintf("$%d", len(args)+1))
+	args = append(args, role)
 	rows, err := r.pool.Query(ctx, query+` ORDER BY co.created_at`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list events: %w", err)
@@ -263,13 +276,18 @@ func (r *Repo) ListEvents(ctx context.Context, calendarID uuid.UUID, rg EventRan
 // ListAllEvents returns events across all calendars for a household, with
 // the same range and expansion rules as ListEvents. If propertyID is
 // provided, only calendars scoped to that property are read.
-func (r *Repo) ListAllEvents(ctx context.Context, householdID uuid.UUID, rg EventRange, propertyID *uuid.UUID, loc *time.Location) ([]Event, error) {
+func (r *Repo) ListAllEvents(ctx context.Context, householdID uuid.UUID, rg EventRange, propertyID *uuid.UUID, loc *time.Location, role string) ([]Event, error) {
 	query := `SELECT ` + eventColumns + ` FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id WHERE c.household_id = $1`
 	args := []any{householdID}
 	if propertyID != nil {
 		args = append(args, *propertyID)
 		query += fmt.Sprintf(" AND c.property_id = $%d", len(args))
 	}
+	// A housesitter listing every event of the household still gets no bill
+	// mirror (kind 'bill') and nothing from the Bills, Maintenance or
+	// Vehicles calendars (access.go).
+	query = visibleToRole(query, fmt.Sprintf("$%d", len(args)+1))
+	args = append(args, role)
 	query, args = rangeFilter(query, args, rg)
 	rows, err := r.pool.Query(ctx, query+` ORDER BY co.created_at`, args...)
 	if err != nil {

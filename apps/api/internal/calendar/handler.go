@@ -32,7 +32,9 @@ func (h *Handler) ListCalendars(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	cals, err := h.repo.ListCalendars(r.Context(), hid)
+	// The role decides which calendars are visible (access.go): a housesitter
+	// does not get the Bills calendar at all.
+	cals, err := h.repo.ListCalendars(r.Context(), hid, claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -152,10 +154,12 @@ func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "invalid calendar id")
 		return
 	}
-	// Verify the target calendar belongs to the caller's household before
-	// reading events. 404 (not 403) on mismatch so cross-tenant calendar
-	// existence is not leaked.
-	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid)
+	// Verify the target calendar belongs to the caller's household and is
+	// one the caller's role may see before reading events. 404 (not 403) on
+	// either, so neither cross-tenant nor hidden-calendar existence leaks: a
+	// housesitter asking for the Bills calendar gets the same answer as for a
+	// calendar that does not exist.
+	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid, claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -169,7 +173,7 @@ func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, msg)
 		return
 	}
-	events, err := h.repo.ListEvents(r.Context(), calID, rg, h.repo.HouseholdLocation(r.Context(), hid))
+	events, err := h.repo.ListEvents(r.Context(), calID, rg, h.repo.HouseholdLocation(r.Context(), hid), claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -198,7 +202,7 @@ func (h *Handler) ListAllEvents(w http.ResponseWriter, r *http.Request) {
 			propertyID = &pid
 		}
 	}
-	events, err := h.repo.ListAllEvents(r.Context(), hid, rg, propertyID, h.repo.HouseholdLocation(r.Context(), hid))
+	events, err := h.repo.ListAllEvents(r.Context(), hid, rg, propertyID, h.repo.HouseholdLocation(r.Context(), hid), claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -225,8 +229,10 @@ func (h *Handler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	// Verify the target calendar belongs to the caller's household before
 	// writing into it. 404 (not 403) on mismatch so cross-tenant calendar
-	// existence is not leaked.
-	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid)
+	// existence is not leaked. Writes are family-only (ResCalendar write =
+	// rolesFamily), and every family role may see every calendar kind, so the
+	// role filter never hides a calendar from a writer here.
+	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid, claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -297,7 +303,7 @@ func (h *Handler) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	// 404 for a calendar of another household, and for an event that is
 	// not in this calendar, so neither existence leaks.
-	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid)
+	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid, claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -355,7 +361,7 @@ func (h *Handler) DeleteEvent(w http.ResponseWriter, r *http.Request) {
 		apierr.NotFound(w, "event not found")
 		return
 	}
-	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid)
+	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid, claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
