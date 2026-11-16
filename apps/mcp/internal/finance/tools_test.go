@@ -130,10 +130,25 @@ func TestBudgetSummaryDefinition(t *testing.T) {
 	if len(tool.InputSchema.Required) != 0 {
 		t.Errorf("required = %v, want none", tool.InputSchema.Required)
 	}
+	wantParams := map[string]bool{"month": true, "sections": true, "detail": true, "category": true, "due_within_days": true}
 	for p := range tool.InputSchema.Properties {
-		if p != "month" && p != "sections" {
+		if !wantParams[p] {
 			t.Errorf("unexpected param %q", p)
 		}
+	}
+	for p := range wantParams {
+		if _, ok := tool.InputSchema.Properties[p]; !ok {
+			t.Errorf("missing param %q", p)
+		}
+	}
+	// #4809: the default answer is the small one, and the description says so
+	// rather than promising everything.
+	if !strings.Contains(tool.Description, "summary by default") {
+		t.Errorf("description does not say it is a summary by default: %q", tool.Description)
+	}
+	db, _ := json.Marshal(tool.InputSchema.Properties["detail"])
+	if !strings.Contains(string(db), `"enum":["summary","lines","full"]`) {
+		t.Errorf("detail schema = %s, want the detail enum", db)
 	}
 	b, _ := json.Marshal(tool.InputSchema.Properties["sections"])
 	if !strings.Contains(string(b), `"enum":["obligations","budget","due_soon","net_worth"]`) {
@@ -153,8 +168,9 @@ func TestParseSections(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"nil means all", nil, allSections, false},
-		{"empty list means all", []any{}, allSections, false},
+		{"nil means the default", nil, defaultSections, false},
+		{"empty list means the default", []any{}, defaultSections, false},
+		{"explicit all", []any{"obligations", "budget", "due_soon", "net_worth"}, allSections, false},
 		{"list, catalog order, deduped", []any{"net_worth", "obligations", "net_worth"}, []string{"obligations", "net_worth"}, false},
 		{"string", "obligations", []string{"obligations"}, false},
 		{"comma string, any case, dash", "Net-Worth, OBLIGATIONS", []string{"obligations", "net_worth"}, false},
@@ -218,31 +234,64 @@ func TestBudgetSummary_Empty(t *testing.T) {
 	ctx, _ := testutil.SeedHousehold(t, pool)
 	_, _, h := NewBudgetSummaryTool(pool)
 
+	// #4809: no arguments means the small answer, budget and due_soon only.
 	_, w := call(t, ctx, h, nil)
 	d := w.Data
-	if d == nil || d.Obligations == nil || d.NetWorth == nil || d.Budget == nil || d.DueSoon == nil {
+	if d == nil || d.Budget == nil || d.DueSoon == nil {
 		t.Fatalf("data = %+v", d)
+	}
+	if d.Obligations != nil || d.NetWorth != nil {
+		t.Errorf("default includes obligations/net_worth: %+v", d)
 	}
 	if want := time.Now().UTC().Format("2006-01"); d.Month != want {
 		// Household timezone is unset (UTC) in the seed.
 		t.Errorf("month = %s, want %s", d.Month, want)
 	}
-	if !reflect.DeepEqual(d.Sections, allSections) {
-		t.Errorf("sections = %v", d.Sections)
+	if !reflect.DeepEqual(d.Sections, defaultSections) {
+		t.Errorf("sections = %v, want %v", d.Sections, defaultSections)
 	}
 	if len(d.Budget.Categories) != 0 || d.Budget.Totals.Committed != "0.00" || d.Budget.Currency != "USD" ||
 		len(d.DueSoon.Items) != 0 || d.DueSoon.Total != "0.00" || d.DueSoon.Days != 30 {
 		t.Errorf("budget/due_soon = %+v / %+v", d.Budget, d.DueSoon)
 	}
-	if d.Obligations.BillsByCategory == nil || len(d.Obligations.BillsByCategory) != 0 || d.Obligations.MonthlyTotal != 0 {
-		t.Errorf("obligations = %+v", d.Obligations)
-	}
-	if !strings.Contains(w.Summary, "no bills or loan payments recorded yet") || !strings.Contains(w.Summary, "Estimated net worth $0.00") ||
+	if !strings.Contains(w.Summary, "no bills or loan payments recorded yet") ||
 		!strings.Contains(w.Summary, "No budget categories set yet.") || !strings.Contains(w.Summary, "Nothing falls due in the next 30 days.") {
 		t.Errorf("summary = %q", w.Summary)
 	}
+	if strings.Contains(w.Summary, "net worth") {
+		t.Errorf("summary mentions net worth, which was not asked for: %q", w.Summary)
+	}
 	if len(w.Next) == 0 || !strings.Contains(w.Next[0], "bill_create") {
 		t.Errorf("next = %v", w.Next)
+	}
+	// The coverage block names what the default left out, so a small model
+	// cannot read the default as the whole picture.
+	c := d.Coverage
+	if c.Detail != detailSummary || !reflect.DeepEqual(c.Sections, defaultSections) ||
+		!reflect.DeepEqual(c.NotIncluded, []string{sectionObligations, sectionNetWorth}) {
+		t.Errorf("coverage = %+v", c)
+	}
+	if !strings.Contains(c.HowToGetDetail, `sections=["obligations","net_worth"]`) {
+		t.Errorf("how_to_get_detail = %q", c.HowToGetDetail)
+	}
+	if c.DueWindow == "" || c.Month != d.Month {
+		t.Errorf("coverage window/month = %+v", c)
+	}
+
+	// Every section still reachable on request.
+	_, w = call(t, ctx, h, map[string]any{"sections": allSections})
+	d = w.Data
+	if d == nil || d.Obligations == nil || d.NetWorth == nil || d.Budget == nil || d.DueSoon == nil {
+		t.Fatalf("all sections: data = %+v", d)
+	}
+	if d.Obligations.BillsByCategory == nil || len(d.Obligations.BillsByCategory) != 0 || d.Obligations.MonthlyTotal != 0 {
+		t.Errorf("obligations = %+v", d.Obligations)
+	}
+	if !strings.Contains(w.Summary, "Estimated net worth $0.00") {
+		t.Errorf("all-sections summary = %q", w.Summary)
+	}
+	if c := d.Coverage; len(c.NotIncluded) != 0 {
+		t.Errorf("all sections: not_included = %v, want none", c.NotIncluded)
 	}
 }
 
@@ -462,9 +511,9 @@ func TestBudgetSummary_WhatDoWeOweEachMonth(t *testing.T) {
 	}
 
 	_, _, h := NewBudgetSummaryTool(pool)
-	_, w := call(t, ctx, h, map[string]any{"month": "2026-11"})
+	_, w := call(t, ctx, h, map[string]any{"month": "2026-11", "sections": []any{"obligations", "budget"}, "detail": "lines"})
 	d := w.Data
-	if d.Budget == nil || d.Obligations == nil || d.DueSoon == nil {
+	if d.Budget == nil || d.Obligations == nil {
 		t.Fatalf("data = %+v", d)
 	}
 	b := d.Budget
@@ -528,6 +577,158 @@ func TestBudgetSummary_Roles(t *testing.T) {
 		res, w := call(t, member(role), h, nil)
 		if !res.IsError || !strings.Contains(w.Error.Message, "The "+role+" role can't see the budget") {
 			t.Errorf("%s = %+v", role, w)
+		}
+	}
+}
+
+// TestBudgetSummary_CoverageStatesScope is the #4809 anti-regression test for
+// the war game's worst failure: an agent confidently answering "nothing is
+// due" from an answer that was never the whole picture. Every result must say
+// what it covers, what it left out, and how to ask for the rest.
+func TestBudgetSummary_CoverageStatesScope(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	bg := context.Background()
+	var housing uuid.UUID
+	if err := pool.QueryRow(bg, `INSERT INTO budget_categories (household_id, name, monthly_amount) VALUES ($1, 'Housing', 2000) RETURNING id`,
+		hh.HouseholdID).Scan(&housing); err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{
+		`INSERT INTO bills (household_id, name, amount, due_day, category, budget_category_id) VALUES ($1, 'Electric', 142.5, 18, 'Utilities', $2)`,
+		`INSERT INTO bills (household_id, name, amount, due_day, category, budget_category_id) VALUES ($1, 'Water', 40, 20, 'Utilities', $2)`,
+		`INSERT INTO bills (household_id, name, amount, due_day, category) VALUES ($1, 'Gym', 30, 25, 'Health')`,
+		`INSERT INTO loans (household_id, name, original_amount, remaining_balance, monthly_payment, due_day, budget_category_id) VALUES ($1, 'Mortgage', 300000, 250000, 1850, 1, $2)`,
+	} {
+		args := []any{hh.HouseholdID}
+		if strings.Contains(sql, "$2") {
+			args = append(args, housing)
+		}
+		if _, err := pool.Exec(bg, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _, h := NewBudgetSummaryTool(pool)
+
+	// The default lists no lines, says how many it left out, and names the
+	// argument that lists them.
+	_, w := call(t, ctx, h, nil)
+	c := w.Data.Coverage
+	if c.Detail != detailSummary || c.LinesNotListed == nil || *c.LinesNotListed != 4 || c.LinesListed == nil || *c.LinesListed != 0 {
+		t.Errorf("default coverage = %+v, want 0 listed and 4 not listed", c)
+	}
+	if !strings.Contains(c.HowToGetDetail, `detail="lines"`) || !strings.Contains(c.HowToGetDetail, `detail="full"`) {
+		t.Errorf("how_to_get_detail does not name detail: %q", c.HowToGetDetail)
+	}
+	// The summary must not read as "nothing is due": the total covers all.
+	if w.Data.DueSoon == nil || w.Data.DueSoon.Total == "0.00" {
+		t.Errorf("due_soon lost its total: %+v", w.Data.DueSoon)
+	}
+	if !strings.Contains(c.DueWindow, " to ") {
+		t.Errorf("coverage does not state the due window: %q", c.DueWindow)
+	}
+
+	// detail=full lists every line and then claims no omission of lines.
+	_, w = call(t, ctx, h, map[string]any{"detail": "full"})
+	if c := w.Data.Coverage; c.LinesNotListed == nil || *c.LinesNotListed != 0 || *c.LinesListed != 4 {
+		t.Errorf("detail=full coverage = %+v, want all 4 listed", c)
+	} else if strings.Contains(c.HowToGetDetail, "bill and loan lines are not listed") {
+		t.Errorf("detail=full still claims missing lines: %q", c.HowToGetDetail)
+	}
+
+	// category=… returns one category with its lines and says so in scope.
+	_, w = call(t, ctx, h, map[string]any{"category": "housing"})
+	d := w.Data
+	if len(d.Budget.Categories) != 1 || d.Budget.Categories[0].Name != "Housing" {
+		t.Fatalf("category=housing categories = %+v", d.Budget.Categories)
+	}
+	// Housing holds the Mortgage loan and both bills are filed under Housing
+	// in this seed (they carry budget_category_id $2).
+	listed := len(d.Budget.Categories[0].Lines)
+	if listed == 0 {
+		t.Errorf("category=housing listed no lines: %+v", d.Budget.Categories[0].Lines)
+	}
+	if !strings.Contains(d.Coverage.Scope, "Housing") || d.Coverage.Detail != detailLines {
+		t.Errorf("category coverage = %+v, want it to name the category and the detail it listed", d.Coverage)
+	}
+	// The other categories' lines were dropped from this result, so coverage
+	// must still say lines are missing, or the answer looks complete (#4809).
+	if d.Coverage.LinesNotListed == nil || *d.Coverage.LinesNotListed == 0 {
+		t.Errorf("narrowed coverage claims nothing was left out: %+v", d.Coverage)
+	}
+	if *d.Coverage.LinesListed != listed {
+		t.Errorf("lines_listed %d, want the %d listed", *d.Coverage.LinesListed, listed)
+	}
+	// The totals still cover the whole household, and the summary says so
+	// instead of reading like Housing's own total.
+	if d.Budget.Totals.Committed != "2062.50" {
+		t.Errorf("narrowed totals = %q, want the household's 2062.50", d.Budget.Totals.Committed)
+	}
+	if !strings.Contains(w.Summary, "the whole household pays $2,062.50") {
+		t.Errorf("narrowed summary reads as the category's total: %q", w.Summary)
+	}
+
+	// An unknown category is refused with the names that exist, never a zero.
+	res, w := call(t, ctx, h, map[string]any{"category": "Groceries"})
+	if !res.IsError || w.Error == nil || w.Error.Field != "category" || !strings.Contains(w.Error.Fix, "Housing") {
+		t.Errorf("unknown category = %+v", w)
+	}
+
+	// due_within_days narrows the window and the coverage states it.
+	_, w = call(t, ctx, h, map[string]any{"sections": []any{"due_soon"}, "due_within_days": 3})
+	if d := w.Data.DueSoon; d.Days != 3 {
+		t.Errorf("due_within_days=3 gave %d", d.Days)
+	}
+	if c := w.Data.Coverage; !strings.Contains(c.DueWindow, w.Data.DueSoon.From+" to "+w.Data.DueSoon.To) {
+		t.Errorf("coverage window = %q, want %s to %s", c.DueWindow, w.Data.DueSoon.From, w.Data.DueSoon.To)
+	}
+}
+
+// TestBudgetSummary_ParseNewArgs covers the #4809 parameters' accepted and
+// rejected forms, including the sloppy ones small models send.
+func TestBudgetSummary_ParseNewArgs(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, _ := testutil.SeedHousehold(t, pool)
+	_, _, h := NewBudgetSummaryTool(pool)
+
+	for raw, want := range map[any]string{
+		nil: detailSummary, "": detailSummary, "summary": detailSummary,
+		"LINES": detailLines, "lines": detailLines, "full": detailFull, " Full ": detailFull,
+	} {
+		if got, err := parseDetail(raw); err != nil || got != want {
+			t.Errorf("parseDetail(%v) = %q, %v; want %q", raw, got, err, want)
+		}
+	}
+	for _, raw := range []any{"verbose", "all", 3.0} {
+		if _, err := parseDetail(raw); err == nil {
+			t.Errorf("parseDetail(%v) accepted a bad level", raw)
+		}
+	}
+
+	for raw, want := range map[any]int{nil: 0, 7.0: 7, 1.0: 1, 365.0: 365, "14": 14, "": 0} {
+		if got, err := parseDueWithin(raw); err != nil || got != want {
+			t.Errorf("parseDueWithin(%v) = %d, %v; want %d", raw, got, err, want)
+		}
+	}
+	for _, raw := range []any{0.0, 366.0, -5.0, 2.5, "soon", true} {
+		if _, err := parseDueWithin(raw); err == nil {
+			t.Errorf("parseDueWithin(%v) accepted a bad window", raw)
+		}
+	}
+
+	// A bad value reaches the caller as an isError result with a fix.
+	for _, tc := range []struct {
+		args  map[string]any
+		field string
+	}{
+		{map[string]any{"detail": "verbose"}, "detail"},
+		{map[string]any{"due_within_days": 9999.0}, "due_within_days"},
+		{map[string]any{"sections": []any{"due_soon"}, "category": "Housing"}, "category"},
+		{map[string]any{"category": "Housing"}, "category"}, // no such category yet here
+	} {
+		res, w := call(t, ctx, h, tc.args)
+		if !res.IsError || w.Error == nil || w.Error.Field != tc.field || w.Error.Fix == "" || w.Error.Example == nil {
+			t.Errorf("%v: want an isError on %s with fix and example, got %+v", tc.args, tc.field, w)
 		}
 	}
 }
