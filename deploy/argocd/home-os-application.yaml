@@ -54,7 +54,7 @@ spec:
           # PLACEHOLDER: #4357 sets this to the sha-<short> tag of the
           # release.yml run on feat/family-hub, one tag for ALL images
           # (migrations included). See the header for the procedure.
-          imageTag: sha-SET_IN_4357
+          imageTag: sha-0e3eb29
           # The tag is immutable, so the node cache is safe.
           imagePullPolicy: IfNotPresent
           # PLACEHOLDER: #4357 must replace this with the private hostname
@@ -63,11 +63,16 @@ spec:
           # the UI/API/MCP public URLs, the MCP resource URL and the ingress
           # host. The chart refuses to render while this is the placeholder,
           # empty or localhost.
-          publicUrl: https://HOMEOS_PRIVATE_HOSTNAME_SET_IN_4389
+          publicUrl: https://homeos.simstech.cloud
         api:
           allowRegistration: "false"
+        # 1 replica: Stage 1 replaces the hand-set sha-cc8a503 MCP with the
+        # chart-managed image, and the acceptance criteria require /mcp live.
+        # The old `replicas: 0` was a war-game leftover from when the MCP image
+        # did not exist yet (#4513 §1); it was never cleaned up after the
+        # Deployment was hand-scaled to 1.
         mcp:
-          replicas: 0
+          replicas: 1
         ingress:
           enabled: true
           className: traefik
