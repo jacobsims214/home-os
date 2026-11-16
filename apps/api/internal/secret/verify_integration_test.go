@@ -9,7 +9,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -177,5 +180,152 @@ func TestSecretKey_LegacyRowUpgradesOnUnlock(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("activity_log has %d secret_keys rows", n)
+	}
+}
+
+// verifyAs runs VerifyKey as member uid of hid and returns status + Retry-After.
+func verifyAs(h *Handler, hid, uid uuid.UUID, verifier []byte) (int, string) {
+	b, _ := json.Marshal(map[string]any{"verifier": verifier, "key_version": 1})
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(b))
+	req = req.WithContext(middleware.WithClaims(req.Context(),
+		&auth.Claims{HouseholdID: hid.String(), UserID: uid.String(), Role: "owner"}))
+	rec := httptest.NewRecorder()
+	h.VerifyKey(rec, req)
+	return rec.Code, rec.Header().Get("Retry-After")
+}
+
+// countEvaluations replaces the verifierEvaluated hook with a counter. Each
+// evaluation also sleeps, widening the window in which a check-then-act limiter
+// would let parallel requests through.
+func countEvaluations(t *testing.T) *atomic.Int64 {
+	t.Helper()
+	var n atomic.Int64
+	prev := verifierEvaluated
+	verifierEvaluated = func() {
+		n.Add(1)
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Cleanup(func() { verifierEvaluated = prev })
+	return &n
+}
+
+func TestVerifyKey_ConcurrentGuessesCannotBypassLimit(t *testing.T) {
+	pool := keyTestDB(t)
+	h := NewHandler(NewRepo(pool))
+	hid, uid := newHousehold(t, pool), uuid.New()
+	right := sha256.Sum256([]byte("right"))
+	wrong := sha256.Sum256([]byte("wrong"))
+	if code, body := call(t, h.SetupKey, hid, map[string]any{"verifier": right[:], "key_salt": []byte("0123456789abcdef"), "key_version": 1}); code != http.StatusCreated {
+		t.Fatalf("setup: %d %s", code, body)
+	}
+	evals := countEvaluations(t)
+
+	const n = 50
+	var (
+		wg              sync.WaitGroup
+		start           = make(chan struct{})
+		n422, n429, bad atomic.Int64
+	)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			code, retry := verifyAs(h, hid, uid, wrong[:])
+			switch {
+			case code == http.StatusUnprocessableEntity:
+				n422.Add(1)
+			case code == http.StatusTooManyRequests && retry != "":
+				n429.Add(1)
+			default:
+				bad.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if bad.Load() != 0 || n422.Load()+n429.Load() != n {
+		t.Fatalf("unexpected responses: 422=%d 429=%d other=%d", n422.Load(), n429.Load(), bad.Load())
+	}
+	if n422.Load() > verifyMaxFailures {
+		t.Fatalf("%d wrong guesses answered 422, limit %d", n422.Load(), verifyMaxFailures)
+	}
+	if evals.Load() > verifyMaxFailures {
+		t.Fatalf("%d verifier evaluations, limit %d", evals.Load(), verifyMaxFailures)
+	}
+	if evals.Load() != n422.Load() {
+		t.Fatalf("evaluations %d != 422s %d", evals.Load(), n422.Load())
+	}
+	t.Logf("50 concurrent wrong guesses: %d evaluated (422), %d refused (429)", n422.Load(), n429.Load())
+
+	// Refused requests did not burn the member's slots: wrong guesses continue
+	// until exactly verifyMaxFailures have been counted, then 429.
+	for i := n422.Load(); i < verifyMaxFailures; i++ {
+		if code, _ := verifyAs(h, hid, uid, wrong[:]); code != http.StatusUnprocessableEntity {
+			t.Fatalf("sequential wrong %d: %d", i+1, code)
+		}
+	}
+	if code, retry := verifyAs(h, hid, uid, right[:]); code != http.StatusTooManyRequests || retry == "" {
+		t.Fatalf("locked member, right password: %d %q", code, retry)
+	}
+	if evals.Load() != verifyMaxFailures {
+		t.Fatalf("total evaluations %d, want %d", evals.Load(), verifyMaxFailures)
+	}
+}
+
+func TestVerifyKey_LimitIsPerMemberWithHouseholdCeiling(t *testing.T) {
+	pool := keyTestDB(t)
+	h := NewHandler(NewRepo(pool))
+	hid := newHousehold(t, pool)
+	right := sha256.Sum256([]byte("right"))
+	wrong := sha256.Sum256([]byte("wrong"))
+	if code, body := call(t, h.SetupKey, hid, map[string]any{"verifier": right[:], "key_salt": []byte("0123456789abcdef"), "key_version": 1}); code != http.StatusCreated {
+		t.Fatalf("setup: %d %s", code, body)
+	}
+
+	// One member locks only themself.
+	alice, bob := uuid.New(), uuid.New()
+	for i := 0; i < verifyMaxFailures; i++ {
+		if code, _ := verifyAs(h, hid, alice, wrong[:]); code != http.StatusUnprocessableEntity {
+			t.Fatalf("alice wrong %d: %d", i+1, code)
+		}
+	}
+	if code, _ := verifyAs(h, hid, alice, right[:]); code != http.StatusTooManyRequests {
+		t.Fatalf("alice locked: %d", code)
+	}
+	if code, _ := verifyAs(h, hid, bob, right[:]); code != http.StatusOK {
+		t.Fatalf("bob unlocks while alice is locked: %d", code)
+	}
+
+	// A correct password clears that member's count, but household failures
+	// keep counting toward the ceiling.
+	if code, _ := verifyAs(h, hid, bob, wrong[:]); code != http.StatusUnprocessableEntity {
+		t.Fatal("bob wrong")
+	}
+	if code, _ := verifyAs(h, hid, bob, right[:]); code != http.StatusOK {
+		t.Fatal("bob right")
+	}
+	failures := verifyMaxFailures + 1 // alice's 10 + bob's 1
+	for failures < verifyHouseholdMaxFailures {
+		member := uuid.New()
+		for i := 0; i < verifyMaxFailures && failures < verifyHouseholdMaxFailures; i++ {
+			if code, _ := verifyAs(h, hid, member, wrong[:]); code != http.StatusUnprocessableEntity {
+				t.Fatalf("household failure %d: %d", failures+1, code)
+			}
+			failures++
+		}
+	}
+	// Ceiling reached: even a fresh member with the right password waits.
+	if code, retry := verifyAs(h, hid, uuid.New(), right[:]); code != http.StatusTooManyRequests || retry == "" {
+		t.Fatalf("household ceiling: %d %q", code, retry)
+	}
+	// Another household is unaffected.
+	other := newHousehold(t, pool)
+	if code, _ := call(t, h.SetupKey, other, map[string]any{"verifier": right[:], "key_salt": []byte("0123456789abcdef"), "key_version": 1}); code != http.StatusCreated {
+		t.Fatal("setup other")
+	}
+	if code, _ := verifyAs(h, other, uuid.New(), right[:]); code != http.StatusOK {
+		t.Fatalf("other household: %d", code)
 	}
 }

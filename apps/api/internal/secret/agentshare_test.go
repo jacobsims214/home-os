@@ -112,27 +112,109 @@ func TestFailLimiter(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	l := newFailLimiter()
 	l.now = func() time.Time { return now }
-	hid, other := uuid.New(), uuid.New()
+	hid, other, uid, uid2 := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	try := func(h, u uuid.UUID) (*verifyAttempt, time.Duration) { return l.begin(h, u) }
 	for i := 0; i < verifyMaxFailures; i++ {
-		if l.retryAfter(hid) != 0 {
-			t.Fatalf("locked after %d failures", i)
+		a, wait := try(hid, uid)
+		if a == nil {
+			t.Fatalf("locked after %d failures (wait %v)", i, wait)
 		}
-		l.fail(hid)
+		a.fail()
+		a.release() // no-op after fail
 	}
-	if l.retryAfter(hid) != verifyFailWindow {
-		t.Fatalf("retryAfter = %v", l.retryAfter(hid))
+	if a, wait := try(hid, uid); a != nil || wait != verifyFailWindow {
+		t.Fatalf("member not locked: attempt=%v wait=%v", a != nil, wait)
 	}
-	if l.retryAfter(other) != 0 {
+	// Another member of the same household and another household still try.
+	if a, _ := try(hid, uid2); a == nil {
+		t.Fatal("another member is locked too")
+	} else {
+		a.release()
+	}
+	if a, _ := try(other, uid); a == nil {
 		t.Fatal("another household is locked too")
+	} else {
+		a.release()
 	}
 	now = now.Add(verifyFailWindow)
-	if l.retryAfter(hid) != 0 {
+	a, _ := try(hid, uid)
+	if a == nil {
 		t.Fatal("still locked after the window")
 	}
-	l.fail(hid)
-	l.reset(hid)
-	if _, ok := l.entries[hid]; ok {
-		t.Fatal("reset kept the entry")
+	a.fail()
+	a, _ = try(hid, uid)
+	a.succeed()
+	if e := l.entries[limitKey{hid: hid, uid: uid}]; e != nil {
+		t.Fatalf("succeed kept the member entry: %+v", *e)
+	}
+	if e := l.entries[limitKey{hid: hid, household: true}]; e == nil || e.count != 1 || e.inflight != 0 {
+		t.Fatal("succeed must keep the household failure and release its slot")
+	}
+}
+
+func TestFailLimiter_InflightReservesSlots(t *testing.T) {
+	l := newFailLimiter()
+	hid, uid := uuid.New(), uuid.New()
+	var held []*verifyAttempt
+	for i := 0; i < verifyMaxFailures; i++ {
+		a, _ := l.begin(hid, uid)
+		if a == nil {
+			t.Fatalf("refused reservation %d", i)
+		}
+		held = append(held, a)
+	}
+	// All slots are in flight: the next one is refused before any failure.
+	if a, wait := l.begin(hid, uid); a != nil || wait != inflightRetry {
+		t.Fatalf("over-reserved: attempt=%v wait=%v", a != nil, wait)
+	}
+	// Released slots (500s, cancellations) are not counted.
+	for _, a := range held {
+		a.release()
+	}
+	if len(l.entries) != 0 {
+		t.Fatalf("released attempts left %d entries", len(l.entries))
+	}
+}
+
+func TestFailLimiter_HouseholdCeiling(t *testing.T) {
+	l := newFailLimiter()
+	hid := uuid.New()
+	for n := 0; n < verifyHouseholdMaxFailures; n++ {
+		uid := uuid.NewSHA1(hid, []byte{byte(n / verifyMaxFailures)})
+		a, _ := l.begin(hid, uid)
+		if a == nil {
+			t.Fatalf("household locked after %d failures", n)
+		}
+		a.fail()
+	}
+	a, wait := l.begin(hid, uuid.New())
+	if a != nil || wait <= 0 || wait > verifyFailWindow {
+		t.Fatalf("fresh member passed the household ceiling: attempt=%v wait=%v", a != nil, wait)
+	}
+}
+
+func TestFailLimiter_ConcurrentBeginNeverExceedsMax(t *testing.T) {
+	l := newFailLimiter()
+	hid, uid := uuid.New(), uuid.New()
+	var mu sync.Mutex
+	got := 0
+	var wg sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if a, _ := l.begin(hid, uid); a != nil {
+				mu.Lock()
+				got++
+				mu.Unlock()
+				time.Sleep(time.Millisecond)
+				a.fail()
+			}
+		}()
+	}
+	wg.Wait()
+	if got > verifyMaxFailures {
+		t.Fatalf("%d attempts reserved, max %d", got, verifyMaxFailures)
 	}
 }
 

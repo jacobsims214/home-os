@@ -85,7 +85,7 @@ type Handler struct {
 	repo     *Repo
 	search   searchIndexer
 	agentKey *AgentKey    // nil: "shared with agents" is off (#4446)
-	limiter  *failLimiter // wrong /verify attempts per household
+	limiter  *failLimiter // wrong /verify attempts per member and per household
 }
 
 // NewHandler creates a new secret handler.
@@ -675,6 +675,10 @@ func (h *Handler) GetKeyInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// verifierEvaluated is called each time VerifyKey compares a client verifier
+// with the stored one (argon2id or legacy). Tests replace it to count guesses.
+var verifierEvaluated = func() {}
+
 // VerifyKey checks the client-sent verifier against the household's stored
 // verifier for the given key version. The client re-derives the key from the
 // entered master password (PBKDF2 + stored salt) and sends the verifier
@@ -692,7 +696,9 @@ func (h *Handler) GetKeyInfo(w http.ResponseWriter, r *http.Request) {
 // Returns 200 on a match; 422 INVALID_MASTER_KEY on a mismatch (never 401:
 // the BFF treats a 401 as an expired session); 404 if no key is set up; 429
 // TOO_MANY_ATTEMPTS (with Retry-After) after verifyMaxFailures wrong attempts
-// for the household within verifyFailWindow.
+// by the member, or verifyHouseholdMaxFailures by the whole household, within
+// verifyFailWindow (see ratelimit.go). Attempts are reserved before argon2id
+// runs, so concurrent requests cannot exceed those limits.
 //
 // POST /api/v1/secrets/verify
 func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
@@ -729,27 +735,40 @@ func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
 		apierr.NotFound(w, "master key not set up")
 		return
 	}
-	if wait := h.limiter.retryAfter(hid); wait > 0 {
+	// Reserve the attempt before any comparison: the check and the
+	// reservation are one atomic step, so concurrent guesses cannot all pass
+	// the limit while argon2id is still running for the first ones.
+	uid := uuid.Nil
+	if id := actorUserID(r); id != nil {
+		uid = *id
+	}
+	attempt, wait := h.limiter.begin(hid, uid)
+	if attempt == nil {
 		writeTooManyAttempts(w, wait)
 		return
 	}
+	// Any exit that neither fails nor succeeds (500, cancelled request) gives
+	// the reservation back uncounted.
+	defer attempt.release()
+
 	// A verifier outside the accepted length can never match a stored one;
 	// reject it before spending an argon2id computation on it.
 	if !validClientVerifier(verifier) {
-		h.limiter.fail(hid)
+		attempt.fail()
 		writeInvalidMasterKey(w)
 		return
 	}
 
 	switch {
 	case stored.Verifier != nil:
+		verifierEvaluated()
 		ok, needsRehash, err := checkVerifier(r.Context(), *stored.Verifier, verifier)
 		if err != nil {
 			apierr.InternalError(w, err)
 			return
 		}
 		if !ok {
-			h.limiter.fail(hid)
+			attempt.fail()
 			writeInvalidMasterKey(w)
 			return
 		}
@@ -758,8 +777,9 @@ func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case len(stored.KeyHash) > 0:
+		verifierEvaluated()
 		if subtle.ConstantTimeCompare(verifier, stored.KeyHash) != 1 {
-			h.limiter.fail(hid)
+			attempt.fail()
 			writeInvalidMasterKey(w)
 			return
 		}
@@ -767,11 +787,11 @@ func (h *Handler) VerifyKey(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		// A row with neither (only possible after a 051 down) never matches.
-		h.limiter.fail(hid)
+		attempt.fail()
 		writeInvalidMasterKey(w)
 		return
 	}
-	h.limiter.reset(hid)
+	attempt.succeed()
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
