@@ -244,6 +244,8 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 		`INSERT INTO pets (household_id, name, species) SELECT $1, '` + benchDisposablePrefix + ` pet ' || g, 'fish' FROM generate_series(1, %[1]d) g`,
 		// Contacts with nothing attached, for contact_delete.
 		`INSERT INTO vendors (household_id, name, trades) SELECT $1, '` + benchDisposablePrefix + ` contact ' || g, ARRAY['handyman'] FROM generate_series(1, %[1]d) g`,
+		// Guides with nothing attached, for guide_delete.
+		`INSERT INTO guides (household_id, title, body) SELECT $1, '` + benchDisposablePrefix + ` guide ' || g, 'x' FROM generate_series(1, %[1]d) g`,
 		// Vehicles with nothing attached, for vehicle_delete.
 		`INSERT INTO vehicles (household_id, make, model) SELECT $1, 'Junker', '` + benchDisposablePrefix + ` car ' || g FROM generate_series(1, %[1]d) g`,
 		// People without a login and with nothing attached, for person_delete.
@@ -287,12 +289,12 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 // benchFixtures are ids from the measured household that tool arguments use.
 type benchFixtures struct {
 	Asset, Bill, Event, Note, Document, Loan, Task, Property, Vehicle, Calendar, Person, Pet string
-	List, ListItem, Credential, Contact                                                      string
+	List, ListItem, Credential, Contact, Guide                                               string
 
 	// Rows each measured call of a write tool consumes, in order.
 	DisposableAssets, DisposableBills, DisposableLoans, DisposableTasks, DisposableNotes, DisposableEvents []string
 	DisposableListItems, DisposablePeople, DisposablePets, DisposableProperties, DisposableRooms           []string
-	DisposableVehicles, DisposableContacts                                                                 []string
+	DisposableVehicles, DisposableContacts, DisposableGuides                                               []string
 	PayableBills, PendingTasks, UnreadNotifications                                                        []string
 }
 
@@ -346,6 +348,7 @@ func loadFixtures(t testing.TB, pool *pgxpool.Pool, hh uuid.UUID) benchFixtures 
 
 		List:     one(`SELECT id::text FROM lists WHERE household_id = $1 AND name = 'Grocery'`),
 		ListItem: one(`SELECT i.id::text FROM list_items i JOIN lists l ON l.id = i.list_id WHERE l.household_id = $1 AND l.name = 'Grocery' AND i.text = 'Grocery item 1'`),
+		Guide:    one(`SELECT id::text FROM guides WHERE household_id = $1 AND title = 'How to 1'`),
 
 		DisposableAssets:     disp("assets", "name"),
 		DisposableListItems:  disp("list_items", "text"),
@@ -359,6 +362,7 @@ func loadFixtures(t testing.TB, pool *pgxpool.Pool, hh uuid.UUID) benchFixtures 
 		DisposableRooms:      disp("rooms", "name"),
 		DisposableVehicles:   disp("vehicles", "model"),
 		DisposableContacts:   disp("vendors", "name"),
+		DisposableGuides:     disp("guides", "title"),
 		DisposableEvents: many(`SELECT co.id::text FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
 		                         WHERE c.household_id = $1 AND co.ical_data LIKE '%` + benchDisposablePrefix + ` event%' ORDER BY co.id`),
 		PayableBills: many(`SELECT id::text FROM bills WHERE household_id = $1 AND paid_date IS NULL AND frequency = 'monthly'

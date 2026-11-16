@@ -11,6 +11,7 @@ import (
 	"home-os/mcp/internal/credential"
 	"home-os/mcp/internal/file"
 	"home-os/mcp/internal/finance"
+	"home-os/mcp/internal/guides"
 	"home-os/mcp/internal/household"
 	"home-os/mcp/internal/lists"
 	"home-os/mcp/internal/loan"
@@ -42,6 +43,7 @@ var registrars = []func(*server.Server, server.Deps){
 	property.Register,
 	vehicle.Register,
 	pet.Register,
+	guides.Register,
 	vendors.Register,
 	calendar.Register,
 	notification.Register,

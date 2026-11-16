@@ -36,6 +36,7 @@ var wantTools = []string{
 	"document_find", "document_get", "document_upload",
 	"event_create", "event_delete", "event_find", "event_update",
 	"family_overview", "family_update",
+	"guide_create", "guide_delete", "guide_find", "guide_get", "guide_update",
 	"list_add_items", "list_check_items", "list_create", "list_find", "list_get",
 	"list_remove_items", "list_update", "list_update_item",
 	"loan_create", "loan_delete", "loan_find", "loan_update",

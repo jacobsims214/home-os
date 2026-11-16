@@ -127,6 +127,15 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 		}},
 		{"family_overview", static(map[string]any{})},
 		{"family_update", func(i int) map[string]any { return map[string]any{"name": fmt.Sprintf("The Bench Family %d", i)} }},
+		{"guide_create", func(i int) map[string]any {
+			return map[string]any{"title": fmt.Sprintf("Bench guide %d", i), "body": "1. Bench step.\n2. Another step.", "tags": []string{"bench"}}
+		}},
+		{"guide_delete", func(i int) map[string]any { return map[string]any{"guide_id": pick(f.DisposableGuides, i)} }},
+		{"guide_find", static(map[string]any{"query": "how do I replace the furnace filter"})},
+		{"guide_get", static(map[string]any{"guide_id": f.Guide})},
+		{"guide_update", func(i int) map[string]any {
+			return map[string]any{"guide_id": f.Guide, "body": fmt.Sprintf("Step. Revision %d.", i), "change_note": "bench"}
+		}},
 		{"list_add_items", func(i int) map[string]any {
 			return map[string]any{"list_id": "grocery", "items": []any{map[string]any{"text": fmt.Sprintf("Bench item %d", i)}, "milk"}}
 		}},

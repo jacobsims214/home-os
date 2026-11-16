@@ -305,6 +305,7 @@ var aboutFinder = map[string]string{
 	"asset": "asset_find", "vehicle": "vehicle_find", "pet": "pet_find",
 	"contact": "contact_find", "bill": "bill_find", "loan": "loan_find",
 	"maintenance": "maintenance_find", "event": "event_find", "list": "list_find",
+	"guide": "guide_find",
 }
 
 func findIDWith(t string) string {
