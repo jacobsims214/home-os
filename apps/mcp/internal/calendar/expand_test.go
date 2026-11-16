@@ -17,6 +17,22 @@ var bandArgs = map[string]any{
 	"repeat": map[string]any{"freq": "weekly", "by_day": []string{"TU", "TH"}, "count": 12},
 }
 
+// occurrencesOf turns a detail=full agenda section back into Events, so the
+// tests that check expansion can use occurrenceList unchanged.
+func occurrencesOf(t *testing.T, entries []AgendaEvent) []Event {
+	t.Helper()
+	out := make([]Event, 0, len(entries))
+	for _, e := range entries {
+		ev := Event{ID: e.ID, Title: e.Title, Start: e.Start, End: e.End, AllDay: e.AllDay,
+			LocalDate: e.LocalDate, Weekday: e.Weekday, RecurrenceID: e.RecurrenceID}
+		if e.Description != nil {
+			ev.Description = *e.Description
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
 // occurrenceList renders event_find/agenda items as "MM-DD HH:MM title".
 func occurrenceList(t *testing.T, evs []Event, ny *time.Location) []string {
 	t.Helper()
@@ -172,7 +188,8 @@ func TestAgendaExpandsDailySeries(t *testing.T) {
 	env.mustCall(t, env.create, map[string]any{"title": "Trash", "start": "2027-03-02", "end": "2027-03-02", "all_day": true,
 		"repeat": map[string]any{"freq": "weekly"}})
 
-	text := env.mustCall(t, agenda, map[string]any{"from": "2027-03-13", "to": "2027-03-23", "areas": []string{"events"}})
+	// detail=full gives one entry per occurrence, the shape event_find returns.
+	text := env.mustCall(t, agenda, map[string]any{"from": "2027-03-13", "to": "2027-03-23", "areas": []string{"events"}, "detail": "full"})
 	var res agendaResult
 	if err := json.Unmarshal(data(t, text), &res); err != nil {
 		t.Fatal(err)
@@ -181,7 +198,7 @@ func TestAgendaExpandsDailySeries(t *testing.T) {
 	// ends on the 20th. Trash is weekly on Tuesdays, all day.
 	want := []string{"03-13 17:30 Homework", "03-14 17:30 Homework", "03-16 00:00 Trash", "03-16 17:30 Homework", "03-17 17:30 Homework",
 		"03-18 17:30 Homework", "03-19 17:30 Homework", "03-20 17:30 Homework", "03-23 00:00 Trash"}
-	if got := occurrenceList(t, res.Events, env.ny); !eq(got, want) {
+	if got := occurrenceList(t, occurrencesOf(t, res.Events), env.ny); !eq(got, want) {
 		t.Errorf("agenda = %v\nwant %v", got, want)
 	}
 	for _, ev := range res.Events {
@@ -195,6 +212,34 @@ func TestAgendaExpandsDailySeries(t *testing.T) {
 	}
 	if len(res.Warnings) != 0 {
 		t.Errorf("warnings = %v", res.Warnings)
+	}
+
+	// The default, summary: one entry per series, its occurrence dates
+	// complete (Mar 15 skipped, the series ending on the 20th), and the same
+	// days as the full answer.
+	text = env.mustCall(t, agenda, map[string]any{"from": "2027-03-13", "to": "2027-03-23", "areas": []string{"events"}})
+	var sum agendaResult
+	if err := json.Unmarshal(data(t, text), &sum); err != nil {
+		t.Fatal(err)
+	}
+	if len(sum.Events) != 2 {
+		t.Fatalf("summary has %d entries, want one per series: %s", len(sum.Events), text)
+	}
+	byTitle := map[string]AgendaEvent{}
+	for _, e := range sum.Events {
+		byTitle[e.Title] = e
+	}
+	hw := byTitle["Homework"]
+	if hw.Repeat == "" || hw.Occurrences != 7 || strings.Join(hw.Dates, ",") !=
+		"2027-03-13,2027-03-14,2027-03-16,2027-03-17,2027-03-18,2027-03-19,2027-03-20" {
+		t.Errorf("Homework summary = %+v", hw)
+	}
+	if hw.At != "17:30" {
+		t.Errorf("Homework at = %q, want 17:30 (a series keeps its first time)", hw.At)
+	}
+	trash := byTitle["Trash"]
+	if !trash.AllDay || strings.Join(trash.Dates, ",") != "2027-03-16,2027-03-23" {
+		t.Errorf("Trash summary = %+v", trash)
 	}
 }
 

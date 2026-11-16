@@ -49,10 +49,11 @@ func HandleDailyBriefing(_ context.Context, req mcp.GetPromptRequest) (*mcp.GetP
 	}
 	return userPrompt("Daily briefing", fmt.Sprintf(`Give the family a short briefing for one day.
 
-1. Call agenda_get with %s. It returns events, bills due and maintenance due, with weekdays.
+1. Call agenda_get with %s and to set to the same day, plus areas=["events","bills","maintenance","meals","lists"] so every section is asked for. It returns events, bills due and upkeep due, with weekdays.
 2. Call notification_find with unread_only=true for anything unread.
-3. Reply in a few short lines: events by time, then bills due (name, amount), then upkeep due. Say "nothing" for an empty section.
-Use the weekday and local_date the tools return; don't work them out yourself.`, from)), nil
+3. Reply in a few short lines: events by time, then bills due (name, amount), then upkeep due.
+Read the coverage block before saying anything is empty: a section is empty only if it is in coverage.areas (an area in coverage.not_included was never asked for; one in coverage.hidden is not visible to this account), and the *_not_listed counts say what it left out.
+Use the weekday and local_date the tools return; don't work them out yourself. If a series lists dates, say the days it falls on rather than repeating one line per day.`, from)), nil
 }
 
 // NewScheduleEventPrompt creates the "schedule-event" prompt: check free
@@ -144,8 +145,8 @@ func HandlePlanWeek(_ context.Context, req mcp.GetPromptRequest) (*mcp.GetPrompt
 	}
 	return userPrompt("Plan the week", fmt.Sprintf(`Help the family plan the 7 days %s.
 
-1. Call agenda_get with %s (YYYY-MM-DD). It lists events, bills due and maintenance due per day.
-2. Reply day by day (weekday + date), one line per item. Point out busy days and anything due.
+1. Call agenda_get with %s (YYYY-MM-DD) and no other arguments: the default is a summarized week of events, bills, meals and list items. Add areas=["maintenance"] if upkeep matters here, and detail="full" only if you need every occurrence and description; the default collapses a repeating series into one entry with its dates.
+2. Reply day by day (weekday + date), one line per item. Point out busy days and anything due. Read the coverage block first: an area it lists under not_included was not asked for, and its counts say how much is behind the listed items.
 3. If the user wants to fit something in, call calendar_find_free_time with the same from/to and duration_minutes, then add it with event_create (start/end ISO 8601 with offset).
 Don't add anything without the user saying yes.`, when, fromParam)), nil
 }

@@ -357,6 +357,40 @@ dex:
   # forced re-logins on multi-device users, but a stolen id_token stays valid
   # longer. Empty = Dex default (24h).
   idTokenExpiry: "24h"
+  # oauth2.passwordConnector: the connector the OAuth2 *password grant*
+  # (grant_type=password at /dex/token, plus its root /token alias) authenticates
+  # against. Empty = no password grant; every request answers
+  # unsupported_grant_type.
+  #
+  # INTERIM, #4886. RETIRED BY #4540 - do not build on it and do not extend it.
+  # This exists only so a headless caller has SOME way in before per-member agent
+  # tokens (#4535) are issued; agent tokens are the designed path. Rationale and
+  # the sequencing of the two tickets: KB decisions/2026-11-16-dex-password-grant-interim.md.
+  #
+  # Why it is here at all: the war game turned the password grant on by hand in
+  # the live ConfigMap, so it was never part of this chart, and the first sync
+  # from the chart deleted it and left every moltis family agent with no headless
+  # auth (#4357). A setting that must survive a sync has to live in the chart.
+  #
+  # "local" is Dex's built-in password DB (enablePasswordDB below), which is what
+  # the members' Dex passwords live in. The id must be "local" or the id of an
+  # entry in dex.connectors; the render fails otherwise, because Dex accepts a
+  # bad id at startup and only 400s per request, which reads like any other
+  # misconfiguration.
+  #
+  # Security: /dex/token is deliberately NOT rate limited at Envoy (it cannot
+  # distinguish a password grant from a refresh without reading the body), and a
+  # password grant has no scope and no per-agent revocation. Keep it as short as
+  # #4535 allows.
+  passwordConnector: ""
+  # connectors: extra Dex connectors, verbatim Dex config, e.g.
+  #   - id: ldap
+  #     type: ldap
+  #     name: LDAP
+  #     config: { host: ldap.example.com:636, bindDN: ..., bindPW: ..., ... }
+  # Empty = none. The password DB ("local") is registered by enablePasswordDB and
+  # is not listed here. Any id used by dex.passwordConnector must appear here.
+  connectors: []
   # Dex is a small Go binary serving OIDC for a handful of users.
   resources:
     requests: { cpu: 50m, memory: 64Mi }

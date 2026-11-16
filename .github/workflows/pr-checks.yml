@@ -293,4 +293,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: helm/kind-action@v1
+      - run: helm lint deploy/helm/home-os --set global.publicUrl=https://homeos.example.com --set global.imageTag=sha-0000000
       - run: helm template deploy/helm/home-os --set global.publicUrl=https://homeos.example.com --set global.imageTag=sha-0000000
+      # The Dex config (password connector, expiry) is asserted on the RENDERED
+      # output, not the values: a setting that exists in values.yaml but never
+      # reaches the ConfigMap is exactly the bug that cost the family agents
+      # their headless auth (#4357, #4886).
+      - run: deploy/helm/home-os/tests/dex-config.sh

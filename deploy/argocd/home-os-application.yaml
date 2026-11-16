@@ -54,7 +54,7 @@ spec:
           # PLACEHOLDER: #4357 sets this to the sha-<short> tag of the
           # release.yml run on feat/family-hub, one tag for ALL images
           # (migrations included). See the header for the procedure.
-          imageTag: sha-0e3eb29
+          imageTag: sha-51cc8c5
           # The tag is immutable, so the node cache is safe.
           imagePullPolicy: IfNotPresent
           # PLACEHOLDER: #4357 must replace this with the private hostname
@@ -90,6 +90,29 @@ spec:
               schedule: "0 2 * * *"
         dex:
           existingSecret: home-os-db-secret
+          # INTERIM (#4886), RETIRED BY #4540. Enables the Dex OAuth2 password
+          # grant (grant_type=password at /dex/token and /token) so a headless
+          # caller can mint an id_token before per-member agent tokens exist
+          # (#4535). Agent tokens are the designed path; this goes away with
+          # #4540 and nothing new should depend on it.
+          #
+          # It MUST be set here rather than on the live ConfigMap: the war game
+          # hand-patched the live ConfigMap, this Argo app rendered over it on
+          # the next sync, and every family agent lost its headless auth (#4357).
+          # A setting that has to survive a sync belongs in the rendered values.
+          #
+          # "local" = Dex's built-in password DB (enablePasswordDB), which is
+          # where the members' Dex passwords live. The chart fails the render if
+          # this names a connector that does not exist.
+          passwordConnector: "local"
+          # expiry.idTokens, pinned explicitly so it cannot drift back to a Dex
+          # default unnoticed (#4886). It stayed 24h through the stopgap restore
+          # on purpose: the war game's 720h came from the same hand patch as the
+          # password connector, and a 30-day id_token sitting in an agent's
+          # environment is the long-lived-unscoped-credential problem the war
+          # game flagged. Every headless caller (tools/wargame/*.py, curl) mints
+          # a fresh token per run, so 24h costs nothing.
+          idTokenExpiry: "24h"
         secrets:
           existingSecret: home-os-secrets
         # Created once by create-home-os-secrets.sh (never rotated by it).
