@@ -150,8 +150,8 @@ type createResult struct {
 	FromTemplate *string  `json:"from_template,omitempty" jsonschema_description:"Name of the template the items were copied from."`
 }
 
-// addResult is list_add_items' data.
-type addResult struct {
+// AddResult is list_add_items' data.
+type AddResult struct {
 	List          listInfo `json:"list"`
 	CreatedList   bool     `json:"created_list,omitempty" jsonschema_description:"true when the list did not exist and was created by this call."`
 	Added         []item   `json:"added"`
@@ -1738,7 +1738,7 @@ func NewListAddItemsTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 		mcp.WithDescription(`Add one or more items in one call, e.g. milk and eggs to "Grocery". Items already open on the list are not duplicated.`),
 		listIDParam(),
 		itemsParam(true, `Items to add, e.g. [{"text":"milk"},{"text":"eggs","quantity":12}]`),
-		respond.Schema[addResult](),
+		respond.Schema[AddResult](),
 	}, classU("Add list items")...)...)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1756,124 +1756,7 @@ func NewListAddItemsTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 			return respond.Invalid("items", "items is empty.", `Pass at least one item, e.g. items=[{"text":"milk"}].`, example), nil
 		}
 
-		var (
-			out       addResult
-			badResult *mcp.CallToolResult
-			shadowed  []listCand
-		)
-		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-			shadowed = nil
-			res, err := resolveList(ctx, tx, hid, str(args, "list_id"), example)
-			if err != nil {
-				return err
-			}
-			if res.Bad != nil && res.MissingKind == "" {
-				badResult = res.Bad
-				return nil
-			}
-			if res.MissingKind != "" {
-				// "add milk to the grocery list" with no active grocery list
-				// (maybe only last week's, archived): make one. The advisory
-				// lock stops two parallel adds from making two lists.
-				kind := res.MissingKind
-				if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('list_kind:' || $1::text || ':' || $2, 0))`, hid, kind); err != nil {
-					return err
-				}
-				var c listCand
-				err := tx.QueryRow(ctx, `SELECT id, name, kind, is_template, archived FROM lists
-					WHERE household_id = $1 AND kind = $2 AND NOT archived AND NOT is_template
-					ORDER BY updated_at DESC, id LIMIT 1`, hid, kind).Scan(&c.ID, &c.Name, &c.Kind, &c.IsTemplate, &c.Archived)
-				switch {
-				case errors.Is(err, pgx.ErrNoRows):
-					c = listCand{Name: kindTitle[kind], Kind: kind}
-					if err := tx.QueryRow(ctx, `INSERT INTO lists (household_id, name, kind) VALUES ($1, $2, $3) RETURNING id`,
-						hid, c.Name, kind).Scan(&c.ID); err != nil {
-						return err
-					}
-					out.CreatedList = true
-					shadowed = res.Shadowed
-				case err != nil:
-					return err
-				}
-				res.List = c
-			}
-			list := res.List
-			if bad, err := writableList(ctx, tx, hid, list, true); err != nil || bad != nil {
-				badResult = bad
-				return err
-			}
-			for i := range items {
-				if items[i].AssigneeRef == "" {
-					continue
-				}
-				id, bad, err := resolvePerson(ctx, tx, hid, fmt.Sprintf("items[%d].assignee_person_id", i), items[i].AssigneeRef, example)
-				if err != nil || bad != nil {
-					badResult = bad
-					return err
-				}
-				items[i].Assignee = &id
-			}
-
-			// Under the list lock no other adder runs, so this duplicate
-			// check is race-free.
-			existing, err := listItemKeys(ctx, tx, list.ID)
-			if err != nil {
-				return err
-			}
-			open, done := map[string]uuid.UUID{}, map[string]uuid.UUID{}
-			for _, k := range existing {
-				n := normText(k.Text)
-				if k.Checked {
-					if _, ok := done[n]; !ok {
-						done[n] = k.ID
-					}
-				} else if _, ok := open[n]; !ok {
-					open[n] = k.ID
-				}
-			}
-			var added, reopened, already []uuid.UUID
-			seen := map[string]bool{}
-			for _, it := range items {
-				n := normText(it.Text)
-				if seen[n] {
-					continue
-				}
-				seen[n] = true
-				if id, ok := open[n]; ok {
-					already = append(already, id)
-					continue
-				}
-				if id, ok := done[n]; ok {
-					// Back on the list: one row, unchecked, with any new
-					// details. Only that row is written.
-					if _, err := tx.Exec(ctx, `UPDATE list_items SET checked = false,
-						  quantity = COALESCE($2::numeric, quantity), unit = COALESCE($3, unit),
-						  section = COALESCE($4, section), assignee_person_id = COALESCE($5, assignee_person_id),
-						  due_date = COALESCE($6::date, due_date)
-						WHERE id = $1`, id, it.Quantity, it.Unit, it.Section, it.Assignee, it.DueDate); err != nil {
-						return err
-					}
-					reopened = append(reopened, id)
-					continue
-				}
-				id, err := insertItemID(ctx, tx, list.ID, hid, it)
-				if err != nil {
-					return err
-				}
-				added = append(added, id)
-			}
-			if out.Added, err = itemsByID(ctx, tx, added); err != nil {
-				return err
-			}
-			if out.Reopened, err = itemsByID(ctx, tx, reopened); err != nil {
-				return err
-			}
-			if out.AlreadyOnList, err = itemsByID(ctx, tx, already); err != nil {
-				return err
-			}
-			out.List, err = getList(ctx, tx, hid, list.ID)
-			return err
-		})
+		out, shadowed, badResult, err := addItems(ctx, pool, hid, str(args, "list_id"), items, addOptions{example: example})
 		if badResult != nil {
 			return badResult, nil
 		}
@@ -1885,37 +1768,8 @@ func NewListAddItemsTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 			}
 			return respond.Failed("add the items", err), nil
 		}
-
 		l := out.List
-		var parts []string
-		if len(out.Added) > 0 {
-			parts = append(parts, fmt.Sprintf("Added %s to %q", joinTexts(itemTexts(out.Added)), l.Name))
-		}
-		if len(out.Reopened) > 0 {
-			parts = append(parts, fmt.Sprintf("put %s back on %q", joinTexts(itemTexts(out.Reopened)), l.Name))
-		}
-		if len(out.AlreadyOnList) > 0 {
-			verb := "is"
-			if len(out.AlreadyOnList) > 1 {
-				verb = "are"
-			}
-			parts = append(parts, fmt.Sprintf("%s %s already on %q", joinTexts(itemTexts(out.AlreadyOnList)), verb, l.Name))
-		}
-		summary := strings.Join(parts, "; ")
-		summary = strings.ToUpper(summary[:1]) + summary[1:] + fmt.Sprintf(" (%d open).", l.OpenCount)
-		if out.CreatedList {
-			summary = fmt.Sprintf("Created the %s list %q. ", l.Kind, l.Name) + summary
-			if len(shadowed) > 0 {
-				what := "archived list"
-				if shadowed[0].IsTemplate {
-					what = "template"
-				}
-				if len(shadowed) > 1 {
-					what += fmt.Sprintf(" (and %d more)", len(shadowed)-1)
-				}
-				summary += fmt.Sprintf(" The %s %q (%s) was left as it is.", what, shadowed[0].Name, shadowed[0].ID)
-			}
-		}
+		summary := addSummary(out, shadowed)
 		first := out.Added
 		if len(first) == 0 {
 			first = append(out.Reopened, out.AlreadyOnList...)
@@ -1927,6 +1781,242 @@ func NewListAddItemsTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 		return respond.OK(summary, out, next...), nil
 	}
 	return "list_add_items", tool, handler
+}
+
+// addOptions tune addItems.
+type addOptions struct {
+	// example is the call shown in isError results.
+	example map[string]any
+	// wordMatch: an item counts as already on the list when its words match
+	// (matchTokens: any case, singular or plural, without a leading "the"),
+	// not only its exact text, so "Eggs" is not added next to "egg".
+	wordMatch bool
+	// noCreate: a kind word with no active list of that kind is an isError
+	// instead of creating the list (a role that may add items but not lists).
+	noCreate bool
+}
+
+// addItems is list_add_items' write, shared with AddItems: one transaction
+// under the list-row lock that resolves listRef (creating the kind's list
+// when the family has none, #4713), skips items already open, re-opens
+// checked ones and inserts the rest. bad is the isError to return.
+func addItems(ctx context.Context, pool *pgxpool.Pool, hid uuid.UUID, listRef string, items []newItem, opt addOptions) (out AddResult, shadowed []listCand, badResult *mcp.CallToolResult, err error) {
+	example := opt.example
+	key := normText
+	if opt.wordMatch {
+		key = func(s string) string { return strings.Join(matchTokens(s), " ") }
+	}
+	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		out, shadowed, badResult = AddResult{}, nil, nil
+		res, err := resolveList(ctx, tx, hid, listRef, example)
+		if err != nil {
+			return err
+		}
+		if res.Bad != nil && res.MissingKind == "" {
+			badResult = res.Bad
+			return nil
+		}
+		if res.MissingKind != "" && opt.noCreate {
+			badResult = respond.Invalid("list_id", fmt.Sprintf("The family has no open %s list, and your role can't start a new list.", res.MissingKind),
+				"Tell the user to ask a family member to start one; retrying will not help.", example)
+			return nil
+		}
+		if res.MissingKind != "" {
+			// "add milk to the grocery list" with no active grocery list
+			// (maybe only last week's, archived): make one. The advisory
+			// lock stops two parallel adds from making two lists.
+			kind := res.MissingKind
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('list_kind:' || $1::text || ':' || $2, 0))`, hid, kind); err != nil {
+				return err
+			}
+			var c listCand
+			err := tx.QueryRow(ctx, `SELECT id, name, kind, is_template, archived FROM lists
+				WHERE household_id = $1 AND kind = $2 AND NOT archived AND NOT is_template
+				ORDER BY updated_at DESC, id LIMIT 1`, hid, kind).Scan(&c.ID, &c.Name, &c.Kind, &c.IsTemplate, &c.Archived)
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+				c = listCand{Name: kindTitle[kind], Kind: kind}
+				if err := tx.QueryRow(ctx, `INSERT INTO lists (household_id, name, kind) VALUES ($1, $2, $3) RETURNING id`,
+					hid, c.Name, kind).Scan(&c.ID); err != nil {
+					return err
+				}
+				out.CreatedList = true
+				shadowed = res.Shadowed
+			case err != nil:
+				return err
+			}
+			res.List = c
+		}
+		list := res.List
+		if bad, err := writableList(ctx, tx, hid, list, true); err != nil || bad != nil {
+			badResult = bad
+			return err
+		}
+		for i := range items {
+			if items[i].AssigneeRef == "" {
+				continue
+			}
+			id, bad, err := resolvePerson(ctx, tx, hid, fmt.Sprintf("items[%d].assignee_person_id", i), items[i].AssigneeRef, example)
+			if err != nil || bad != nil {
+				badResult = bad
+				return err
+			}
+			items[i].Assignee = &id
+		}
+
+		// Under the list lock no other adder runs, so this duplicate
+		// check is race-free.
+		existing, err := listItemKeys(ctx, tx, list.ID)
+		if err != nil {
+			return err
+		}
+		open, done := map[string]uuid.UUID{}, map[string]uuid.UUID{}
+		for _, k := range existing {
+			n := key(k.Text)
+			if k.Checked {
+				if _, ok := done[n]; !ok {
+					done[n] = k.ID
+				}
+			} else if _, ok := open[n]; !ok {
+				open[n] = k.ID
+			}
+		}
+		var added, reopened, already []uuid.UUID
+		seen := map[string]bool{}
+		for _, it := range items {
+			n := key(it.Text)
+			if seen[n] {
+				continue
+			}
+			seen[n] = true
+			if id, ok := open[n]; ok {
+				already = append(already, id)
+				continue
+			}
+			if id, ok := done[n]; ok {
+				// Back on the list: one row, unchecked, with any new
+				// details. Only that row is written.
+				if _, err := tx.Exec(ctx, `UPDATE list_items SET checked = false,
+					  quantity = COALESCE($2::numeric, quantity), unit = COALESCE($3, unit),
+					  section = COALESCE($4, section), assignee_person_id = COALESCE($5, assignee_person_id),
+					  due_date = COALESCE($6::date, due_date)
+					WHERE id = $1`, id, it.Quantity, it.Unit, it.Section, it.Assignee, it.DueDate); err != nil {
+					return err
+				}
+				reopened = append(reopened, id)
+				continue
+			}
+			id, err := insertItemID(ctx, tx, list.ID, hid, it)
+			if err != nil {
+				return err
+			}
+			added = append(added, id)
+		}
+		if out.Added, err = itemsByID(ctx, tx, added); err != nil {
+			return err
+		}
+		if out.Reopened, err = itemsByID(ctx, tx, reopened); err != nil {
+			return err
+		}
+		if out.AlreadyOnList, err = itemsByID(ctx, tx, already); err != nil {
+			return err
+		}
+		out.List, err = getList(ctx, tx, hid, list.ID)
+		return err
+	})
+	return out, shadowed, badResult, err
+}
+
+// AddItem is one item for AddItems.
+type AddItem struct {
+	Text     string
+	Quantity *float64
+	Unit     *string
+	Section  *string
+}
+
+// AddItems adds items to the list listRef names (an id, a name or a kind
+// word such as "grocery") with list_add_items' rules: one transaction under
+// the list lock, nothing open is added twice, a checked item is re-opened,
+// and a kind word with no active list creates one (#4713) unless noCreate.
+// Items match existing ones by their words (matchTokens), so a rerun or a
+// plural adds nothing. It is for other packages' tools (meal_build_grocery_list,
+// #4500) so they don't fork this logic. created is a sentence about a list
+// this call created (with the archived list or template it was named like),
+// empty otherwise; a non-nil bad is the isError to return as is.
+func AddItems(ctx context.Context, pool *pgxpool.Pool, hid uuid.UUID, listRef string, items []AddItem, noCreate bool, example map[string]any) (out AddResult, created string, bad *mcp.CallToolResult, err error) {
+	in := make([]newItem, 0, len(items))
+	for _, it := range items {
+		text := strings.TrimSpace(spaces.ReplaceAllString(it.Text, " "))
+		if text == "" {
+			continue
+		}
+		in = append(in, newItem{Text: text, Quantity: it.Quantity, Unit: it.Unit, Section: it.Section})
+	}
+	if len(in) == 0 {
+		return out, "", respond.Invalid("items", "There is nothing to add.", "", example), nil
+	}
+	if len(in) > maxBatch {
+		return out, "", respond.Invalid("items", fmt.Sprintf("%d items is more than %d in one call.", len(in), maxBatch), "Use a shorter date range.", example), nil
+	}
+	out, shadowed, bad, err := addItems(ctx, pool, hid, listRef, in, addOptions{example: example, wordMatch: true, noCreate: noCreate})
+	if bad != nil || err != nil {
+		return out, "", bad, err
+	}
+	c, left := createdNotes(out, shadowed)
+	return out, strings.TrimSpace(c + " " + left), nil, nil
+}
+
+// addSummary is list_add_items' summary sentence for out; shadowed are the
+// archived lists or templates a newly created list was named like.
+func addSummary(out AddResult, shadowed []listCand) string {
+	l := out.List
+	var parts []string
+	if len(out.Added) > 0 {
+		parts = append(parts, fmt.Sprintf("Added %s to %q", joinTexts(itemTexts(out.Added)), l.Name))
+	}
+	if len(out.Reopened) > 0 {
+		parts = append(parts, fmt.Sprintf("put %s back on %q", joinTexts(itemTexts(out.Reopened)), l.Name))
+	}
+	if len(out.AlreadyOnList) > 0 {
+		verb := "is"
+		if len(out.AlreadyOnList) > 1 {
+			verb = "are"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s already on %q", joinTexts(itemTexts(out.AlreadyOnList)), verb, l.Name))
+	}
+	summary := strings.Join(parts, "; ")
+	summary = strings.ToUpper(summary[:1]) + summary[1:] + fmt.Sprintf(" (%d open).", l.OpenCount)
+	created, left := createdNotes(out, shadowed)
+	if created != "" {
+		summary = created + " " + summary
+	}
+	if left != "" {
+		summary += " " + left
+	}
+	return summary
+}
+
+// createdNotes are the sentences for a list addItems created: "Created the
+// grocery list "Grocery"." and, when an archived list or template had that
+// name, "The archived list "Grocery" (<id>) was left as it is.". Both are
+// empty when no list was created.
+func createdNotes(out AddResult, shadowed []listCand) (created, left string) {
+	if !out.CreatedList {
+		return "", ""
+	}
+	created = fmt.Sprintf("Created the %s list %q.", out.List.Kind, out.List.Name)
+	if len(shadowed) > 0 {
+		what := "archived list"
+		if shadowed[0].IsTemplate {
+			what = "template"
+		}
+		if len(shadowed) > 1 {
+			what += fmt.Sprintf(" (and %d more)", len(shadowed)-1)
+		}
+		left = fmt.Sprintf("The %s %q (%s) was left as it is.", what, shadowed[0].Name, shadowed[0].ID)
+	}
+	return created, left
 }
 
 // ---------------------------------------------------------------------------

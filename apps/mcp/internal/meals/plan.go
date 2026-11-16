@@ -808,6 +808,12 @@ func setHints(res mealSetResult) []string {
 			break
 		}
 	}
+	for _, it := range res.Meals {
+		if it.Meal != nil && it.Meal.RecipeID != nil {
+			out = append(out, fmt.Sprintf("Put the ingredients on the grocery list with meal_build_grocery_list from=%s to=%s.", first, last))
+			break
+		}
+	}
 	out = append(out, "After the meal, record how each person liked it with meal_rate date=… slot=… person_id=… rating=1-5.")
 	return out
 }

@@ -154,7 +154,7 @@ type tools struct {
 	find    caller[listInfo]
 	get     caller[listDetail]
 	create  caller[createResult]
-	add     caller[addResult]
+	add     caller[AddResult]
 	check   caller[checkResult]
 	upItem  caller[itemResult]
 	remove  caller[removeResult]
@@ -178,7 +178,7 @@ func setup(t *testing.T) tools {
 	n, tl, h = NewListCreateTool(pool)
 	tt.create = newCaller[createResult](t, n, tl, h)
 	n, tl, h = NewListAddItemsTool(pool)
-	tt.add = newCaller[addResult](t, n, tl, h)
+	tt.add = newCaller[AddResult](t, n, tl, h)
 	n, tl, h = NewListCheckItemsTool(pool)
 	tt.check = newCaller[checkResult](t, n, tl, h)
 	n, tl, h = NewListUpdateItemTool(pool)

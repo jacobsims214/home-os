@@ -87,6 +87,7 @@ var wantToolClass = map[string]toolClass{
 	"guide_find":              classR,
 	"guide_get":               classR,
 	"guide_update":            classU,
+	"meal_build_grocery_list": classU,
 	"meal_rate":               classU,
 	"meal_set":                classU,
 	"meal_suggest":            classR,

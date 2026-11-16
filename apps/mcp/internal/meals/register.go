@@ -18,4 +18,5 @@ func Register(srv *server.Server, deps server.Deps) {
 	srv.RegisterTool(NewMealSetTool(deps.Pool))
 	srv.RegisterTool(NewMealRateTool(deps.Pool))
 	srv.RegisterTool(NewMealSuggestTool(deps.Pool))
+	srv.RegisterTool(NewMealBuildGroceryListTool(deps.Pool))
 }

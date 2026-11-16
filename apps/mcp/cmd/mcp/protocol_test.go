@@ -41,7 +41,7 @@ var wantTools = []string{
 	"list_remove_items", "list_update", "list_update_item",
 	"loan_create", "loan_delete", "loan_find", "loan_update",
 	"maintenance_complete", "maintenance_create", "maintenance_delete", "maintenance_find", "maintenance_update",
-	"meal_rate", "meal_set", "meal_suggest",
+	"meal_build_grocery_list", "meal_rate", "meal_set", "meal_suggest",
 	"note_create", "note_delete", "note_find", "note_get", "note_update",
 	"notification_find", "notification_mark_read",
 	"person_create", "person_delete", "person_find", "person_get", "person_update",
