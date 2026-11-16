@@ -127,7 +127,10 @@ func newRecurrenceFixture(t *testing.T, tz string) *recurrenceFixture {
 
 	h := NewHandler(NewRepo(pool))
 	r := chi.NewRouter()
-	claims := &auth.Claims{UserID: "local-dev", HouseholdID: hh.String(), Role: "admin"}
+	// A family role: since #4807 calendar reads ask role_can_see_entity, and
+	// an unknown role sees nothing (fails closed), so the fixture needs a real
+	// role from the policy table.
+	claims := &auth.Claims{UserID: "local-dev", HouseholdID: hh.String(), Role: auth.RoleOwner}
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			next.ServeHTTP(w, req.WithContext(middleware.WithClaims(req.Context(), claims)))
