@@ -169,7 +169,7 @@ func HandleHomeUpkeep(_ context.Context, req mcp.GetPromptRequest) (*mcp.GetProm
 1. Call maintenance_find with due_within_days=%s (overdue jobs are included).
 2. Reply with overdue jobs first, then the rest by due date: name, what it's for, due weekday and date.
 3. When the user says a job is done, call maintenance_complete with its task_id (add cost or notes if they give them).
-4. To find a pro for a job, call contact_find with query set to the trade, e.g. plumber.`, days)), nil
+4. To find a pro for a job, call contact_find with trade set to what they do, e.g. trade=plumber.`, days)), nil
 }
 
 // NewFindDocumentPrompt creates the "find-document" prompt: search with

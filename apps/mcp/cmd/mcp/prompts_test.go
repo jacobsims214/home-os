@@ -175,9 +175,13 @@ func TestPromptsNameOnlyRegisteredTools(t *testing.T) {
 		"check-bills":    {"budget_summary", "bill_find"},
 		"schedule-event": {"calendar_find_free_time", "event_create"},
 		"plan-week":      {"agenda_get", "calendar_find_free_time", "event_create"},
-		"home-upkeep":    {"maintenance_find", "maintenance_complete"},
+		"home-upkeep":    {"maintenance_find", "maintenance_complete", "contact_find"},
 		"find-document":  {"document_find", "document_get"},
 		"trip-packing":   {"list_find", "list_create", "list_add_items", "list_check_items"},
+	}
+	// "Find a plumber" is one contact_find call with trade (#4466), not query.
+	if !strings.Contains(texts["home-upkeep"], "contact_find with trade") {
+		t.Errorf("home-upkeep should find pros with contact_find trade=…: %s", texts["home-upkeep"])
 	}
 
 	for name, text := range texts {

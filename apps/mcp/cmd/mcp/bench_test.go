@@ -98,7 +98,14 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 		{"calendar_create", func(i int) map[string]any { return map[string]any{"name": fmt.Sprintf("Bench calendar %d", i)} }},
 		{"calendar_find", static(map[string]any{})},
 		{"calendar_find_free_time", static(map[string]any{"from": day(1), "to": day(7), "duration_minutes": 120})},
+		{"contact_create", func(i int) map[string]any {
+			return map[string]any{"name": fmt.Sprintf("Bench contact %d", i), "trades": []any{"Plumbing"}, "phone": "555-0100"}
+		}},
+		{"contact_delete", func(i int) map[string]any { return map[string]any{"contact_id": pick(f.DisposableContacts, i)} }},
 		{"contact_find", static(map[string]any{"trade": "plumbing"})},
+		{"contact_update", func(i int) map[string]any {
+			return map[string]any{"contact_id": f.Contact, "phone": fmt.Sprintf("555-02%02d", i%100)}
+		}},
 		{"credential_find", static(map[string]any{"query": "wi-fi"})},
 		{"credential_reveal", static(map[string]any{"credential_id": f.Credential})},
 		{"document_find", static(map[string]any{"query": "insurance"})},

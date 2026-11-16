@@ -1,9 +1,18 @@
 // Package vendors provides the MCP contact tools (catalog v2, KB
 // architecture/mcp-tool-catalog.md "contact: vendors, providers and
 // services, found by trade"). Agents call vendors "contacts"; the table
-// stays vendors. Stage 1 has one tool, contact_find, which replaces
-// list_vendors and get_vendor. contact_create, contact_update and
+// stays vendors. contact_find (Stage 1, trades in #4466) replaces
+// list_vendors and get_vendor; contact_create, contact_update and
 // contact_delete are Stage 2 (#4466).
+//
+// Access follows the household role policy (API ResVendors): owner,
+// family_manager and family_member read and write; viewer and housesitter
+// only read; vendor (and any unknown role) gets nothing. The role is
+// re-read from memberships on every call.
+//
+// Trades are normalized exactly like the REST API's vendors.NormalizeTrade;
+// packages/db/testdata/trade_normalization.json is the shared fixture both
+// test suites check, so the two synonym tables cannot drift.
 //
 // Every result is built with internal/respond, and every tool declares all
 // four annotation hints and an outputSchema with string ids. All operations
@@ -22,6 +31,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/respond"
@@ -33,8 +44,21 @@ const (
 	maxLimit     = 100
 )
 
+// Trade limits, the same as the REST API (#4467).
+const (
+	maxTrades   = 20
+	maxTradeLen = 64
+)
+
 // toolHandler is the signature every contact tool handler has.
 type toolHandler = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)
+
+// querier is what both a pool and a transaction offer.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
 // contactCounts is what in the family points at a contact.
 type contactCounts struct {
@@ -53,10 +77,14 @@ type contactData struct {
 	Phone     *string       `json:"phone"`
 	Email     *string       `json:"email"`
 	Website   *string       `json:"website"`
+	Address   *string       `json:"address" jsonschema_description:"Street address; null when not set."`
 	Notes     *string       `json:"notes"`
 	Counts    contactCounts `json:"counts"`
 	CreatedAt time.Time     `json:"created_at"`
 	UpdatedAt time.Time     `json:"updated_at"`
+
+	Duplicate bool     `json:"duplicate,omitempty" jsonschema_description:"contact_create only: true when the same contact was added minutes ago and was returned instead."`
+	Changed   []string `json:"changed,omitempty" jsonschema_description:"contact_update only: the fields that changed."`
 }
 
 // label is the contact's name with its trades (or specialty), e.g.
@@ -139,8 +167,10 @@ var tradeSynonyms = map[string]string{
 }
 
 // normalizeTrade turns user text into the stored trade form: lower case,
-// spaces and hyphens as underscores, synonyms mapped ("Pest Control" ->
-// pest_control, "Plumbing" -> plumber).
+// runs of spaces, hyphens and underscores as one underscore, synonyms mapped
+// ("Pest Control" -> pest_control, "Plumbing" -> plumber). Blank stays
+// blank. It must give the same answer as the API's vendors.NormalizeTrade
+// (shared fixture packages/db/testdata/trade_normalization.json).
 func normalizeTrade(s string) string {
 	t := strings.ToLower(strings.TrimSpace(s))
 	t = strings.Join(strings.FieldsFunc(t, func(r rune) bool { return r == ' ' || r == '-' || r == '_' }), "_")
@@ -148,6 +178,73 @@ func normalizeTrade(s string) string {
 		return mapped
 	}
 	return t
+}
+
+// normalizeTrades normalizes and de-duplicates trades in first-seen order,
+// with the API's limits: no blank trade, each at most 64 characters after
+// normalizing, at most 20 distinct. The result is never nil.
+func normalizeTrades(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, raw := range in {
+		t := normalizeTrade(raw)
+		switch {
+		case t == "":
+			return nil, badArg("trades", "trades must not contain blank values.",
+				`Pass trades as a list of words, e.g. ["plumber"], or [] for none.`)
+		case len(t) > maxTradeLen:
+			return nil, badArg("trades", fmt.Sprintf("Each trade must be at most %d characters; %q is longer.", maxTradeLen, raw),
+				`Pass short trade words, e.g. ["plumber", "handyman"].`)
+		case seen[t]:
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	if len(out) > maxTrades {
+		return nil, badArg("trades", fmt.Sprintf("A contact can have at most %d trades; got %d.", maxTrades, len(out)),
+			"Pass the main trades only.")
+	}
+	return out, nil
+}
+
+// --- address ---
+
+// addressPrefix starts the first notes line that holds the address.
+// vendors has no address column (004), so contact_create/update keep the
+// address as the first notes line, "Address: 12 Main St", and every tool
+// shows it as address with the rest as notes.
+const addressPrefix = "Address: "
+
+// splitAddress separates the stored notes into the address and the rest.
+func splitAddress(notes *string) (address, rest *string) {
+	if notes == nil {
+		return nil, nil
+	}
+	first, after, _ := strings.Cut(*notes, "\n")
+	if !strings.HasPrefix(first, addressPrefix) {
+		return nil, notes
+	}
+	if a := strings.TrimSpace(strings.TrimPrefix(first, addressPrefix)); a != "" {
+		address = &a
+	}
+	if r := strings.TrimSpace(after); r != "" {
+		rest = &r
+	}
+	return address, rest
+}
+
+// joinAddress is the stored notes for an address and the rest of the notes.
+func joinAddress(address, rest *string) *string {
+	switch {
+	case address == nil:
+		return rest
+	case rest == nil:
+		s := addressPrefix + *address
+		return &s
+	}
+	s := addressPrefix + *address + "\n" + *rest
+	return &s
 }
 
 // --- argument parsing ---

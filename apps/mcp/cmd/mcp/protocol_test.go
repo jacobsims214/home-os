@@ -31,7 +31,7 @@ var wantTools = []string{
 	"bill_create", "bill_delete", "bill_find", "bill_pay", "bill_update",
 	"budget_summary",
 	"calendar_create", "calendar_find", "calendar_find_free_time",
-	"contact_find",
+	"contact_create", "contact_delete", "contact_find", "contact_update",
 	"credential_find", "credential_reveal",
 	"document_find", "document_get", "document_upload",
 	"event_create", "event_delete", "event_find", "event_update",

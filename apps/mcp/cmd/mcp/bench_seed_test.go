@@ -242,6 +242,8 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 		`INSERT INTO notes (household_id, entity_type, entity_id, title, body) SELECT $1, 'household', $1, '` + benchDisposablePrefix + ` note ' || g, 'x' FROM generate_series(1, %[1]d) g`,
 		// Pets with nothing attached, for pet_delete.
 		`INSERT INTO pets (household_id, name, species) SELECT $1, '` + benchDisposablePrefix + ` pet ' || g, 'fish' FROM generate_series(1, %[1]d) g`,
+		// Contacts with nothing attached, for contact_delete.
+		`INSERT INTO vendors (household_id, name, trades) SELECT $1, '` + benchDisposablePrefix + ` contact ' || g, ARRAY['handyman'] FROM generate_series(1, %[1]d) g`,
 		// Vehicles with nothing attached, for vehicle_delete.
 		`INSERT INTO vehicles (household_id, make, model) SELECT $1, 'Junker', '` + benchDisposablePrefix + ` car ' || g FROM generate_series(1, %[1]d) g`,
 		// People without a login and with nothing attached, for person_delete.
@@ -285,12 +287,12 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 // benchFixtures are ids from the measured household that tool arguments use.
 type benchFixtures struct {
 	Asset, Bill, Event, Note, Document, Loan, Task, Property, Vehicle, Calendar, Person, Pet string
-	List, ListItem, Credential                                                               string
+	List, ListItem, Credential, Contact                                                      string
 
 	// Rows each measured call of a write tool consumes, in order.
 	DisposableAssets, DisposableBills, DisposableLoans, DisposableTasks, DisposableNotes, DisposableEvents []string
 	DisposableListItems, DisposablePeople, DisposablePets, DisposableProperties, DisposableRooms           []string
-	DisposableVehicles                                                                                     []string
+	DisposableVehicles, DisposableContacts                                                                 []string
 	PayableBills, PendingTasks, UnreadNotifications                                                        []string
 }
 
@@ -338,6 +340,7 @@ func loadFixtures(t testing.TB, pool *pgxpool.Pool, hh uuid.UUID) benchFixtures 
 		Calendar: one(`SELECT id::text FROM calendars WHERE household_id = $1 AND name = 'Family'`),
 		Person:   one(`SELECT id::text FROM people WHERE household_id = $1 AND display_name = 'Nora'`),
 		Pet:      one(`SELECT id::text FROM pets WHERE household_id = $1 AND name = 'Rex'`),
+		Contact:  one(`SELECT id::text FROM vendors WHERE household_id = $1 AND name NOT LIKE 'Disposable%' ORDER BY name LIMIT 1`),
 		Event: one(`SELECT co.id::text FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
 		             WHERE c.household_id = $1 AND co.ical_data LIKE '%Dentist%' ORDER BY co.id LIMIT 1`),
 
@@ -355,6 +358,7 @@ func loadFixtures(t testing.TB, pool *pgxpool.Pool, hh uuid.UUID) benchFixtures 
 		DisposableProperties: disp("properties", "name"),
 		DisposableRooms:      disp("rooms", "name"),
 		DisposableVehicles:   disp("vehicles", "model"),
+		DisposableContacts:   disp("vendors", "name"),
 		DisposableEvents: many(`SELECT co.id::text FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
 		                         WHERE c.household_id = $1 AND co.ical_data LIKE '%` + benchDisposablePrefix + ` event%' ORDER BY co.id`),
 		PayableBills: many(`SELECT id::text FROM bills WHERE household_id = $1 AND paid_date IS NULL AND frequency = 'monthly'

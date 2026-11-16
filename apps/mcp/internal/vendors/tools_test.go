@@ -211,17 +211,6 @@ func TestToolDefinition(t *testing.T) {
 	outputSchema(t)
 }
 
-func TestNormalizeTrade(t *testing.T) {
-	for in, want := range map[string]string{
-		"plumber": "plumber", " Plumbing ": "plumber", "Pest Control": "pest_control", "pest-control": "pest_control",
-		"Veterinarian": "vet", "HVAC": "hvac", "heating and cooling": "hvac", "babysitter": "babysitter",
-	} {
-		if got := normalizeTrade(in); got != want {
-			t.Errorf("normalizeTrade(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestContactFind covers listing, id lookup, trade (exact, synonym, partial,
 // specialty fallback), query, counts, household scoping, pagination,
 // aliases and validation.
@@ -236,7 +225,7 @@ func TestContactFind(t *testing.T) {
 	if got := env.contacts(t); len(got) != 0 || env.Summary != "No contacts saved yet." || env.Total == nil || *env.Total != 0 {
 		t.Fatalf("empty: %+v", env)
 	}
-	if len(env.Next) == 0 || env.Next[0] != "Adding contacts is coming soon." {
+	if len(env.Next) == 0 || !strings.HasPrefix(env.Next[0], "Add a contact with contact_create") {
 		t.Errorf("empty next = %v", env.Next)
 	}
 
@@ -319,7 +308,7 @@ func TestContactFind(t *testing.T) {
 	}
 	env = call(t, ctx, find, map[string]any{"trade": "Pest Control"})
 	if env.Summary != "No Pest Control saved." || len(env.Next) == 0 ||
-		env.Next[0] != "Adding contacts is coming soon." {
+		env.Next[0] != "Add one with contact_create name=… trades=[pest_control] phone=…." {
 		t.Errorf("empty trade: %q %v", env.Summary, env.Next)
 	}
 

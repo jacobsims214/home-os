@@ -11,7 +11,6 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/respond"
-	"home-os/mcp/internal/server"
 )
 
 // findAliases are old list_vendors/get_vendor parameter names (and words
@@ -83,15 +82,19 @@ func NewContactFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("contact_find", append(opts, annotations("Find contacts", true, false, true)...)...)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return notSignedIn(), nil
+		c, bad := callerOf(ctx, pool)
+		if bad != nil {
+			return bad, nil
 		}
+		if !canRead(c.role) {
+			return cannotRead(c.role), nil
+		}
+		hid := c.householdID.String()
 		in, err := parseFindInput(req.GetArguments())
 		if err != nil {
 			return invalid(err, findExample), nil
 		}
-		page, total, err := findContacts(ctx, pool, claims.HouseholdID, in)
+		page, total, err := findContacts(ctx, pool, hid, in)
 		if err != nil {
 			return respond.Failed("find contacts", err), nil
 		}
@@ -103,7 +106,7 @@ func NewContactFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			// Past the end: count what there is so the summary is honest.
 			probe := in
 			probe.limit, probe.offset = 1, 0
-			if _, total, err = findContacts(ctx, pool, claims.HouseholdID, probe); err != nil {
+			if _, total, err = findContacts(ctx, pool, hid, probe); err != nil {
 				return respond.Failed("find contacts", err), nil
 			}
 			in.offset = max(in.offset, total)
@@ -113,14 +116,14 @@ func NewContactFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			Total:      max(total-in.offset, len(page)),
 			NextCursor: respond.CursorAfter(end, total),
 			Narrow:     "Pass next_cursor as cursor for the next page, or add trade or query.",
-		}, findNext(in, page)...), nil
+		}, findNext(in, page, canWrite(c.role))...), nil
 	}
 	return "contact_find", tool, handler
 }
 
 // findContacts loads one page of contacts and the total number of matches.
-func findContacts(ctx context.Context, pool *pgxpool.Pool, householdID string, in findInput) ([]contactData, int, error) {
-	rows, err := pool.Query(ctx, contactSelect, householdID, in.id,
+func findContacts(ctx context.Context, q querier, householdID string, in findInput) ([]contactData, int, error) {
+	rows, err := q.Query(ctx, contactSelect, householdID, in.id,
 		in.tradeNorm, escapeLike(in.trade), escapeLike(in.tradeNorm), escapeLike(in.query),
 		in.limit, in.offset)
 	if err != nil {
@@ -136,6 +139,7 @@ func findContacts(ctx context.Context, pool *pgxpool.Pool, householdID string, i
 			&d.CreatedAt, &d.UpdatedAt,
 			&d.Counts.Bills, &d.Counts.OpenMaintenance, &d.Counts.Pets, &total)
 		d.ID = id.String()
+		d.Address, d.Notes = splitAddress(d.Notes)
 		if d.Trades == nil {
 			d.Trades = []string{}
 		}
@@ -169,23 +173,30 @@ func findSummary(in findInput, page []contactData, total int) string {
 }
 
 // findNext is contact_find's next-step hints (catalog "Next": an empty
-// trade search would suggest contact_create with that trade; until contact_create
-// is registered it says adding contacts is coming soon).
-func findNext(in findInput, page []contactData) []string {
+// trade search suggests contact_create with that trade). Read-only roles
+// are not pointed at write tools.
+func findNext(in findInput, page []contactData, writer bool) []string {
 	if len(page) == 0 {
 		switch {
-		case in.trade != "":
+		case in.trade != "" && writer:
 			return []string{
-				"Adding contacts is coming soon.",
+				fmt.Sprintf("Add one with contact_create name=… trades=[%s] phone=….", in.tradeNorm),
 				fmt.Sprintf("Or search names and notes with contact_find query=%s.", in.trade),
 			}
+		case in.trade != "":
+			return []string{fmt.Sprintf("Search names and notes with contact_find query=%s.", in.trade)}
 		case in.filtered():
 			return []string{"Call contact_find without query to list every contact."}
+		case writer:
+			return []string{"Add a contact with contact_create name=… trades=[plumber] phone=…."}
 		default:
-			return []string{"Adding contacts is coming soon."}
+			return []string{"No contacts are saved yet; ask a family member to add them."}
 		}
 	}
 	c := page[0]
+	if !writer {
+		return []string{fmt.Sprintf("Reach %s: %s.", c.Name, c.reach())}
+	}
 	next := []string{fmt.Sprintf("Have %s do an upkeep job with maintenance_create contact_id=%s.", c.Name, c.ID)}
 	if c.Counts.OpenMaintenance > 0 {
 		next = append(next, fmt.Sprintf("%s is on %s; list upkeep with maintenance_find (items show contact_name).",
@@ -193,6 +204,7 @@ func findNext(in findInput, page []contactData) []string {
 	} else {
 		next = append(next, fmt.Sprintf("Record a bill paid to them with bill_create contact_id=%s.", c.ID))
 	}
+	next = append(next, fmt.Sprintf("Change their details with contact_update contact_id=%s.", c.ID))
 	return next
 }
 
