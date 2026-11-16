@@ -26,6 +26,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/api/internal/file"
 )
 
 // Entry is one activity_log row with its actor and agent resolved to names.
@@ -76,6 +78,11 @@ type Filter struct {
 	// ExcludeEntityTypes hides kinds the caller may not see (the read policy
 	// hook for roles, #4689).
 	ExcludeEntityTypes []string
+	// HideSecretFiles hides entries about a file attached to or linked from
+	// a credential (file.SecretFileSQL): the file's own entries, records in
+	// it (a note on it) and links pointing at it. Set when the role may not
+	// see secrets.
+	HideSecretFiles bool
 	// Limit is the page size; the caller validates it.
 	Limit int
 }
@@ -209,6 +216,9 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID, f Filter) (Page,
 		add("a.entity_type <> ALL(?)", f.ExcludeEntityTypes)
 		// A record attached to a hidden one (a note on a secret) is hidden too.
 		add("(a.parent_type IS NULL OR a.parent_type <> ALL(?))", f.ExcludeEntityTypes)
+	}
+	if f.HideSecretFiles {
+		where = append(where, hiddenFileEntries)
 	}
 	args = append(args, f.Limit+1)
 
@@ -349,3 +359,16 @@ func withLabel(summary, kind, label string) string {
 	label = strings.ReplaceAll(label, `"`, "'")
 	return verb + " " + kind + ` "` + label + `"` + rest[len(kind):]
 }
+
+// hiddenFileEntries leaves out entries about files a role without secrets
+// read must not see (file.SecretFileSQL, the same rule as the files API and
+// the MCP): the file's own entries, entries whose parent is the file (a note
+// on it) and document links pointing at it. An entry about a file deleted
+// since is kept: the rule needs the file row.
+var hiddenFileEntries = `NOT (a.entity_type = 'file' AND ` + file.SecretFileSQL("a.entity_id") + `)
+	AND NOT (a.parent_type IS NOT DISTINCT FROM 'file' AND ` + file.SecretFileSQL("a.parent_id") + `)
+	AND NOT (a.entity_type = 'document_link' AND EXISTS (
+		SELECT 1 FROM document_links al
+		 WHERE al.id = a.entity_id AND al.link_type = 'file'
+		   AND ` + file.SecretFileSQL(`(CASE WHEN al.link_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+		                                   THEN al.link_id::uuid END)`) + `))`

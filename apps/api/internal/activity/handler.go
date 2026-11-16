@@ -3,6 +3,7 @@ package activity
 import (
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"time"
 
@@ -185,6 +186,9 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.ExcludeEntityTypes = hidden
+	// A role kept from credentials is also kept from the documents attached
+	// to or linked from them (#4775).
+	f.HideSecretFiles = slices.Contains(hidden, "secret")
 
 	pg, err := h.repo.List(r.Context(), hid, f)
 	if err != nil {

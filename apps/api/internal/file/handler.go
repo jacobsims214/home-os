@@ -35,7 +35,9 @@
 // Role rules (#4689): the route policy already limits who reaches these
 // handlers (files are hidden from housesitter and vendor). On top of that a
 // role that cannot read credentials (viewer) never sees a file attached to
-// a secret: it is omitted from lists and 404 on get/content/patch.
+// a secret or linked from one (document_links, #4775; the MCP's rule): it
+// is omitted from lists and 404 on get/content/patch, the same answer as a
+// file that does not exist (Repo.GetVisibleFile, secretFileWhere).
 package file
 
 import (
@@ -124,11 +126,6 @@ type updateFileRequest struct {
 func canSeeSecretFiles(r *http.Request) bool {
 	claims := middleware.ClaimsFromContext(r.Context())
 	return claims != nil && auth.Can(claims.Role, auth.ResSecrets, auth.ActRead)
-}
-
-// visible reports whether the caller may see f at all.
-func visible(r *http.Request, f *File) bool {
-	return f.EntityType != EntityTypeSecret || canSeeSecretFiles(r)
 }
 
 // validDate checks a "YYYY-MM-DD" date.
@@ -360,7 +357,7 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 			apierr.JSON(w, http.StatusOK, map[string]any{"data": []*File{}})
 			return
 		}
-		flt.HideEntityTypes = []string{EntityTypeSecret}
+		flt.HideSecretFiles = true
 	}
 
 	files, err := h.repo.ListFiles(r.Context(), hid, flt)
@@ -390,12 +387,12 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fl, err := h.repo.GetFile(r.Context(), hid, id)
+	fl, err := h.repo.GetVisibleFile(r.Context(), hid, id, canSeeSecretFiles(r))
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
-	if fl == nil || !visible(r, fl) {
+	if fl == nil {
 		apierr.NotFound(w, "file not found")
 		return
 	}
@@ -427,12 +424,12 @@ func (h *Handler) GetFileContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fl, err := h.repo.GetFile(r.Context(), hid, id)
+	fl, err := h.repo.GetVisibleFile(r.Context(), hid, id, canSeeSecretFiles(r))
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
-	if fl == nil || !visible(r, fl) {
+	if fl == nil {
 		apierr.NotFound(w, "file not found")
 		return
 	}
@@ -557,12 +554,12 @@ func (h *Handler) UpdateFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A file the caller may not see is absent: check before writing.
-	cur, err := h.repo.GetFile(r.Context(), hid, id)
+	cur, err := h.repo.GetVisibleFile(r.Context(), hid, id, canSeeSecretFiles(r))
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
-	if cur == nil || !visible(r, cur) {
+	if cur == nil {
 		apierr.NotFound(w, "file not found")
 		return
 	}

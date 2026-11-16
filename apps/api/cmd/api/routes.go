@@ -153,7 +153,7 @@ func registerProtectedRoutes(r chi.Router, d protectedDeps) {
 
 	// Note CRUD (polymorphic)
 	noteRepo := note.NewRepo(d.pool)
-	noteHandler := note.NewHandler(noteRepo).WithSearchClient(d.search)
+	noteHandler := note.NewHandler(noteRepo).WithSearchClient(d.search).WithFileChecker(file.NewRepo(d.pool))
 	r.Get("/api/v1/notes", noteHandler.List)
 	r.Post("/api/v1/notes", noteHandler.Create)
 	r.Get("/api/v1/notes/{id}", noteHandler.Get)
@@ -202,7 +202,7 @@ func registerProtectedRoutes(r chi.Router, d protectedDeps) {
 
 	// Link CRUD (polymorphic)
 	linkRepo := link.NewRepo(d.pool)
-	linkHandler := link.NewHandler(linkRepo)
+	linkHandler := link.NewHandler(linkRepo).WithFileChecker(file.NewRepo(d.pool))
 	r.Post("/api/v1/links", linkHandler.Create)
 	r.Get("/api/v1/links", linkHandler.List)
 	r.Delete("/api/v1/links/{id}", linkHandler.Delete)

@@ -143,6 +143,29 @@ func (r *Repo) GetFile(ctx context.Context, householdID, id uuid.UUID) (*File, e
 	return f, nil
 }
 
+// GetVisibleFile is GetFile for a caller: unless includeSecretFiles, a file
+// attached to or linked from a credential is (nil, nil), exactly like a
+// missing one, so a viewer gets the same 404 for both (secretFileWhere).
+func (r *Repo) GetVisibleFile(ctx context.Context, householdID, id uuid.UUID, includeSecretFiles bool) (*File, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+fileColumns+`
+		 FROM files f
+		 WHERE f.id = $1 AND f.household_id = $2 AND `+secretFileWhere(3),
+		id, householdID, includeSecretFiles,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get file: %w", err)
+	}
+	f, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[File])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get file: collect: %w", err)
+	}
+	return f, nil
+}
+
 // GetFileContent returns the raw bytes of the blob backing the given file.
 // The file is first looked up in the files table scoped by household_id (so
 // a caller from another household cannot read another family's bytes), and
@@ -205,8 +228,9 @@ func (r *Repo) ListFiles(ctx context.Context, householdID uuid.UUID, flt ListFil
 	if flt.PersonID != uuid.Nil {
 		add("f.person_id = $%d", flt.PersonID)
 	}
-	if len(flt.HideEntityTypes) > 0 {
-		add("NOT (f.entity_type::text = ANY($%d))", flt.HideEntityTypes)
+	if flt.HideSecretFiles {
+		args = append(args, false)
+		where = append(where, secretFileWhere(len(args)))
 	}
 	query := `SELECT ` + fileColumns + ` FROM files f WHERE ` + strings.Join(where, " AND ") +
 		` ORDER BY f.created_at DESC`
@@ -249,7 +273,8 @@ func (r *Repo) PersonName(ctx context.Context, householdID uuid.UUID, personID *
 }
 
 // VisibleFileIDs returns which of ids are files of the household, leaving
-// out files attached to a credential unless includeSecretFiles. Search uses
+// out files attached to or linked from a credential unless
+// includeSecretFiles (secretFileWhere). Search uses
 // it to re-check hits against Postgres (search.FileChecker), so a stale
 // index never shows a deleted file or a credential's file to a viewer.
 // Ids that are not UUIDs are ignored.
@@ -269,9 +294,9 @@ func (r *Repo) VisibleFileIDs(ctx context.Context, householdID string, ids []str
 		return out, nil
 	}
 	rows, err := r.pool.Query(ctx,
-		`SELECT id FROM files
-		 WHERE household_id = $1 AND id = ANY($2)
-		   AND ($3 OR entity_type::text <> 'secret')`,
+		`SELECT f.id FROM files f
+		 WHERE f.household_id = $1 AND f.id = ANY($2)
+		   AND `+secretFileWhere(3),
 		hid, uids, includeSecretFiles)
 	if err != nil {
 		return out, fmt.Errorf("visible files: %w", err)
@@ -455,4 +480,35 @@ func (f *File) scanTargets() []any {
 	return []any{&f.ID, &f.HouseholdID, &f.BlobID, &f.Name, &f.ContentType, &f.Size, &f.EntityType, &f.EntityID,
 		&f.ExtractedText, &f.OCRStatus, &f.OCRError, &f.Tags, &f.CreatedAt, &f.UpdatedAt,
 		&f.Title, &f.Category, &f.DocumentDate, &f.ExpiresOn, &f.Description, &f.PersonID}
+}
+
+// The credential rule for documents (#4478, aligned with the MCP in #4775):
+// a role without secrets read (viewer) never sees a file attached to a
+// credential (files.entity_type 'secret') or linked from one (a
+// document_links row of a secret with link_type 'file' and link_id = the
+// file id), in lists, get, content, PATCH, search, notes, links and the
+// activity feed. Hidden and missing look the same (404 / left out).
+
+// secretFileWhere is the SQL condition that hides documents attached to a
+// credential (entity_type 'secret') or linked from one (a document_links row
+// of a secret pointing at the file). $n is a boolean: true lets them through.
+// The files table is aliased f. It renders the same SQL as
+// apps/mcp/internal/file/access.go secretFileWhere; TestSecretRuleMatchesMCP
+// fails if the two drift.
+func secretFileWhere(n int) string {
+	return fmt.Sprintf(`($%[1]d::boolean OR (f.entity_type::text <> 'secret' AND NOT EXISTS (
+		SELECT 1 FROM document_links sl
+		 WHERE sl.household_id = f.household_id AND sl.link_type = 'file'
+		   AND sl.link_id = f.id::text AND sl.entity_type::text = 'secret')))`, n)
+}
+
+// SecretFileSQL is the same rule for other packages' queries: a condition
+// that is true when the file whose id is the SQL expression fileID is
+// attached to or linked from a credential, so roles without secrets read
+// must not see it or anything about it (its notes, links, activity). It
+// takes no parameters, so it can be added to any WHERE clause. A file that
+// no longer exists is not hidden by it.
+func SecretFileSQL(fileID string) string {
+	return `EXISTS (SELECT 1 FROM files f WHERE f.id = ` + fileID + ` AND NOT ` +
+		strings.Replace(secretFileWhere(0), "$0::boolean", "false", 1) + `)`
 }

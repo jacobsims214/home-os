@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -266,6 +270,113 @@ func TestSecretFilesHiddenFromViewer(t *testing.T) {
 	assert.Equal(t, http.StatusOK, code)
 }
 
+// linkFromSecret links f from credential sec (a document_links row of the
+// secret, the way the MCP's document_update add_links stores it).
+func linkFromSecret(t *testing.T, pool *pgxpool.Pool, hh, sec, f uuid.UUID) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO document_links (household_id, entity_type, entity_id, link_type, link_id, title)
+		 VALUES ($1, 'secret', $2, 'file', $3, 'Passport scan')`, hh, sec, f.String())
+	require.NoError(t, err)
+}
+
+// #4775: a file linked from a credential (not attached to it) is hidden from
+// a viewer exactly like an attached one and like a file that does not
+// exist: no list row, the same 404 on get, content and PATCH, and
+// VisibleFileIDs (search) leaves it out. Family roles still see it.
+func TestCredentialLinkedFilesHiddenFromViewer(t *testing.T) {
+	pool := testDB(t)
+	hh := household(t, pool)
+	sec := secretRow(t, pool, hh)
+	repo := NewRepo(pool)
+	h := metaRouter(NewHandler(repo))
+
+	up := func(name, title string) File {
+		code, body := uploadForm(t, h, hh, name, "scan", map[string]string{"title": title, "category": "legal"})
+		require.Equal(t, http.StatusCreated, code, string(body))
+		return decodeFile(t, body)
+	}
+	linked := up("passport.jpg", "Passport scan")
+	plain := up("library-card.jpg", "Library card")
+	linkFromSecret(t, pool, hh, sec, linked.ID)
+	// A link of another kind, or from another record, does not hide a file.
+	pet := uuid.New()
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO pets (id, household_id, name) VALUES ($1, $2, 'Rex')`, pet, hh)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO document_links (household_id, entity_type, entity_id, link_type, link_id, title)
+		 VALUES ($1, 'pet', $2, 'file', $3, 'Library card')`, hh, pet, plain.ID.String())
+	require.NoError(t, err)
+
+	ids := func(b []byte) []uuid.UUID {
+		out := []uuid.UUID{}
+		for _, f := range decodeFiles(t, b) {
+			out = append(out, f.ID)
+		}
+		return out
+	}
+	_, body := call(t, h, hh, auth.RoleViewer, http.MethodGet, "/api/v1/files", nil)
+	assert.Equal(t, []uuid.UUID{plain.ID}, ids(body), "viewer list")
+	_, body = call(t, h, hh, auth.RoleViewer, http.MethodGet, "/api/v1/files?category=legal", nil)
+	assert.Equal(t, []uuid.UUID{plain.ID}, ids(body), "viewer list with a filter")
+
+	missing := uuid.New()
+	for _, tc := range []struct{ method, suffix string }{
+		{http.MethodGet, ""}, {http.MethodGet, "/content"}, {http.MethodPatch, ""},
+	} {
+		var b any
+		if tc.method == http.MethodPatch {
+			b = map[string]any{"title": "x"}
+		}
+		code, hidden := call(t, h, hh, auth.RoleViewer, tc.method, "/api/v1/files/"+linked.ID.String()+tc.suffix, b)
+		mcode, absent := call(t, h, hh, auth.RoleViewer, tc.method, "/api/v1/files/"+missing.String()+tc.suffix, b)
+		assert.Equal(t, http.StatusNotFound, code, tc.method+tc.suffix)
+		assert.Equal(t, mcode, code, "hidden and missing answer alike: "+tc.method+tc.suffix)
+		assert.Equal(t, string(absent), string(hidden), "hidden and missing answer alike: "+tc.method+tc.suffix)
+	}
+	code, _ := call(t, h, hh, auth.RoleViewer, http.MethodGet, "/api/v1/files/"+plain.ID.String(), nil)
+	assert.Equal(t, http.StatusOK, code)
+
+	ok, err := repo.VisibleFileIDs(context.Background(), hh.String(), []string{linked.ID.String(), plain.ID.String()}, false)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{plain.ID.String(): true}, ok, "search check for a viewer")
+	ok, err = repo.VisibleFileIDs(context.Background(), hh.String(), []string{linked.ID.String(), plain.ID.String()}, true)
+	require.NoError(t, err)
+	assert.Len(t, ok, 2, "search check for family")
+
+	for _, role := range []string{auth.RoleOwner, auth.RoleFamilyManager, auth.RoleFamilyMember} {
+		_, body = call(t, h, hh, role, http.MethodGet, "/api/v1/files", nil)
+		assert.ElementsMatch(t, []uuid.UUID{linked.ID, plain.ID}, ids(body), role)
+		for _, suffix := range []string{"", "/content"} {
+			code, _ = call(t, h, hh, role, http.MethodGet, "/api/v1/files/"+linked.ID.String()+suffix, nil)
+			assert.Equal(t, http.StatusOK, code, role+suffix)
+		}
+	}
+	code, body = call(t, h, hh, auth.RoleOwner, http.MethodPatch, "/api/v1/files/"+linked.ID.String(),
+		map[string]any{"description": "Expires 2031"})
+	assert.Equal(t, http.StatusOK, code, string(body))
+}
+
+// TestSecretRuleMatchesMCP keeps the API's credential rule identical to the
+// MCP's (apps/mcp/internal/file/access.go secretFileWhere, #4477): the MCP
+// is a separate module whose internal package can't be imported, so the
+// test reads its source, renders its SQL template and compares.
+func TestSecretRuleMatchesMCP(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "mcp", "internal", "file", "access.go"))
+	require.NoError(t, err)
+	m := regexp.MustCompile("(?s)func secretFileWhere\\(n int\\) string \\{\\s*return fmt\\.Sprintf\\(`([^`]*)`, n\\)").FindSubmatch(src)
+	require.NotNil(t, m, "secretFileWhere not found in the MCP's access.go")
+	norm := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	for _, n := range []int{1, 3, 13} {
+		assert.Equal(t, norm(fmt.Sprintf(string(m[1]), n)), norm(secretFileWhere(n)), "n=%d", n)
+	}
+	// SecretFileSQL is the same rule with the bypass off.
+	assert.Equal(t, norm(`EXISTS (SELECT 1 FROM files f WHERE f.id = x.id AND NOT `+
+		strings.Replace(fmt.Sprintf(string(m[1]), 0), "$0::boolean", "false", 1)+`)`),
+		norm(SecretFileSQL("x.id")))
+}
+
 func TestSearchDocumentBuilder(t *testing.T) {
 	hh, id := uuid.New(), uuid.New()
 	f := &File{ID: id, HouseholdID: hh, Name: "scan.pdf", Category: "medical", Title: strp("Rex vaccination record"),
@@ -379,6 +490,14 @@ func TestDocumentHybridSearch(t *testing.T) {
 	sf := up(hh, "codes.txt", map[string]string{"title": "Bank recovery codes", "entity_type": "secret", "entity_id": sec.String()})
 	assert.Contains(t, fileHits(doSearch(t, sh, hh, auth.RoleOwner, "bank recovery codes")), sf.ID.String())
 	assert.NotContains(t, fileHits(doSearch(t, sh, hh, auth.RoleViewer, "bank recovery codes")), sf.ID.String())
+
+	// A file linked from (not attached to) a credential (#4775): its
+	// metadata document is "document-<id>", but the Postgres check drops it
+	// for a viewer.
+	pp := up(hh, "IMG_0042.jpg", map[string]string{"title": "Passport scan", "category": "legal"})
+	linkFromSecret(t, pool, hh, sec, pp.ID)
+	assert.Contains(t, fileHits(doSearch(t, sh, hh, auth.RoleOwner, "passport scan")), pp.ID.String())
+	assert.NotContains(t, fileHits(doSearch(t, sh, hh, auth.RoleViewer, "passport scan")), pp.ID.String())
 
 	// Delete removes the metadata document from household_search.
 	require.Equal(t, http.StatusNoContent, deleteFile(t, h, hh, vacc.ID))

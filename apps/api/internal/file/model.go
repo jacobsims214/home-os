@@ -149,7 +149,7 @@ type ListFilter struct {
 	EntityID   uuid.UUID
 	Category   string
 	PersonID   uuid.UUID
-	// HideEntityTypes drops files attached to these entity kinds (a viewer
-	// never sees files attached to a credential).
-	HideEntityTypes []string
+	// HideSecretFiles leaves out files attached to or linked from a
+	// credential (for roles without secrets read; see secretFileWhere).
+	HideSecretFiles bool
 }

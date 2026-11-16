@@ -21,10 +21,65 @@ type searchIndexer interface {
 	DeleteDocument(ctx context.Context, id string) error
 }
 
+// FileChecker answers which of a household's file ids the caller may see;
+// *file.Repo satisfies it (VisibleFileIDs, the credential rule shared with
+// the files API and the MCP).
+type FileChecker interface {
+	VisibleFileIDs(ctx context.Context, householdID string, ids []string, includeSecretFiles bool) (map[string]bool, error)
+}
+
 // Handler holds dependencies for note HTTP handlers.
 type Handler struct {
 	repo   *Repo
 	search searchIndexer
+	files  FileChecker // nil: notes on files are hidden from roles without secrets read
+}
+
+// WithFileChecker lets roles without secrets read see notes on the files
+// they may see; without it they see no notes on files at all (fail closed).
+func (h *Handler) WithFileChecker(fc FileChecker) *Handler {
+	h.files = fc
+	return h
+}
+
+// hideSecretFileNotes drops, for a role without secrets read (viewer),
+// notes on a file attached to or linked from a credential (#4775): the file
+// is hidden from that role, so are its notes. A failed check drops every
+// note on a file (fail closed).
+func (h *Handler) hideSecretFileNotes(r *http.Request, hid uuid.UUID, notes []*Note) []*Note {
+	if middleware.Can(r, auth.ResSecrets, auth.ActRead) {
+		return notes
+	}
+	var ids []string
+	for _, n := range notes {
+		if n.EntityType == "file" {
+			ids = append(ids, n.EntityID.String())
+		}
+	}
+	if len(ids) == 0 {
+		return notes
+	}
+	ok := map[string]bool{}
+	if h.files != nil {
+		var err error
+		if ok, err = h.files.VisibleFileIDs(r.Context(), hid.String(), ids, false); err != nil {
+			slog.Warn("notes: file visibility check failed, omitting notes on files", "error", err)
+			ok = map[string]bool{}
+		}
+	}
+	out := notes[:0:0]
+	for _, n := range notes {
+		if n.EntityType != "file" || ok[n.EntityID.String()] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// noteVisible is CanSeeEntity plus the credential-file rule for one note.
+func (h *Handler) noteVisible(r *http.Request, hid uuid.UUID, n *Note) bool {
+	return auth.CanSeeEntity(middleware.Role(r), n.EntityType) &&
+		len(h.hideSecretFileNotes(r, hid, []*Note{n})) == 1
 }
 
 // NewHandler creates a new note handler.
@@ -38,10 +93,18 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexNote(ctx context.Context, n *Note) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("note: panic during search indexing", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("note: panic during search indexing", "panic", r)
+		}
+	}()
 	title := ""
-	if n.Title != nil { title = *n.Title }
+	if n.Title != nil {
+		title = *n.Title
+	}
 	doc := search.SearchDocument{
 		ID: "note-" + n.ID.String(), HouseholdID: n.HouseholdID.String(),
 		EntityType: "note", EntityID: n.ID.String(),
@@ -54,8 +117,14 @@ func (h *Handler) indexNote(ctx context.Context, n *Note) {
 }
 
 func (h *Handler) deleteNoteIndex(ctx context.Context, id string) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("note: panic during search deletion", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("note: panic during search deletion", "panic", r)
+		}
+	}()
 	if err := h.search.DeleteDocument(context.Background(), "note-"+id); err != nil {
 		slog.Warn("note: failed to delete from search", "id", id, "error", err)
 	}
@@ -154,6 +223,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			apierr.DB(w, err)
 			return
 		}
+		notes = h.hideSecretFileNotes(r, hid, notes)
 		apierr.JSON(w, http.StatusOK, map[string]any{"data": toNoteResponses(notes)})
 		return
 	}
@@ -163,7 +233,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	notes = visibleNotes(middleware.Role(r), notes)
+	notes = h.hideSecretFileNotes(r, hid, visibleNotes(middleware.Role(r), notes))
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
 		"data": toNoteResponses(notes),
@@ -190,7 +260,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	if note == nil || !auth.CanSeeEntity(middleware.Role(r), note.EntityType) {
+	if note == nil || !h.noteVisible(r, hid, note) {
 		apierr.NotFound(w, "note not found")
 		return
 	}
@@ -309,7 +379,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	if existing == nil || !auth.CanSeeEntity(middleware.Role(r), existing.EntityType) {
+	if existing == nil || !h.noteVisible(r, hid, existing) {
 		apierr.NotFound(w, "note not found")
 		return
 	}
