@@ -115,11 +115,11 @@ func HandleCheckBills(_ context.Context, req mcp.GetPromptRequest) (*mcp.GetProm
 	days := arg(req, "days", "7")
 	return userPrompt("Check bills", fmt.Sprintf(`Review the family's bills.
 
-1. Call budget_summary with sections=["obligations"] for the monthly total by category.
-2. Call bill_find with due_within_days=%s for bills due soon.
+1. Call budget_summary for the monthly total by budget category and what falls due. Its coverage block says how many bills it left out of the listing; pass detail="full" if you need every bill's name and amount.
+2. Call bill_find with due_within_days=%s for bills due soon, in case the summary's window is wider than you need.
 3. Reply with the monthly total, then each bill due soon: name, amount, weekday and date, and whether it's autopay.
 4. If the user says one is paid, call bill_pay with its bill_id.
-If nothing is due, say so.`, days)), nil
+Only say nothing is due if bill_find returned no bills and the summary's due_soon total is $0.00: a summary lists only a few items, so say how many are in the window, not just the ones it named.`, days)), nil
 }
 
 // NewPlanWeekPrompt creates the "plan-week" prompt: the week ahead from

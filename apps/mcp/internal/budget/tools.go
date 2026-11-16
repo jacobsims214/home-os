@@ -257,9 +257,9 @@ type CategoryLines struct {
 	Committed        string  `json:"committed" jsonschema_description:"Sum of the lines' monthly_amount"`
 	Remaining        *string `json:"remaining" jsonschema_description:"budgeted - committed (negative when over budget); null when no budget is set"`
 	OverBudget       bool    `json:"over_budget"`
-	LineCount        int     `json:"line_count" jsonschema_description:"How many bills and loan payments are in this category this month"`
-	Lines            []Line  `json:"lines" jsonschema_description:"The largest lines by monthly_amount (at most 8); see more_lines"`
-	MoreLines        int     `json:"more_lines,omitempty" jsonschema_description:"Lines not listed; find them with bill_find or loan_find"`
+	LineCount        int     `json:"line_count" jsonschema_description:"How many bills and loan payments are in this category this month (whether or not their lines are listed)"`
+	Lines            []Line  `json:"lines,omitempty" jsonschema_description:"The bill and loan lines behind committed: absent at detail=summary, the largest at detail=lines, all at detail=full. See more_lines"`
+	MoreLines        int     `json:"more_lines,omitempty" jsonschema_description:"How many of line_count are not listed here. Their money is in committed and the totals; get them with detail=lines or detail=full, or bill_find/loan_find"`
 }
 
 // Totals adds every line (and every budget) of the month.
@@ -286,6 +286,16 @@ type Report struct {
 	committedCents int64
 	budgetedCents  int64
 	catCount       int
+
+	// narrowedTo is the category Narrow kept, empty for a whole-household
+	// report. Describe uses it so a one-category answer never reads as the
+	// household's totals (#4809).
+	narrowedTo string
+
+	// narrowedDroppedLines is how many lines of the other categories Narrow
+	// removed. It is what a caller must count as "not listed" so a
+	// one-category answer never reports that nothing was left out (#4809).
+	narrowedDroppedLines int
 }
 
 // CommittedCents is Totals.Committed in cents.
@@ -348,12 +358,50 @@ func listCategories(ctx context.Context, q querier, householdID string) ([]categ
 	return out, rows.Err()
 }
 
-// Load builds the month's Report for the household. month's year and month
-// are used. Bills are spread to monthly amounts (x1, /3, /6, /12; a once
-// bill in full in its due month only), each rounded to the cent; a loan
-// counts while active in the month (balance left, started by month end, not
-// ended before it). Same math as the API and budget_summary's obligations.
+// Depth is how much line detail a Report carries (#4809). The totals, the
+// category rows and the committed-per-category figures are the same at every
+// depth; only the lines behind them change, because they are what made the
+// payload large.
+type Depth int
+
+const (
+	// DepthSummary lists no lines: every category with budgeted, committed,
+	// remaining, over_budget, line_count, and more_lines counting all of
+	// them. It answers "what do we owe each month, and where?" for a small
+	// model without the per-bill detail.
+	DepthSummary Depth = iota
+	// DepthLines lists up to MaxLines lines per category, the largest first.
+	DepthLines
+	// DepthFull lists every line of every category.
+	DepthFull
+)
+
+// maxLinesAt is how many lines a category lists at depth.
+func (d Depth) maxLinesAt() int {
+	switch d {
+	case DepthSummary:
+		return 0
+	case DepthFull:
+		return math.MaxInt
+	default:
+		return MaxLines
+	}
+}
+
+// Load builds the month's Report for the household with up to MaxLines lines
+// per category. It is LoadDepth with DepthLines.
 func Load(ctx context.Context, q querier, householdID string, month time.Time) (*Report, error) {
+	return LoadDepth(ctx, q, householdID, month, DepthLines)
+}
+
+// LoadDepth builds the month's Report for the household at the given depth.
+// month's year and month are used. Bills are spread to monthly amounts
+// (x1, /3, /6, /12; a once bill in full in its due month only), each rounded
+// to the cent; a loan counts while active in the month (balance left, started
+// by month end, not ended before it). Same math as the API and
+// budget_summary's obligations. The totals always cover every line at every
+// depth.
+func LoadDepth(ctx context.Context, q querier, householdID string, month time.Time, depth Depth) (*Report, error) {
 	start := time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, time.UTC)
 	cats, err := listCategories(ctx, q, householdID)
 	if err != nil {
@@ -432,7 +480,14 @@ func Load(ctx context.Context, q querier, householdID string, month time.Time) (
 		g := a.group
 		g.Committed = FormatCents(a.committed)
 		g.LineCount = len(g.Lines)
-		g.Lines, g.MoreLines = largestLines(g.Lines, MaxLines)
+		max := depth.maxLinesAt()
+		if max == 0 {
+			// detail=summary: no lines at all, and no empty "lines": [] either
+			// (#4809). more_lines still counts them.
+			g.Lines, g.MoreLines = nil, len(g.Lines)
+		} else {
+			g.Lines, g.MoreLines = largestLines(g.Lines, max)
+		}
 		if a.budget != nil {
 			g.Budgeted = centsPtr(a.budget)
 			rem := *a.budget - a.committed
@@ -478,15 +533,50 @@ func largestLines(lines []Line, max int) ([]Line, int) {
 	return lines[:max], len(lines) - max
 }
 
+// describeNarrowed is Describe for a report narrowed to one category: only
+// that category's budget, committed and remaining, never the household's
+// totals, so the sentence cannot be read as the whole picture (#4809).
+func (r *Report) describeNarrowed() string {
+	var g *CategoryLines
+	if len(r.Categories) == 1 {
+		g = &r.Categories[0]
+	} else {
+		g = &r.Uncategorized
+	}
+	committed, _, _ := parseCents(g.Committed)
+	if g.Budgeted == nil {
+		return fmt.Sprintf("%s: %s a month from %s, no monthly budget set.",
+			g.Name, Money(committed), plural(g.LineCount, "bill or loan payment", "bills or loan payments"))
+	}
+	budgeted, _, _ := parseCents(*g.Budgeted)
+	s := fmt.Sprintf("%s: budget %s, %s committed against it", g.Name, Money(budgeted), Money(committed))
+	if g.OverBudget {
+		rem, _, _ := parseCents(strings.TrimPrefix(*g.Remaining, "-"))
+		s += fmt.Sprintf(", over budget by %s", Money(rem))
+	} else {
+		rem, _, _ := parseCents(*g.Remaining)
+		s += fmt.Sprintf(", %s left", Money(rem))
+	}
+	return s + fmt.Sprintf(" (%s in the category).", plural(g.LineCount, "bill or loan payment", "bills or loan payments"))
+}
+
+// maxNamedOverBudget is how many over-budget categories Describe names before
+// it says "and N more".
+const maxNamedOverBudget = 3
+
 // Describe is the report's summary phrase, e.g. "Budgets: $2,500.00 a month
 // across 3 categories, $2,150.00 committed against them; over budget:
 // Housing by $120.00." or "No budget categories set yet."
 func (r *Report) Describe() string {
+	if r.narrowedTo != "" {
+		return r.describeNarrowed()
+	}
 	if r.catCount == 0 {
 		return "No budget categories set yet."
 	}
 	var withBudget int
 	var over []string
+	var overCount int
 	var inCents int64
 	for _, c := range r.Categories {
 		if c.Budgeted == nil {
@@ -496,8 +586,13 @@ func (r *Report) Describe() string {
 		cc, _, _ := parseCents(c.Committed)
 		inCents += cc
 		if c.OverBudget {
-			rem, _, _ := parseCents(strings.TrimPrefix(*c.Remaining, "-"))
-			over = append(over, fmt.Sprintf("%s by %s", c.Name, Money(rem)))
+			overCount++
+			// Only the first few by name: the sentence stays readable for a
+			// small model, and categories carries all of them (#4809).
+			if len(over) < maxNamedOverBudget {
+				rem, _, _ := parseCents(strings.TrimPrefix(*c.Remaining, "-"))
+				over = append(over, fmt.Sprintf("%s by %s", c.Name, Money(rem)))
+			}
 		}
 	}
 	s := fmt.Sprintf("Budgets: %s a month across %s, %s committed against them",
@@ -507,11 +602,72 @@ func (r *Report) Describe() string {
 	}
 	if len(over) > 0 {
 		s += "; over budget: " + strings.Join(over, ", ")
+		if more := overCount - len(over); more > 0 {
+			s += fmt.Sprintf(" and %d more", more)
+		}
 	}
 	if n := r.Uncategorized.LineCount; n > 0 {
 		s += fmt.Sprintf("; %s not in a budget category", plural(n, "line", "lines"))
 	}
 	return s + "."
+}
+
+// Narrow returns a copy of the report with only the named category kept (any
+// case or spacing). The totals still cover the whole month: the other
+// categories' money is what the totals are, and dropping it would answer a
+// different question than the numbers claim to (#4809). A name that matches
+// neither a category nor the no-category group returns nil, so the caller can
+// refuse the call rather than report zero.
+func (r *Report) Narrow(name string) *Report {
+	key := normName(name)
+	out := *r
+	out.Categories = nil
+	out.narrowedTo = name
+	out.narrowedDroppedLines = 0
+	found := false
+	for _, c := range r.Categories {
+		if normName(c.Name) == key {
+			out.Categories = []CategoryLines{c}
+			out.narrowedTo = c.Name // the stored spelling, for the scope sentence
+			found = true
+			continue
+		}
+		out.narrowedDroppedLines += c.LineCount
+	}
+	if normName(r.Uncategorized.Name) == key {
+		// The no-category group: keep it whole and show no budget categories.
+		out.Categories = []CategoryLines{}
+		out.Uncategorized = r.Uncategorized
+		return &out
+	}
+	if !found {
+		return nil
+	}
+	// Keep the totals covering every line (they are the month's, not this
+	// group's) and drop the other groups' lines from the payload.
+	out.narrowedDroppedLines += r.Uncategorized.LineCount
+	out.Uncategorized = CategoryLines{Name: r.Uncategorized.Name, Committed: FormatCents(0), Lines: []Line{}}
+	return &out
+}
+
+// NarrowedTo is the category Narrow kept, empty for a whole-household report.
+func (r *Report) NarrowedTo() string { return r.narrowedTo }
+
+// DroppedLines is how many lines Narrow removed from the other categories.
+// Zero for a whole-household report.
+func (r *Report) DroppedLines() int { return r.narrowedDroppedLines }
+
+// CategoryNames lists the categories the report has, in order, for error
+// messages that tell a small model what names it may pass.
+func (r *Report) CategoryNames() []string {
+	names := make([]string, 0, len(r.Categories)+1)
+	for _, c := range r.Categories {
+		names = append(names, c.Name)
+	}
+	if r.Uncategorized.LineCount > 0 {
+		names = append(names, r.Uncategorized.Name)
+	}
+	return names
 }
 
 // find returns the category with name (any case/spacing), or nil.
@@ -554,7 +710,7 @@ type DueSoon struct {
 	Total       string    `json:"total" jsonschema_description:"Sum of the items' amounts"`
 	BillCount   int       `json:"bill_count"`
 	LoanCount   int       `json:"loan_count"`
-	Items       []DueItem `json:"items" jsonschema_description:"By due date, then name (the first 20); see more_items"`
+	Items       []DueItem `json:"items,omitempty" jsonschema_description:"By due date, then name. The first 5 at detail=summary, 20 at detail=lines, all at detail=full; see more_items"`
 	MoreItems   int       `json:"more_items,omitempty" jsonschema_description:"Items not listed; find bills with bill_find due_within_days"`
 	NoDueDate   int       `json:"without_due_date" jsonschema_description:"Bills and active loans with no usable due date (not checked)"`
 	totalCents  int64
@@ -564,12 +720,38 @@ type DueSoon struct {
 // TotalCents is Total in cents.
 func (d *DueSoon) TotalCents() int64 { return d.totalCents }
 
-// LoadDueSoon lists the household's bills (by bill.BillDueFor, so paid
+// MaxSummaryDueItems is how many due_soon items DepthSummary lists: enough to
+// answer "what's due next?" in one small call (#4809).
+const MaxSummaryDueItems = 5
+
+// maxDueItemsAt is how many due_soon items are listed at depth.
+func (d Depth) maxDueItemsAt() int {
+	switch d {
+	case DepthSummary:
+		return MaxSummaryDueItems
+	case DepthFull:
+		return math.MaxInt
+	default:
+		return MaxDueItems
+	}
+}
+
+// LoadDueSoon lists up to MaxDueItems of the household's bills and loan
+// payments due in the window. It is LoadDueSoonDepth with DepthLines.
+func LoadDueSoon(ctx context.Context, q querier, householdID string, today time.Time, days int) (*DueSoon, error) {
+	return LoadDueSoonDepth(ctx, q, householdID, today, days, DepthLines)
+}
+
+// LoadDueSoonDepth lists the household's bills (by bill.BillDueFor, so paid
 // bills move on to their next date and once bills that passed unpaid are
 // left out, as bill_find due_within_days does) and active loans' payments
 // (on due_day, clamped to short months) due from today to today + days.
 // today is the family's date as midnight UTC (bill.HouseholdToday).
-func LoadDueSoon(ctx context.Context, q querier, householdID string, today time.Time, days int) (*DueSoon, error) {
+//
+// The counts and the total always cover every item in the window at every
+// depth; depth decides how many items are listed (and so how big the
+// payload is) and MoreItems says how many were not.
+func LoadDueSoonDepth(ctx context.Context, q querier, householdID string, today time.Time, days int, depth Depth) (*DueSoon, error) {
 	end := today.AddDate(0, 0, days)
 	out := &DueSoon{Days: days, From: today.Format(time.DateOnly), To: end.Format(time.DateOnly), Currency: Currency, Items: []DueItem{}}
 
@@ -655,9 +837,9 @@ func LoadDueSoon(ctx context.Context, q querier, householdID string, today time.
 		return a.ID < b.ID
 	})
 	out.Total = FormatCents(out.totalCents)
-	if len(out.Items) > MaxDueItems {
-		out.MoreItems = len(out.Items) - MaxDueItems
-		out.Items = out.Items[:MaxDueItems]
+	if max := depth.maxDueItemsAt(); len(out.Items) > max {
+		out.MoreItems = len(out.Items) - max
+		out.Items = out.Items[:max]
 	}
 	return out, nil
 }
