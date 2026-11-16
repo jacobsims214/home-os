@@ -66,6 +66,12 @@ spec:
         - name: API_TRUSTED_PROXIES
           value: {{ join "," (.trustedProxies | default list) | quote }}
         {{- end }}
+        # POST /auth/change-password has its own budget (per client IP and per
+        # account) because it accepts a password guess (#4822).
+        - name: API_CHANGE_PASSWORD_RATE_PER_MINUTE
+          value: {{ .Values.api.changePasswordRateLimit.perMinute | default 5 | quote }}
+        - name: API_CHANGE_PASSWORD_RATE_BURST
+          value: {{ .Values.api.changePasswordRateLimit.burst | default 3 | quote }}
         - name: SMTP_HOST
           value: "{{ .Values.smtp.host }}"
         - name: SMTP_PORT

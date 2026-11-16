@@ -242,6 +242,9 @@ var expectedAccess = map[string][]string{
 
 	"GET /api/v1/activity": readers, // viewer: no secret lines (handler)
 
+	// The caller's own sign-in password: every role, self-scoped (#4822).
+	"POST /api/v1/auth/change-password": everyone,
+
 	"GET /api/v1/guides":                                      sitters,
 	"POST /api/v1/guides":                                     family,
 	"GET /api/v1/guides/{id}":                                 sitters,

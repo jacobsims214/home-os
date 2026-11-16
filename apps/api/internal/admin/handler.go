@@ -153,8 +153,6 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 const (
 	maxName          = 100 // runes, as invite signup
 	maxEmail         = 255 // users.email VARCHAR(255)
-	minPassword      = 8   // bytes
-	maxPassword      = 72  // bytes: bcrypt's limit; longer is refused, not truncated
 	maxHouseholdName = 255 // runes, households.name
 	maxTimezone      = 100 // households.timezone
 )
@@ -273,10 +271,10 @@ func validateCreate(req createUserRequest) (CreateUserInput, string) {
 		strings.HasPrefix(in.Email, "@") || strings.HasSuffix(in.Email, "@") ||
 		strings.ContainsAny(in.Email, " \t\r\n"):
 		return in, "email must be a valid email address"
-	case len(req.Password) < minPassword:
-		return in, "password must be at least 8 characters"
-	case len(req.Password) > maxPassword:
-		return in, "password must be at most 72 bytes"
+	}
+	// The same rule invite signup, reset and change-password apply.
+	if err := auth.ValidatePasswordLength(req.Password); err != nil {
+		return in, err.Error()
 	}
 
 	hhID := strings.TrimSpace(req.HouseholdID)

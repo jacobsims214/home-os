@@ -2,6 +2,7 @@ package main
 
 import (
 	"log/slog"
+	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,6 +24,7 @@ import (
 	"home-os/api/internal/loan"
 	"home-os/api/internal/maintenance"
 	"home-os/api/internal/meals"
+	"home-os/api/internal/middleware"
 	"home-os/api/internal/note"
 	"home-os/api/internal/notification"
 	"home-os/api/internal/people"
@@ -32,6 +34,7 @@ import (
 	"home-os/api/internal/secret"
 	"home-os/api/internal/vehicle"
 	"home-os/api/internal/vendors"
+	"home-os/api/pkg/apierr"
 	"home-os/api/pkg/smtp"
 )
 
@@ -43,6 +46,36 @@ type protectedDeps struct {
 	smtp             *smtp.Client
 	householdHandler *household.Handler
 	inviteHandler    *invite.Handler
+	// authHandler serves the caller's own account routes (change-password).
+	// Nil in tests that only walk the router without calling a handler.
+	authHandler *auth.Handler
+	// changePasswordLimiter, when set, is the per-client-IP budget for
+	// change-password (the same #4685 limiter type, its own instance). The
+	// handler adds a per-account budget from the same limiter.
+	changePasswordLimiter *middleware.RateLimiter
+}
+
+// changePasswordRoute is POST /api/v1/auth/change-password's handler: the
+// auth handler's, wrapped in the per-IP budget when one is configured. The
+// route is inside RequireAuth + RequirePolicy, so both run after the token is
+// verified and the route's password/write rule is checked.
+//
+// With no auth handler (tests that only walk the router) the route still
+// exists — RequirePolicy must see every route to keep its table honest — and
+// answers 503 rather than panicking if it is ever called.
+func (d protectedDeps) changePasswordRoute() http.HandlerFunc {
+	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apierr.JSON(w, http.StatusServiceUnavailable, apierr.ErrorResponse{Error: apierr.ErrorDetail{
+			Code: "SERVICE_UNAVAILABLE", Message: "changing your password is not available",
+		}})
+	})
+	if d.authHandler != nil {
+		h = http.HandlerFunc(d.authHandler.ChangePassword)
+	}
+	if d.changePasswordLimiter != nil {
+		h = d.changePasswordLimiter.Middleware(h)
+	}
+	return h.ServeHTTP
 }
 
 // registerProtectedRoutes mounts every route that runs behind
@@ -220,6 +253,12 @@ func registerProtectedRoutes(r chi.Router, d protectedDeps) {
 
 	// Agent tokens: each member creates, lists and revokes their own.
 	agenttoken.NewHandler(agenttoken.NewRepo(d.pool)).RegisterRoutes(r)
+
+	// The caller's own sign-in password (#4822). Self-scoped (the account
+	// comes from the verified token) and limited per client IP here and per
+	// account in the handler: it is the one authenticated route that accepts a
+	// password guess.
+	r.Post("/api/v1/auth/change-password", d.changePasswordRoute())
 
 	// Stage 2 family routes: people, budget, lists, meals, activity, guides.
 	registerStage2Routes(r, d.pool, d.search)

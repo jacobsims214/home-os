@@ -77,6 +77,10 @@ const (
 	ResMeals         Resource = "meals"         // recipes, meal plans, meal feedback
 	ResActivity      Resource = "activity"      // the family activity feed
 	ResGuides        Resource = "guides"        // guides
+	// ResPassword is the caller's own sign-in password (#4822). No MCP tool
+	// uses it; it is here so this mirror matches roles.go, which the shared
+	// fixture enforces.
+	ResPassword Resource = "password"
 )
 
 // Action is something a role may do with a resource.
@@ -200,6 +204,14 @@ var Policy = map[Resource]map[Action][]string{
 	ResMeals:    {ActRead: rolesSitter, ActWrite: rolesFamily, ActRateOthers: rolesManagers},
 	ResActivity: {ActRead: rolesReaders},
 	ResGuides:   {ActRead: rolesSitter, ActWrite: rolesFamily},
+
+	// Changing your own sign-in password is every role's own business,
+	// including a viewer, a housesitter and a vendor (#4822). Nothing in the
+	// MCP offers it: the route is the API's POST /auth/change-password, which
+	// takes the account from the verified token, so a grant here only keeps
+	// the two mirrors in step (the fixture would fail otherwise). No tool
+	// names this resource.
+	ResPassword: {ActWrite: rolesEveryone},
 }
 
 // Can reports whether a member with role may perform act on res. Unknown

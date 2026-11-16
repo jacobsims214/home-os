@@ -140,6 +140,16 @@ func main() {
 	go publicLimiter.Run(limiterCtx)
 	limited := func(h http.HandlerFunc) http.Handler { return publicLimiter.Middleware(h) }
 
+	// Change-password gets its own limiter instance rather than sharing the
+	// public one: it is authenticated, so keying it per client IP alongside
+	// signup and forgot-password would let one password change spend the
+	// household's signup budget. The handler adds a per-account budget from the
+	// same instance, so a stolen session cannot outrun the IP budget by moving
+	// between addresses (#4822).
+	changePasswordLimiter := middleware.NewRateLimiter(
+		cfg.ChangePasswordRatePerMinute, cfg.ChangePasswordRateBurst, trustedProxies)
+	go changePasswordLimiter.Run(limiterCtx)
+
 	// Health endpoint — returns service status.
 	r.Get("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		apierr.JSON(w, http.StatusOK, map[string]string{
@@ -167,7 +177,8 @@ func main() {
 		slog.Info("SMTP not configured; password reset emails will be skipped")
 	}
 
-	authHandler := auth.NewHandler(authRepo, cfg, smtpClient, dexClient, oidcVerifier)
+	authHandler := auth.NewHandler(authRepo, cfg, smtpClient, dexClient, oidcVerifier).
+		WithChangePasswordLimiter(changePasswordLimiter)
 
 	r.Get("/api/v1/auth/me", authHandler.Me)
 	r.Post("/api/v1/auth/caldav-password", authHandler.GenerateCaldavPassword)
@@ -208,12 +219,14 @@ func main() {
 		// the one policy table in auth/roles.go. Unmapped routes answer 403.
 		r.Use(middleware.RequirePolicy)
 		registerProtectedRoutes(r, protectedDeps{
-			pool:             pool,
-			cfg:              cfg,
-			search:           searchClient,
-			smtp:             smtpClient,
-			householdHandler: householdHandler,
-			inviteHandler:    inviteHandler,
+			pool:                  pool,
+			cfg:                   cfg,
+			search:                searchClient,
+			smtp:                  smtpClient,
+			householdHandler:      householdHandler,
+			inviteHandler:         inviteHandler,
+			authHandler:           authHandler,
+			changePasswordLimiter: changePasswordLimiter,
 		})
 	})
 

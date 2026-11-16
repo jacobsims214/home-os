@@ -218,6 +218,11 @@ var routeRules = map[string]RouteRule{
 	// Activity feed: the handler hides kinds the role may not see.
 	"GET /api/v1/activity": rr(auth.ResActivity, auth.ActRead),
 
+	// The caller's own sign-in password (#4822). Self-scoped: the handler reads
+	// the account from the verified token, so this grants no access to anyone
+	// else's password.
+	"POST /api/v1/auth/change-password": rr(auth.ResPassword, auth.ActWrite),
+
 	// Guides.
 	"GET /api/v1/guides":                                      rr(auth.ResGuides, auth.ActRead),
 	"POST /api/v1/guides":                                     rr(auth.ResGuides, auth.ActWrite),

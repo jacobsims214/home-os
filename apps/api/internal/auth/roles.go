@@ -121,6 +121,10 @@ const (
 	ResMeals         Resource = "meals"         // recipes, meal plans, meal feedback
 	ResActivity      Resource = "activity"      // the family activity feed
 	ResGuides        Resource = "guides"        // guides
+	// ResPassword is the caller's own sign-in password. The resource is
+	// self-scoped: no route and no handler ever names another account, so a
+	// grant here only ever changes the caller's own credential (#4822).
+	ResPassword Resource = "password"
 )
 
 // Action is something a role may do with a resource.
@@ -239,6 +243,14 @@ var policy = map[Resource]map[Action][]string{
 	ResMeals:    {ActRead: rolesSitter, ActWrite: rolesFamily, ActRateOthers: rolesManagers},
 	ResActivity: {ActRead: rolesReaders},
 	ResGuides:   {ActRead: rolesSitter, ActWrite: rolesFamily},
+
+	// Changing your own password is every role's own business, including a
+	// viewer, a housesitter and a vendor: it grants nothing beyond the
+	// credential the caller already signs in with. The handler verifies the
+	// current password against Dex and revokes the caller's own refresh
+	// tokens, and takes the account from the verified token, never from the
+	// request (#4822).
+	ResPassword: {ActWrite: rolesEveryone},
 }
 
 // Can reports whether a member with role may perform act on res. Unknown

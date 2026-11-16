@@ -143,6 +143,7 @@ func (v *Verifier) VerifyToken(ctx context.Context, tokenStr string) (*Claims, e
 		UserID: ident.Subject,
 		Email:  ident.Email,
 		Name:   ident.Name,
+		DexSub: ident.Subject,
 	}
 	if v.resolver == nil {
 		return claims, nil
