@@ -38,13 +38,13 @@ import (
 // Mirrors the EntityType constants in apps/api/internal/file/model.go. If you
 // add a new attachable entity type there, add a query here too.
 var entityNameQueries = map[string]string{
-	"property":    "SELECT name FROM properties WHERE id = $1",
-	"vehicle":     "SELECT CONCAT_WS(' ', NULLIF(year::text, ''), make, model) FROM vehicles WHERE id = $1",
-	"pet":         "SELECT name FROM pets WHERE id = $1",
-	"bill":        "SELECT name FROM bills WHERE id = $1",
-	"maintenance": "SELECT name FROM maintenance_tasks WHERE id = $1",
-	"asset":       "SELECT name FROM assets WHERE id = $1",
-	"vendor":      "SELECT name FROM vendors WHERE id = $1",
+	"property":         "SELECT name FROM properties WHERE id = $1",
+	"vehicle":          "SELECT CONCAT_WS(' ', NULLIF(year::text, ''), make, model) FROM vehicles WHERE id = $1",
+	"pet":              "SELECT name FROM pets WHERE id = $1",
+	"bill":             "SELECT name FROM bills WHERE id = $1",
+	"maintenance_task": "SELECT name FROM maintenance_tasks WHERE id = $1",
+	"asset":            "SELECT name FROM assets WHERE id = $1",
+	"vendor":           "SELECT name FROM vendors WHERE id = $1",
 }
 
 // OCR status constants. These mirror apps/api/internal/file/model.go

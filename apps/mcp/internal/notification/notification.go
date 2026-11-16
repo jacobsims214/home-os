@@ -75,7 +75,6 @@ type notificationData struct {
 var aboutKinds = map[string]struct{ about, open string }{
 	"bill":             {"bill", "bill_find id=%s"},
 	"maintenance_task": {"maintenance", "maintenance_find id=%s"},
-	"maintenance":      {"maintenance", "maintenance_find id=%s"},
 	"loan":             {"loan", "loan_find id=%s"},
 	"asset":            {"asset", "asset_find id=%s"},
 	"vehicle":          {"vehicle", "vehicle_find id=%s"},

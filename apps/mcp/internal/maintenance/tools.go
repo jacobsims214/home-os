@@ -723,7 +723,7 @@ func NewMaintenanceDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc
 		var events []event
 		rows, err := tx.Query(ctx,
 			`SELECT co.calendar_id::text, co.uid FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
-			  WHERE c.household_id = $1 AND co.entity_id = $2 AND co.entity_type IN ('maintenance', 'maintenance_task')`,
+			  WHERE c.household_id = $1 AND co.entity_id = $2 AND co.entity_type = 'maintenance_task'`,
 			claims.HouseholdID, id)
 		if err != nil {
 			return respond.Failed("delete the task", err), nil

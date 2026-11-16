@@ -646,7 +646,7 @@ func (r *Repo) UpsertMaintenanceEvent(ctx context.Context, householdID, taskID u
 		`SELECT co.id::text, co.calendar_id::text, co.uid, co.ical_data
 		   FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
 		  WHERE c.household_id = $1 AND co.entity_id = $2
-		    AND co.entity_type IN ('maintenance', 'maintenance_task')
+		    AND co.entity_type = 'maintenance_task'
 		  ORDER BY co.created_at LIMIT 1
 		  FOR UPDATE OF co`, householdID, taskID,
 	).Scan(&eventID, &calendarID, &uid, &icalData)
@@ -727,7 +727,7 @@ func (r *Repo) DeleteMaintenanceEvent(ctx context.Context, householdID, taskID u
 	rows, err := tx.Query(ctx,
 		`DELETE FROM calendar_objects co USING calendars c
 		  WHERE c.id = co.calendar_id AND c.household_id = $1
-		    AND co.entity_id = $2 AND co.entity_type IN ('maintenance', 'maintenance_task')
+		    AND co.entity_id = $2 AND co.entity_type = 'maintenance_task'
 		  RETURNING co.calendar_id::text, co.uid`, householdID, taskID)
 	if err != nil {
 		return fmt.Errorf("delete maintenance event: %w", err)
