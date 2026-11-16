@@ -28,6 +28,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/calendar"
+	"home-os/mcp/internal/file"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/sqlutil"
@@ -66,6 +67,10 @@ type area struct {
 	// SitterDoc, when set, replaces Doc for the housesitter role, who may
 	// only see part of the record.
 	SitterDoc string
+	// RoleWhere, when set, is an extra condition for every caller in which
+	// $5 is the caller's current role (text), e.g. role_can_see_entity($5,
+	// t.entity_type::text).
+	RoleWhere string
 }
 
 // areas lists every area search_all covers, in result order (the catalog's
@@ -93,8 +98,14 @@ var areas = []area{
 		OpenRef: "t.id", Open: "contact_find id=%s", Sort: "t.created_at"},
 	{Name: "note", Plural: "notes", From: "notes t", Scope: "t.household_id",
 		Title: "COALESCE(NULLIF(btrim(t.title), ''), '(untitled)')", Doc: "concat_ws(' ', t.title, t.body)",
-		SecretWhere: "t.entity_type::text <> 'secret'",
-		OpenRef:     "t.id", Open: "note_get note_id=%s", Sort: "t.updated_at"},
+		// The note's parent decides (#4798): its kind must be one the role
+		// may see (role_can_see_entity, migration 061), and for roles
+		// without credentials no note on a secret or on a file attached to or
+		// linked from one (the documents' credential rule).
+		SecretWhere: "t.entity_type::text <> 'secret' AND NOT (t.entity_type::text = 'file' AND " +
+			file.SecretFileSQL("t.entity_id") + ")",
+		RoleWhere: "role_can_see_entity($5, 'note') AND role_can_see_entity($5, t.entity_type::text)",
+		OpenRef:   "t.id", Open: "note_get note_id=%s", Sort: "t.updated_at"},
 	{Name: "list", Plural: "lists", From: "lists t", Scope: "t.household_id",
 		Title:   "t.name",
 		Doc:     "concat_ws(' ', t.name, (SELECT string_agg(i.text, ' ' ORDER BY i.position) FROM list_items i WHERE i.list_id = t.id))",
@@ -107,9 +118,10 @@ var areas = []area{
 	{Name: "document", Plural: "documents", From: "files t", Scope: "t.household_id",
 		// 048 document metadata: title (falls back to the file name),
 		// category and description are searched before the extracted text.
-		Title:       "COALESCE(NULLIF(btrim(t.title), ''), t.name)",
-		Doc:         "concat_ws(' ', t.title, t.name, t.category, t.description, array_to_string(t.tags, ' '), t.extracted_text)",
-		SecretWhere: "t.entity_type::text <> 'secret'",
+		Title: "COALESCE(NULLIF(btrim(t.title), ''), t.name)",
+		Doc:   "concat_ws(' ', t.title, t.name, t.category, t.description, array_to_string(t.tags, ' '), t.extracted_text)",
+		// Documents attached to or linked from a credential (#4775, #4798).
+		SecretWhere: "NOT " + file.SecretFileSQL("t.id"),
 		OpenRef:     "t.id", Open: "document_get document_id=%s", Sort: "t.created_at"},
 	{Name: "asset", Plural: "things", From: "assets t", Scope: "t.household_id",
 		Title: "t.name", Doc: "concat_ws(' ', t.name, t.category, t.manufacturer, t.model, t.notes)",
@@ -264,7 +276,7 @@ func NewSearchTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Conte
 			if a.Name == "event" {
 				g, err = searchEventGroup(ctx, pool, claims.HouseholdID, query, limit)
 			} else {
-				g, err = searchArea(ctx, pool, forRole(a, role), claims.HouseholdID, query, limit)
+				g, err = searchArea(ctx, pool, forRole(a, role), role, claims.HouseholdID, query, limit)
 			}
 			if err != nil {
 				return respond.Failed("search "+a.Plural, err), nil
@@ -284,10 +296,15 @@ func NewSearchTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Conte
 
 // searchArea runs the escaped ILIKE search over one SQL area. Records whose
 // title matches come first, then the newest.
-func searchArea(ctx context.Context, pool *pgxpool.Pool, a area, householdID, query string, limit int) (searchGroup, error) {
+func searchArea(ctx context.Context, pool *pgxpool.Pool, a area, role, householdID, query string, limit int) (searchGroup, error) {
 	where := ""
 	if a.SecretWhere != "" {
 		where = " AND " + a.SecretWhere
+	}
+	args := []any{householdID, sqlutil.ContainsPattern(query), query, limit}
+	if a.RoleWhere != "" {
+		where += " AND " + a.RoleWhere
+		args = append(args, role)
 	}
 	sql := fmt.Sprintf(`
 		SELECT s.id, s.title, s.open_ref,
@@ -307,7 +324,7 @@ func searchArea(ctx context.Context, pool *pgxpool.Pool, a area, householdID, qu
 		LIMIT $4`,
 		"t.id", a.Title, a.OpenRef, a.Doc, a.Sort, a.From, snippetBefore, snippetLen, a.Scope, where)
 
-	rows, err := pool.Query(ctx, sql, householdID, sqlutil.ContainsPattern(query), query, limit)
+	rows, err := pool.Query(ctx, sql, args...)
 	if err != nil {
 		return searchGroup{}, fmt.Errorf("query %s: %w", a.Name, err)
 	}

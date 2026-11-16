@@ -147,8 +147,11 @@ func registerProtectedRoutes(r chi.Router, d protectedDeps) {
 
 	// Search
 	// File hits are re-checked against Postgres (deleted files, and files
-	// attached to credentials for roles that cannot read credentials).
-	searchHandler := search.NewHandler(d.search).WithFileChecker(file.NewRepo(d.pool))
+	// attached to credentials for roles that cannot read credentials), and so
+	// are note hits, by their parent (#4798).
+	searchFiles := file.NewRepo(d.pool)
+	searchHandler := search.NewHandler(d.search).WithFileChecker(searchFiles).
+		WithNoteChecker(search.NewNoteRepo(d.pool, searchFiles))
 	r.Get("/api/v1/search", searchHandler.Search)
 
 	// Note CRUD (polymorphic)

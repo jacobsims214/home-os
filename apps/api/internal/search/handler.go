@@ -24,12 +24,22 @@ type FileChecker interface {
 type Handler struct {
 	client *Client
 	files  FileChecker // nil: file hits are not re-checked against Postgres
+	notes  NoteChecker // nil: every note hit is dropped (fail closed)
 }
 
 // WithFileChecker makes Search drop file hits whose file is gone or hidden
 // from the caller.
 func (h *Handler) WithFileChecker(fc FileChecker) *Handler {
 	h.files = fc
+	return h
+}
+
+// WithNoteChecker makes Search re-check note hits against Postgres by
+// their parent (#4798): a note on a record the role may not see, such as a
+// credential or a credential's file for a viewer, is dropped. Without it
+// Search returns no note hits at all.
+func (h *Handler) WithNoteChecker(nc NoteChecker) *Handler {
+	h.notes = nc
 	return h
 }
 
@@ -81,6 +91,7 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	if h.files != nil {
 		results = h.checkFiles(r.Context(), claims.HouseholdID, claims.Role, results)
 	}
+	results = h.checkNotes(r.Context(), claims.HouseholdID, claims.Role, results)
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{

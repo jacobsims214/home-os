@@ -126,7 +126,7 @@ jobs:
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/homeos_test?sslmode=disable
       TYPESENSE_TEST_ADDR: 127.0.0.1:8108
       TYPESENSE_TEST_KEY: homeos-ci-test-key
-      TYPESENSE_TESTS: TestDocumentHybridSearch|TestGuideHybridSearchIntegration|TestTypesenseHybridIntegration
+      TYPESENSE_TESTS: TestDocumentHybridSearch|TestGuideHybridSearchIntegration|TestTypesenseHybridIntegration|TestNoteHitsFollowParentIntegration
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

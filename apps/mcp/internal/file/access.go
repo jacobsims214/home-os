@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -130,4 +131,15 @@ func secretFileWhere(n int) string {
 		SELECT 1 FROM document_links sl
 		 WHERE sl.household_id = f.household_id AND sl.link_type = 'file'
 		   AND sl.link_id = f.id::text AND sl.entity_type::text = 'secret')))`, n)
+}
+
+// SecretFileSQL is the same rule for other packages' queries (search_all,
+// #4798), like the API's file.SecretFileSQL: a condition that is true when
+// the file whose id is the SQL expression fileID is attached to or linked
+// from a credential, so roles without secrets read must not see it or
+// anything about it (its notes). It takes no parameters. A file that no
+// longer exists is not hidden by it.
+func SecretFileSQL(fileID string) string {
+	return `EXISTS (SELECT 1 FROM files f WHERE f.id = ` + fileID + ` AND NOT ` +
+		strings.Replace(secretFileWhere(0), "$0::boolean", "false", 1) + `)`
 }

@@ -731,6 +731,17 @@ func TestSearchAllRoles(t *testing.T) {
 	secretDoc := mustExec(t, pool,
 		`INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'Quokka recovery codes', 1, 'secret', $3) RETURNING id::text`,
 		h.HouseholdID, blob, chase)
+	// A document linked from (not attached to) the credential, and a note on
+	// it (#4775, #4798): hidden like the credential's own records.
+	linkedDoc := mustExec(t, pool,
+		`INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'Quokka passport scan', 1, 'household', $1) RETURNING id::text`,
+		h.HouseholdID, blob)
+	mustExec(t, pool,
+		`INSERT INTO document_links (household_id, entity_type, entity_id, link_type, link_id, title) VALUES ($1, 'secret', $2, 'file', $3, 'scan') RETURNING id::text`,
+		h.HouseholdID, chase, linkedDoc)
+	linkedDocNote := mustExec(t, pool,
+		`INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'file', $2, 'Renewal', 'Quokka passport number 4471') RETURNING id::text`,
+		h.HouseholdID, linkedDoc)
 	// A person matched only through a field a housesitter may not see.
 	schoolOnly := mustExec(t, pool,
 		`INSERT INTO people (household_id, display_name, school) VALUES ($1, 'Robin', 'Quokka Elementary') RETURNING id::text`,
@@ -795,6 +806,20 @@ func TestSearchAllRoles(t *testing.T) {
 			}
 			if got := has(env, "note", secretNote) || has(env, "document", secretDoc); got != tc.credentials {
 				t.Errorf("records attached to a secret visible = %v, want %v", got, tc.credentials)
+			}
+			if got := has(env, "document", linkedDoc) || has(env, "note", linkedDocNote); got != tc.credentials {
+				t.Errorf("document linked from a secret, or its note, visible = %v, want %v", got, tc.credentials)
+			}
+
+			// The exact text of a note on a credential, and of one on a file
+			// linked from a credential (#4798).
+			for _, q := range []struct{ text, id string }{
+				{"Quokka PIN hint", secretNote}, {"Quokka passport number 4471", linkedDocNote},
+			} {
+				env := search(t, ctx, pool, map[string]any{"query": q.text})
+				if got := has(env, "note", q.id); got != tc.credentials {
+					t.Errorf("note hit for %q = %v, want %v", q.text, got, tc.credentials)
+				}
 			}
 			if got := has(env, "person", schoolOnly); got != (tc.role != "housesitter" && tc.role != "vendor") {
 				t.Errorf("person matched by school visible = %v", got)
