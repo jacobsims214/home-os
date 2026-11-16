@@ -399,6 +399,234 @@ func anyMatch(allergy, item string) bool {
 	return false
 }
 
+// TestAllergenGroupVocabulary is #4804's acceptance test: every synonym and
+// every group member the ticket named matches the ingredient it named. The
+// data is what changed, so there is a row per pair: a shortened group shows
+// up here as one failing row naming the word that went missing, not as a
+// vague count.
+//
+// It goes through anyMatch, the path a stored allergy takes (allergensIn then
+// one matcher per allergen), so a synonym only passes if the alias map and
+// the group agree.
+func TestAllergenGroupVocabulary(t *testing.T) {
+	for _, tc := range []struct {
+		allergy, item string
+		want          bool
+		why           string
+	}{
+		// -- synonyms -> group (the ticket's "should map to a group" list) --
+		{"crustaceans", "shrimp", true, "crustacean(s) -> shellfish"},
+		{"Crustacean allergy", "crab", true, "crustacean(s) -> shellfish"},
+		{"seafood", "shrimp", true, "seafood -> shellfish"},
+		{"seafood", "salmon", true, "seafood -> fish"},
+		{"seafood", "mussels", true, "seafood -> shellfish (molluscs)"},
+		{"seafood allergy", "sea bass", true, "seafood -> fish"},
+		{"dairy products", "cheddar", true, "dairy product(s) -> dairy"},
+		{"Dairy products", "mascarpone", true, "dairy product(s) -> dairy"},
+		{"cow's milk", "cheddar", true, "cow's milk -> dairy"},
+		{"cows milk", "butter", true, "cow's milk, no apostrophe -> dairy"},
+		{"cow\u2019s milk", "ghee", true, "cow's milk with a curly apostrophe -> dairy"},
+		{"lactose intolerance", "milk", true, "lactose intolerance -> lactose"},
+		{"lactose intolerant", "milk", true, "lactose intolerant -> lactose"},
+		{"Lactose intolerant", "cream", true, "lactose intolerant -> lactose"},
+		{"celiac disease", "flour", true, "celiac disease -> celiac"},
+		{"coeliac", "flour", true, "coeliac, people.allergies path"},
+		{"Coeliac disease", "naan", true, "coeliac disease -> celiac"},
+		{"soya", "tofu", true, "soya -> soy"},
+		{"soya", "soybeans", true, "soya -> soy"},
+		{"sesame seeds", "toasted sesame oil", true, "sesame seed(s) -> sesame"},
+		{"sesame seed", "tahini", true, "sesame seed -> sesame"},
+		{"mollusc", "squid", true, "mollusc -> squid"},
+		{"mollusk", "octopus", true, "mollusk -> octopus"},
+		{"mollusc", "clam", true, "mollusc -> clam"},
+		{"mollusc", "mussels", true, "mollusc -> mussel"},
+		{"mollusc", "oyster", true, "mollusc -> oyster"},
+		{"mollusc", "scallops", true, "mollusc -> scallop"},
+
+		// -- group members the ticket named as missing --
+		{"shellfish", "squid", true, "shellfish -> squid"},
+		{"shellfish", "calamari", true, "shellfish -> calamari"},
+		{"shellfish", "octopus", true, "shellfish -> octopus"},
+		{"shellfish", "langoustine", true, "shellfish -> langoustine"},
+		{"fish", "sea bass", true, "fish -> sea bass"},
+		{"fish", "snapper", true, "fish -> snapper"},
+		{"fish", "pollock", true, "fish -> pollock"},
+		{"fish", "sole", true, "fish -> sole"},
+		{"fish", "flounder", true, "fish -> flounder"},
+		{"fish", "mahi mahi", true, "fish -> mahi mahi"},
+		{"fish", "swordfish", true, "fish -> swordfish"},
+		{"fish", "catfish", true, "fish -> catfish"},
+		{"dairy", "mascarpone", true, "dairy -> mascarpone"},
+		{"dairy", "parmigiano reggiano", true, "dairy -> parmigiano reggiano"},
+		{"dairy", "gruyere", true, "dairy -> gruyere"},
+		{"dairy", "brie", true, "dairy -> brie"},
+		{"dairy", "paneer", true, "dairy -> paneer"},
+		{"dairy", "queso", true, "dairy -> queso"},
+		{"dairy", "kefir", true, "dairy -> kefir"},
+		{"gluten", "penne", true, "gluten -> penne"},
+		{"gluten", "sourdough", true, "gluten -> sourdough"},
+		{"gluten", "naan", true, "gluten -> naan"},
+		{"gluten", "puff pastry", true, "gluten -> puff pastry"},
+		{"gluten", "beer", true, "gluten -> beer"},
+		{"gluten", "macaroni", true, "gluten -> macaroni"},
+		{"gluten", "lasagna", true, "gluten -> lasagna"},
+		{"gluten", "orzo", true, "gluten -> orzo"},
+		{"gluten", "ramen", true, "gluten -> ramen"},
+		{"gluten", "udon", true, "gluten -> udon"},
+		{"gluten", "pita", true, "gluten -> pita"},
+		{"gluten", "baguette", true, "gluten -> baguette"},
+		{"gluten", "phyllo", true, "gluten -> phyllo"},
+		{"gluten", "pie crust", true, "gluten -> pie crust"},
+		{"gluten", "pizza dough", true, "gluten -> pizza dough"},
+		{"gluten", "crouton", true, "gluten -> crouton"},
+		{"soy", "soybeans", true, "soy -> soybeans"},
+		// celiac is a gluten allergy, so it gets the same shapes.
+		{"celiac", "naan", true, "celiac -> naan"},
+		{"celiac", "penne", true, "celiac -> penne"},
+		{"celiac", "soy sauce", true, "celiac -> soy sauce (wheat)"},
+
+		// -- the manager's list, in the words a parent types --
+		{"dairy", "butter", true, "dairy -> butter"},
+		{"dairy", "ghee", true, "dairy -> ghee"},
+		{"dairy", "whey", true, "dairy -> whey"},
+		{"dairy", "creme fraiche", true, "dairy -> creme fraiche"},
+		{"dairy", "halloumi", true, "dairy -> halloumi"},
+		{"milk allergy", "kefir", true, "milk -> kefir"},
+		{"gluten", "flour", true, "gluten -> flour"},
+		{"celiac", "flour", true, "celiac -> flour"},
+		{"celiac", "bread", true, "celiac -> bread"},
+
+		// -- exceptions that must keep holding (#4802/#4804) --
+		{"dairy", "peanut butter", false, "peanut butter is not dairy"},
+		{"milk", "peanut butter", false, "peanut butter is not milk"},
+		{"lactose intolerance", "almond milk", false, "almond milk is not lactose"},
+		{"lactose intolerance", "mascarpone", true, "lactose gets the wider dairy list"},
+		{"lactose intolerant", "paneer", true, "lactose gets the wider dairy list"},
+		{"dairy", "almond milk", false, "almond milk is not dairy"},
+		{"dairy", "bean curd", false, "bean curd is tofu, not dairy"},
+		{"egg", "eggplant", false, "eggplant is not egg"},
+		{"nut", "nutmeg", false, "nutmeg is not a nut"},
+		{"nut", "coconut", false, "coconut is not a nut"},
+		{"nut", "butternut squash", false, "butternut is not a nut"},
+		{"shellfish", "oyster mushroom", false, "oyster mushrooms are not shellfish"},
+		{"fish", "chicken", false, "chicken is not fish"},
+		{"gluten", "root beer", false, "root beer is not gluten"},
+		{"gluten", "ginger beer", false, "ginger beer is not gluten"},
+		{"celiac", "root beer", false, "root beer is not gluten"},
+		{"celiac", "almond flour", false, "almond flour is not gluten"},
+		{"celiac", "rice flour", false, "rice flour is not gluten"},
+		{"celiac", "corn tortillas", false, "corn tortillas are not gluten"},
+		// "gluten-free bread" is deliberately still flagged: the words are
+		// stripped and "bread" remains, and a label is not proof (#4804).
+		{"celiac", "gluten-free bread", true, "a packet claim is not proof"},
+		{"celiac", "chickpea pasta", false, "chickpea pasta is not gluten"},
+		{"celiac", "soba noodles", false, "soba is buckwheat"},
+		{"dairy", "coconut yogurt", false, "coconut yogurt is not dairy"},
+		{"dairy", "oat cream", false, "oat cream is not dairy"},
+		{"dairy", "cream soda", false, "cream soda is not dairy"},
+		{"fish", "bass ale", false, "bass ale is a beer, not a fish"},
+		{"gluten", "rice noodles", false, "rice noodles are not gluten"},
+		// Exceptions are for the group words only: an allergy's own word still
+		// always matches, and a nut allergy still flags almond flour.
+		{"almond", "almond flour", true, "the allergy's own word always matches"},
+		{"nut", "almond flour", true, "almond flour is still nuts"},
+		{"milk", "coconut milk", true, "the allergy's own word always matches"},
+	} {
+		if got := anyMatch(tc.allergy, tc.item); got != tc.want {
+			t.Errorf("%s: allergy %q vs %q = %v, want %v", tc.why, tc.allergy, tc.item, got, tc.want)
+		}
+	}
+}
+
+// TestDietUsesWidenedGroups is the other half of #4804: dietRules reuses
+// allergenGroups through the same newAllergyMatcher, so "gluten-free",
+// "dairy-free" and "no seafood" inherit the wider vocabulary. Without this a
+// celiac's allergy would flag penne while their own diet let it through.
+func TestDietUsesWidenedGroups(t *testing.T) {
+	for _, tc := range []struct {
+		diet, item string
+		want       bool
+	}{
+		{"gluten-free", "penne", true},
+		{"gluten-free", "naan", true},
+		{"gluten-free", "root beer", false},
+		{"gluten free", "puff pastry", true},
+		{"dairy free", "mascarpone", true},
+		{"dairy-free", "peanut butter", false},
+		{"dairy free", "paneer", true},
+		{"no seafood", "squid", true},
+		{"no seafood", "salmon", true},
+		{"no seafood", "chicken", false},
+		{"no shellfish", "calamari", true},
+		{"no soya", "soybeans", true},
+		{"no sesame seeds", "tahini", true},
+		{"no gluten", "beer", true},
+		{"no gluten", "ginger beer", false},
+	} {
+		rules, ok := dietRules(eater{id: "p", name: "Nora"}, tc.diet)
+		if !ok {
+			t.Fatalf("diet %q was not applied", tc.diet)
+		}
+		got := false
+		for _, r := range rules {
+			if r.m.matches(tc.item) {
+				got = true
+			}
+		}
+		if got != tc.want {
+			t.Errorf("diet %q vs %q = %v, want %v", tc.diet, tc.item, got, tc.want)
+		}
+	}
+}
+
+// TestAllergenAliasGroups pins the mapping itself, so a future edit that
+// drops a group from an alias is visible even if the ingredient lists happen
+// to overlap. It also keeps the groups honest: an alias must point at a real
+// group, and every group must be reachable by its own key.
+func TestAllergenAliasGroups(t *testing.T) {
+	for key := range allergenGroups {
+		if len(compilePhrases(allergenGroups[key])) == 0 {
+			t.Errorf("group %q has no usable ingredient", key)
+		}
+	}
+	for alias, groups := range allergenAliases {
+		for _, g := range groups {
+			if _, ok := allergenGroups[g]; !ok {
+				t.Errorf("alias %q points at %q, which is not a group", alias, g)
+			}
+		}
+	}
+	// The synonyms the ticket named, by the keys allergensIn produces.
+	for _, tc := range []struct {
+		allergy string
+		want    []string
+	}{
+		{"crustaceans", []string{"crustacean"}},
+		{"seafood", []string{"fish", "shellfish"}},
+		{"dairy products", []string{"dairy"}},
+		{"cow's milk", []string{"dairy"}},
+		{"lactose intolerance", []string{"lactose"}},
+		{"lactose intolerant", []string{"lactose"}},
+		{"celiac disease", []string{"celiac"}},
+		{"coeliac", []string{"celiac"}},
+		{"coeliac disease", []string{"celiac"}},
+		{"soya", []string{"soy"}},
+		{"sesame seeds", []string{"sesame"}},
+		{"mollusc", []string{"mollusc"}},
+		{"mollusk", []string{"mollusc"}},
+	} {
+		var got []string
+		for _, a := range allergensIn(tc.allergy) {
+			got = append(got, allergyGroupKeys(a)...)
+		}
+		for _, w := range tc.want {
+			if !slices.Contains(got, w) {
+				t.Errorf("allergy %q gives groups %v, want %q among them", tc.allergy, got, w)
+			}
+		}
+	}
+}
+
 // TestAllergyMatchersSplitAndLabel pins the two things a stored entry must
 // now do: one entry can give several allergens, and each warning keeps a
 // readable label (the bare allergen, not the raw text).
