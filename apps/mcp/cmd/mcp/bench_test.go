@@ -184,6 +184,9 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 				map[string]any{"date": day(i % 60), "slot": "snack", "text": fmt.Sprintf("Bench snack %d", i)},
 			}}
 		}},
+		{"meal_suggest", func(i int) map[string]any {
+			return map[string]any{"date": day(i % 30), "slot": "dinner", "max_minutes": 60}
+		}},
 		{"note_create", func(i int) map[string]any {
 			return map[string]any{"title": fmt.Sprintf("Bench note %d", i), "content": "Remember the bench."}
 		}},

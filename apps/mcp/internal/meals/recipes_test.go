@@ -356,6 +356,11 @@ func TestAllergyMatcher(t *testing.T) {
 		{"milk", "coconut milk", true}, // the allergy's own word always matches
 		{"nuts", "nutmeg", false},
 		{"nuts", "butternut squash", false},
+		// Stored notes (#4742) are not part of the allergen.
+		{"peanuts (carries an EpiPen)", "peanut butter", true},
+		{"peanuts (carries an EpiPen)", "satay sauce", true},
+		{"tree nuts (cashews, in backpack)", "walnuts", true},
+		{"Dairy (hives)", "cheddar", true},
 	} {
 		m, ok := newAllergyMatcher("p", "Nora", tc.allergy)
 		if !ok {

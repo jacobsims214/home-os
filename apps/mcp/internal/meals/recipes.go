@@ -980,9 +980,33 @@ type allergyMatcher struct {
 	own, group, except        []*regexp.Regexp
 }
 
+// bareAllergen is the allergen of a stored allergy: the text before the
+// first "(" ("peanuts (carries an EpiPen)" -> "peanuts"). people.allergies
+// keeps notes that way since #4742 (KB mcp/people-tools.md).
+func bareAllergen(allergy string) string {
+	if i := strings.Index(allergy, "("); i > 0 {
+		allergy = allergy[:i]
+	}
+	return strings.TrimSpace(allergy)
+}
+
+// compilePhrases compiles each phrase's Go regex (phrasePatterns).
+func compilePhrases(phrases []string) []*regexp.Regexp {
+	var out []*regexp.Regexp
+	for _, p := range phrases {
+		if _, goRe, ok := phrasePatterns(p); ok {
+			out = append(out, regexp.MustCompile(goRe))
+		}
+	}
+	return out
+}
+
 // newAllergyMatcher builds the regexes for one allergy, e.g. "tree nuts".
+// A note in parentheses is not part of the allergen: "peanuts (carries an
+// EpiPen)" matches like "peanuts".
 func newAllergyMatcher(personID, person, allergy string) (allergyMatcher, bool) {
-	m := allergyMatcher{personID: personID, person: person, allergy: strings.TrimSpace(allergy)}
+	allergy = bareAllergen(allergy)
+	m := allergyMatcher{personID: personID, person: person, allergy: allergy}
 	key := strings.Join(func() []string {
 		ws := words(allergy)
 		for i, w := range ws {
@@ -991,18 +1015,9 @@ func newAllergyMatcher(personID, person, allergy string) (allergyMatcher, bool) 
 		return ws
 	}(), " ")
 	key = strings.TrimSuffix(strings.TrimSuffix(key, " allergy"), " allergie")
-	compile := func(phrases []string) []*regexp.Regexp {
-		var out []*regexp.Regexp
-		for _, p := range phrases {
-			if _, goRe, ok := phrasePatterns(p); ok {
-				out = append(out, regexp.MustCompile(goRe))
-			}
-		}
-		return out
-	}
-	m.own = compile([]string{allergy})
-	m.group = compile(allergenGroups[key])
-	m.except = compile(allergenExceptions[key])
+	m.own = compilePhrases([]string{allergy})
+	m.group = compilePhrases(allergenGroups[key])
+	m.except = compilePhrases(allergenExceptions[key])
 	return m, len(m.own) > 0
 }
 
