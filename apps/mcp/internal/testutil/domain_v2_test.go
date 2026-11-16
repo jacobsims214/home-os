@@ -421,6 +421,7 @@ func TestDomainV2_Backfill039(t *testing.T) {
 	// chain strictly newest-first. 056 drops the legacy bill/loan/vendor
 	// columns that 038 down and the legacy inserts below need back.
 	apply("058_same_family_fks.down.sql") // newest first: 058's FKs need 043's vendors key
+	apply("057_secret_agent_share.down.sql")
 	apply("056_domain_v2_cleanup.down.sql")
 	apply("055_activity_event_titles.down.sql")
 	apply("054_change_notifications.down.sql")

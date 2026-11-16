@@ -157,6 +157,7 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	asset := insertID(t, pool, `INSERT INTO assets (household_id, room_id, name) VALUES ($1, $2, 'Fridge') RETURNING id`, f.household, f.room)
 
 	applyMigration(t, pool, "058_same_family_fks.down.sql") // newest first: 058's FKs need 043's vendors key
+	applyMigration(t, pool, "057_secret_agent_share.down.sql")
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql")
 
 	billVehicle := insertID(t, pool, `INSERT INTO bills (household_id, name, entity_type, entity_id) VALUES ($1, 'Car wash', 'vehicle', $2) RETURNING id`, f.household, f.vehicle)
@@ -178,6 +179,10 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	mustExec(t, pool, `INSERT INTO integrations (household_id, type) VALUES ($1, 'homeassistant')`, f.household)
 
 	applyMigration(t, pool, "056_domain_v2_cleanup.up.sql")
+	// Back to the head, so the down below is newest-first again (057 down
+	// is not idempotent).
+	applyMigration(t, pool, "057_secret_agent_share.up.sql")
+	applyMigration(t, pool, "058_same_family_fks.up.sql")
 
 	type subject struct{ property, vehicle, asset *uuid.UUID }
 	subjectOf := func(table string, id uuid.UUID) subject {
@@ -237,6 +242,7 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 
 	// Down: the legacy columns come back, filled from the typed FKs.
 	applyMigration(t, pool, "058_same_family_fks.down.sql") // newest first: 058's FKs need 043's vendors key
+	applyMigration(t, pool, "057_secret_agent_share.down.sql")
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql")
 	legacy := func(table string, id uuid.UUID) (kind *string, entity *uuid.UUID) {
 		t.Helper()

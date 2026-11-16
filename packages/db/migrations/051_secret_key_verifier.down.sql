@@ -10,6 +10,15 @@
 --     cannot unlock until 051 is applied again. Their encrypted secrets and
 --     PBKDF2 salt are untouched. Legacy rows (never upgraded) work as before.
 --
+-- The backup table deliberately has NO foreign key to secret_keys (#4699).
+-- It must outlive this file for the lossless down/up above, so it cannot be
+-- dropped here; but an FK would make 026 down (DROP TABLE secret_keys) fail,
+-- blocking every rollback below 051. Without it the table is plain parked
+-- data: 051 up joins it on secret_key_id (orphans match nothing) and then
+-- drops it, and a row whose key was deleted meanwhile just stays unmatched.
+-- A database that ran the earlier version of this file has the FK; it is
+-- dropped below.
+--
 -- Runs in one transaction.
 
 BEGIN;
@@ -19,9 +28,11 @@ ALTER TABLE secret_keys
     DROP CONSTRAINT secret_keys_verifier_argon2id;
 
 CREATE TABLE IF NOT EXISTS secret_key_verifier_051_backup (
-    secret_key_id UUID PRIMARY KEY REFERENCES secret_keys(id) ON DELETE CASCADE,
+    secret_key_id UUID PRIMARY KEY, -- secret_keys.id; no FK, see header
     verifier      TEXT NOT NULL
 );
+ALTER TABLE secret_key_verifier_051_backup
+    DROP CONSTRAINT IF EXISTS secret_key_verifier_051_backup_secret_key_id_fkey;
 
 INSERT INTO secret_key_verifier_051_backup (secret_key_id, verifier)
 SELECT id, verifier FROM secret_keys WHERE verifier IS NOT NULL
