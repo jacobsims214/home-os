@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/budgetcat"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 )
@@ -37,6 +38,10 @@ const duplicateWindow = "10 minutes"
 var paramAliases = map[string]string{
 	"is_autopay": "autopay",
 	"vendor_id":  "contact_id",
+	// bills.category is the bill's own label; the budget category has its
+	// own param (#4702).
+	"budget_category_id": "budget_category",
+	"budget":             "budget_category",
 }
 
 // normalizeArgs returns a copy of args with old parameter names moved to
@@ -60,17 +65,20 @@ func normalizeArgs(args map[string]any) map[string]any {
 // createBillInput is the validated bill_create arguments. Optional text
 // fields are nil when absent or blank so they are stored as NULL.
 type createBillInput struct {
-	name       string
-	amount     float64
-	frequency  string
-	dueDay     *int       // monthly bills only
-	dueDate    *time.Time // every other frequency
-	category   *string
-	autopay    bool
-	contactID  *uuid.UUID
-	subject    subject
-	paymentURL *string
-	notes      *string
+	name      string
+	amount    float64
+	frequency string
+	dueDay    *int       // monthly bills only
+	dueDate   *time.Time // every other frequency
+	category  *string
+	// budgetCategory is the budget category ref (name or UUID), nil when
+	// absent or blank.
+	budgetCategory *string
+	autopay        bool
+	contactID      *uuid.UUID
+	subject        subject
+	paymentURL     *string
+	notes          *string
 }
 
 // createExample is a valid bill_create call for error examples.
@@ -145,6 +153,7 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		mcp.WithNumber("due_day", mcp.Description("Monthly bills: day of the month due, 1-31"), mcp.Min(1), mcp.Max(31)),
 		mcp.WithString("due_date", mcp.Description("Other bills: next due date, YYYY-MM-DD; repeats every 3/6/12 months")),
 		mcp.WithString("category", mcp.Description("Category, e.g. Utilities, Insurance, Subscription")),
+		mcp.WithString("budget_category", mcp.Description("Budget category name or id (default: one named like category)")),
 		mcp.WithBoolean("autopay", mcp.Description("true when it is paid automatically (default false)")),
 		mcp.WithString("contact_id", mcp.Description("Contact (vendor) id it is paid to, from contact_find")),
 		mcp.WithString("property_id", mcp.Description("House or other property it is for (UUID from property_find)")),
@@ -195,6 +204,16 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		if err != nil {
 			return respond.Failed("create the bill", err), nil
 		}
+		cat, res, err := createBudgetCategory(ctx, tx, in, claims.HouseholdID)
+		if err != nil {
+			return respond.Failed("create the bill", err), nil
+		} else if res != nil {
+			return res, nil
+		}
+		var categoryID *uuid.UUID
+		if cat != nil {
+			categoryID = &cat.ID
+		}
 
 		dup, err := scanBill(tx.QueryRow(ctx,
 			`SELECT `+billColumns+`
@@ -222,12 +241,13 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 
 		r, err := scanBill(tx.QueryRow(ctx,
 			`INSERT INTO bills (household_id, name, amount, due_day, category, is_autopay,
-			                    vendor_id, property_id, vehicle_id, asset_id, payment_url, notes, frequency, due_date)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			                    vendor_id, property_id, vehicle_id, asset_id, payment_url, notes, frequency, due_date,
+			                    budget_category_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			 RETURNING `+billColumns,
 			claims.HouseholdID, in.name, in.amount, in.dueDay, in.category, in.autopay,
 			in.contactID, in.subject.propertyID, in.subject.vehicleID, in.subject.assetID, in.paymentURL, in.notes,
-			in.frequency, in.dueDate,
+			in.frequency, in.dueDate, categoryID,
 		))
 		if err != nil {
 			if res := subjectDBError(err, createExample); res != nil {
@@ -249,7 +269,7 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 
 		b := r.data(today)
 		return respond.OK(
-			fmt.Sprintf("Created bill %s, %s %s.", b.Name, money(in.amount), b.dueText()),
+			fmt.Sprintf("Created bill %s, %s %s.", b.Name, money(in.amount), b.dueText())+budgetText(cat),
 			b,
 			fmt.Sprintf("Mark it paid with bill_pay bill_id=%s.", b.ID),
 			"See monthly totals by category with budget_summary.",
@@ -274,6 +294,10 @@ type billUpdate struct {
 	frequency *string
 	dueDay    *int
 	dueDate   *time.Time
+	// budgetCategorySet is true when budget_category was given;
+	// budgetCategory is then the ref, or nil to clear it.
+	budgetCategorySet bool
+	budgetCategory    *string
 }
 
 // scheduleGiven reports whether frequency, due_day or due_date was given.
@@ -305,6 +329,7 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		mcp.WithNumber("due_day", mcp.Description("Monthly bills: day of the month due, 1-31"), mcp.Min(1), mcp.Max(31)),
 		mcp.WithString("due_date", mcp.Description("Other bills: next due date, YYYY-MM-DD")),
 		mcp.WithString("category", mcp.Description("Category, e.g. Utilities; empty string clears it")),
+		mcp.WithString("budget_category", mcp.Description("Budget category name or id; a new name creates it; \"\" clears it")),
 		mcp.WithBoolean("autopay", mcp.Description("true when it is paid automatically")),
 		mcp.WithString("contact_id", mcp.Description("Contact (vendor) id from contact_find; empty string clears it")),
 		mcp.WithString("property_id", mcp.Description("Move it to this property (UUID); \"\" unties it")),
@@ -381,6 +406,22 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			}
 		}
 
+		var cat *budgetcat.Category
+		if in.budgetCategorySet {
+			var categoryID *uuid.UUID
+			if in.budgetCategory != nil {
+				var res *mcp.CallToolResult
+				if cat, res, err = resolveBudgetCategory(ctx, tx, *in.budgetCategory, claims.HouseholdID, example); err != nil {
+					return respond.Failed("update the bill", err), nil
+				} else if res != nil {
+					return res, nil
+				}
+				categoryID = &cat.ID
+			}
+			in.columns = append(in.columns, "budget_category_id")
+			in.values = append(in.values, categoryID)
+		}
+
 		// $1 is the bill id, $2 the household; the SET values follow.
 		args := []any{in.billID, claims.HouseholdID}
 		sets := make([]string, 0, len(in.columns)+1)
@@ -427,6 +468,7 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		if d := b.dueText(); d != "" {
 			summary = fmt.Sprintf("Updated bill %s (%s); next %s.", b.Name, strings.Join(in.params, ", "), d)
 		}
+		summary += budgetText(cat)
 		return respond.OK(summary, b,
 			fmt.Sprintf("Mark it paid with bill_pay bill_id=%s.", b.ID)), nil
 	}
@@ -881,6 +923,13 @@ func parseUpdateBillInput(args map[string]any) (billUpdate, error) {
 		}
 		u.set("category", "category", category)
 	}
+	if given(args, "budget_category") {
+		if u.budgetCategory, err = parseBudgetCategory(args); err != nil {
+			return u, err
+		}
+		u.budgetCategorySet = true
+		u.params = append(u.params, "budget_category")
+	}
 
 	if autopay, ok, err := optionalBool(args, "autopay"); err != nil {
 		return u, err
@@ -926,9 +975,9 @@ func parseUpdateBillInput(args map[string]any) (billUpdate, error) {
 		u.set("notes", "notes", notes)
 	}
 
-	if len(u.columns) == 0 && !u.scheduleGiven() {
+	if len(u.columns) == 0 && !u.scheduleGiven() && !u.budgetCategorySet {
 		return u, badArg("", "No fields to update.",
-			"Pass bill_id plus at least one of name, amount, frequency, due_day, due_date, category, autopay, contact_id, property_id, vehicle_id, asset_id, notes.")
+			"Pass bill_id plus at least one of name, amount, frequency, due_day, due_date, category, budget_category, autopay, contact_id, property_id, vehicle_id, asset_id, notes.")
 	}
 	return u, nil
 }
@@ -966,6 +1015,9 @@ func parseCreateBillInput(args map[string]any) (createBillInput, error) {
 	}
 
 	if in.category, err = parseCategory(args); err != nil {
+		return in, err
+	}
+	if in.budgetCategory, err = parseBudgetCategory(args); err != nil {
 		return in, err
 	}
 	if in.autopay, _, err = optionalBool(args, "autopay"); err != nil {
@@ -1186,6 +1238,60 @@ func parseCategory(args map[string]any) (*string, error) {
 }
 
 // optionalBool reads a boolean argument; ok is false when absent or null.
+// parseBudgetCategory reads budget_category: a budget category name or id,
+// nil when absent or blank.
+func parseBudgetCategory(args map[string]any) (*string, error) {
+	c, err := optionalString(args, "budget_category")
+	if err != nil {
+		return nil, err
+	}
+	if c != nil && utf8.RuneCountInString(*c) > budgetcat.MaxNameLen {
+		return nil, badArg("budget_category", fmt.Sprintf("budget_category must be at most %d characters.", budgetcat.MaxNameLen),
+			"Pass a short budget category, e.g. Utilities.")
+	}
+	return c, nil
+}
+
+// resolveBudgetCategory resolves a budget_category ref (a name, created when
+// the family has none, or a UUID of one of its categories).
+func resolveBudgetCategory(ctx context.Context, tx pgx.Tx, ref, householdID string, example map[string]any) (*budgetcat.Category, *mcp.CallToolResult, error) {
+	c, err := budgetcat.Resolve(ctx, tx, householdID, ref)
+	switch {
+	case errors.Is(err, budgetcat.ErrNotFound):
+		return nil, respond.Invalid("budget_category", fmt.Sprintf("No budget category with id %q in this family.", ref),
+			"Pass the category's name instead, e.g. Utilities; a new name creates it.", example), nil
+	case err != nil:
+		return nil, nil, err
+	}
+	return &c, nil, nil
+}
+
+// createBudgetCategory picks bill_create's budget category: budget_category
+// when given (resolved or created), else an existing budget category named
+// like the bill's category (never created from it, so a free-text label
+// does not add budget categories), else none.
+func createBudgetCategory(ctx context.Context, tx pgx.Tx, in createBillInput, householdID string) (*budgetcat.Category, *mcp.CallToolResult, error) {
+	if in.budgetCategory != nil {
+		return resolveBudgetCategory(ctx, tx, *in.budgetCategory, householdID, createExample)
+	}
+	if in.category == nil {
+		return nil, nil, nil
+	}
+	c, ok, err := budgetcat.Lookup(ctx, tx, householdID, *in.category)
+	if err != nil || !ok {
+		return nil, nil, err
+	}
+	return &c, nil, nil
+}
+
+// budgetText is the summary sentence for a bill filed under c, "" for nil.
+func budgetText(c *budgetcat.Category) string {
+	if c == nil {
+		return ""
+	}
+	return " Filed under " + c.Describe() + "."
+}
+
 func optionalBool(args map[string]any, key string) (val, ok bool, err error) {
 	v, present := args[key]
 	if !present || v == nil {

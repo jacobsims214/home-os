@@ -44,7 +44,10 @@ func decodeData[T any](t *testing.T, e writeEnv) T {
 	return d
 }
 
-func (e writeEnv) property(t *testing.T) propertyData { t.Helper(); return decodeData[propertyData](t, e) }
+func (e writeEnv) property(t *testing.T) propertyData {
+	t.Helper()
+	return decodeData[propertyData](t, e)
+}
 
 func (e writeEnv) wantError(t *testing.T, field string) {
 	t.Helper()
@@ -271,10 +274,15 @@ func TestPropertyRoomAsset(t *testing.T) {
 	if !strings.Contains(env.Next[0], "room_id="+kitchen.ID) || !strings.Contains(env.Next[0], "asset_update asset_id=…") {
 		t.Errorf("next = %v", env.Next)
 	}
-	// The legacy finance columns are never written (#4704).
-	if n := count(t, pool, `SELECT count(*) FROM properties WHERE id = $1 AND mortgage_amount IS NULL AND property_tax_annual IS NULL
-		AND insurance_annual IS NULL AND hoa_fee_monthly IS NULL AND down_payment IS NULL`, p.ID); n != 1 {
-		t.Errorf("legacy finance columns written")
+	// Mortgage, tax, insurance and HOA live in loans and bills about the
+	// property (#4704; #4707 drops the old columns): creating a property
+	// makes none of them.
+	if n := count(t, pool, `SELECT (SELECT count(*) FROM loans WHERE property_id = $1) + (SELECT count(*) FROM bills WHERE property_id = $1)`,
+		p.ID); n != 0 {
+		t.Errorf("property_create made %d loans/bills", n)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM properties WHERE id = $1 AND down_payment IS NULL`, p.ID); n != 1 {
+		t.Errorf("down_payment written")
 	}
 	if n := count(t, pool, `SELECT count(*) FROM rooms WHERE property_id = $1 AND household_id = $2`, p.ID, hh.HouseholdID); n != 2 {
 		t.Errorf("rooms household_id not set: %d", n)

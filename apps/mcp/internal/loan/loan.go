@@ -63,11 +63,13 @@ const loanSelect = `SELECT l.id, l.name, l.lender, l.original_amount::float8, l.
 	       l.interest_rate::float8, l.term_months, l.monthly_payment::float8, l.due_day,
 	       l.start_date, l.term_end, l.property_id, l.vehicle_id, l.asset_id, l.notes,
 	       l.created_at, l.updated_at,
-	       COALESCE(a.name, NULLIF(concat_ws(' ', v.year, v.make, v.model), ''), p.name)
+	       COALESCE(a.name, NULLIF(concat_ws(' ', v.year, v.make, v.model), ''), p.name),
+	       l.budget_category_id, bc.name
 	FROM loans l
 	LEFT JOIN properties p ON p.id = l.property_id
 	LEFT JOIN vehicles v ON v.id = l.vehicle_id
-	LEFT JOIN assets a ON a.id = l.asset_id`
+	LEFT JOIN assets a ON a.id = l.asset_id
+	LEFT JOIN budget_categories bc ON bc.id = l.budget_category_id`
 
 // loanRow is a loans row as the tools load it.
 type loanRow struct {
@@ -89,6 +91,8 @@ type loanRow struct {
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 	SubjectName      *string
+	BudgetCategoryID *uuid.UUID
+	BudgetCategory   *string
 }
 
 // scanLoan reads one row of loanSelect.
@@ -97,7 +101,7 @@ func scanLoan(row pgx.Row) (loanRow, error) {
 	err := row.Scan(&r.ID, &r.Name, &r.Lender, &r.OriginalAmount, &r.RemainingBalance,
 		&r.InterestRate, &r.TermMonths, &r.MonthlyPayment, &r.DueDay,
 		&r.StartDate, &r.TermEnd, &r.PropertyID, &r.VehicleID, &r.AssetID, &r.Notes,
-		&r.CreatedAt, &r.UpdatedAt, &r.SubjectName)
+		&r.CreatedAt, &r.UpdatedAt, &r.SubjectName, &r.BudgetCategoryID, &r.BudgetCategory)
 	return r, err
 }
 
@@ -134,6 +138,8 @@ type loanData struct {
 	AssetID          *string   `json:"asset_id" jsonschema_description:"The thing the loan is for (its property_id follows the asset)."`
 	SubjectType      *string   `json:"subject_type" jsonschema_description:"property, vehicle or asset; null for a loan not tied to anything."`
 	SubjectName      *string   `json:"subject_name" jsonschema_description:"Name of the property, vehicle or asset."`
+	BudgetCategoryID *string   `json:"budget_category_id" jsonschema_description:"Budget category budget_summary files the payment under; null is uncategorized."`
+	BudgetCategory   *string   `json:"budget_category" jsonschema_description:"Name of that budget category, e.g. Housing."`
 	Notes            *string   `json:"notes"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
@@ -159,6 +165,7 @@ func (r loanRow) data(today time.Time) loanData {
 		InterestRate: r.InterestRate, TermMonths: r.TermMonths,
 		DueDay: r.DueDay, PropertyID: uuidString(r.PropertyID), VehicleID: uuidString(r.VehicleID),
 		AssetID: uuidString(r.AssetID), SubjectName: r.SubjectName, Notes: r.Notes,
+		BudgetCategoryID: uuidString(r.BudgetCategoryID), BudgetCategory: r.BudgetCategory,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 		remaining: r.RemainingBalance, payment: r.MonthlyPayment,
 	}

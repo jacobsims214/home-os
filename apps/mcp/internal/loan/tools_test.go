@@ -245,7 +245,7 @@ func deref[T any](p *T) any {
 func TestToolDefinitions(t *testing.T) {
 	type hints struct{ readOnly, destructive, idempotent bool }
 	createParams := []string{"name", "original_amount", "remaining_balance", "lender", "interest_rate", "term_months",
-		"monthly_payment", "due_day", "start_date", "term_end", "notes", "property_id", "vehicle_id", "asset_id"}
+		"monthly_payment", "due_day", "start_date", "term_end", "notes", "category", "property_id", "vehicle_id", "asset_id"}
 	want := map[string]struct {
 		title    string
 		required []string

@@ -168,25 +168,12 @@ func memberCtx(t *testing.T, pool *pgxpool.Pool, hh testutil.Household, role str
 	}), uid
 }
 
-// legacyColumns are the vehicles finance columns the tools must never read
-// or write (#4704): a car loan is a loan, insurance and registration are bills.
-const legacyColumns = `lender, loan_amount, loan_term_months, monthly_payment, registration_renewal_month,
-	registration_cost, insurance_provider, insurance_cost`
-
 // legacyParams are legacy names a model might send; they must not be
-// advertised or written.
+// advertised or written. The vehicles finance columns they named are dropped
+// by #4707, so the tests prove "not written" through loans and bills (a car
+// loan is a loan, insurance and registration are bills), never the columns.
 var legacyParams = []string{"lender", "loan_amount", "loan_term_months", "monthly_payment", "registration_renewal_month",
 	"registration_cost", "insurance_provider", "insurance_cost", "odometer", "nickname"}
-
-// legacyRow reads the legacy columns of one vehicle as text.
-func legacyRow(t *testing.T, pool *pgxpool.Pool, id string) string {
-	t.Helper()
-	var s string
-	if err := pool.QueryRow(context.Background(), `SELECT concat_ws('|', `+legacyColumns+`) FROM vehicles WHERE id = $1`, id).Scan(&s); err != nil {
-		t.Fatal(err)
-	}
-	return s
-}
 
 // TestWriteToolDefinitions pins the write tools to the catalog: names,
 // required params, descriptions, all four hints and an outputSchema.
@@ -294,11 +281,6 @@ func TestVehicleCreate(t *testing.T) {
 	if last := env.Next[len(env.Next)-1]; !strings.Contains(last, "no odometer field") || !strings.Contains(last, "vehicle_update vehicle_id="+f.ID) {
 		t.Errorf("unstored hint missing: %v", env.Next)
 	}
-	for _, id := range []string{v.ID, f.ID} {
-		if got := legacyRow(t, pool, id); got != "" {
-			t.Errorf("legacy finance columns written for %s: %q", id, got)
-		}
-	}
 	if n := count(t, pool, `SELECT count(*) FROM loans WHERE household_id = $1`, hh.HouseholdID) +
 		count(t, pool, `SELECT count(*) FROM bills WHERE household_id = $1`, hh.HouseholdID); n != 0 {
 		t.Errorf("vehicle_create made %d loans/bills from legacy params", n)
@@ -370,7 +352,7 @@ func TestVehicleCreateParallel(t *testing.T) {
 
 // TestVehicleUpdate: partial update with null clears, a no-op writes
 // nothing, name-or-id resolution with an ambiguity error, another family's
-// vehicle is not found, and the legacy finance columns stay as they were.
+// vehicle is not found, and legacy finance params write no loan or bill.
 func TestVehicleUpdate(t *testing.T) {
 	t.Parallel()
 	pool := testutil.NewPool(t)
@@ -378,14 +360,22 @@ func TestVehicleUpdate(t *testing.T) {
 	w := newWriteTools(pool)
 	bg := context.Background()
 
-	// A pre-#4704 row with legacy finance values: they must survive updates.
-	odyssey := insertID(t, pool, `INSERT INTO vehicles (household_id, year, make, model, license_plate, color, current_value,
-		lender, loan_amount, loan_term_months, monthly_payment, registration_renewal_month, registration_cost, insurance_provider, insurance_cost)
-		VALUES ($1, 2019, 'Honda', 'Odyssey', 'ABC123', 'Blue', 20000, 'Old Bank', 30000, 60, 550, 4, 85, 'Old Insurer', 1200) RETURNING id`, hh.HouseholdID)
-	legacyBefore := legacyRow(t, pool, odyssey)
-	if legacyBefore == "" {
-		t.Fatal("legacy fixture empty")
+	// The vehicle's loan lives in loans (typed vehicle_id): legacy finance
+	// params on vehicle_update must not touch it or add loans/bills.
+	odyssey := insertID(t, pool, `INSERT INTO vehicles (household_id, year, make, model, license_plate, color, current_value)
+		VALUES ($1, 2019, 'Honda', 'Odyssey', 'ABC123', 'Blue', 20000) RETURNING id`, hh.HouseholdID)
+	insertID(t, pool, `INSERT INTO loans (household_id, name, lender, original_amount, remaining_balance, monthly_payment, vehicle_id)
+		VALUES ($1, 'Odyssey loan', 'Old Bank', 30000, 21000, 550, $2) RETURNING id`, hh.HouseholdID, odyssey)
+	financeRows := func() string {
+		var s string
+		if err := pool.QueryRow(bg, `SELECT concat_ws('|', (SELECT count(*) FROM bills WHERE household_id = $1),
+			(SELECT string_agg(concat_ws(',', name, lender, original_amount, monthly_payment), ';') FROM loans WHERE household_id = $1))`,
+			hh.HouseholdID).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
 	}
+	financeBefore := financeRows()
 
 	// By model name, any case: a new value and a cleared color.
 	env := w.update.run(t, ctx, map[string]any{"vehicle_id": "odyssey", "current_value": "18,500", "color": nil,
@@ -398,8 +388,8 @@ func TestVehicleUpdate(t *testing.T) {
 	if !strings.HasPrefix(env.Summary, "Updated 2019 Honda Odyssey") || !strings.Contains(env.Summary, "(color, current_value)") {
 		t.Errorf("summary = %q", env.Summary)
 	}
-	if got := legacyRow(t, pool, odyssey); got != legacyBefore {
-		t.Errorf("legacy columns changed: %q -> %q", legacyBefore, got)
+	if got := financeRows(); got != financeBefore {
+		t.Errorf("legacy params changed loans/bills: %q -> %q", financeBefore, got)
 	}
 
 	// No-op: nothing written, updated_at unchanged.

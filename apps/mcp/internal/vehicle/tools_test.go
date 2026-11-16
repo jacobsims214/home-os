@@ -184,8 +184,8 @@ func TestVehicleFind(t *testing.T) {
 	}
 
 	odyssey := insertID(t, pool, `INSERT INTO vehicles (household_id, year, make, model, vin, license_plate, color,
-		purchase_price, purchase_date, current_value, insurance_cost, loan_amount)
-		VALUES ($1, 2022, 'Honda', 'Odyssey', '5FNRL6H7XNB000001', 'ABC123', 'Blue', 38000, '2022-03-15', 31000, 1200, 30000)
+		purchase_price, purchase_date, current_value)
+		VALUES ($1, 2022, 'Honda', 'Odyssey', '5FNRL6H7XNB000001', 'ABC123', 'Blue', 38000, '2022-03-15', 31000)
 		RETURNING id`, hh.HouseholdID)
 	f150 := insertID(t, pool, `INSERT INTO vehicles (household_id, year, make, model, notes)
 		VALUES ($1, 2019, 'Ford', 'F-150', 'Tow hitch 100%_ rated') RETURNING id`, hh.HouseholdID)
@@ -221,8 +221,10 @@ func TestVehicleFind(t *testing.T) {
 			o.PurchaseDate == nil || *o.PurchaseDate != "2022-03-15" || o.CurrentValue == nil || *o.CurrentValue != 31000 {
 			t.Fatalf("odyssey: %+v", o)
 		}
+		// Money comes from the typed loan and bills (loan_count, bill_count),
+		// never as legacy finance fields on the vehicle.
 		if strings.Contains(string(env.Items), "insurance_cost") || strings.Contains(string(env.Items), "loan_amount") {
-			t.Errorf("legacy finance columns leaked: %s", env.Items)
+			t.Errorf("legacy finance fields in the output: %s", env.Items)
 		}
 		if env.Summary != "Found 2 vehicles." || !strings.Contains(strings.Join(env.Next, " "), "vehicle_find id=") {
 			t.Errorf("summary/next: %q %v", env.Summary, env.Next)

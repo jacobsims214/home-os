@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/budgetcat"
 	"home-os/mcp/internal/respond"
 )
 
@@ -31,6 +32,7 @@ var fieldAliases = map[string]string{
 	"due": "due_day", "payment_day": "due_day",
 	"end_date": "term_end", "maturity_date": "term_end", "payoff_date": "term_end",
 	"term": "term_months", "start": "start_date", "note": "notes",
+	"budget_category": "category", "budget_category_id": "category", "category_id": "category", "budget": "category",
 }
 
 // writeAliases are old (S1) and other parameter names for loan_update /
@@ -68,6 +70,9 @@ type loanFields struct {
 	startDate        *time.Time
 	termEnd          *time.Time
 	notes            *string
+	// category is the budget category ref (a name or a UUID), nil when
+	// absent or blank; set["category"] with a nil category clears it.
+	category *string
 	// subject is set when any of property_id / vehicle_id / asset_id was
 	// given: the three columns are then replaced together.
 	subject    bool
@@ -78,7 +83,7 @@ type loanFields struct {
 
 // fieldParams are the create/update params in the order summaries list them.
 var fieldParams = []string{"name", "lender", "original_amount", "remaining_balance", "interest_rate",
-	"term_months", "monthly_payment", "due_day", "start_date", "term_end", "notes", "property_id", "vehicle_id", "asset_id"}
+	"term_months", "monthly_payment", "due_day", "start_date", "term_end", "notes", "category", "property_id", "vehicle_id", "asset_id"}
 
 // parseDate reads a YYYY-MM-DD (or YYYY-MM, the 1st of that month) param.
 func parseDate(args map[string]any, key, example string) (*time.Time, error) {
@@ -166,6 +171,13 @@ func parseFields(args map[string]any) (loanFields, error) {
 	if f.notes, err = optionalString(args, "notes"); err != nil {
 		return f, err
 	}
+	if f.category, err = optionalString(args, "category"); err != nil {
+		return f, err
+	}
+	if f.category != nil && utf8.RuneCountInString(*f.category) > budgetcat.MaxNameLen {
+		return f, badArg("category", fmt.Sprintf("category must be at most %d characters.", budgetcat.MaxNameLen),
+			"Pass a short budget category, e.g. Housing.")
+	}
 
 	if subjectGiven(args) {
 		f.subject = true
@@ -215,6 +227,32 @@ func checkSubjects(ctx context.Context, tx pgx.Tx, f loanFields, householdID str
 		}
 	}
 	return nil, nil
+}
+
+// resolveCategory resolves f.category (a name, created when the family has
+// none, or a UUID) to the budget category the loan is filed under. It
+// returns nil, nil when category was not given or is being cleared.
+func resolveCategory(ctx context.Context, tx pgx.Tx, f loanFields, householdID string, example map[string]any) (*budgetcat.Category, *mcp.CallToolResult, error) {
+	if f.category == nil {
+		return nil, nil, nil
+	}
+	c, err := budgetcat.Resolve(ctx, tx, householdID, *f.category)
+	switch {
+	case errors.Is(err, budgetcat.ErrNotFound):
+		return nil, respond.Invalid("category", fmt.Sprintf("No budget category with id %q in this family.", *f.category),
+			"Pass the category's name instead, e.g. Housing; a new name creates it.", example), nil
+	case err != nil:
+		return nil, nil, err
+	}
+	return &c, nil, nil
+}
+
+// categoryText is the summary sentence for a loan filed under c, "" for nil.
+func categoryText(c *budgetcat.Category) string {
+	if c == nil {
+		return ""
+	}
+	return " Filed under " + c.Describe() + "."
 }
 
 // dbError maps a constraint violation the checks above could not see (a
@@ -280,6 +318,7 @@ func NewLoanCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		mcp.WithString("start_date", mcp.Description("Date the loan started, YYYY-MM-DD")),
 		mcp.WithString("term_end", mcp.Description("Last payment date, YYYY-MM-DD (default start_date + term_months)")),
 		mcp.WithString("notes", mcp.Description("Free-text notes")),
+		mcp.WithString("category", mcp.Description("Budget category name or id, e.g. Housing; a new name creates it")),
 		mcp.WithString("property_id", mcp.Description("House or other property it is for (UUID from property_find)")),
 		mcp.WithString("vehicle_id", mcp.Description("Car or other vehicle it is for (UUID from vehicle_find)")),
 		mcp.WithString("asset_id", mcp.Description("Thing it is for (UUID from asset_find)")),
@@ -329,6 +368,16 @@ func NewLoanCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		if err != nil {
 			return respond.Failed("create the loan", err), nil
 		}
+		cat, res, err := resolveCategory(ctx, tx, f, c.householdID, createExample)
+		if err != nil {
+			return respond.Failed("create the loan", err), nil
+		} else if res != nil {
+			return res, nil
+		}
+		var categoryID *uuid.UUID
+		if cat != nil {
+			categoryID = &cat.ID
+		}
 
 		dup, err := scanLoan(tx.QueryRow(ctx, loanSelect+`
 			WHERE l.household_id = $1 AND lower(l.name) = lower($2)
@@ -355,14 +404,14 @@ func NewLoanCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		err = tx.QueryRow(ctx,
 			`INSERT INTO loans (household_id, name, lender, original_amount, remaining_balance, interest_rate,
 			                    term_months, monthly_payment, due_day, start_date, term_end, notes,
-			                    property_id, vehicle_id, asset_id)
+			                    property_id, vehicle_id, asset_id, budget_category_id)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date,
 			         COALESCE($15::date, `+termEndSQL("$10::date", "$7::int", "NULL::date")+`),
-			         $11, $12, $13, $14)
+			         $11, $12, $13, $14, $16)
 			 RETURNING id`,
 			c.householdID, *f.name, f.lender, *f.originalAmount, *f.remainingBalance, f.interestRate,
 			f.termMonths, f.monthlyPayment, f.dueDay, f.startDate, f.notes,
-			f.propertyID, f.vehicleID, f.assetID, f.termEnd,
+			f.propertyID, f.vehicleID, f.assetID, f.termEnd, categoryID,
 		).Scan(&id)
 		if err != nil {
 			if res := dbError(err, f.set["term_end"], createExample); res != nil {
@@ -379,7 +428,7 @@ func NewLoanCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 
 		d := r.data(today)
-		summary := fmt.Sprintf("Created loan %s: %s.", d.Name, d.describe())
+		summary := fmt.Sprintf("Created loan %s: %s.", d.Name, d.describe()) + categoryText(cat)
 		next := []string{"See monthly totals and net worth with budget_summary."}
 		if d.MonthlyPayment == nil {
 			next = append(next, fmt.Sprintf("Add the monthly_payment with loan_update loan_id=%s so budget_summary counts it.", d.ID))
@@ -453,6 +502,7 @@ func NewLoanUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		mcp.WithString("start_date", mcp.Description("Date the loan started, YYYY-MM-DD; \"\" clears it")),
 		mcp.WithString("term_end", mcp.Description("Last payment date, YYYY-MM-DD; \"\" clears it")),
 		mcp.WithString("notes", mcp.Description("New notes; \"\" clears them")),
+		mcp.WithString("category", mcp.Description("Budget category name or id; a new name creates it; \"\" clears it")),
 		mcp.WithString("property_id", mcp.Description("Move it to this property (UUID); \"\" unties it")),
 		mcp.WithString("vehicle_id", mcp.Description("Move it to this vehicle (UUID); \"\" unties it")),
 		mcp.WithString("asset_id", mcp.Description("Move it to this asset (UUID); \"\" unties it")),
@@ -489,7 +539,7 @@ func NewLoanUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			}
 		}
 		cols, vals := f.columns()
-		if len(cols) == 0 {
+		if len(cols) == 0 && !f.set["category"] {
 			return respond.Invalid("", "No fields to update.",
 				"Pass loan_id plus at least one field, e.g. remaining_balance.", updateExample), nil
 		}
@@ -511,6 +561,20 @@ func NewLoanUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			return respond.Failed("update the loan", err), nil
 		} else if res != nil {
 			return res, nil
+		}
+		cat, res, err := resolveCategory(ctx, tx, f, c.householdID, updateExample)
+		if err != nil {
+			return respond.Failed("update the loan", err), nil
+		} else if res != nil {
+			return res, nil
+		}
+		if f.set["category"] {
+			cols = append(cols, "budget_category_id")
+			if cat != nil {
+				vals = append(vals, cat.ID)
+			} else {
+				vals = append(vals, nil)
+			}
 		}
 
 		args2 := []any{*loanID, c.householdID}
@@ -564,7 +628,7 @@ func NewLoanUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 
 		d := r.data(today)
 		return respond.OK(
-			fmt.Sprintf("Updated loan %s (%s): %s.", d.Name, strings.Join(f.changed(), ", "), d.describe()),
+			fmt.Sprintf("Updated loan %s (%s): %s.", d.Name, strings.Join(f.changed(), ", "), d.describe())+categoryText(cat),
 			d,
 			"See monthly totals and net worth with budget_summary.",
 		), nil
