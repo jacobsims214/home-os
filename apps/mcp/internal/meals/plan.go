@@ -191,6 +191,7 @@ type mealSetResult struct {
 	Meals    []mealSetItem `json:"meals" jsonschema_description:"One entry per date+slot, by date then slot."`
 	Timezone string        `json:"timezone" jsonschema_description:"The family timezone dates are in."`
 	Notes    []string      `json:"notes,omitempty" jsonschema_description:"Things the user should know, e.g. a param that is not saved."`
+	Checks   []string      `json:"checks,omitempty" jsonschema_description:"Allergies that could not be checked; tell the user."`
 }
 
 type mealRateResult struct {
@@ -208,8 +209,10 @@ type mealRateResult struct {
 // ---------------------------------------------------------------------------
 
 // loadPlan returns the meals planned from from to to (YYYY-MM-DD, inclusive),
-// by date then slot, with ratings and allergy warnings.
-func loadPlan(ctx context.Context, q querier, hid uuid.UUID, from, to string) ([]PlannedMeal, error) {
+// by date then slot, with ratings and allergy warnings. checks lists the
+// family's allergies that could not be read as an allergen, so the caller can
+// say so instead of warning about nothing (#4802).
+func loadPlan(ctx context.Context, q querier, hid uuid.UUID, from, to string) (meals []PlannedMeal, checks []string, err error) {
 	rows, err := q.Query(ctx, `
 SELECT m.id::text, m.date::text, m.slot, m.title, m.recipe_id::text, m.notes, r.ingredients
   FROM meal_plans m
@@ -217,7 +220,7 @@ SELECT m.id::text, m.date::text, m.slot, m.title, m.recipe_id::text, m.notes, r.
  WHERE m.household_id = $1 AND m.date BETWEEN $2::date AND $3::date
  ORDER BY m.date, array_position(ARRAY['breakfast','lunch','dinner','snack']::text[], m.slot::text), m.id`, hid, from, to)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	type row struct {
 		meal PlannedMeal
@@ -229,15 +232,15 @@ SELECT m.id::text, m.date::text, m.slot, m.title, m.recipe_id::text, m.notes, r.
 		return x, err
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := make([]PlannedMeal, 0, len(all))
 	if len(all) == 0 {
-		return out, nil
+		return out, nil, nil
 	}
-	matchers, err := familyAllergies(ctx, q, hid)
+	matchers, checks, err := familyAllergies(ctx, q, hid)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	index := map[string]int{}
 	for _, x := range all {
@@ -258,7 +261,7 @@ SELECT f.meal_plan_id::text, p.display_name, f.person_id::text, f.rating, f.comm
  WHERE m.household_id = $1 AND m.date BETWEEN $2::date AND $3::date
  ORDER BY lower(p.display_name) NULLS LAST, f.created_at, f.id`, hid, from, to)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer fb.Close()
 	for fb.Next() {
@@ -266,7 +269,7 @@ SELECT f.meal_plan_id::text, p.display_name, f.person_id::text, f.rating, f.comm
 		var r MealRating
 		var rating *int16
 		if err := fb.Scan(&mealID, &r.Person, &r.PersonID, &rating, &r.Comment); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if rating != nil {
 			v := int(*rating)
@@ -276,11 +279,13 @@ SELECT f.meal_plan_id::text, p.display_name, f.person_id::text, f.rating, f.comm
 			out[i].Ratings = append(out[i].Ratings, r)
 		}
 	}
-	return out, fb.Err()
+	return out, checks, fb.Err()
 }
 
 // mealWarnings matches a meal against the family's allergies: a recipe's
-// ingredients, or a free-text meal's own name ("peanut noodles").
+// ingredients, or a free-text meal's own name ("peanut noodles"). The
+// matchers come from familyAllergies, which reads every stored allergy with
+// the same normaliser preference text gets (#4802).
 func mealWarnings(matchers []allergyMatcher, title string, hasRecipe bool, rawIngredients []byte) []string {
 	if len(matchers) == 0 {
 		return nil
@@ -306,19 +311,19 @@ func mealWarnings(matchers []allergyMatcher, title string, hasRecipe bool, rawIn
 // AgendaMeals is agenda_get's meals area: the meals planned from first to
 // last (dates in the family timezone, inclusive). allowed is false when the
 // caller's role can't see meal plans (vendor, or not signed in).
-func AgendaMeals(ctx context.Context, pool *pgxpool.Pool, first, last time.Time) (meals []PlannedMeal, allowed bool, err error) {
+func AgendaMeals(ctx context.Context, pool *pgxpool.Pool, first, last time.Time) (meals []PlannedMeal, checks []string, allowed bool, err error) {
 	c, err := callerInfo(ctx, pool)
 	if errors.Is(err, errNotSignedIn) {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	if !canRead(c.role) {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
-	meals, err = loadPlan(ctx, pool, c.householdID, first.Format(time.DateOnly), last.Format(time.DateOnly))
-	return meals, true, err
+	meals, checks, err = loadPlan(ctx, pool, c.householdID, first.Format(time.DateOnly), last.Format(time.DateOnly))
+	return meals, checks, true, err
 }
 
 // AgendaMealLine is one meal for a summary: "Tue dinner Chicken Tacos".
@@ -641,10 +646,11 @@ func NewMealSetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			res.Meals = append(res.Meals, item)
 		}
 		first, last := entries[0].date.Format(time.DateOnly), entries[len(entries)-1].date.Format(time.DateOnly)
-		plan, err := loadPlan(ctx, tx, c.householdID, first, last)
+		plan, checks, err := loadPlan(ctx, tx, c.householdID, first, last)
 		if err != nil {
 			return respond.Failed("plan the meals", err), nil
 		}
+		res.Checks = checks
 		for i := range res.Meals {
 			it := &res.Meals[i]
 			if it.Action == "cleared" || it.Action == "already_empty" {
@@ -787,6 +793,7 @@ func setSummary(res mealSetResult) string {
 			s += fmt.Sprintf(" %s on %s is free text; saved recipes with a similar name: %s.", it.Meal.Title, it.Weekday, strings.Join(it.SimilarRecipes, ", "))
 		}
 	}
+	s += checkSentence(res.Checks)
 	for _, n := range res.Notes {
 		s += " Note: " + n
 	}
@@ -1097,7 +1104,7 @@ ON CONFLICT (meal_plan_id, person_id) DO UPDATE SET rating = EXCLUDED.rating, co
 			res.PreviousRating = nil
 		}
 
-		plan, err := loadPlan(ctx, tx, c.householdID, date.Format(time.DateOnly), date.Format(time.DateOnly))
+		plan, _, err := loadPlan(ctx, tx, c.householdID, date.Format(time.DateOnly), date.Format(time.DateOnly))
 		if err != nil {
 			return respond.Failed("save the rating", err), nil
 		}

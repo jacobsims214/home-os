@@ -108,35 +108,6 @@ type rule struct {
 	m    allergyMatcher
 }
 
-// allergyMention spots allergy talk in a preference.
-var allergyMention = regexp.MustCompile(`(?i)\b(allerg\w*|anaphyla\w*|epi-?pens?|intoleran\w*|celiac|coeliac)\b`)
-
-// allergyFiller is what is left out of "severe peanut allergy" to get the
-// allergen. "celiac" and "lactose" stay: they are allergen group keys.
-var allergyFiller = regexp.MustCompile(`(?i)\b(severe(ly)?|mild|serious|life[- ]threatening|anaphylactic|anaphylaxis|food|foods|allergic|allergy|allergies|allergen|allergens|intolerant|intolerance|intolerances|sensitivity|sensitive|reaction|reactions|to|of|a|an|the|has|have|is|no|avoid|avoids|carries|carry|epi-?pens?|must|strictly|strict|very)\b`)
-
-var listSep = regexp.MustCompile(`(?i)\s*(?:,|;|/|&|\band\b|\bor\b|\+)\s*`)
-
-var freeSuffix = regexp.MustCompile(`(?i)[- ]free\b`)
-
-// allergensIn reads the allergens out of allergy text: "Severe peanut
-// allergy" -> [peanut], "allergic to shrimp and crab" -> [shrimp, crab],
-// "nut-free (allergy)" -> [nut]. Empty when nothing is left to match.
-func allergensIn(text string) []string {
-	text = regexp.MustCompile(`\([^)]*\)`).ReplaceAllString(strings.ToLower(text), " ")
-	text = strings.ReplaceAll(text, "coeliac", "celiac")
-	text = freeSuffix.ReplaceAllString(text, " ")
-	text = allergyFiller.ReplaceAllString(text, " ")
-	var out []string
-	for _, p := range listSep.Split(text, -1) {
-		p = strings.Join(strings.Fields(p), " ")
-		if len(words(p)) > 0 && !slices.Contains(out, p) {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 // dietGroups are what a diet word rules out.
 var (
 	meatWords = []string{"chicken", "beef", "pork", "bacon", "ham", "sausage", "lamb", "mutton", "turkey", "steak", "veal",
@@ -162,6 +133,7 @@ func dietRules(e eater, value string) ([]rule, bool) {
 		return rule{kind: "diet", m: m}
 	}
 	group := func(key string) rule {
+		// key is a normalised allergen already (a group name like "dairy").
 		m, _ := newAllergyMatcher(e.id, e.name, key)
 		m.allergy = label
 		return rule{kind: "diet", m: m}
@@ -227,10 +199,12 @@ func eaterRules(ctx context.Context, q querier, hid uuid.UUID, eaters []eater, l
 		ids[i] = e.id
 		byID[e.id] = e
 		for _, a := range e.allergies {
-			if m, ok := newAllergyMatcher(e.id, e.name, a); ok {
-				rules = append(rules, rule{kind: "allergy", m: m})
+			if ms := allergyMatchers(e.id, e.name, a); len(ms) > 0 {
+				for _, m := range ms {
+					rules = append(rules, rule{kind: "allergy", m: m})
+				}
 			} else {
-				checks = append(checks, fmt.Sprintf("%s has an allergy saved as %q that could not be checked against recipes; confirm the meal is safe.", e.name, a))
+				checks = append(checks, uncheckedAllergyLine(e.name, a))
 			}
 		}
 	}
@@ -265,6 +239,7 @@ SELECT person_id::text, kind::text, category, value, coalesce(notes, '')
 			}
 			added := 0
 			for _, a := range found {
+				// found is already normalised by allergensIn.
 				if m, ok := newAllergyMatcher(e.id, e.name, a); ok {
 					rules = append(rules, rule{kind: "allergy", m: m})
 					added++
@@ -289,7 +264,11 @@ SELECT person_id::text, kind::text, category, value, coalesce(notes, '')
 			if !foodCategory(p.category) {
 				continue
 			}
-			if m, ok := newAllergyMatcher(e.id, e.name, p.value); ok {
+			// A like or dislike is one food, read the same way as an allergy
+			// ("shrimp - anaphylaxis" means shrimp). The label stays the saved
+			// value, so reasons read "Sam dislikes chicken" (#4802).
+			for _, m := range allergyMatchers(e.id, e.name, p.value) {
+				m.allergy = p.value
 				rules = append(rules, rule{kind: p.kind, m: m})
 			}
 		}
@@ -760,7 +739,7 @@ func NewMealSuggestTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 				continue
 			}
 			for _, a := range p.allergies {
-				if m, ok := newAllergyMatcher(p.id, p.name, a); ok {
+				for _, m := range allergyMatchers(p.id, p.name, a) {
 					others = append(others, rule{kind: "allergy", m: m})
 				}
 			}

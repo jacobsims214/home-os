@@ -1507,6 +1507,7 @@ type agendaResult struct {
 	Bills       []AgendaBill        `json:"bills"`
 	Maintenance []AgendaTask        `json:"maintenance"`
 	Meals       []meals.PlannedMeal `json:"meals,omitempty" jsonschema_description:"Planned meals by date then slot, with ratings and allergy warnings."`
+	MealChecks  []string            `json:"meal_checks,omitempty" jsonschema_description:"Saved allergies that could not be checked; tell the user."`
 	Lists       *AgendaLists        `json:"lists,omitempty" jsonschema_description:"Present when the lists area was asked for."`
 	Unavailable []string            `json:"unavailable,omitempty" jsonschema_description:"Areas asked for that Home OS can't show yet."`
 	Warnings    []string            `json:"warnings,omitempty" jsonschema_description:"Sections that failed to load; don't assume they are empty."`
@@ -1621,7 +1622,7 @@ func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			}
 		}
 		if want["meals"] {
-			planned, allowed, err := meals.AgendaMeals(ctx, pool, first, last)
+			planned, mealChecks, allowed, err := meals.AgendaMeals(ctx, pool, first, last)
 			switch {
 			case err != nil:
 				slog.Error("agenda_get: query meals error", "error", err)
@@ -1636,6 +1637,9 @@ func NewAgendaGetTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 				}
 			default:
 				res.Meals = planned
+				// An allergy saved as text nobody can read matches nothing;
+				// say so rather than let the warning quietly disappear (#4802).
+				res.MealChecks = mealChecks
 			}
 		}
 		if want["lists"] {
@@ -1693,6 +1697,9 @@ func agendaSummary(res agendaResult, days []time.Time, want map[string]bool) str
 				break
 			}
 		}
+		if len(res.MealChecks) > 0 {
+			p += "; some allergies could not be checked"
+		}
 		parts = append(parts, p)
 	}
 	if want["lists"] && res.Lists != nil {
@@ -1705,6 +1712,9 @@ func agendaSummary(res agendaResult, days []time.Time, want map[string]bool) str
 	s := when + ": " + strings.Join(parts, ", ") + "."
 	if len(parts) == 0 {
 		s = when + ": nothing requested that Home OS can show yet."
+	}
+	for _, c := range res.MealChecks {
+		s += " " + c
 	}
 	if len(res.Warnings) > 0 {
 		s += " Some sections failed to load; see warnings."

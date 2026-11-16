@@ -226,7 +226,7 @@ func TestMealSetWeek(t *testing.T) {
 	}
 
 	// Read back: what agenda_get areas=["meals"] serves.
-	plan, allowed, err := AgendaMeals(ctx, pool, today, today.AddDate(0, 0, 6))
+	plan, _, allowed, err := AgendaMeals(ctx, pool, today, today.AddDate(0, 0, 6))
 	if err != nil || !allowed || len(plan) != 7 {
 		t.Fatalf("plan = %+v %v %v", plan, allowed, err)
 	}
@@ -423,7 +423,7 @@ func TestMealPlanRoles(t *testing.T) {
 	}
 	for _, role := range []string{"viewer", "housesitter"} {
 		ctx, _ := memberCtx(t, pool, hh, role)
-		plan, allowed, err := AgendaMeals(ctx, pool, today, today)
+		plan, _, allowed, err := AgendaMeals(ctx, pool, today, today)
 		if err != nil || !allowed || len(plan) != 2 {
 			t.Errorf("%s reads plan = %+v %v %v", role, plan, allowed, err)
 		}
@@ -443,7 +443,7 @@ func TestMealPlanRoles(t *testing.T) {
 		}
 	}
 	vendorCtx, _ := memberCtx(t, pool, hh, "vendor")
-	if plan, allowed, err := AgendaMeals(vendorCtx, pool, today, today); err != nil || allowed || plan != nil {
+	if plan, _, allowed, err := AgendaMeals(vendorCtx, pool, today, today); err != nil || allowed || plan != nil {
 		t.Errorf("vendor reads plan = %+v %v %v", plan, allowed, err)
 	}
 	if n := count(t, pool, `SELECT count(*) FROM meal_plans WHERE household_id = $1 AND date = $2 AND slot = 'dinner'`, hh.HouseholdID, d0); n != 1 {

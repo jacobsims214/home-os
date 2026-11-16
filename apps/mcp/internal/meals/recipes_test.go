@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -361,13 +362,67 @@ func TestAllergyMatcher(t *testing.T) {
 		{"peanuts (carries an EpiPen)", "satay sauce", true},
 		{"tree nuts (cashews, in backpack)", "walnuts", true},
 		{"Dairy (hives)", "cheddar", true},
+		// #4802: the same normaliser preference text gets, so ordinary
+		// wording of an allergy still matches. Every one of these matched
+		// nothing before.
+		{"Shrimp allergy", "shrimp", true},
+		{"Shrimp allergy", "Garlic Shrimp", true},
+		{"strawberry allergy", "fresh strawberries", true},
+		{"Severe peanut allergy", "peanut butter", true},
+		{"allergic to peanuts", "peanuts", true},
+		{"allergic to peanuts", "peanut butter", true},
+		{"Peanuts - anaphylaxis", "peanuts", true},
+		{"peanuts \u2013 anaphylaxis", "roasted peanuts", true},
+		{"peanuts: EpiPen", "roasted peanuts", true},
+		{"peanuts and tree nuts", "cashews", true},
+		{"peanuts and tree nuts", "peanut butter", true},
+		{"tree nuts; peanuts", "walnuts", true},
+		{"Allergic to shrimp & crab", "crab cakes", true},
+		// Worded allergies still leave other foods alone.
+		{"allergic to peanuts", "chicken thighs", false},
+		{"Shrimp allergy", "shrimp stock paste", true},
 	} {
-		m, ok := newAllergyMatcher("p", "Nora", tc.allergy)
-		if !ok {
-			t.Fatalf("no matcher for %q", tc.allergy)
-		}
-		if got := m.matches(tc.item); got != tc.want {
+		if got := anyMatch(tc.allergy, tc.item); got != tc.want {
 			t.Errorf("allergy %q vs %q = %v, want %v", tc.allergy, tc.item, got, tc.want)
+		}
+	}
+}
+
+// anyMatch is how a stored allergy is used everywhere now: read the text
+// with allergensIn, then match each allergen it gives.
+func anyMatch(allergy, item string) bool {
+	for _, m := range allergyMatchers("p", "Nora", allergy) {
+		if m.matches(item) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAllergyMatchersSplitAndLabel pins the two things a stored entry must
+// now do: one entry can give several allergens, and each warning keeps a
+// readable label (the bare allergen, not the raw text).
+func TestAllergyMatchersSplitAndLabel(t *testing.T) {
+	ms := allergyMatchers("p", "Nora", "peanuts and tree nuts")
+	if len(ms) != 2 {
+		t.Fatalf("matchers = %+v, want peanut and tree nut", ms)
+	}
+	var labels []string
+	for _, m := range ms {
+		labels = append(labels, m.allergy)
+	}
+	if !slices.Equal(labels, []string{"peanuts", "tree nuts"}) {
+		t.Errorf("labels = %q", labels)
+	}
+	// The label stays the bare allergen, so warnings read as they always did.
+	if got := warningLines(AllergyWarnings(ms, []string{"peanut butter", "cashews"})); len(got) != 2 ||
+		got[0] != "Nora (peanuts): peanut butter" || got[1] != "Nora (tree nuts): cashews" {
+		t.Errorf("warnings = %q", got)
+	}
+	// Nothing left to match: no matchers, so the caller can say so.
+	for _, nothing := range []string{"allergy", "anaphylactic", "  ", "severe", "(carries an EpiPen)"} {
+		if ms := allergyMatchers("p", "Nora", nothing); len(ms) != 0 {
+			t.Errorf("allergyMatchers(%q) = %+v, want none", nothing, ms)
 		}
 	}
 }
@@ -694,6 +749,76 @@ func TestRecipeRatingsAndAllergies(t *testing.T) {
 		t.Errorf("feedback lost: %d", n)
 	}
 	_ = future
+}
+
+// TestRecipeWarningsForWordedAllergies is #4802's other acceptance test: an
+// allergy saved as a sentence ("allergic to peanuts") must produce the same
+// recipe and meal warnings a bare allergen does, and one that normalises to
+// nothing must be visible in checks instead of silently matching nothing.
+func TestRecipeWarningsForWordedAllergies(t *testing.T) {
+	t.Parallel()
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	ts := newTools(pool)
+	bg := context.Background()
+
+	if _, err := pool.Exec(bg, `INSERT INTO people (household_id, display_name, allergies)
+		VALUES ($1, 'Nora', ARRAY['allergic to peanuts']), ($1, 'Sam', ARRAY['Shrimp allergy']), ($1, 'Bea', ARRAY['allergy'])`,
+		hh.HouseholdID); err != nil {
+		t.Fatal(err)
+	}
+	d := ts.create.run(t, ctx, map[string]any{"name": "Satay Noodles", "ingredients": []any{"200 g rice noodles", "3 tbsp peanut butter"}, "steps": []any{"Cook."}}).recipe(t)
+
+	// recipe_get: the ingredient matches, and the label stays the bare allergen.
+	g := ts.get.run(t, ctx, map[string]any{"recipe_id": d.ID}).recipe(t)
+	if len(g.AllergyWarnings) != 1 || g.AllergyWarnings[0].Allergy != "peanuts" || g.AllergyWarnings[0].Ingredient != "peanut butter" {
+		t.Errorf("get warnings = %+v", g.AllergyWarnings)
+	}
+	if !slices.Contains(g.Checks, `Bea has an allergy saved as "allergy" that could not be checked against recipes; confirm the meal is safe.`) {
+		t.Errorf("get checks = %v", g.Checks)
+	}
+
+	// recipe_find: the same hit, and the summary names the unreadable allergy.
+	e := ts.find.run(t, ctx, map[string]any{"query": "satay"})
+	it := e.items(t)
+	if len(it) != 1 || !slices.Contains(it[0].AllergyWarnings, "Nora (peanuts): peanut butter") {
+		t.Errorf("find = %+v", it)
+	}
+	if !strings.Contains(e.Summary, "contain an allergen") || !strings.Contains(e.Summary, `Bea has an allergy saved as "allergy"`) {
+		t.Errorf("find summary = %s", e.Summary)
+	}
+
+	// meal_set: planning it warns, and the plan read back (agenda_get) agrees.
+	today := familyToday("UTC")
+	date := today.Format(time.DateOnly)
+	res := newPlanTools(pool).set.run(t, ctx, map[string]any{"date": date, "slot": "dinner", "recipe_id": d.ID}).set(t)
+	if len(res.Meals) != 1 || res.Meals[0].Meal == nil ||
+		!slices.Contains(res.Meals[0].Meal.AllergyWarnings, "Nora (peanuts): peanut butter") {
+		t.Fatalf("meal_set = %+v", res.Meals)
+	}
+	if !slices.Contains(res.Checks, `Bea has an allergy saved as "allergy" that could not be checked against recipes; confirm the meal is safe.`) {
+		t.Errorf("meal_set checks = %v", res.Checks)
+	}
+	plan, checks, allowed, err := AgendaMeals(ctx, pool, today, today)
+	if err != nil || !allowed || len(plan) != 1 {
+		t.Fatalf("agenda = %+v %v %v %v", plan, checks, allowed, err)
+	}
+	if !slices.Contains(plan[0].AllergyWarnings, "Nora (peanuts): peanut butter") || len(checks) != 1 {
+		t.Errorf("agenda meal = %+v / checks %v", plan[0], checks)
+	}
+
+	// Free text too: "peanut satay" is matched by the normalised allergen.
+	res = newPlanTools(pool).set.run(t, ctx, map[string]any{"date": date, "slot": "lunch", "text": "Peanut satay skewers"}).set(t)
+	if len(res.Meals) != 1 || !slices.Contains(res.Meals[0].Meal.AllergyWarnings, "Nora (peanuts): Peanut satay skewers") {
+		t.Errorf("free text = %+v", res.Meals)
+	}
+
+	// A worded allergy that names another food does not warn on this one.
+	ts.create.run(t, ctx, map[string]any{"name": "Plain Rice", "ingredients": []any{"1 cup rice"}, "steps": []any{"Cook."}})
+	rice := ts.get.run(t, ctx, map[string]any{"recipe_id": "Plain Rice"}).recipe(t)
+	if len(rice.AllergyWarnings) != 0 {
+		t.Errorf("rice warnings = %+v", rice.AllergyWarnings)
+	}
 }
 
 func TestRecipeDelete(t *testing.T) {
