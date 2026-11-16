@@ -88,7 +88,7 @@ func TestFamilyOverview(t *testing.T) {
 	familyCal := insertCalendar(t, pool, hh.HouseholdID, "Family", "family")
 	billsCal := insertCalendar(t, pool, hh.HouseholdID, "Bills", "bills")
 	insertCalendar(t, pool, other.HouseholdID, "Other family", "family")
-	insertKid(t, pool, hh.HouseholdID, "Nora") // no login: person_find shows kids from #4464
+	noraID := insertKid(t, pool, hh.HouseholdID, "Nora") // no login: listed since #4464
 	insertKid(t, pool, other.HouseholdID, "Someone else")
 
 	decode := func(t *testing.T, env envelope) overview {
@@ -118,8 +118,11 @@ func TestFamilyOverview(t *testing.T) {
 		if f.Weekday != before.Format("Mon") && f.Weekday != after.Format("Mon") {
 			t.Errorf("weekday = %q, want %s", f.Weekday, before.Format("Mon"))
 		}
-		if len(ov.People) != 1 {
-			t.Fatalf("people = %+v, want only the owner (kids arrive with #4464)", ov.People)
+		if len(ov.People) != 2 {
+			t.Fatalf("people = %+v, want the owner and Nora (kids are listed since #4464)", ov.People)
+		}
+		if k := ov.People[1]; k.ID != noraID || k.Name != "Nora" || k.HasAccount || k.UserID != nil || k.Email != nil || k.Role != nil {
+			t.Errorf("kid = %+v", k)
 		}
 		p := ov.People[0]
 		if p.ID != personIDOf(t, pool, hh.HouseholdID, hh.UserID.String()) || p.Name != "Test Owner" ||
@@ -134,7 +137,7 @@ func TestFamilyOverview(t *testing.T) {
 		if len(ov.HowTo) < 5 || len(ov.HowTo) > 8 {
 			t.Errorf("how_to has %d lines, want 5-8", len(ov.HowTo))
 		}
-		if !strings.Contains(env.Summary, f.Today) || !strings.Contains(env.Summary, "1 person") || len(env.Next) == 0 {
+		if !strings.Contains(env.Summary, f.Today) || !strings.Contains(env.Summary, "2 people") || len(env.Next) == 0 {
 			t.Errorf("summary %q next %v", env.Summary, env.Next)
 		}
 	})
@@ -159,7 +162,8 @@ func TestFamilyOverview(t *testing.T) {
 	t.Run("new members show up", func(t *testing.T) {
 		addMember(t, pool, hh, "family_member")
 		env, _ := callEnvelope(t, ctx, h, rs, nil)
-		if ov := decode(t, env); len(ov.People) != 2 || ov.People[1].Name != "Member family_member" {
+		// Members come first, in join order; people without a login after.
+		if ov := decode(t, env); len(ov.People) != 3 || ov.People[1].Name != "Member family_member" || ov.People[2].ID != noraID {
 			t.Errorf("people = %+v", ov.People)
 		}
 	})
@@ -198,7 +202,7 @@ func TestPersonFind(t *testing.T) {
 	ownerPerson := personIDOf(t, pool, hh.HouseholdID, hh.UserID.String())
 	mgrPerson := personIDOf(t, pool, hh.HouseholdID, mgrUser)
 	otherPerson := personIDOf(t, pool, other.HouseholdID, other.UserID.String())
-	insertKid(t, pool, hh.HouseholdID, "Nora")
+	noraPerson := insertKid(t, pool, hh.HouseholdID, "Nora")
 	birth := time.Now().UTC().AddDate(-10, 0, -1).Format("2006-01-02")
 	if _, err := pool.Exec(context.Background(),
 		`UPDATE people SET relationship = 'parent', birthdate = $2 WHERE id = $1`, ownerPerson, birth); err != nil {
@@ -213,13 +217,17 @@ func TestPersonFind(t *testing.T) {
 		return out
 	}
 
-	t.Run("lists members in join order", func(t *testing.T) {
+	t.Run("lists members in join order, then people without a login", func(t *testing.T) {
 		env, _ := callEnvelope(t, ctx, h, rs, map[string]any{})
-		if !env.OK || env.Total != 2 || env.Truncated {
+		if !env.OK || env.Total != 3 || env.Truncated {
 			t.Fatalf("got %+v", env)
 		}
-		if got := ids(env.Items); len(got) != 2 || got[0] != ownerPerson || got[1] != mgrPerson {
-			t.Fatalf("ids = %v, want owner then manager", got)
+		if got := ids(env.Items); len(got) != 3 || got[0] != ownerPerson || got[1] != mgrPerson || got[2] != noraPerson {
+			t.Fatalf("ids = %v, want owner, manager, Nora", got)
+		}
+		if k := env.Items[2]; k.Name != "Nora" || k.HasAccount || k.UserID != nil || k.Email != nil || k.Role != nil ||
+			k.Relationship == nil || *k.Relationship != "child" {
+			t.Errorf("kid = %+v", k)
 		}
 		o := env.Items[0]
 		if o.Relationship == nil || *o.Relationship != "parent" || o.Age == nil || *o.Age != 10 || !o.HasAccount ||
@@ -229,7 +237,7 @@ func TestPersonFind(t *testing.T) {
 		if m := env.Items[1]; m.Relationship != nil || m.Age != nil || m.Role == nil || *m.Role != "family_manager" {
 			t.Errorf("manager = %+v", m)
 		}
-		if !strings.Contains(env.Summary, "2 people") || len(env.Next) == 0 {
+		if !strings.Contains(env.Summary, "3 people") || len(env.Next) == 0 {
 			t.Errorf("summary %q next %v", env.Summary, env.Next)
 		}
 	})
@@ -244,9 +252,11 @@ func TestPersonFind(t *testing.T) {
 		{"relationship any case", map[string]any{"relationship": "Parent"}, []string{ownerPerson}},
 		{"id is the person id", map[string]any{"id": mgrPerson}, []string{mgrPerson}},
 		{"id may be the user id", map[string]any{"id": strings.ToUpper(mgrUser)}, []string{mgrPerson}},
-		{"blank filters are ignored", map[string]any{"query": " ", "relationship": "", "cursor": "", "limit": ""}, []string{ownerPerson, mgrPerson}},
+		{"blank filters are ignored", map[string]any{"query": " ", "relationship": "", "cursor": "", "limit": ""}, []string{ownerPerson, mgrPerson, noraPerson}},
 		{"no match", map[string]any{"query": "nobody-here"}, []string{}},
-		{"kids without a login wait for #4464", map[string]any{"query": "Nora"}, []string{}},
+		{"kids without a login (#4464)", map[string]any{"query": "nor"}, []string{noraPerson}},
+		{"relationship child", map[string]any{"relationship": "CHILD"}, []string{noraPerson}},
+		{"id of a kid", map[string]any{"id": noraPerson}, []string{noraPerson}},
 	}
 	for _, tc := range filters {
 		t.Run(tc.name, func(t *testing.T) {
@@ -261,15 +271,15 @@ func TestPersonFind(t *testing.T) {
 	}
 
 	t.Run("pages with an opaque cursor", func(t *testing.T) {
-		env, _ := callEnvelope(t, ctx, h, rs, map[string]any{"limit": 1})
-		if !env.OK || !env.Truncated || env.Total != 2 || len(env.Items) != 1 || env.Items[0].ID != ownerPerson {
+		env, _ := callEnvelope(t, ctx, h, rs, map[string]any{"limit": 2})
+		if !env.OK || !env.Truncated || env.Total != 3 || len(env.Items) != 2 || env.Items[0].ID != ownerPerson {
 			t.Fatalf("page 1 = %+v", env)
 		}
-		if env.NextCursor != respond.EncodeCursor(1) {
+		if env.NextCursor != respond.EncodeCursor(2) {
 			t.Fatalf("page 1 next_cursor = %q", env.NextCursor)
 		}
-		env, _ = callEnvelope(t, ctx, h, rs, map[string]any{"limit": 1, "cursor": env.NextCursor})
-		if !env.OK || env.Truncated || env.NextCursor != "" || len(env.Items) != 1 || env.Items[0].ID != mgrPerson {
+		env, _ = callEnvelope(t, ctx, h, rs, map[string]any{"limit": 2, "cursor": env.NextCursor})
+		if !env.OK || env.Truncated || env.NextCursor != "" || len(env.Items) != 1 || env.Items[0].ID != noraPerson {
 			t.Fatalf("page 2 = %+v", env)
 		}
 	})

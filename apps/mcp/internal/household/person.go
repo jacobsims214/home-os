@@ -41,9 +41,11 @@ type personRow struct {
 	Role         *string `json:"role,omitempty" jsonschema_description:"Membership role, e.g. owner, family_manager, family_member"`
 }
 
-// peopleSelect lists the people of household $1 who are members (log in).
-// People without a login (kids, grandparents) arrive with #4464. Age is
-// computed from the birthdate in the family timezone.
+// peopleSelect lists the people of household $1: members who log in and,
+// since #4464, kids, grandparents and others without a login (no
+// membership, so user_id, email and role are null). A person whose login is
+// no longer a member is listed without an account. Age is computed from the
+// birthdate in the family timezone.
 const peopleSelect = `
 SELECT p.id::text, p.display_name, p.relationship,
        CASE WHEN p.birthdate IS NULL THEN NULL
@@ -52,9 +54,13 @@ SELECT p.id::text, p.display_name, p.relationship,
        COUNT(*) OVER ()
   FROM people p
   JOIN households h ON h.id = p.household_id
-  JOIN memberships m ON m.household_id = p.household_id AND m.user_id = p.user_id
-  JOIN users u ON u.id = p.user_id
+  LEFT JOIN memberships m ON m.household_id = p.household_id AND m.user_id = p.user_id
+  LEFT JOIN users u ON u.id = m.user_id
  WHERE p.household_id = $1`
+
+// peopleOrder orders peopleSelect: members in the order they joined, then
+// everyone else by name.
+const peopleOrder = ` ORDER BY m.created_at NULLS LAST, lower(p.display_name), p.id`
 
 // scanPeople reads rows from a peopleSelect query and returns them with the
 // total match count (from the window column).
@@ -64,20 +70,19 @@ func scanPeople(rows pgx.Rows) ([]personRow, int, error) {
 	total := 0
 	for rows.Next() {
 		var p personRow
-		var userID, email, role string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Relationship, &p.Age, &userID, &email, &role, &total); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Relationship, &p.Age, &p.UserID, &p.Email, &p.Role, &total); err != nil {
 			return nil, 0, err
 		}
-		p.HasAccount = true
-		p.UserID, p.Email, p.Role = &userID, &email, &role
+		p.HasAccount = p.Role != nil
 		out = append(out, p)
 	}
 	return out, total, rows.Err()
 }
 
 // NewPersonFindTool creates person_find (catalog v2; replaces list_members).
-// For now it lists the family members who log in; #4464 adds people without
-// a login from the same people table, so ids do not change.
+// It lists everyone in the people table: members who log in and, since
+// #4464, people without a login. person_get, person_create, person_update
+// and person_delete are in internal/people.
 func NewPersonFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("person_find",
 		mcp.WithDescription("List or search family members, including kids and others without a login. Returns name, relationship, age and whether they have an account."),
@@ -170,7 +175,7 @@ func NewPersonFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			add("lower(p.relationship) = lower($%d)", relationship)
 		}
 		params = append(params, limit, offset)
-		sql += fmt.Sprintf(" ORDER BY m.created_at, p.id LIMIT $%d OFFSET $%d", len(params)-1, len(params))
+		sql += peopleOrder + fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(params)-1, len(params))
 
 		rows, err := pool.Query(ctx, sql, params...)
 		if err != nil {

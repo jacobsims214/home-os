@@ -225,7 +225,7 @@ func NewFamilyOverviewTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		parallel(
 			func() {
-				rows, err := pool.Query(ctx, peopleSelect+` ORDER BY m.created_at, p.id`, hh)
+				rows, err := pool.Query(ctx, peopleSelect+peopleOrder, hh)
 				if err == nil {
 					ov.People, _, err = scanPeople(rows)
 				}

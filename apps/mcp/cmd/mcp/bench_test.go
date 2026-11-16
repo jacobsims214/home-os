@@ -165,7 +165,16 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 		{"notification_mark_read", func(i int) map[string]any {
 			return map[string]any{"notification_ids": []string{pick(f.UnreadNotifications, i)}}
 		}},
+		{"person_create", func(i int) map[string]any {
+			return map[string]any{"display_name": fmt.Sprintf("Bench kid %d", i), "relationship": "child", "birthdate": "2018-05-01"}
+		}},
+		{"person_delete", func(i int) map[string]any { return map[string]any{"person_id": pick(f.DisposablePeople, i)} }},
 		{"person_find", static(map[string]any{})},
+		{"person_get", static(map[string]any{"person_id": "Nora"})},
+		{"person_update", func(i int) map[string]any {
+			return map[string]any{"person_id": f.Person, "grade": strconv.Itoa(1 + i%12),
+				"add_preferences": []any{map[string]any{"kind": "like", "item": fmt.Sprintf("Bench food %d", i%5)}}}
+		}},
 		{"pet_find", static(map[string]any{})},
 		{"property_find", static(map[string]any{})},
 		{"search_all", static(map[string]any{"query": "insurance"})},
@@ -201,8 +210,8 @@ func TestMCPLatency(t *testing.T) {
 		"disposable assets": fx.DisposableAssets, "disposable bills": fx.DisposableBills,
 		"disposable loans": fx.DisposableLoans, "disposable tasks": fx.DisposableTasks,
 		"disposable notes": fx.DisposableNotes, "disposable events": fx.DisposableEvents,
-		"disposable list items": fx.DisposableListItems,
-		"payable bills":         fx.PayableBills, "pending tasks": fx.PendingTasks, "unread notifications": fx.UnreadNotifications,
+		"disposable list items": fx.DisposableListItems, "disposable people": fx.DisposablePeople,
+		"payable bills": fx.PayableBills, "pending tasks": fx.PendingTasks, "unread notifications": fx.UnreadNotifications,
 	} {
 		if len(ids) < calls {
 			t.Fatalf("seed has %d %s, need %d (lower BENCH_N)", len(ids), name, calls)

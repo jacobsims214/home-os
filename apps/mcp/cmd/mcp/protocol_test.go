@@ -42,7 +42,8 @@ var wantTools = []string{
 	"maintenance_complete", "maintenance_create", "maintenance_delete", "maintenance_find", "maintenance_update",
 	"note_create", "note_delete", "note_find", "note_get", "note_update",
 	"notification_find", "notification_mark_read",
-	"person_find", "pet_find", "property_find", "search_all", "vehicle_find",
+	"person_create", "person_delete", "person_find", "person_get", "person_update",
+	"pet_find", "property_find", "search_all", "vehicle_find",
 }
 
 // TestLegacyInitializeClient proves that a pre-2026-07-28 client (one that
