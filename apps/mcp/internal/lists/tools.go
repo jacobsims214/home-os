@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -499,6 +500,9 @@ func normText(s string) string {
 // matches "tomato". Only used for matching, never stored.
 func singular(s string) string {
 	switch {
+	case (strings.HasSuffix(s, "sses") || strings.HasSuffix(s, "xes") ||
+		strings.HasSuffix(s, "ches") || strings.HasSuffix(s, "shes")) && len(s) > 4:
+		return strings.TrimSuffix(s, "es") // glasses, boxes, peaches, dishes
 	case strings.HasSuffix(s, "oes") && len(s) > 4:
 		return strings.TrimSuffix(s, "es")
 	case strings.HasSuffix(s, "ies") && len(s) > 4:
@@ -977,14 +981,42 @@ func listItemKeys(ctx context.Context, q querier, listID uuid.UUID) ([]itemKey, 
 	return out, rows.Err()
 }
 
-// matchText finds the items one text refers to. An exact match (any case,
-// singular or plural) beats a partial one ("turkey" in "Turkey, 14 lb").
-// prefer, when not nil, keeps only items whose checked state differs from
-// *prefer if any do (checking off "milk" means the open milk). Several exact
-// matches are all returned; several partial ones are ambiguous.
+// wordSep splits item text into words: anything that is not a letter or a
+// digit ("Turkey, 14 lb" is turkey/14/lb).
+var wordSep = regexp.MustCompile(`[^\p{L}\p{N}]+`)
+
+// leadingFiller are words dropped from the front of a text before matching,
+// so "the oat milk" is oat/milk and "some eggs" is egg.
+var leadingFiller = map[string]bool{"the": true, "a": true, "an": true, "some": true, "my": true, "our": true}
+
+// matchTokens is the word form of an item text used for matching: lower
+// case words, each made singular, without leading filler words.
+func matchTokens(s string) []string {
+	var out []string
+	for _, w := range wordSep.Split(normText(s), -1) {
+		if w == "" || (len(out) == 0 && leadingFiller[w]) {
+			continue
+		}
+		out = append(out, singular(w))
+	}
+	return out
+}
+
+// matchText finds the items one text refers to. It compares whole words,
+// never characters, so "tea" can't hit "Steak" and "eggplant" can't hit
+// "Egg". An exact match (the same words, any case, singular or plural,
+// ignoring a leading the/a/an/some/my) beats a partial one, where every word
+// of the text is a word of the item ("turkey" in "Turkey, 14 lb"). An item
+// whose words are only part of the text never matches ("the oat milk" is not
+// "Milk"), for check and remove alike. prefer, when not nil, keeps only items
+// whose checked state differs from *prefer if any do (checking off "milk"
+// means the open milk). Several exact matches are all returned; several
+// partial ones are ambiguous.
 func matchText(items []itemKey, text string, prefer *bool) (matches []itemKey, ambiguousMatches []itemKey) {
-	q := normText(text)
-	qs := singular(q)
+	q := matchTokens(text)
+	if len(q) == 0 {
+		return nil, nil
+	}
 	narrow := func(in []itemKey) []itemKey {
 		if prefer == nil {
 			return in
@@ -1002,11 +1034,11 @@ func matchText(items []itemKey, text string, prefer *bool) (matches []itemKey, a
 	}
 	var exact, partial []itemKey
 	for _, k := range items {
-		t := normText(k.Text)
+		t := matchTokens(k.Text)
 		switch {
-		case t == q || singular(t) == qs:
+		case slices.Equal(t, q):
 			exact = append(exact, k)
-		case len(qs) >= 3 && (strings.Contains(t, qs) || (len(t) >= 3 && strings.Contains(q, t))):
+		case containsAll(t, q):
 			partial = append(partial, k)
 		}
 	}
@@ -1018,6 +1050,16 @@ func matchText(items []itemKey, text string, prefer *bool) (matches []itemKey, a
 		return partial, nil
 	}
 	return nil, partial
+}
+
+// containsAll reports whether every word of want is a word of have.
+func containsAll(have, want []string) bool {
+	for _, w := range want {
+		if !slices.Contains(have, w) {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveItems turns item_ids[] and texts[] into item ids of the list. Any
@@ -1062,12 +1104,12 @@ func resolveItems(ctx context.Context, q querier, listID uuid.UUID, listName str
 			open := []string{}
 			for _, k := range keys {
 				if !k.Checked && len(open) < 15 {
-					open = append(open, strconv.Quote(k.Text))
+					open = append(open, fmt.Sprintf("%q (%s)", k.Text, k.ID))
 				}
 			}
 			fix := fmt.Sprintf("List %q has no items.", listName)
 			if len(keys) > 0 {
-				fix = fmt.Sprintf("Open items on %q: %s. Use list_get list_id=%s to see all items.", listName, orNone(open), listID)
+				fix = fmt.Sprintf("Open items on %q: %s. Pass the full text of the one you mean, or its id in item_ids; list_get list_id=%s shows all items.", listName, orNone(open), listID)
 			}
 			return nil, respond.Invalid("texts", fmt.Sprintf("No item on %q matches %q.", listName, text), fix, example), nil
 		}
