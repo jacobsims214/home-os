@@ -201,7 +201,7 @@ func TestNoteReadsFollowRolePolicy(t *testing.T) {
 
 	// note_find: exactly the visible notes, and their previews name only
 	// visible parents.
-	list := func(roleCtx context.Context) map[string]uuid.UUID {
+	list := func(roleCtx context.Context) (map[string]uuid.UUID, envelope[wireSummary]) {
 		t.Helper()
 		env := find.mustOK(t, roleCtx, map[string]any{"limit": maxFindLimit})
 		got := map[string]uuid.UUID{}
@@ -211,7 +211,7 @@ func TestNoteReadsFollowRolePolicy(t *testing.T) {
 			}
 			got[*it.Title] = it.ID
 		}
-		return got
+		return got, env
 	}
 
 	for _, role := range auth.AllRoles {
@@ -222,7 +222,13 @@ func TestNoteReadsFollowRolePolicy(t *testing.T) {
 				mctx = roleCtx(t, pool, hh, role)
 			}
 			want := visibleTo(role)
-			got := list(mctx)
+			got, env := list(mctx)
+			// total comes from COUNT(*) OVER (), so a filter applied after
+			// the scan would still advertise the hidden notes here.
+			if env.Total == nil || *env.Total != lenKeys(want) {
+				t.Errorf("%s: note_find total = %v, want %d (hidden notes must not be counted)",
+					role, env.Total, lenKeys(want))
+			}
 			for key, id := range f.notes {
 				title := "About " + key
 				if want[key] {
