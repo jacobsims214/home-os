@@ -132,9 +132,9 @@ func TestPetLegacyVetFieldsMapToFamilyVendor(t *testing.T) {
 	require.Equal(t, http.StatusOK, res.Code, res.Body)
 	assert.Equal(t, other, res.data()["vet_vendor_id"])
 
-	// The pets table's legacy columns are never written.
+	// The pets table has no legacy vet columns any more (migration 060).
 	var legacy int
 	require.NoError(t, pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM pets WHERE household_id = $1 AND (vet_name IS NOT NULL OR vet_phone IS NOT NULL)`, a).Scan(&legacy))
+		`SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'pets' AND column_name IN ('vet_name', 'vet_phone')`).Scan(&legacy))
 	assert.Zero(t, legacy)
 }
