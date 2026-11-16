@@ -232,15 +232,14 @@ test.describe("role-aware navigation", () => {
 // ─── Header bell and axe (#4752) ──────────────────────────────
 
 /**
- * Runs axe-core (WCAG 2.x A/AA rules) over the shell (header, navigation,
- * popovers and dialogs; <main> is excluded, page content is the page's own
- * spec's job) and fails on any critical or serious violation, listing the
- * rule ids and offending elements.
+ * Runs axe-core (WCAG 2.x A/AA rules) over the whole page (the shell's header,
+ * navigation, popovers and dialogs, plus the /dashboard content in <main>, which
+ * has been included since the badge contrast fix in #4754) and fails on any
+ * critical or serious violation, listing the rule ids and offending elements.
  */
 async function expectNoSeriousAxeViolations(page: Page) {
   const { violations } = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
-    .exclude("main")
     .analyze();
   const bad = violations
     .filter((v) => v.impact === "critical" || v.impact === "serious")
