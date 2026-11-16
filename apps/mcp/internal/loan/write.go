@@ -16,14 +16,32 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/respond"
-	"home-os/mcp/internal/server"
 )
 
 // duplicateWindow is the loan_create loop guard (catalog §1 "Loop guard").
 const duplicateWindow = "10 minutes"
 
-// writeAliases are old (S1) parameter names for loan_update / loan_delete.
-var writeAliases = map[string]string{"id": "loan_id"}
+// fieldAliases are other names models use for the create/update fields.
+var fieldAliases = map[string]string{
+	"rate": "interest_rate", "apr": "interest_rate", "interest": "interest_rate",
+	"payment": "monthly_payment", "monthly": "monthly_payment", "monthly_amount": "monthly_payment",
+	"balance": "remaining_balance", "owed": "remaining_balance", "remaining": "remaining_balance",
+	"amount": "original_amount", "principal": "original_amount", "loan_amount": "original_amount",
+	"bank": "lender", "servicer": "lender",
+	"due": "due_day", "payment_day": "due_day",
+	"end_date": "term_end", "maturity_date": "term_end", "payoff_date": "term_end",
+	"term": "term_months", "start": "start_date", "note": "notes",
+}
+
+// writeAliases are old (S1) and other parameter names for loan_update /
+// loan_delete: the field aliases plus id/loan for loan_id.
+var writeAliases = func() map[string]string {
+	m := map[string]string{"id": "loan_id", "loan": "loan_id"}
+	for k, v := range fieldAliases {
+		m[k] = v
+	}
+	return m
+}()
 
 // createExample is a valid loan_create call for error examples.
 var createExample = map[string]any{
@@ -48,6 +66,7 @@ type loanFields struct {
 	monthlyPayment   *float64
 	dueDay           *int
 	startDate        *time.Time
+	termEnd          *time.Time
 	notes            *string
 	// subject is set when any of property_id / vehicle_id / asset_id was
 	// given: the three columns are then replaced together.
@@ -59,7 +78,21 @@ type loanFields struct {
 
 // fieldParams are the create/update params in the order summaries list them.
 var fieldParams = []string{"name", "lender", "original_amount", "remaining_balance", "interest_rate",
-	"term_months", "monthly_payment", "due_day", "start_date", "notes", "property_id", "vehicle_id", "asset_id"}
+	"term_months", "monthly_payment", "due_day", "start_date", "term_end", "notes", "property_id", "vehicle_id", "asset_id"}
+
+// parseDate reads a YYYY-MM-DD (or YYYY-MM, the 1st of that month) param.
+func parseDate(args map[string]any, key, example string) (*time.Time, error) {
+	s, err := optionalString(args, key)
+	if err != nil || s == nil {
+		return nil, err
+	}
+	for _, layout := range []string{time.DateOnly, "2006-01"} {
+		if d, perr := time.Parse(layout, *s); perr == nil {
+			return &d, nil
+		}
+	}
+	return nil, badArg(key, fmt.Sprintf("%s %q is not a date.", key, *s), fmt.Sprintf("Pass %s as YYYY-MM-DD, e.g. %s.", key, example))
+}
 
 // parseFields validates every create/update field present in args.
 func parseFields(args map[string]any) (loanFields, error) {
@@ -121,14 +154,14 @@ func parseFields(args map[string]any) (loanFields, error) {
 	} else if ok {
 		f.dueDay = &n
 	}
-	if s, err := optionalString(args, "start_date"); err != nil {
+	if f.startDate, err = parseDate(args, "start_date", "2021-06-01"); err != nil {
 		return f, err
-	} else if s != nil {
-		d, perr := time.Parse(time.DateOnly, *s)
-		if perr != nil {
-			return f, badArg("start_date", fmt.Sprintf("start_date %q is not a date.", *s), "Pass start_date as YYYY-MM-DD, e.g. 2021-06-01.")
-		}
-		f.startDate = &d
+	}
+	if f.termEnd, err = parseDate(args, "term_end", "2051-06-01"); err != nil {
+		return f, err
+	}
+	if f.startDate != nil && f.termEnd != nil && f.termEnd.Before(*f.startDate) {
+		return f, badArg("term_end", "term_end is before start_date.", "Pass a term_end on or after start_date.")
 	}
 	if f.notes, err = optionalString(args, "notes"); err != nil {
 		return f, err
@@ -186,7 +219,7 @@ func checkSubjects(ctx context.Context, tx pgx.Tx, f loanFields, householdID str
 
 // dbError maps a constraint violation the checks above could not see (a
 // subject deleted meanwhile, a CHECK) to an isError result; nil otherwise.
-func dbError(err error, example map[string]any) *mcp.CallToolResult {
+func dbError(err error, termEndGiven bool, example map[string]any) *mcp.CallToolResult {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
 		return nil
@@ -207,6 +240,10 @@ func dbError(err error, example map[string]any) *mcp.CallToolResult {
 			return respond.Invalid("vehicle_id", "A loan on a vehicle can't also be on a property or asset.",
 				"Pass only vehicle_id, or only property_id and/or asset_id.", example)
 		case "loans_term_end_check":
+			if termEndGiven {
+				return respond.Invalid("term_end", "term_end is before the loan's start_date.",
+					"Pass a later term_end, or change start_date too.", example)
+			}
 			return respond.Invalid("start_date", "start_date is after the end of the loan's term.",
 				"Pass an earlier start_date, or a longer term_months.", example)
 		}
@@ -241,6 +278,7 @@ func NewLoanCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		mcp.WithNumber("monthly_payment", mcp.Description("Payment each month, e.g. 1850"), mcp.Min(0)),
 		mcp.WithNumber("due_day", mcp.Description("Day of the month the payment is due, 1-31"), mcp.Min(1), mcp.Max(31)),
 		mcp.WithString("start_date", mcp.Description("Date the loan started, YYYY-MM-DD")),
+		mcp.WithString("term_end", mcp.Description("Last payment date, YYYY-MM-DD (default start_date + term_months)")),
 		mcp.WithString("notes", mcp.Description("Free-text notes")),
 		mcp.WithString("property_id", mcp.Description("House or other property it is for (UUID from property_find)")),
 		mcp.WithString("vehicle_id", mcp.Description("Car or other vehicle it is for (UUID from vehicle_find)")),
@@ -250,11 +288,14 @@ func NewLoanCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("loan_create", append(opts, annotations("Create loan", false, false, false)...)...)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return notSignedIn(), nil
+		c, deny := callerOf(ctx, pool)
+		if deny != nil {
+			return deny, nil
 		}
-		args, err := withAliases(req.GetArguments(), nil)
+		if !canWrite(c.role) {
+			return cannotWrite(c.role, "loan_create"), nil
+		}
+		args, err := withAliases(req.GetArguments(), fieldAliases)
 		if err != nil {
 			return invalid(err, createExample), nil
 		}
@@ -279,12 +320,12 @@ func NewLoanCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-		if res, err := checkSubjects(ctx, tx, f, claims.HouseholdID, createExample); err != nil {
+		if res, err := checkSubjects(ctx, tx, f, c.householdID, createExample); err != nil {
 			return respond.Failed("create the loan", err), nil
 		} else if res != nil {
 			return res, nil
 		}
-		today, err := householdToday(ctx, tx, claims.HouseholdID)
+		today, err := householdToday(ctx, tx, c.householdID)
 		if err != nil {
 			return respond.Failed("create the loan", err), nil
 		}
@@ -295,7 +336,7 @@ func NewLoanCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			  AND l.created_at > NOW() - $5::interval
 			ORDER BY l.created_at DESC
 			LIMIT 1`,
-			claims.HouseholdID, *f.name, *f.originalAmount, *f.remainingBalance, duplicateWindow,
+			c.householdID, *f.name, *f.originalAmount, *f.remainingBalance, duplicateWindow,
 		))
 		switch {
 		case err == nil:
@@ -316,20 +357,20 @@ func NewLoanCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			                    term_months, monthly_payment, due_day, start_date, term_end, notes,
 			                    property_id, vehicle_id, asset_id)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date,
-			         `+termEndSQL("$10::date", "$7::int", "NULL::date")+`,
+			         COALESCE($15::date, `+termEndSQL("$10::date", "$7::int", "NULL::date")+`),
 			         $11, $12, $13, $14)
 			 RETURNING id`,
-			claims.HouseholdID, *f.name, f.lender, *f.originalAmount, *f.remainingBalance, f.interestRate,
+			c.householdID, *f.name, f.lender, *f.originalAmount, *f.remainingBalance, f.interestRate,
 			f.termMonths, f.monthlyPayment, f.dueDay, f.startDate, f.notes,
-			f.propertyID, f.vehicleID, f.assetID,
+			f.propertyID, f.vehicleID, f.assetID, f.termEnd,
 		).Scan(&id)
 		if err != nil {
-			if res := dbError(err, createExample); res != nil {
+			if res := dbError(err, f.set["term_end"], createExample); res != nil {
 				return res, nil
 			}
 			return respond.Failed("create the loan", err), nil
 		}
-		r, err := loadLoan(ctx, tx, id, claims.HouseholdID)
+		r, err := loadLoan(ctx, tx, id, c.householdID)
 		if err != nil {
 			return respond.Failed("create the loan", err), nil
 		}
@@ -367,6 +408,7 @@ func (f loanFields) columns() (cols []string, vals []any) {
 	add("monthly_payment", "monthly_payment", f.monthlyPayment)
 	add("due_day", "due_day", f.dueDay)
 	add("start_date", "start_date", f.startDate)
+	add("term_end", "term_end", f.termEnd)
 	add("notes", "notes", f.notes)
 	if f.subject {
 		cols = append(cols, "property_id", "vehicle_id", "asset_id")
@@ -389,14 +431,17 @@ func (f loanFields) changed() []string {
 // NewLoanUpdateTool creates the loan_update MCP tool (catalog v2, class U),
 // replacing update_loan. Only the given fields change. name, the amounts,
 // interest_rate, term_months and due_day cannot be cleared (null means
-// unchanged); a blank lender, notes or start_date clears it. Giving any of
-// property_id / vehicle_id / asset_id replaces the loan's subject (the others
-// are cleared); a blank one unties it. term_end follows start_date and
-// term_months. A loan of another household is reported as not found.
+// unchanged); a blank lender, notes, start_date or term_end clears it.
+// Giving any of property_id / vehicle_id / asset_id replaces the loan's
+// subject (the others are cleared); a blank one unties it. term_end follows
+// start_date and term_months unless it is given. loan_id is a UUID or what
+// the family calls the loan ("Mortgage", "the Odyssey loan"): resolveLoan
+// lists the candidates when that is ambiguous. A loan of another household
+// is reported as not found. Family roles only (role re-read per call).
 func NewLoanUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Change a loan; only the given fields change (e.g. a new remaining_balance after a payment)."),
-		mcp.WithString("loan_id", mcp.Description("The loan's id (UUID) from loan_find"), mcp.Required()),
+		mcp.WithString("loan_id", mcp.Description("The loan's id from loan_find, or its name, e.g. Mortgage"), mcp.Required()),
 		mcp.WithString("name", mcp.Description("New name, e.g. Mortgage")),
 		mcp.WithNumber("original_amount", mcp.Description("Amount originally borrowed, e.g. 320000"), mcp.Min(0)),
 		mcp.WithNumber("remaining_balance", mcp.Description("What is still owed now, e.g. 249500"), mcp.Min(0)),
@@ -406,6 +451,7 @@ func NewLoanUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		mcp.WithNumber("monthly_payment", mcp.Description("Payment each month, e.g. 1850"), mcp.Min(0)),
 		mcp.WithNumber("due_day", mcp.Description("Day of the month the payment is due, 1-31"), mcp.Min(1), mcp.Max(31)),
 		mcp.WithString("start_date", mcp.Description("Date the loan started, YYYY-MM-DD; \"\" clears it")),
+		mcp.WithString("term_end", mcp.Description("Last payment date, YYYY-MM-DD; \"\" clears it")),
 		mcp.WithString("notes", mcp.Description("New notes; \"\" clears them")),
 		mcp.WithString("property_id", mcp.Description("Move it to this property (UUID); \"\" unties it")),
 		mcp.WithString("vehicle_id", mcp.Description("Move it to this vehicle (UUID); \"\" unties it")),
@@ -415,20 +461,23 @@ func NewLoanUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("loan_update", append(opts, annotations("Update loan", false, false, true)...)...)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return notSignedIn(), nil
+		c, deny := callerOf(ctx, pool)
+		if deny != nil {
+			return deny, nil
+		}
+		if !canWrite(c.role) {
+			return cannotWrite(c.role, "loan_update"), nil
 		}
 		args, err := withAliases(req.GetArguments(), writeAliases)
 		if err != nil {
 			return invalid(err, updateExample), nil
 		}
-		loanID, err := optionalUUID(args, "loan_id")
+		ref, err := optionalString(args, "loan_id")
 		if err != nil {
 			return invalid(err, updateExample), nil
 		}
-		if loanID == nil {
-			return respond.Invalid("loan_id", "loan_id is required.", "Pass the loan's id from loan_find.", updateExample), nil
+		if ref == nil {
+			return respond.Invalid("loan_id", "loan_id is required.", "Pass the loan's id from loan_find, or its name.", updateExample), nil
 		}
 		f, err := parseFields(args)
 		if err != nil {
@@ -451,19 +500,28 @@ func NewLoanUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-		if res, err := checkSubjects(ctx, tx, f, claims.HouseholdID, updateExample); err != nil {
+		target, res, err := resolveLoan(ctx, tx, c.householdID, *ref)
+		if err != nil {
+			return respond.Failed("update the loan", err), nil
+		} else if res != nil {
+			return res, nil
+		}
+		loanID := &target.ID
+		if res, err := checkSubjects(ctx, tx, f, c.householdID, updateExample); err != nil {
 			return respond.Failed("update the loan", err), nil
 		} else if res != nil {
 			return res, nil
 		}
 
-		args2 := []any{*loanID, claims.HouseholdID}
+		args2 := []any{*loanID, c.householdID}
 		sets := make([]string, 0, len(cols)+2)
 		startExpr, termExpr := "start_date", "term_months"
 		for i, c := range cols {
 			args2 = append(args2, vals[i])
 			ph := fmt.Sprintf("$%d", len(args2))
 			switch c {
+			case "term_end":
+				ph += "::date"
 			case "start_date":
 				ph += "::date"
 				startExpr = ph
@@ -473,7 +531,7 @@ func NewLoanUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			}
 			sets = append(sets, c+" = "+ph)
 		}
-		if f.set["start_date"] || f.set["term_months"] {
+		if (f.set["start_date"] || f.set["term_months"]) && !f.set["term_end"] {
 			sets = append(sets, "term_end = "+termEndSQL(startExpr, termExpr, "term_end"))
 		}
 		sets = append(sets, "updated_at = NOW()")
@@ -487,16 +545,16 @@ func NewLoanUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			return respond.NotFound("loan", loanID.String(), "Call loan_find to get the loan_id."), nil
 		}
 		if err != nil {
-			if res := dbError(err, updateExample); res != nil {
+			if res := dbError(err, f.set["term_end"], updateExample); res != nil {
 				return res, nil
 			}
 			return respond.Failed("update the loan", err), nil
 		}
-		r, err := loadLoan(ctx, tx, id, claims.HouseholdID)
+		r, err := loadLoan(ctx, tx, id, c.householdID)
 		if err != nil {
 			return respond.Failed("update the loan", err), nil
 		}
-		today, err := householdToday(ctx, tx, claims.HouseholdID)
+		today, err := householdToday(ctx, tx, c.householdID)
 		if err != nil {
 			return respond.Failed("update the loan", err), nil
 		}
@@ -521,34 +579,38 @@ func isBlank(v any) bool {
 }
 
 // NewLoanDeleteTool creates the loan_delete MCP tool (catalog v2, class X),
-// replacing delete_loan. It deletes one loan of the household and returns it
+// replacing delete_loan. It deletes one loan of the household (loan_id is a
+// UUID or a name, resolved like loan_update) and returns it
 // as it was. A missing or already deleted loan is reported as not found and
 // nothing is deleted, so a repeat call is safe. Notes, files and links about
 // the loan are rehomed by the loans_rehome_entity_refs trigger (038).
 func NewLoanDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Delete a loan (paid off or entered by mistake)."),
-		mcp.WithString("loan_id", mcp.Description("The loan's id (UUID) from loan_find"), mcp.Required()),
+		mcp.WithString("loan_id", mcp.Description("The loan's id from loan_find, or its name, e.g. Mortgage"), mcp.Required()),
 		respond.Schema[loanData](),
 	}
 	tool := mcp.NewTool("loan_delete", append(opts, annotations("Delete loan", false, true, true)...)...)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return notSignedIn(), nil
+		c, deny := callerOf(ctx, pool)
+		if deny != nil {
+			return deny, nil
+		}
+		if !canWrite(c.role) {
+			return cannotWrite(c.role, "loan_delete"), nil
 		}
 		example := map[string]any{"loan_id": exampleLoanID}
 		args, err := withAliases(req.GetArguments(), writeAliases)
 		if err != nil {
 			return invalid(err, example), nil
 		}
-		loanID, err := optionalUUID(args, "loan_id")
+		ref, err := optionalString(args, "loan_id")
 		if err != nil {
 			return invalid(err, example), nil
 		}
-		if loanID == nil {
-			return respond.Invalid("loan_id", "loan_id is required.", "Pass the loan's id from loan_find.", example), nil
+		if ref == nil {
+			return respond.Invalid("loan_id", "loan_id is required.", "Pass the loan's id from loan_find, or its name.", example), nil
 		}
 
 		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
@@ -557,19 +619,27 @@ func NewLoanDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
+		target, res, err := resolveLoan(ctx, tx, c.householdID, *ref)
+		if err != nil {
+			return respond.Failed("delete the loan", err), nil
+		} else if res != nil {
+			return res, nil
+		}
+		loanID := &target.ID
+
 		r, err := scanLoan(tx.QueryRow(ctx, loanSelect+` WHERE l.id = $1 AND l.household_id = $2 FOR UPDATE OF l`,
-			*loanID, claims.HouseholdID))
+			*loanID, c.householdID))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return respond.NotFound("loan", loanID.String(), "Call loan_find to list loans and their ids."), nil
 		}
 		if err != nil {
 			return respond.Failed("delete the loan", err), nil
 		}
-		today, err := householdToday(ctx, tx, claims.HouseholdID)
+		today, err := householdToday(ctx, tx, c.householdID)
 		if err != nil {
 			return respond.Failed("delete the loan", err), nil
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM loans WHERE id = $1 AND household_id = $2`, *loanID, claims.HouseholdID); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM loans WHERE id = $1 AND household_id = $2`, *loanID, c.householdID); err != nil {
 			return respond.Failed("delete the loan", err), nil
 		}
 		if err := tx.Commit(ctx); err != nil {

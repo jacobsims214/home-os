@@ -108,20 +108,27 @@ func loadLoan(ctx context.Context, q interface {
 	return scanLoan(q.QueryRow(ctx, loanSelect+` WHERE l.id = $1 AND l.household_id = $2`, id, householdID))
 }
 
+// currency is the family's currency. Households have no currency column
+// yet; every amount in Home OS is in US dollars.
+const currency = "USD"
+
 // loanData is one loan in every loan tool's output. IDs are strings (a
-// uuid.UUID would be advertised as a byte array in the outputSchema).
+// uuid.UUID would be advertised as a byte array in the outputSchema), and
+// so is money: decimal strings in currency, as the API returns them.
 type loanData struct {
 	ID               string    `json:"id" jsonschema_description:"The loan_id to pass to loan_update or loan_delete."`
 	Name             string    `json:"name"`
 	Lender           *string   `json:"lender"`
-	OriginalAmount   float64   `json:"original_amount" jsonschema_description:"Amount originally borrowed."`
-	RemainingBalance float64   `json:"remaining_balance" jsonschema_description:"What is still owed."`
+	Currency         string    `json:"currency" jsonschema_description:"Currency of every amount, e.g. USD."`
+	OriginalAmount   string    `json:"original_amount" jsonschema_description:"Amount originally borrowed, decimal string, e.g. 320000.00."`
+	RemainingBalance string    `json:"remaining_balance" jsonschema_description:"What is still owed, decimal string, e.g. 251340.12."`
 	InterestRate     *float64  `json:"interest_rate" jsonschema_description:"Annual rate in percent; 6.25 means 6.25%."`
 	TermMonths       *int      `json:"term_months"`
-	MonthlyPayment   *float64  `json:"monthly_payment"`
+	MonthlyPayment   *string   `json:"monthly_payment" jsonschema_description:"Payment each month, decimal string, e.g. 1850.00."`
 	DueDay           *int      `json:"due_day" jsonschema_description:"Day of the month the payment is due (1-31); a short month uses its last day."`
 	StartDate        *string   `json:"start_date" jsonschema_description:"YYYY-MM-DD."`
-	TermEnd          *string   `json:"term_end" jsonschema_description:"Last month of the term, YYYY-MM-DD (start_date + term_months)."`
+	TermEnd          *string   `json:"term_end" jsonschema_description:"Last payment month of the term, YYYY-MM-DD."`
+	TermEndWeekday   *string   `json:"term_end_weekday" jsonschema_description:"Weekday of term_end, e.g. Fri."`
 	PropertyID       *string   `json:"property_id" jsonschema_description:"The house or other property the loan is for."`
 	VehicleID        *string   `json:"vehicle_id" jsonschema_description:"The car or other vehicle the loan is for."`
 	AssetID          *string   `json:"asset_id" jsonschema_description:"The thing the loan is for (its property_id follows the asset)."`
@@ -135,32 +142,38 @@ type loanData struct {
 	NextDueWeekday   *string   `json:"next_due_weekday" jsonschema_description:"Weekday of next_due_date, e.g. Thu."`
 	DaysUntilDue     *int      `json:"days_until_due" jsonschema_description:"Whole days from today (family timezone) to next_due_date."`
 	Duplicate        bool      `json:"duplicate,omitempty" jsonschema_description:"loan_create only: true when the same loan was created minutes ago and was returned instead."`
+
+	// The amounts as numbers, for describe.
+	remaining float64
+	payment   *float64
 }
+
+// decimal formats an amount as the decimal string the outputs use.
+func decimal(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) }
 
 // data builds the output for r as of today (household-local midnight UTC).
 func (r loanRow) data(today time.Time) loanData {
 	d := loanData{
-		ID: r.ID.String(), Name: r.Name, Lender: r.Lender,
-		OriginalAmount: r.OriginalAmount, RemainingBalance: r.RemainingBalance,
-		InterestRate: r.InterestRate, TermMonths: r.TermMonths, MonthlyPayment: r.MonthlyPayment,
+		ID: r.ID.String(), Name: r.Name, Lender: r.Lender, Currency: currency,
+		OriginalAmount: decimal(r.OriginalAmount), RemainingBalance: decimal(r.RemainingBalance),
+		InterestRate: r.InterestRate, TermMonths: r.TermMonths,
 		DueDay: r.DueDay, PropertyID: uuidString(r.PropertyID), VehicleID: uuidString(r.VehicleID),
 		AssetID: uuidString(r.AssetID), SubjectName: r.SubjectName, Notes: r.Notes,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+		remaining: r.RemainingBalance, payment: r.MonthlyPayment,
+	}
+	if r.MonthlyPayment != nil {
+		d.MonthlyPayment = strPtr(decimal(*r.MonthlyPayment))
 	}
 	if r.StartDate != nil {
 		d.StartDate = dateOnly(*r.StartDate)
 	}
 	if r.TermEnd != nil {
-		d.TermEnd = dateOnly(*r.TermEnd)
+		d.TermEnd, d.TermEndWeekday = dateOnly(*r.TermEnd), weekday(*r.TermEnd)
 	}
-	switch {
-	case r.VehicleID != nil:
-		d.SubjectType = strPtr(subjectVehicle)
-	case r.AssetID != nil:
-		d.SubjectType = strPtr(subjectAsset)
-	case r.PropertyID != nil:
-		d.SubjectType = strPtr(subjectProperty)
-	default:
+	if k := subjectTypeOf(r); k != "" {
+		d.SubjectType = strPtr(k)
+	} else {
 		d.SubjectName = nil
 	}
 	d.PaidOff = r.RemainingBalance <= 0 || (r.TermEnd != nil && r.TermEnd.Before(today))
@@ -177,21 +190,26 @@ func (r loanRow) data(today time.Time) loanData {
 }
 
 // describe is a short phrase for summaries, e.g. "$1,850.00/month due Thu
-// Dec 1 at 6.25% with Chase, $250,000.00 left".
+// Dec 1 (the 1st each month) at 6.25% with Chase, $250,000.00 left, term
+// ends 2051-01-31".
 func (d loanData) describe() string {
 	var parts []string
-	if d.MonthlyPayment != nil {
-		s := money(*d.MonthlyPayment) + "/month"
-		if d.NextDueDate != nil {
-			if t, err := time.Parse(time.DateOnly, *d.NextDueDate); err == nil {
-				s += " due " + t.Format("Mon Jan 2")
+	due := ""
+	if d.NextDueDate != nil {
+		if t, err := time.Parse(time.DateOnly, *d.NextDueDate); err == nil {
+			due = "due " + t.Format("Mon Jan 2")
+			if d.DueDay != nil {
+				due += " (the " + ordinal(*d.DueDay) + " each month)"
 			}
 		}
-		parts = append(parts, s)
-	} else if d.NextDueDate != nil {
-		if t, err := time.Parse(time.DateOnly, *d.NextDueDate); err == nil {
-			parts = append(parts, "due "+t.Format("Mon Jan 2"))
-		}
+	}
+	switch {
+	case d.payment != nil && due != "":
+		parts = append(parts, money(*d.payment)+"/month "+due)
+	case d.payment != nil:
+		parts = append(parts, money(*d.payment)+"/month")
+	case due != "":
+		parts = append(parts, due)
 	}
 	if d.InterestRate != nil {
 		parts = append(parts, "at "+strconv.FormatFloat(*d.InterestRate, 'f', -1, 64)+"%")
@@ -202,9 +220,27 @@ func (d loanData) describe() string {
 	if d.PaidOff {
 		parts = append(parts, "paid off")
 	} else {
-		parts = append(parts, money(d.RemainingBalance)+" left")
+		parts = append(parts, money(d.remaining)+" left")
+		if d.TermEnd != nil {
+			parts = append(parts, "term ends "+*d.TermEnd)
+		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ordinal is 1st, 2nd, 3rd, 4th ... 31st.
+func ordinal(n int) string {
+	suffix := "th"
+	switch {
+	case n%100 >= 11 && n%100 <= 13:
+	case n%10 == 1:
+		suffix = "st"
+	case n%10 == 2:
+		suffix = "nd"
+	case n%10 == 3:
+		suffix = "rd"
+	}
+	return strconv.Itoa(n) + suffix
 }
 
 // nextDueDate returns the first date on or after today that falls on dueDay
@@ -463,7 +499,8 @@ func number(args map[string]any, key string) (val float64, ok bool, err error) {
 	case int64:
 		val = float64(n)
 	case string:
-		s := strings.TrimSpace(n)
+		// "$1,850.00", "1,850 USD" and "6.25%" are what people write.
+		s := strings.TrimSpace(strings.NewReplacer("$", "", ",", "", "%", "", "USD", "", "usd", "", " ", "").Replace(n))
 		if s == "" {
 			return 0, false, nil
 		}
@@ -492,9 +529,4 @@ func wholeNumber(args map[string]any, key string, lo, hi int) (int, bool, error)
 			fmt.Sprintf("Pass %s as a whole number between %d and %d.", key, lo, hi))
 	}
 	return int(n), true, nil
-}
-
-// escapeLike escapes ILIKE wildcards so query matches literally.
-func escapeLike(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }

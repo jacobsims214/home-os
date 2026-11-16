@@ -245,7 +245,7 @@ func deref[T any](p *T) any {
 func TestToolDefinitions(t *testing.T) {
 	type hints struct{ readOnly, destructive, idempotent bool }
 	createParams := []string{"name", "original_amount", "remaining_balance", "lender", "interest_rate", "term_months",
-		"monthly_payment", "due_day", "start_date", "notes", "property_id", "vehicle_id", "asset_id"}
+		"monthly_payment", "due_day", "start_date", "term_end", "notes", "property_id", "vehicle_id", "asset_id"}
 	want := map[string]struct {
 		title    string
 		required []string
@@ -339,7 +339,7 @@ func TestLoanCreate(t *testing.T) {
 		"due_day": 31.0, "start_date": "2021-01-31", "property_id": house,
 	})
 	d := env.loan(t)
-	if d.RemainingBalance != 251340.12 || d.InterestRate == nil || *d.InterestRate != 6.25 || *d.DueDay != 31 {
+	if d.RemainingBalance != "251340.12" || d.Currency != "USD" || d.OriginalAmount != "320000.00" || deref(d.MonthlyPayment) != "1850.00" || d.InterestRate == nil || *d.InterestRate != 6.25 || *d.DueDay != 31 {
 		t.Errorf("stored values = %+v", d)
 	}
 	if deref(d.PropertyID) != house || deref(d.SubjectType) != "property" || deref(d.SubjectName) != "Maple St" {
@@ -494,7 +494,11 @@ func TestLoanFind(t *testing.T) {
 	}
 
 	wantError(t, call(t, f.ctx, f.find, "loan_find", map[string]any{"cursor": "abc"}), "cursor")
-	wantError(t, call(t, f.ctx, f.find, "loan_find", map[string]any{"id": "Mortgage"}), "id")
+	// A name in id is searched for rather than refused.
+	if l := call(t, f.ctx, f.find, "loan_find", map[string]any{"id": "Mortgage"}).loans(t); len(l) != 1 || l[0].ID != mortgage.ID {
+		t.Errorf("name in id = %v", l)
+	}
+	wantError(t, call(t, f.ctx, f.find, "loan_find", map[string]any{"id": "Mortgage", "query": "car"}), "id")
 	missing := call(t, f.ctx, f.find, "loan_find", map[string]any{"id": uuid.NewString()})
 	if missing.OK {
 		t.Errorf("unknown id should be isError")
@@ -526,7 +530,7 @@ func TestLoanUpdate(t *testing.T) {
 
 	env := call(t, f.ctx, f.upd, "loan_update", map[string]any{"loan_id": l.ID, "remaining_balance": 199000.0, "monthly_payment": 1500.0})
 	u := env.loan(t)
-	if u.RemainingBalance != 199000 || deref(u.MonthlyPayment) != 1500.0 || deref(u.Lender) != "Chase" || deref(u.PropertyID) != house {
+	if u.RemainingBalance != "199000.00" || deref(u.MonthlyPayment) != "1500.00" || deref(u.Lender) != "Chase" || deref(u.PropertyID) != house {
 		t.Errorf("partial update = %+v", u)
 	}
 	if !strings.HasPrefix(env.Summary, "Updated loan Mortgage (remaining_balance, monthly_payment):") {
@@ -534,7 +538,7 @@ func TestLoanUpdate(t *testing.T) {
 	}
 
 	// Repeat: idempotent.
-	if again := call(t, f.ctx, f.upd, "loan_update", map[string]any{"loan_id": l.ID, "remaining_balance": 199000.0}).loan(t); again.RemainingBalance != 199000 {
+	if again := call(t, f.ctx, f.upd, "loan_update", map[string]any{"loan_id": l.ID, "remaining_balance": 199000.0}).loan(t); again.RemainingBalance != "199000.00" {
 		t.Errorf("repeat = %+v", again)
 	}
 
@@ -570,7 +574,7 @@ func TestLoanUpdate(t *testing.T) {
 		field string
 	}{
 		{"no loan_id", map[string]any{"name": "X"}, "loan_id"},
-		{"bad loan_id", map[string]any{"loan_id": "Mortgage", "name": "X"}, "loan_id"},
+		{"unknown loan name", map[string]any{"loan_id": "Boat loan", "name": "X"}, "loan_id"},
 		{"no fields", map[string]any{"loan_id": l.ID}, ""},
 		{"clear name", map[string]any{"loan_id": l.ID, "name": ""}, "name"},
 		{"clear balance", map[string]any{"loan_id": l.ID, "remaining_balance": ""}, "remaining_balance"},

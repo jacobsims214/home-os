@@ -11,11 +11,10 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/respond"
-	"home-os/mcp/internal/server"
 )
 
 // findAliases are old loan_find/get_loan parameter names.
-var findAliases = map[string]string{"loan_id": "id"}
+var findAliases = map[string]string{"loan_id": "id", "loan": "query", "name": "query", "search": "query", "q": "query"}
 
 // findExample is a valid loan_find call for error examples.
 var findExample = map[string]any{"query": "mortgage"}
@@ -41,15 +40,20 @@ func (in findInput) filtered() bool {
 // NewLoanFindTool creates the loan_find MCP tool (catalog v2, class R),
 // replacing list_loans and get_loan. It lists the household's loans sorted
 // by name, each with its next payment date (from due_day, in the family's
-// timezone) and its subject. property_id matches loans on that property,
-// including loans on its assets. Pagination is limit + the opaque
+// timezone) and its subject. query matches a loan by its name, lender or
+// notes, by the vehicle/property it is linked to ("the Odyssey loan"), or by
+// its kind ("mortgage" is the loan on a property, "car loan" the one on a
+// vehicle); filler words are ignored and the best matches win (matchLoans).
+// property_id matches loans on that property, including loans on its assets.
+// Loans are money: housesitter and vendor are refused (role re-read per
+// call). Pagination is limit + the opaque
 // next_cursor (respond.EncodeCursor), passed back as cursor.
 func NewLoanFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	opts := []mcp.ToolOption{
-		mcp.WithDescription("List or search loans with lender, rate, monthly payment, due day and balance. " +
-			"Answers \"when is the mortgage due and what's the rate?\"."),
+		mcp.WithDescription("Find loans with rate, lender, monthly payment, due day, next due date, balance and term end. " +
+			"One call answers \"when is the mortgage due, how much, what's the rate?\"."),
 		mcp.WithString("id", mcp.Description("A loan_id (UUID) to get exactly that loan")),
-		mcp.WithString("query", mcp.Description("Text in the name, lender, notes or what it's for, e.g. mortgage")),
+		mcp.WithString("query", mcp.Description("Loan name, lender, or what it's for: mortgage, Odyssey, car loan")),
 		mcp.WithString("property_id", mcp.Description("Only loans on this property (UUID from property_find)")),
 		mcp.WithString("vehicle_id", mcp.Description("Only loans on this vehicle (UUID from vehicle_find)")),
 		mcp.WithNumber("limit", mcp.Description("Max loans to return, 1-100 (default 25)"), mcp.Min(1), mcp.Max(maxLimit)),
@@ -59,15 +63,18 @@ func NewLoanFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("loan_find", append(opts, annotations("Find loans", true, false, true)...)...)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return notSignedIn(), nil
+		c, deny := callerOf(ctx, pool)
+		if deny != nil {
+			return deny, nil
+		}
+		if !canRead(c.role) {
+			return cannotRead(c.role), nil
 		}
 		in, err := parseFindInput(req.GetArguments())
 		if err != nil {
 			return invalid(err, findExample), nil
 		}
-		today, err := householdToday(ctx, pool, claims.HouseholdID)
+		today, err := householdToday(ctx, pool, c.householdID)
 		if err != nil {
 			return respond.Failed("find loans", err), nil
 		}
@@ -75,16 +82,13 @@ func NewLoanFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		rows, err := pool.Query(ctx, loanSelect+`
 			WHERE l.household_id = $1
 			  AND ($2::uuid IS NULL OR l.id = $2)
-			  AND ($3 = '' OR l.name ILIKE '%' || $3 || '%' OR l.lender ILIKE '%' || $3 || '%'
-			       OR l.notes ILIKE '%' || $3 || '%' OR p.name ILIKE '%' || $3 || '%'
-			       OR a.name ILIKE '%' || $3 || '%' OR concat_ws(' ', v.year, v.make, v.model) ILIKE '%' || $3 || '%')
-			  AND ($4::uuid IS NULL OR l.property_id = $4)
-			  AND ($5::uuid IS NULL OR l.vehicle_id = $5)
-			  AND ($6::uuid IS NULL OR l.asset_id = $6)
-			  AND ($7 = '' OR ($7 = 'property' AND l.property_id IS NOT NULL)
-			       OR ($7 = 'vehicle' AND l.vehicle_id IS NOT NULL) OR ($7 = 'asset' AND l.asset_id IS NOT NULL))
+			  AND ($3::uuid IS NULL OR l.property_id = $3)
+			  AND ($4::uuid IS NULL OR l.vehicle_id = $4)
+			  AND ($5::uuid IS NULL OR l.asset_id = $5)
+			  AND ($6 = '' OR ($6 = 'property' AND l.property_id IS NOT NULL)
+			       OR ($6 = 'vehicle' AND l.vehicle_id IS NOT NULL) OR ($6 = 'asset' AND l.asset_id IS NOT NULL))
 			ORDER BY lower(l.name), l.created_at, l.id`,
-			claims.HouseholdID, in.id, escapeLike(in.query), in.propertyID, in.vehicleID, in.assetID, in.subjectKind,
+			c.householdID, in.id, in.propertyID, in.vehicleID, in.assetID, in.subjectKind,
 		)
 		if err != nil {
 			return respond.Failed("find loans", err), nil
@@ -95,6 +99,9 @@ func NewLoanFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		if in.id != nil && len(loaded) == 0 {
 			return respond.NotFound("loan", in.id.String(), "Call loan_find without id to list loans and their ids."), nil
+		}
+		if in.query != "" {
+			loaded = matchLoans(loaded, in.query)
 		}
 
 		total := len(loaded)
@@ -142,7 +149,7 @@ func findNext(in findInput, page []loanData) []string {
 		if !in.filtered() {
 			return []string{"Add one with loan_create (name, original_amount, remaining_balance)."}
 		}
-		return []string{"Call loan_find with fewer filters, or add the loan with loan_create."}
+		return []string{"Call loan_find without query to list every loan, or add the loan with loan_create."}
 	}
 	first := page[0]
 	next := []string{fmt.Sprintf("Change one (e.g. a new remaining_balance) with loan_update loan_id=%s.", first.ID)}
@@ -180,13 +187,23 @@ func parseFindInput(raw map[string]any) (findInput, error) {
 	if err != nil {
 		return in, err
 	}
-	if in.id, err = optionalUUID(args, "id"); err != nil {
-		return in, err
-	}
 	if q, err := optionalString(args, "query"); err != nil {
 		return in, err
 	} else if q != nil {
 		in.query = *q
+	}
+	// A loan name passed as id ("Mortgage") is searched for, not refused:
+	// small models put whatever names the loan in the id param.
+	if s, err := optionalString(args, "id"); err != nil {
+		return in, err
+	} else if s != nil {
+		if id, perr := uuid.Parse(*s); perr == nil {
+			in.id = &id
+		} else if in.query == "" {
+			in.query = *s
+		} else {
+			return in, badArg("id", fmt.Sprintf("id must be a UUID; got %q.", *s), uuidFixes["id"])
+		}
 	}
 	if in.propertyID, err = optionalUUID(args, "property_id"); err != nil {
 		return in, err
