@@ -24,24 +24,74 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 	return &Repo{pool: pool}
 }
 
-// selectProperty reads a property with its legacy finance fields derived
-// from its loan and bills (#4704). properties.mortgage_*, property_tax_*,
-// insurance_* and hoa_fee_monthly are never read. The column order matches
-// the Property struct (RowToAddrOfStructByPos).
-var selectProperty = `SELECT p.id, p.household_id, p.name, p.address, p.property_type, p.notes, p.created_at, p.updated_at,
-        p.purchase_price, p.purchase_date::text, p.current_value, p.down_payment,
+// A property read is built from three parts, in the order of the Property
+// struct (RowToAddrOfStructByPos scans by position):
+//
+//  1. the identity columns, which every role that may read a property gets;
+//  2. the property row's own money columns;
+//  3. the money derived from the family's loans and bills (#4704).
+//
+// Parts 2 and 3 have a real and a NULL form with the same columns, in the same
+// order, of the same type; which pair a read uses is the whole of the money
+// policy in the query. A caller whose role may not see money (#4806) reads
+// part 1 only: the values never enter the process, and the loan and bill joins
+// do not run. Every money column is cast to text, which is what the Property
+// struct scans into, so the NULL form is a list of NULL::text of the same
+// length and the two forms are interchangeable to pgx.
+var (
+	// selectPropertyIdentity is what a housesitter, a vendor and the family
+	// all see.
+	selectPropertyIdentity = `SELECT p.id, p.household_id, p.name, p.address, p.property_type, p.notes, p.created_at, p.updated_at`
+
+	// selectPropertyRowMoney is the property row's own finance columns.
+	selectPropertyRowMoney = `,
+        p.purchase_price::text, p.purchase_date::text, p.current_value::text, p.down_payment::text`
+
+	// selectDerivedMoney derives the legacy finance fields from the property's
+	// loan and bills: the mortgage (lender, account number, amount, rate, term
+	// and start date), the tax and insurance amounts and the HOA fee.
+	// properties.mortgage_*, property_tax_* and insurance_* are never read;
+	// migration 069 dropped them.
+	selectDerivedMoney = `,
         m.original_amount::text, m.interest_rate::text, m.term_months::text, m.start_date::text,
-        m.lender, m.account_number,
-        ` + legacyfinance.AmountSQL(legacyfinance.PropertyTax, "tx") + `,
-        ` + legacyfinance.DueMonthsTextSQL("tx") + `,
-        ` + legacyfinance.AmountSQL(legacyfinance.PropertyInsurance, "ins") + `,
-        ` + legacyfinance.ProviderSQL("ins") + `,
-        ` + legacyfinance.AmountSQL(legacyfinance.HOAFee, "hoa") + `
+        m.lender::text, m.account_number::text,
+        (` + legacyfinance.AmountSQL(legacyfinance.PropertyTax, "tx") + `)::text,
+        (` + legacyfinance.DueMonthsTextSQL("tx") + `)::text,
+        (` + legacyfinance.AmountSQL(legacyfinance.PropertyInsurance, "ins") + `)::text,
+        (` + legacyfinance.ProviderSQL("ins") + `)::text,
+        (` + legacyfinance.AmountSQL(legacyfinance.HOAFee, "hoa") + `)::text
    FROM properties p` +
-	legacyfinance.LoanJoin(legacyfinance.Mortgage, "m", "property_id", "p") +
-	legacyfinance.BillJoin(legacyfinance.PropertyTax, "tx", "property_id", "p") +
-	legacyfinance.BillJoin(legacyfinance.PropertyInsurance, "ins", "property_id", "p") +
-	legacyfinance.BillJoin(legacyfinance.HOAFee, "hoa", "property_id", "p")
+		legacyfinance.LoanJoin(legacyfinance.Mortgage, "m", "property_id", "p") +
+		legacyfinance.BillJoin(legacyfinance.PropertyTax, "tx", "property_id", "p") +
+		legacyfinance.BillJoin(legacyfinance.PropertyInsurance, "ins", "property_id", "p") +
+		legacyfinance.BillJoin(legacyfinance.HOAFee, "hoa", "property_id", "p")
+
+	// The no-money forms of parts 2 and 3: the same columns as NULL, and no
+	// loan or bill in the query at all.
+	selectPropertyRowMoneyNull = `,
+        NULL::text, NULL::text, NULL::text, NULL::text`
+	selectDerivedMoneyNull = `,
+        NULL::text, NULL::text, NULL::text, NULL::text,
+        NULL::text, NULL::text,
+        NULL::text,
+        NULL::text,
+        NULL::text,
+        NULL::text,
+        NULL::text
+   FROM properties p`
+)
+
+// selectPropertySQL is the property select for a caller who may (withMoney) or
+// may not see money. A field added to selectPropertyRowMoney or
+// selectDerivedMoney needs its NULL twin in the matching ...Null constant:
+// TestSelectPropertySQLSkipsMoneyQuery compares the two column lists against
+// Postgres and fails until it is added.
+func selectPropertySQL(withMoney bool) string {
+	if withMoney {
+		return selectPropertyIdentity + selectPropertyRowMoney + selectDerivedMoney
+	}
+	return selectPropertyIdentity + selectPropertyRowMoneyNull + selectDerivedMoneyNull
+}
 
 // Finance is the legacy finance fields of a request, parsed. Each one is a
 // partial update of the property's loan or bill; nil leaves it alone.
@@ -56,8 +106,8 @@ type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-func getProperty(ctx context.Context, q querier, propertyID, householdID uuid.UUID) (*Property, error) {
-	rows, err := q.Query(ctx, selectProperty+` WHERE p.id = $1 AND p.household_id = $2`, propertyID, householdID)
+func getProperty(ctx context.Context, q querier, propertyID, householdID uuid.UUID, withMoney bool) (*Property, error) {
+	rows, err := q.Query(ctx, selectPropertySQL(withMoney)+` WHERE p.id = $1 AND p.household_id = $2`, propertyID, householdID)
 	if err != nil {
 		return nil, fmt.Errorf("get property: %w", err)
 	}
@@ -88,9 +138,11 @@ func applyFinance(ctx context.Context, tx pgx.Tx, s legacyfinance.Subject, f Fin
 	return legacyfinance.ApplyBill(ctx, tx, s, legacyfinance.HOAFee, f.HOA)
 }
 
-// ListProperties returns all properties for a household.
-func (r *Repo) ListProperties(ctx context.Context, householdID uuid.UUID) ([]*Property, error) {
-	rows, err := r.pool.Query(ctx, selectProperty+` WHERE p.household_id = $1 ORDER BY p.name`, householdID)
+// ListProperties returns all properties for a household. withMoney says
+// whether the caller's role may see money (#4806): without it the loan and
+// bill lookups are skipped and every money field comes back NULL.
+func (r *Repo) ListProperties(ctx context.Context, householdID uuid.UUID, withMoney bool) ([]*Property, error) {
+	rows, err := r.pool.Query(ctx, selectPropertySQL(withMoney)+` WHERE p.household_id = $1 ORDER BY p.name`, householdID)
 	if err != nil {
 		return nil, fmt.Errorf("list properties: %w", err)
 	}
@@ -104,14 +156,16 @@ func (r *Repo) ListProperties(ctx context.Context, householdID uuid.UUID) ([]*Pr
 }
 
 // GetProperty returns a single property by ID, scoped to the household.
-func (r *Repo) GetProperty(ctx context.Context, propertyID, householdID uuid.UUID) (*Property, error) {
-	return getProperty(ctx, r.pool, propertyID, householdID)
+// withMoney has the same meaning as in ListProperties.
+func (r *Repo) GetProperty(ctx context.Context, propertyID, householdID uuid.UUID, withMoney bool) (*Property, error) {
+	return getProperty(ctx, r.pool, propertyID, householdID, withMoney)
 }
 
 // CreateProperty inserts a new property, applies the legacy finance fields
 // to loans/bills about it in the same transaction, and returns the created
 // record. Nullable columns are passed through as-is (nil => NULL).
-func (r *Repo) CreateProperty(ctx context.Context, householdID uuid.UUID, p *Property, fin Finance) (*Property, error) {
+// withMoney has the same meaning as in ListProperties.
+func (r *Repo) CreateProperty(ctx context.Context, householdID uuid.UUID, p *Property, fin Finance, withMoney bool) (*Property, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("create property: begin: %w", err)
@@ -134,7 +188,10 @@ func (r *Repo) CreateProperty(ctx context.Context, householdID uuid.UUID, p *Pro
 	if err := applyFinance(ctx, tx, s, fin); err != nil {
 		return nil, fmt.Errorf("create property: %w", err)
 	}
-	property, err := getProperty(ctx, tx, id, householdID)
+	// The caller just wrote these fields; return them as stored, but only to
+	// a role that may see money (write is family-only today, so that is
+	// every caller of this path, and a widened write cannot leak by default).
+	property, err := getProperty(ctx, tx, id, householdID, withMoney)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +209,8 @@ func (r *Repo) CreateProperty(ctx context.Context, householdID uuid.UUID, p *Pro
 // semantics (nil clears the column). The legacy finance fields are applied
 // to the property's loan/bills in the same transaction, after the property
 // is known to exist. Returns nil if the property was not found.
-func (r *Repo) UpdateProperty(ctx context.Context, propertyID, householdID uuid.UUID, p *Property, fin Finance) (*Property, error) {
+// withMoney has the same meaning as in ListProperties.
+func (r *Repo) UpdateProperty(ctx context.Context, propertyID, householdID uuid.UUID, p *Property, fin Finance, withMoney bool) (*Property, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("update property: begin: %w", err)
@@ -187,7 +245,7 @@ func (r *Repo) UpdateProperty(ctx context.Context, propertyID, householdID uuid.
 	if err := applyFinance(ctx, tx, s, fin); err != nil {
 		return nil, fmt.Errorf("update property: %w", err)
 	}
-	property, err := getProperty(ctx, tx, propertyID, householdID)
+	property, err := getProperty(ctx, tx, propertyID, householdID, withMoney)
 	if err != nil {
 		return nil, err
 	}
