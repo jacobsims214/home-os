@@ -333,9 +333,24 @@ func TestGuideRevisions(t *testing.T) {
 		t.Errorf("summary = %q", e.Summary)
 	}
 	var newest string
-	if err := pool.QueryRow(context.Background(), `SELECT body FROM guide_revisions WHERE guide_id = $1
-		ORDER BY created_at DESC, id DESC LIMIT 1`, d.ID).Scan(&newest); err != nil || newest != newBody {
+	var note *string
+	if err := pool.QueryRow(context.Background(), `SELECT body, change_note FROM guide_revisions WHERE guide_id = $1
+		ORDER BY created_at DESC, id DESC LIMIT 1`, d.ID).Scan(&newest, &note); err != nil || newest != newBody {
 		t.Errorf("newest revision = %q (%v), want the saved body", newest, err)
+	}
+	// change_note is stored on the new revision and returned by guide_get.
+	if note == nil || *note != "new filter size" {
+		t.Errorf("newest revision change_note = %v, want new filter size", note)
+	}
+	if len(u.RecentRevisions) != 2 || u.RecentRevisions[0].ChangeNote != "new filter size" || u.RecentRevisions[1].ChangeNote != "" {
+		t.Errorf("update recent_revisions = %+v", u.RecentRevisions)
+	}
+	if g := w.get.run(t, f.ctx, map[string]any{"guide_id": d.ID}).guide(t); len(g.RecentRevisions) != 2 ||
+		g.RecentRevisions[0].ChangeNote != "new filter size" || g.RecentRevisions[1].ChangeNote != "" {
+		t.Errorf("guide_get recent_revisions = %+v", g.RecentRevisions)
+	}
+	if raw := w.get.run(t, f.ctx, map[string]any{"guide_id": d.ID}).raw; strings.Count(raw, `"change_note"`) != 1 {
+		t.Errorf("guide_get should omit an empty change_note: %s", raw)
 	}
 	if n := count(t, pool, `SELECT count(*) FROM guide_revisions WHERE guide_id = $1 AND body = $2`, d.ID, oldBody); n != 1 {
 		t.Error("the previous body is not kept as a revision")

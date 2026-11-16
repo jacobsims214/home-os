@@ -49,7 +49,10 @@ type Revision struct {
 	Body         string
 	EditedBy     *uuid.UUID
 	EditedByName *string
-	CreatedAt    time.Time
+	// ChangeNote is why this save changed the guide; nil when none was
+	// given (068).
+	ChangeNote *string
+	CreatedAt  time.Time
 }
 
 // ListFilter narrows List. Zero values mean "no filter".
@@ -167,8 +170,9 @@ func (r *Repo) Get(ctx context.Context, householdID, id uuid.UUID) (*Guide, erro
 }
 
 // insertRevision writes the body as saved by editedBy (nil when the editor
-// has no users row, e.g. local dev). household_id is filled by trigger.
-func insertRevision(ctx context.Context, tx pgx.Tx, guideID uuid.UUID, body string, editedBy *uuid.UUID) error {
+// has no users row, e.g. local dev), with why it changed (changeNote, nil for
+// none). household_id is filled by trigger.
+func insertRevision(ctx context.Context, tx pgx.Tx, guideID uuid.UUID, body string, editedBy *uuid.UUID, changeNote *string) error {
 	if _, err := tx.Exec(ctx,
 		// An editor id with no users row (local dev) is stored as NULL
 		// rather than failing the save.
@@ -178,9 +182,9 @@ func insertRevision(ctx context.Context, tx pgx.Tx, guideID uuid.UUID, body stri
 		// that committed last could sort as older. Callers hold the guide's
 		// row lock here, so clock_timestamp() orders revisions by commit and
 		// the newest revision is always the saved body.
-		`INSERT INTO guide_revisions (guide_id, body, edited_by, created_at)
-		 VALUES ($1, $2, (SELECT id FROM users WHERE id = $3), clock_timestamp())`,
-		guideID, body, editedBy); err != nil {
+		`INSERT INTO guide_revisions (guide_id, body, edited_by, change_note, created_at)
+		 VALUES ($1, $2, (SELECT id FROM users WHERE id = $3), $4, clock_timestamp())`,
+		guideID, body, editedBy, changeNote); err != nil {
 		return fmt.Errorf("guides: insert revision: %w", err)
 	}
 	return nil
@@ -204,7 +208,7 @@ func (r *Repo) Create(ctx context.Context, g *Guide, editedBy *uuid.UUID) (*Guid
 	if err != nil {
 		return nil, fmt.Errorf("guides: create: %w", err)
 	}
-	if err := insertRevision(ctx, tx, created.ID, created.Body, editedBy); err != nil {
+	if err := insertRevision(ctx, tx, created.ID, created.Body, editedBy, nil); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -216,7 +220,8 @@ func (r *Repo) Create(ctx context.Context, g *Guide, editedBy *uuid.UUID) (*Guid
 // Update locks the guide, lets mutate change it, saves it and writes a
 // revision, all in one transaction. mutate's error is returned unchanged (so
 // a validation error reaches the caller as is); the guide is untouched then.
-func (r *Repo) Update(ctx context.Context, householdID, id uuid.UUID, editedBy *uuid.UUID, mutate func(*Guide) error) (*Guide, error) {
+// changeNote (nil for none) is stored on the new revision.
+func (r *Repo) Update(ctx context.Context, householdID, id uuid.UUID, editedBy *uuid.UUID, changeNote *string, mutate func(*Guide) error) (*Guide, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("guides: update: begin: %w", err)
@@ -234,7 +239,7 @@ func (r *Repo) Update(ctx context.Context, householdID, id uuid.UUID, editedBy *
 	if err := mutate(g); err != nil {
 		return nil, err
 	}
-	saved, err := saveLocked(ctx, tx, g, editedBy)
+	saved, err := saveLocked(ctx, tx, g, editedBy, changeNote)
 	if err != nil {
 		return nil, err
 	}
@@ -245,8 +250,8 @@ func (r *Repo) Update(ctx context.Context, householdID, id uuid.UUID, editedBy *
 }
 
 // saveLocked writes g (already locked by the caller's transaction) and a
-// revision of its body.
-func saveLocked(ctx context.Context, tx pgx.Tx, g *Guide, editedBy *uuid.UUID) (*Guide, error) {
+// revision of its body with changeNote (nil for none).
+func saveLocked(ctx context.Context, tx pgx.Tx, g *Guide, editedBy *uuid.UUID, changeNote *string) (*Guide, error) {
 	saved, err := scanGuide(tx.QueryRow(ctx,
 		`UPDATE guides
 		 SET title = $3, summary = $4, body = $5, tags = $6,
@@ -257,14 +262,15 @@ func saveLocked(ctx context.Context, tx pgx.Tx, g *Guide, editedBy *uuid.UUID) (
 	if err != nil {
 		return nil, fmt.Errorf("guides: save: %w", err)
 	}
-	if err := insertRevision(ctx, tx, saved.ID, saved.Body, editedBy); err != nil {
+	if err := insertRevision(ctx, tx, saved.ID, saved.Body, editedBy, changeNote); err != nil {
 		return nil, err
 	}
 	return saved, nil
 }
 
 // Restore makes revision revID the guide's body again. The restore is a save
-// like any other: it writes a new revision (history is never rewritten).
+// like any other: it writes a new revision (history is never rewritten) whose
+// change note is "Restored revision <revID>".
 func (r *Repo) Restore(ctx context.Context, householdID, guideID, revID uuid.UUID, editedBy *uuid.UUID) (*Guide, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -289,7 +295,8 @@ func (r *Repo) Restore(ctx context.Context, householdID, guideID, revID uuid.UUI
 	if err != nil {
 		return nil, fmt.Errorf("guides: restore: revision: %w", err)
 	}
-	saved, err := saveLocked(ctx, tx, g, editedBy)
+	note := "Restored revision " + revID.String()
+	saved, err := saveLocked(ctx, tx, g, editedBy, &note)
 	if err != nil {
 		return nil, err
 	}
@@ -312,11 +319,11 @@ func (r *Repo) Delete(ctx context.Context, householdID, id uuid.UUID) error {
 	return nil
 }
 
-const revisionCols = `r.id, r.guide_id, r.household_id, r.body, r.edited_by, u.name, r.created_at`
+const revisionCols = `r.id, r.guide_id, r.household_id, r.body, r.edited_by, u.name, r.change_note, r.created_at`
 
 func scanRevision(row pgx.Row) (*Revision, error) {
 	var v Revision
-	if err := row.Scan(&v.ID, &v.GuideID, &v.HouseholdID, &v.Body, &v.EditedBy, &v.EditedByName, &v.CreatedAt); err != nil {
+	if err := row.Scan(&v.ID, &v.GuideID, &v.HouseholdID, &v.Body, &v.EditedBy, &v.EditedByName, &v.ChangeNote, &v.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &v, nil

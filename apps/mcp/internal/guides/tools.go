@@ -1121,6 +1121,7 @@ type revisionInfo struct {
 	LocalTime  string `json:"local_time" jsonschema_description:"HH:MM in the family timezone."`
 	EditedBy   string `json:"edited_by,omitempty" jsonschema_description:"Who saved it."`
 	BodyLength int    `json:"body_length" jsonschema_description:"Characters in the steps as saved."`
+	ChangeNote string `json:"change_note,omitempty" jsonschema_description:"Why it changed, as given when it was saved."`
 }
 
 // guideData is one guide in full (guide_get, create, update).
@@ -1153,7 +1154,7 @@ func loadData(ctx context.Context, q querier, hid, id uuid.UUID, role string) (g
 	}
 	rows, err := q.Query(ctx, `
 SELECT r.id::text, to_char(r.created_at AT TIME ZONE h.timezone, 'YYYY-MM-DD'), to_char(r.created_at AT TIME ZONE h.timezone, 'Dy'),
-       to_char(r.created_at AT TIME ZONE h.timezone, 'HH24:MI'), COALESCE(u.name, ''), char_length(r.body), count(*) OVER ()
+       to_char(r.created_at AT TIME ZONE h.timezone, 'HH24:MI'), COALESCE(u.name, ''), char_length(r.body), COALESCE(r.change_note, ''), count(*) OVER ()
   FROM guide_revisions r
   JOIN households h ON h.id = r.household_id
   LEFT JOIN users u ON u.id = r.edited_by
@@ -1165,7 +1166,7 @@ SELECT r.id::text, to_char(r.created_at AT TIME ZONE h.timezone, 'YYYY-MM-DD'), 
 	}
 	d.RecentRevisions, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (revisionInfo, error) {
 		var v revisionInfo
-		return v, row.Scan(&v.ID, &v.LocalDate, &v.Weekday, &v.LocalTime, &v.EditedBy, &v.BodyLength, &d.RevisionCount)
+		return v, row.Scan(&v.ID, &v.LocalDate, &v.Weekday, &v.LocalTime, &v.EditedBy, &v.BodyLength, &v.ChangeNote, &d.RevisionCount)
 	})
 	return d, err
 }
@@ -1173,10 +1174,11 @@ SELECT r.id::text, to_char(r.created_at AT TIME ZONE h.timezone, 'YYYY-MM-DD'), 
 // insertRevision writes the body as saved, in the caller's transaction,
 // exactly as the API does: an editor with no users row is stored as NULL,
 // and created_at is clock_timestamp() (taken after the guide's row lock), not
-// NOW(), so revisions sort by commit.
-func insertRevision(ctx context.Context, tx pgx.Tx, guideID uuid.UUID, body string, editedBy *uuid.UUID) error {
-	_, err := tx.Exec(ctx, `INSERT INTO guide_revisions (guide_id, body, edited_by, created_at)
-		VALUES ($1, $2, (SELECT id FROM users WHERE id = $3), clock_timestamp())`, guideID, body, editedBy)
+// NOW(), so revisions sort by commit. changeNote is why it changed ("" stores
+// NULL).
+func insertRevision(ctx context.Context, tx pgx.Tx, guideID uuid.UUID, body string, editedBy *uuid.UUID, changeNote string) error {
+	_, err := tx.Exec(ctx, `INSERT INTO guide_revisions (guide_id, body, edited_by, change_note, created_at)
+		VALUES ($1, $2, (SELECT id FROM users WHERE id = $3), NULLIF($4, ''), clock_timestamp())`, guideID, body, editedBy, changeNote)
 	return err
 }
 
@@ -1697,7 +1699,7 @@ func NewGuideCreateTool(pool *pgxpool.Pool, idx searchIndex) (string, mcp.Tool, 
 			c.householdID, f.title.val, summary, f.body.val, tags, propertyID, assetID, vehicleID).Scan(&id); err != nil {
 			return respond.Failed("save the guide", err), nil
 		}
-		if err := insertRevision(ctx, tx, id, f.body.val, c.userID); err != nil {
+		if err := insertRevision(ctx, tx, id, f.body.val, c.userID, ""); err != nil {
 			return respond.Failed("save the guide", err), nil
 		}
 		var sameTitle int
@@ -1743,8 +1745,7 @@ var updateExample = map[string]any{"guide_id": "HVAC filter replacement", "body"
 // revision in the same transaction, so the previous steps stay in history.
 // A call that changes nothing writes nothing.
 //
-// change_note is accepted and echoed in the summary, but not stored:
-// guide_revisions (049) has no column for it.
+// change_note is stored on the new revision (068) and echoed in the summary.
 func NewGuideUpdateTool(pool *pgxpool.Pool, idx searchIndex) (string, mcp.Tool, toolHandler) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Change a guide. Every update keeps the previous version as a revision. Only the given fields change."),
@@ -1886,7 +1887,7 @@ func NewGuideUpdateTool(pool *pgxpool.Pool, idx searchIndex) (string, mcp.Tool, 
 			id, c.householdID, title, summary, body, tags, propertyID, assetID, vehicleID); err != nil {
 			return respond.Failed("update the guide", err), nil
 		}
-		if err := insertRevision(ctx, tx, id, body, c.userID); err != nil {
+		if err := insertRevision(ctx, tx, id, body, c.userID, f.changeNote.val); err != nil {
 			return respond.Failed("update the guide", err), nil
 		}
 		d, err := loadData(ctx, tx, c.householdID, id, c.role)

@@ -27,6 +27,7 @@ const EntityType = "guide"
 const (
 	maxTitle      = 255
 	maxSummary    = 2000
+	maxChangeNote = 500
 	maxBody       = 256 << 10 // 256 KiB of markdown
 	maxTags       = 30
 	maxTagLen     = 50
@@ -171,13 +172,15 @@ type createRequest struct {
 }
 
 // updateRequest: omitted fields are unchanged; summary "" clears it; subject
-// fields follow subject.Fields.Apply ("" clears one).
+// fields follow subject.Fields.Apply ("" clears one). change_note is why it
+// changed, stored on the new revision (trimmed; "" or omitted stores none).
 type updateRequest struct {
 	subject.Fields
-	Title   *string   `json:"title"`
-	Summary *string   `json:"summary"`
-	Body    *string   `json:"body"`
-	Tags    *[]string `json:"tags"`
+	Title      *string   `json:"title"`
+	Summary    *string   `json:"summary"`
+	Body       *string   `json:"body"`
+	Tags       *[]string `json:"tags"`
+	ChangeNote *string   `json:"change_note"`
 }
 
 type guideResponse struct {
@@ -201,6 +204,7 @@ type revisionResponse struct {
 	BodyLength   int     `json:"body_length"`
 	EditedBy     *string `json:"edited_by"`
 	EditedByName *string `json:"edited_by_name"`
+	ChangeNote   *string `json:"change_note"`
 	CreatedAt    string  `json:"created_at"`
 }
 
@@ -227,6 +231,7 @@ func toRevisionResponse(v *Revision, withBody bool) revisionResponse {
 		BodyLength:   utf8.RuneCountInString(v.Body),
 		EditedBy:     subject.String(v.EditedBy),
 		EditedByName: v.EditedByName,
+		ChangeNote:   v.ChangeNote,
 		CreatedAt:    v.CreatedAt.UTC().Format(time.RFC3339Nano),
 	}
 	if withBody {
@@ -265,6 +270,21 @@ func cleanSummary(s *string) (*string, error) {
 	}
 	if utf8.RuneCountInString(v) > maxSummary {
 		return nil, validationError("summary must be at most 2000 characters")
+	}
+	return &v, nil
+}
+
+// cleanChangeNote trims a revision's change note; blank is none.
+func cleanChangeNote(s *string) (*string, error) {
+	if s == nil {
+		return nil, nil
+	}
+	v := strings.TrimSpace(*s)
+	if v == "" {
+		return nil, nil
+	}
+	if utf8.RuneCountInString(v) > maxChangeNote {
+		return nil, validationError("change_note must be at most 500 characters")
 	}
 	return &v, nil
 }
@@ -501,8 +521,13 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
+	note, err := cleanChangeNote(req.ChangeNote)
+	if err != nil {
+		writeErr(w, err, "guide")
+		return
+	}
 
-	saved, err := h.repo.Update(r.Context(), c.householdID, id, c.userID, func(g *Guide) error {
+	saved, err := h.repo.Update(r.Context(), c.householdID, id, c.userID, note, func(g *Guide) error {
 		var err error
 		if req.Title != nil {
 			if g.Title, err = cleanTitle(*req.Title); err != nil {

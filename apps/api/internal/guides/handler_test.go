@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -115,6 +116,7 @@ type revisionJSON struct {
 	BodyLength   int     `json:"body_length"`
 	EditedBy     *string `json:"edited_by"`
 	EditedByName *string `json:"edited_by_name"`
+	ChangeNote   *string `json:"change_note"`
 }
 
 // family inserts a household with one member (role) and returns a client
@@ -185,10 +187,11 @@ func TestGuideRevisions(t *testing.T) {
 	require.NotNil(t, revs[0].EditedByName)
 	assert.Equal(t, "Sam", *revs[0].EditedByName)
 	assert.Nil(t, revs[0].Body, "list omits bodies")
+	assert.Nil(t, revs[0].ChangeNote, "create stores no change note")
 	first := revs[0].ID
 
-	// A body edit writes a revision.
-	rec = c.do(http.MethodPut, "/api/v1/guides/"+g.ID, map[string]any{"body": "1. Unplug the modem.\n2. Wait 30s."})
+	// A body edit writes a revision, with its change note (trimmed).
+	rec = c.do(http.MethodPut, "/api/v1/guides/"+g.ID, map[string]any{"body": "1. Unplug the modem.\n2. Wait 30s.", "change_note": "  added a wait "})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, "Reset the router", decode[guideJSON](t, rec).Title, "omitted fields are unchanged")
 
@@ -201,6 +204,9 @@ func TestGuideRevisions(t *testing.T) {
 	revs = revisions(t, c, g.ID)
 	require.Len(t, revs, 3)
 	assert.Equal(t, first, revs[2].ID, "newest first")
+	require.NotNil(t, revs[1].ChangeNote)
+	assert.Equal(t, "added a wait", *revs[1].ChangeNote)
+	assert.Nil(t, revs[0].ChangeNote, "a save without change_note stores none")
 
 	// The newest revision equals the guide's body.
 	rec = c.do(http.MethodGet, "/api/v1/guides/"+g.ID+"/revisions/"+revs[0].ID, nil)
@@ -217,13 +223,31 @@ func TestGuideRevisions(t *testing.T) {
 	assert.Equal(t, "Reset the internet router", g.Title, "restore changes only the body")
 	revs = revisions(t, c, g.ID)
 	require.Len(t, revs, 4)
+	require.NotNil(t, revs[0].ChangeNote)
+	assert.Equal(t, "Restored revision "+first, *revs[0].ChangeNote)
 	rec = c.do(http.MethodGet, "/api/v1/guides/"+g.ID+"/revisions/"+revs[0].ID, nil)
-	assert.Equal(t, "1. Unplug the modem.", *decode[revisionJSON](t, rec).Body)
+	restored := decode[revisionJSON](t, rec)
+	assert.Equal(t, "1. Unplug the modem.", *restored.Body)
+	require.NotNil(t, restored.ChangeNote)
+	assert.Equal(t, "Restored revision "+first, *restored.ChangeNote)
 
 	// A failed save writes nothing.
 	rec = c.do(http.MethodPut, "/api/v1/guides/"+g.ID, map[string]any{"title": "  ", "body": "lost"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, 4, revisionCount(t, pool, g.ID))
+	rec = c.do(http.MethodPut, "/api/v1/guides/"+g.ID, map[string]any{"body": "lost", "change_note": strings.Repeat("é", 501)})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "change_note over 500 characters")
+	assert.Equal(t, 4, revisionCount(t, pool, g.ID))
+	// 500 characters is fine; a blank note stores none.
+	rec = c.do(http.MethodPut, "/api/v1/guides/"+g.ID, map[string]any{"change_note": strings.Repeat("é", 500)})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = c.do(http.MethodPut, "/api/v1/guides/"+g.ID, map[string]any{"change_note": "   "})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	revs = revisions(t, c, g.ID)
+	require.Len(t, revs, 6)
+	assert.Nil(t, revs[0].ChangeNote)
+	require.NotNil(t, revs[1].ChangeNote)
+	assert.Equal(t, strings.Repeat("é", 500), *revs[1].ChangeNote)
 
 	// Unknown revision.
 	rec = c.do(http.MethodPost, "/api/v1/guides/"+g.ID+"/revisions/"+uuid.NewString()+"/restore", nil)
