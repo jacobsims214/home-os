@@ -93,14 +93,12 @@ var aboutToDB = map[string]string{
 }
 
 // aboutFinder names the registered tool that finds ids for each about_type.
-// recipe has no registered finder yet; the ticket that registers
-// recipe_find adds it here.
 var aboutFinder = map[string]string{
 	"person": "person_find", "property": "property_find", "room": "property_find",
 	"asset": "asset_find", "vehicle": "vehicle_find", "pet": "pet_find",
 	"contact": "contact_find", "bill": "bill_find", "loan": "loan_find",
 	"maintenance": "maintenance_find", "event": "event_find", "list": "list_find",
-	"guide": "guide_find",
+	"guide": "guide_find", "recipe": "recipe_find",
 }
 
 // findIDWith says how to get an about_type's id: its finder tool, or the

@@ -214,6 +214,15 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 		{"property_update", func(i int) map[string]any {
 			return map[string]any{"property_id": f.Property, "current_value": 420000 + i, "add_rooms": []string{"Office"}}
 		}},
+		{"recipe_create", func(i int) map[string]any {
+			return map[string]any{"name": fmt.Sprintf("Bench recipe %d", i), "servings": 4, "total_minutes": 30,
+				"ingredients": []any{map[string]any{"item": "pasta", "quantity": 1, "unit": "lb"}, "2 cups tomato sauce"},
+				"steps":       []any{"Boil the pasta.", "Add the sauce."}, "tags": []any{"bench"}}
+		}},
+		{"recipe_delete", func(i int) map[string]any { return map[string]any{"recipe_id": pick(f.DisposableRecipes, i)} }},
+		{"recipe_find", static(map[string]any{"ingredient": "chicken"})},
+		{"recipe_get", static(map[string]any{"recipe_id": f.Recipe})},
+		{"recipe_update", func(i int) map[string]any { return map[string]any{"recipe_id": f.Recipe, "servings": 1 + i%12} }},
 		{"room_delete", func(i int) map[string]any { return map[string]any{"room_id": pick(f.DisposableRooms, i)} }},
 		{"search_all", static(map[string]any{"query": "insurance"})},
 		{"vehicle_create", func(i int) map[string]any {

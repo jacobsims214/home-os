@@ -226,7 +226,11 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 		 SELECT l.id, $1, 'Grocery item ' || g, 'Aisle ' || (g % 8), g % 3 = 0, g
 		   FROM lists l, generate_series(1, 40) g WHERE l.household_id = $1 AND l.name = 'Grocery'`,
 		`INSERT INTO recipes (household_id, title, description, ingredients, tags)
-		 SELECT $1, 'Recipe ' || g, 'Weeknight dinner ' || g, '[]'::jsonb, ARRAY['dinner'] FROM generate_series(1, 40) g`,
+		 SELECT $1, 'Recipe ' || g, 'Weeknight dinner ' || g,
+		        jsonb_build_array(jsonb_build_object('name', CASE WHEN g % 2 = 0 THEN 'chicken thighs' ELSE 'tofu' END, 'quantity', 1, 'unit', 'lb'),
+		                          jsonb_build_object('name', 'rice', 'quantity', 2, 'unit', 'cup'),
+		                          jsonb_build_object('name', 'garlic', 'quantity', 3, 'unit', 'clove')),
+		        ARRAY['dinner'] FROM generate_series(1, 40) g`,
 		`INSERT INTO guides (household_id, title, summary, body, tags)
 		 SELECT $1, 'How to ' || g, 'Guide ' || g, repeat('Step. ', 20), ARRAY['howto'] FROM generate_series(1, 20) g`,
 
@@ -254,6 +258,8 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 		INSERT INTO files (household_id, blob_id, name, content_type, size, entity_type, entity_id, extracted_text, ocr_status, title)
 		SELECT $1, nb.id, 'zz-disposable-' || g || '.txt', 'text/plain', 12, 'household', $1, 'disposable ' || g, 'done',
 		       '` + benchDisposablePrefix + ` doc ' || g FROM nb`,
+		// Recipes with nothing attached, for recipe_delete.
+		`INSERT INTO recipes (household_id, title, ingredients) SELECT $1, '` + benchDisposablePrefix + ` recipe ' || g, '[{"name":"water"}]'::jsonb FROM generate_series(1, %[1]d) g`,
 		// Vehicles with nothing attached, for vehicle_delete.
 		`INSERT INTO vehicles (household_id, make, model) SELECT $1, 'Junker', '` + benchDisposablePrefix + ` car ' || g FROM generate_series(1, %[1]d) g`,
 		// People without a login and with nothing attached, for person_delete.
@@ -297,12 +303,12 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 // benchFixtures are ids from the measured household that tool arguments use.
 type benchFixtures struct {
 	Asset, Bill, Event, Note, Document, Loan, Task, Property, Vehicle, Calendar, Person, Pet string
-	List, ListItem, Credential, Contact, Guide                                               string
+	List, ListItem, Credential, Contact, Guide, Recipe                                       string
 
 	// Rows each measured call of a write tool consumes, in order.
 	DisposableAssets, DisposableBills, DisposableLoans, DisposableTasks, DisposableNotes, DisposableEvents []string
 	DisposableListItems, DisposablePeople, DisposablePets, DisposableProperties, DisposableRooms           []string
-	DisposableVehicles, DisposableContacts, DisposableGuides, DisposableDocuments                          []string
+	DisposableVehicles, DisposableContacts, DisposableGuides, DisposableDocuments, DisposableRecipes       []string
 	PayableBills, PendingTasks, UnreadNotifications                                                        []string
 }
 
@@ -357,6 +363,7 @@ func loadFixtures(t testing.TB, pool *pgxpool.Pool, hh uuid.UUID) benchFixtures 
 		List:     one(`SELECT id::text FROM lists WHERE household_id = $1 AND name = 'Grocery'`),
 		ListItem: one(`SELECT i.id::text FROM list_items i JOIN lists l ON l.id = i.list_id WHERE l.household_id = $1 AND l.name = 'Grocery' AND i.text = 'Grocery item 1'`),
 		Guide:    one(`SELECT id::text FROM guides WHERE household_id = $1 AND title = 'How to 1'`),
+		Recipe:   one(`SELECT id::text FROM recipes WHERE household_id = $1 AND title = 'Recipe 1'`),
 
 		DisposableAssets:     disp("assets", "name"),
 		DisposableListItems:  disp("list_items", "text"),
@@ -372,6 +379,7 @@ func loadFixtures(t testing.TB, pool *pgxpool.Pool, hh uuid.UUID) benchFixtures 
 		DisposableContacts:   disp("vendors", "name"),
 		DisposableGuides:     disp("guides", "title"),
 		DisposableDocuments:  disp("files", "title"),
+		DisposableRecipes:    disp("recipes", "title"),
 		DisposableEvents: many(`SELECT co.id::text FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
 		                         WHERE c.household_id = $1 AND co.ical_data LIKE '%` + benchDisposablePrefix + ` event%' ORDER BY co.id`),
 		PayableBills: many(`SELECT id::text FROM bills WHERE household_id = $1 AND paid_date IS NULL AND frequency = 'monthly'

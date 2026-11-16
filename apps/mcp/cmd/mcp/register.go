@@ -16,6 +16,7 @@ import (
 	"home-os/mcp/internal/lists"
 	"home-os/mcp/internal/loan"
 	"home-os/mcp/internal/maintenance"
+	"home-os/mcp/internal/meals"
 	"home-os/mcp/internal/note"
 	"home-os/mcp/internal/notification"
 	"home-os/mcp/internal/people"
@@ -44,6 +45,7 @@ var registrars = []func(*server.Server, server.Deps){
 	vehicle.Register,
 	pet.Register,
 	guides.Register,
+	meals.Register,
 	vendors.Register,
 	calendar.Register,
 	notification.Register,

@@ -87,6 +87,11 @@ var wantToolClass = map[string]toolClass{
 	"guide_find":              classR,
 	"guide_get":               classR,
 	"guide_update":            classU,
+	"recipe_create":           classC,
+	"recipe_delete":           classX,
+	"recipe_find":             classR,
+	"recipe_get":              classR,
+	"recipe_update":           classU,
 	"list_add_items":          classU,
 	"list_check_items":        classU,
 	"list_create":             classC,
@@ -309,8 +314,8 @@ func TestAnnotationProblemsCatchesMistakes(t *testing.T) {
 		{"create marked idempotent", "note_create", without(func(h *hints) { h.ReadOnlyHint = b(false) }), "catalog says C"},
 		{"delete not destructive", "note_delete", without(func(h *hints) { h.ReadOnlyHint = b(false) }), "catalog says X"},
 		{"update marked R", "note_update", r, "catalog says U"},
-		{"unlisted tool", "recipe_find", r, "not in wantToolClass"},
-		{"unlisted create marked R", "recipe_create", r, "verb means C"},
+		{"unlisted tool", "widget_find", r, "not in wantToolClass"},
+		{"unlisted create marked R", "widget_create", r, "verb means C"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

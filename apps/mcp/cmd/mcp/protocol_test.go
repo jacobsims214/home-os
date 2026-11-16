@@ -46,6 +46,7 @@ var wantTools = []string{
 	"person_create", "person_delete", "person_find", "person_get", "person_update",
 	"pet_create", "pet_delete", "pet_find", "pet_update",
 	"property_create", "property_delete", "property_find", "property_update",
+	"recipe_create", "recipe_delete", "recipe_find", "recipe_get", "recipe_update",
 	"room_delete", "search_all",
 	"vehicle_create", "vehicle_delete", "vehicle_find", "vehicle_update",
 }

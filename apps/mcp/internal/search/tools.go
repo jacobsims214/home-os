@@ -103,8 +103,7 @@ var areas = []area{
 		Title: "t.title",
 		Doc: "concat_ws(' ', t.title, t.description, array_to_string(t.tags, ' '), " +
 			"(SELECT string_agg(e->>'name', ' ') FROM jsonb_array_elements(t.ingredients) e))",
-		// No recipe tool is registered yet: plain text until recipe_get is.
-		OpenRef: "t.title", Open: "Tell the user it is their recipe %q in Home OS; opening recipes here is coming soon.", Sort: "t.created_at"},
+		OpenRef: "t.id", Open: "recipe_get recipe_id=%s", Sort: "t.created_at"},
 	{Name: "document", Plural: "documents", From: "files t", Scope: "t.household_id",
 		// 048 document metadata: title (falls back to the file name),
 		// category and description are searched before the extracted text.
@@ -142,7 +141,7 @@ var areas = []area{
 
 // noOpenTool is the types whose open is plain text for the user, not a tool
 // call, so they are left out of the "Open … with …" hints.
-var noOpenTool = map[string]bool{"recipe": true}
+var noOpenTool = map[string]bool{}
 
 // areaNames is the types[] enum, in result order.
 var areaNames = func() []string {
