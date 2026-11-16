@@ -27,6 +27,7 @@ func TestLists046_Reversible(t *testing.T) {
 
 	// 047 and 049 replace entity_household() on top of 046, and 050 adds
 	// authorship on top of all of them; undo them first.
+	applyMigration(t, pool, "066_list_item_checked_by.down.sql")   // newest first: drops list_items.checked_by
 	applyMigration(t, pool, "065_vendor_address.down.sql")         // newest first: moves vendors.address back into notes
 	applyMigration(t, pool, "064_membership_vendor_link.down.sql") // newest first: 064's memberships FK needs 043's vendors key
 	applyMigration(t, pool, "061_notify_creator_role.down.sql")    // newest first: restores 054's notify_entity_creator

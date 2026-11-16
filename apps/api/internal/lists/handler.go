@@ -189,6 +189,8 @@ type itemResponse struct {
 	Section          *string  `json:"section"`
 	Checked          bool     `json:"checked"`
 	CheckedAt        *string  `json:"checked_at"`
+	CheckedBy        *string  `json:"checked_by"`
+	CheckedByName    *string  `json:"checked_by_name"`
 	AssigneePersonID *string  `json:"assignee_person_id"`
 	DueDate          *string  `json:"due_date"`
 	Position         float64  `json:"position"`
@@ -223,6 +225,11 @@ func toItemResponse(it *Item) itemResponse {
 	if it.CheckedAt != nil {
 		s := fmtTime(*it.CheckedAt)
 		resp.CheckedAt = &s
+	}
+	if it.CheckedBy != nil {
+		s := it.CheckedBy.String()
+		resp.CheckedBy = &s
+		resp.CheckedByName = it.CheckedByName
 	}
 	if it.AssigneePersonID != nil {
 		s := it.AssigneePersonID.String()

@@ -126,6 +126,8 @@ type item struct {
 	Unit             *string  `json:"unit"`
 	Section          *string  `json:"section" jsonschema_description:"Aisle or room, e.g. Produce."`
 	Checked          bool     `json:"checked"`
+	CheckedBy        *string  `json:"checked_by" jsonschema_description:"User id of the member who checked it off; null when open or unknown."`
+	CheckedByName    *string  `json:"checked_by_name" jsonschema_description:"Name of the member who checked it off, e.g. Amber."`
 	AssigneePersonID *string  `json:"assignee_person_id"`
 	AssigneeName     *string  `json:"assignee_name"`
 	DueDate          *string  `json:"due_date" jsonschema_description:"YYYY-MM-DD."`
@@ -197,11 +199,15 @@ const listFrom = ` FROM lists l JOIN households h ON h.id = l.household_id`
 
 // itemCols is what scanItem reads. FROM must be itemFrom.
 const itemCols = `i.id, i.list_id, i.text, i.quantity::float8, i.unit, i.section, i.checked,
-	i.assignee_person_id, pe.display_name, i.due_date::text, to_char(i.due_date, 'Dy'), u.name`
+	i.assignee_person_id, pe.display_name, i.due_date::text, to_char(i.due_date, 'Dy'), u.name,
+	i.checked_by, cb.name`
 
+// checked_by (migration 066) is filled by trigger from the caller
+// (app.user_id), so list_check_items needs no code to record it.
 const itemFrom = ` FROM list_items i
 	LEFT JOIN people pe ON pe.id = i.assignee_person_id
-	LEFT JOIN users u ON u.id = i.created_by`
+	LEFT JOIN users u ON u.id = i.created_by
+	LEFT JOIN users cb ON cb.id = i.checked_by`
 
 // itemOrder is the canonical item order: position is not unique.
 const itemOrder = ` ORDER BY i.position, i.created_at, i.id`
@@ -235,13 +241,18 @@ func scanItems(rows pgx.Rows) ([]item, error) {
 			it           item
 			id, listID   uuid.UUID
 			assignee     *uuid.UUID
+			checkedBy    *uuid.UUID
 			dueDate, dow *string
 		)
 		if err := rows.Scan(&id, &listID, &it.Text, &it.Quantity, &it.Unit, &it.Section, &it.Checked,
-			&assignee, &it.AssigneeName, &dueDate, &dow, &it.AddedBy); err != nil {
+			&assignee, &it.AssigneeName, &dueDate, &dow, &it.AddedBy, &checkedBy, &it.CheckedByName); err != nil {
 			return nil, err
 		}
 		it.ID, it.ListID = id.String(), listID.String()
+		if checkedBy != nil {
+			s := checkedBy.String()
+			it.CheckedBy = &s
+		}
 		if assignee != nil {
 			s := assignee.String()
 			it.AssigneePersonID = &s

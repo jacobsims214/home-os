@@ -14,6 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
+	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/testutil"
 )
 
@@ -928,4 +930,77 @@ func mapsKeys(m map[string]bool) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestCheckedBy: list_check_items records the caller in checked_by (migration
+// 066 trigger, from app.user_id), housesitters included; unchecking and
+// re-adding a checked item clear it; list_get returns the id and the name.
+func TestCheckedBy(t *testing.T) {
+	tt := setup(t)
+	ctx := tt.ctx
+	var sitter uuid.UUID
+	if err := tt.pool.QueryRow(context.Background(),
+		`INSERT INTO users (email, name, password_hash) VALUES ($1, 'Amber', 'x') RETURNING id`,
+		uuid.NewString()+"@test.homeos.local").Scan(&sitter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tt.pool.Exec(context.Background(),
+		`INSERT INTO memberships (household_id, user_id, role) VALUES ($1, $2, 'housesitter')`, tt.hh.HouseholdID, sitter); err != nil {
+		t.Fatal(err)
+	}
+	sitterCtx := server.ContextWithClaims(context.Background(), &auth.Claims{
+		UserID: sitter.String(), HouseholdID: tt.hh.HouseholdID.String(), Role: "housesitter",
+	})
+
+	l := tt.create.ok(t, ctx, map[string]any{"name": "Groceries", "kind": "grocery", "items": []any{"milk", "eggs", "bread"}}).Data
+	id := l.List.ID
+	byText := func() map[string]item {
+		t.Helper()
+		out := map[string]item{}
+		for _, it := range tt.get.ok(t, ctx, map[string]any{"list_id": id}).Data.Items {
+			out[it.Text] = it
+		}
+		return out
+	}
+	wantBy := func(it item, user uuid.UUID, name string) {
+		t.Helper()
+		if user == uuid.Nil {
+			if it.CheckedBy != nil || it.CheckedByName != nil {
+				t.Errorf("%s: checked_by = %v %v, want null", it.Text, it.CheckedBy, it.CheckedByName)
+			}
+			return
+		}
+		if it.CheckedBy == nil || *it.CheckedBy != user.String() || it.CheckedByName == nil || *it.CheckedByName != name {
+			t.Errorf("%s: checked_by = %v %v, want %s %s", it.Text, it.CheckedBy, it.CheckedByName, user, name)
+		}
+	}
+
+	env := tt.check.ok(t, sitterCtx, map[string]any{"list_id": id, "texts": []string{"milk"}})
+	if len(env.Data.Changed) != 1 {
+		t.Fatalf("changed = %+v", env.Data.Changed)
+	}
+	wantBy(env.Data.Changed[0], sitter, "Amber")
+	env = tt.check.ok(t, ctx, map[string]any{"list_id": id, "texts": []string{"eggs"}})
+	wantBy(env.Data.Changed[0], tt.hh.UserID, "Test Owner")
+
+	got := byText()
+	wantBy(got["milk"], sitter, "Amber")
+	wantBy(got["eggs"], tt.hh.UserID, "Test Owner")
+	wantBy(got["bread"], uuid.Nil, "")
+
+	// Checking again keeps the first checker.
+	tt.check.ok(t, ctx, map[string]any{"list_id": id, "texts": []string{"milk"}})
+	wantBy(byText()["milk"], sitter, "Amber")
+
+	// Uncheck clears it; so does re-adding a checked item (reopened).
+	env = tt.check.ok(t, ctx, map[string]any{"list_id": id, "texts": []string{"milk"}, "checked": false})
+	wantBy(env.Data.Changed[0], uuid.Nil, "")
+	add := tt.add.ok(t, ctx, map[string]any{"list_id": id, "items": []any{"eggs"}})
+	if len(add.Data.Reopened) != 1 {
+		t.Fatalf("reopened = %+v", add.Data.Reopened)
+	}
+	wantBy(add.Data.Reopened[0], uuid.Nil, "")
+	got = byText()
+	wantBy(got["milk"], uuid.Nil, "")
+	wantBy(got["eggs"], uuid.Nil, "")
 }

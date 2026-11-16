@@ -156,6 +156,7 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	pet := insertID(t, pool, `INSERT INTO pets (household_id, name) VALUES ($1, 'Rex') RETURNING id`, f.household)
 	asset := insertID(t, pool, `INSERT INTO assets (household_id, room_id, name) VALUES ($1, $2, 'Fridge') RETURNING id`, f.household, f.room)
 
+	applyMigration(t, pool, "066_list_item_checked_by.down.sql")   // newest first: drops list_items.checked_by
 	applyMigration(t, pool, "065_vendor_address.down.sql")         // newest first: moves vendors.address back into notes
 	applyMigration(t, pool, "064_membership_vendor_link.down.sql") // newest first: 064's memberships FK needs 043's vendors key
 	applyMigration(t, pool, "061_notify_creator_role.down.sql")    // newest first: restores 054's notify_entity_creator
@@ -190,6 +191,7 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	applyMigration(t, pool, "060_drop_pet_vet_columns.up.sql")
 	applyMigration(t, pool, "064_membership_vendor_link.up.sql")
 	applyMigration(t, pool, "065_vendor_address.up.sql")
+	applyMigration(t, pool, "066_list_item_checked_by.up.sql")
 
 	type subject struct{ property, vehicle, asset *uuid.UUID }
 	subjectOf := func(table string, id uuid.UUID) subject {
@@ -248,6 +250,7 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	before := countAll()
 
 	// Down: the legacy columns come back, filled from the typed FKs.
+	applyMigration(t, pool, "066_list_item_checked_by.down.sql")   // newest first: drops list_items.checked_by
 	applyMigration(t, pool, "065_vendor_address.down.sql")         // newest first: moves vendors.address back into notes
 	applyMigration(t, pool, "064_membership_vendor_link.down.sql") // newest first: 064's memberships FK needs 043's vendors key
 	applyMigration(t, pool, "061_notify_creator_role.down.sql")    // newest first: restores 054's notify_entity_creator

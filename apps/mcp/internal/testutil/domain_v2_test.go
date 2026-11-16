@@ -420,6 +420,7 @@ func TestDomainV2_Backfill039(t *testing.T) {
 	// secret_keys and 052 one bills column; they are undone first to keep the
 	// chain strictly newest-first. 056 drops the legacy bill/loan/vendor
 	// columns that 038 down and the legacy inserts below need back.
+	apply("066_list_item_checked_by.down.sql")   // newest first: drops list_items.checked_by
 	apply("065_vendor_address.down.sql")         // newest first: moves vendors.address back into notes
 	apply("064_membership_vendor_link.down.sql") // newest first: 064's memberships FK needs 043's vendors key
 	apply("061_notify_creator_role.down.sql")    // newest first: restores 054's notify_entity_creator

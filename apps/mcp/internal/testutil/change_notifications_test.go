@@ -213,7 +213,7 @@ func TestChangeNotifications054_UpdatesDedupeAndText(t *testing.T) {
 		`Amber updated bill "Netflix"`:                         {"You created this bill. Changed: amount, notes.", "", uuid.Nil}, // link cleared by rehome on delete
 		`Amber updated note "Tires"`:                           {"You created this note. Changed: body.", "note", note},
 		`Amber updated secret "Wi-Fi"`:                         {"You created this secret. Changed: encrypted data.", "secret", secret},
-		`Amber updated list item "Milk"`:                       {"You created this list item. Changed: checked, checked at.", "list", list},
+		`Amber updated list item "Milk"`:                       {"You created this list item. Changed: checked, checked at, checked by.", "list", list}, // checked by: 066
 		`Amber updated event "Movie night" on Sat Nov 28`:      {"You created this event. Changed: ical data.", "calendar_event", ev},
 		`Amber (via Kitchen assistant) deleted bill "Netflix"`: {"You created this bill.", "", uuid.Nil},
 	}

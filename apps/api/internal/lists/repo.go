@@ -60,15 +60,20 @@ type List struct {
 
 // Item is a row of list_items.
 type Item struct {
-	ID               uuid.UUID
-	ListID           uuid.UUID
-	HouseholdID      uuid.UUID
-	Text             string
-	Quantity         *float64
-	Unit             *string
-	Section          *string
-	Checked          bool
-	CheckedAt        *time.Time
+	ID          uuid.UUID
+	ListID      uuid.UUID
+	HouseholdID uuid.UUID
+	Text        string
+	Quantity    *float64
+	Unit        *string
+	Section     *string
+	Checked     bool
+	CheckedAt   *time.Time
+	// CheckedBy is the member who checked the item off (migration 066,
+	// filled by trigger from the request's actor); nil when unchecked or
+	// unknown. CheckedByName is that user's name.
+	CheckedBy        *uuid.UUID
+	CheckedByName    *string
 	AssigneePersonID *uuid.UUID
 	DueDate          *string // YYYY-MM-DD
 	Position         float64
@@ -162,7 +167,8 @@ func scanList(row pgx.Row) (*List, error) {
 
 const itemCols = `i.id, i.list_id, i.household_id, i.text, i.quantity::float8, i.unit, i.section,
 	i.checked, i.checked_at, i.assignee_person_id, i.due_date::text, i.position,
-	i.created_at, i.updated_at`
+	i.created_at, i.updated_at,
+	i.checked_by, (SELECT u.name FROM users u WHERE u.id = i.checked_by)`
 
 // itemOrder is the canonical item order: position is not unique.
 const itemOrder = `ORDER BY i.position, i.created_at, i.id`
@@ -174,7 +180,7 @@ func scanItems(rows pgx.Rows) ([]*Item, error) {
 		var it Item
 		if err := rows.Scan(&it.ID, &it.ListID, &it.HouseholdID, &it.Text, &it.Quantity, &it.Unit,
 			&it.Section, &it.Checked, &it.CheckedAt, &it.AssigneePersonID, &it.DueDate,
-			&it.Position, &it.CreatedAt, &it.UpdatedAt); err != nil {
+			&it.Position, &it.CreatedAt, &it.UpdatedAt, &it.CheckedBy, &it.CheckedByName); err != nil {
 			return nil, err
 		}
 		out = append(out, &it)
