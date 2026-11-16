@@ -34,6 +34,48 @@ async function gotoDetail(page: Page) {
 const noHorizontalScroll = (page: Page) =>
   page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
 
+/** Rendered colour of an element, and the token it should equal, both as rgb(). */
+async function fieldColours(page: Page, field: string) {
+  return page.locator(`main [data-field="${field}"]`).first().evaluate((row) => {
+    const probe = (v: string) => {
+      const el = document.createElement("span");
+      el.style.color = `var(${v})`;
+      document.body.appendChild(el);
+      const c = getComputedStyle(el).color;
+      el.remove();
+      return c;
+    };
+    const lum = (rgb: string) => {
+      const [r, g, b] = rgb.match(/\d+/g)!.slice(0, 3).map((n) => {
+        const c = Number(n) / 255;
+        return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const dd = row.querySelector("dd")!;
+    const dt = row.querySelector("dt")!;
+    const value = getComputedStyle(dd).color;
+    const surface = probe("--surface");
+    const [hi, lo] = [lum(value), lum(surface)].sort((a, b) => b - a);
+    return {
+      value,
+      label: getComputedStyle(dt).color,
+      ink: probe("--ink"),
+      ink3: probe("--ink-3"),
+      contrast: (hi + 0.05) / (lo + 0.05),
+    };
+  });
+}
+
+/** Label and value boxes of one field row. */
+async function fieldBoxes(page: Page, field: string) {
+  const row = page.locator(`main [data-field="${field}"]`).first();
+  return {
+    label: (await row.locator("dt").boundingBox())!,
+    value: (await row.locator("dd").boundingBox())!,
+  };
+}
+
 async function snap(page: Page, testInfo: TestInfo, name: string, fullPage = false) {
   const path = testInfo.outputPath(`${name}.png`);
   await page.screenshot({ path, fullPage });
@@ -65,6 +107,20 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(main.getByText("Account Number")).toBeVisible();
       await expect(main.getByRole("tablist", { name: "Resource types" })).toBeHidden();
       expect(await noHorizontalScroll(page)).toBe(true);
+
+      // #4537: values are --ink (readable in both schemes), labels --ink-3.
+      const colours = await fieldColours(page, "name");
+      expect(colours.value).toBe(colours.ink);
+      expect(colours.label).toBe(colours.ink3);
+      expect(colours.contrast).toBeGreaterThanOrEqual(7);
+      // #4537: labels sit above their values with a gap, never run together.
+      for (const field of ["name", "account_number", "payment_url"]) {
+        const { label, value } = await fieldBoxes(page, field);
+        expect(value.y).toBeGreaterThanOrEqual(label.y + label.height);
+        expect(Math.abs(value.x - label.x)).toBeLessThan(1);
+        expect(value.x + value.width).toBeLessThanOrEqual(390);
+      }
+      await expect(main.locator('[data-field="name"] dd')).toHaveText(BILL.name);
       await snap(page, testInfo, `detail-390-${colorScheme}`, true);
 
       await resources.click();
@@ -89,6 +145,10 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(main.getByRole("button", { name: "Save" })).toBeVisible();
       await expect(main.getByRole("button", { name: "Cancel" })).toBeVisible();
       expect(await noHorizontalScroll(page)).toBe(true);
+      // #4537: touch-sized inputs with 16 px text on phones.
+      const input = main.getByRole("textbox", { name: "Account Number" });
+      expect((await input.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      expect(await input.evaluate((el) => getComputedStyle(el).fontSize)).toBe("16px");
 
       // The title bar sticks under the shell header while scrolling.
       await page.mouse.wheel(0, 600);
@@ -116,6 +176,14 @@ for (const colorScheme of ["light", "dark"] as const) {
       expect(Math.abs(resources.y - details.y)).toBeLessThan(2);
       await expect(main.getByRole("tablist", { name: "Resource types" })).toBeVisible();
       expect(await noHorizontalScroll(page)).toBe(true);
+
+      // #4537: label/value grid on desktop, values readable.
+      const colours = await fieldColours(page, "name");
+      expect(colours.value).toBe(colours.ink);
+      expect(colours.contrast).toBeGreaterThanOrEqual(7);
+      const { label, value } = await fieldBoxes(page, "name");
+      expect(value.x).toBeGreaterThanOrEqual(label.x + label.width + 16);
+      expect(Math.abs(value.y - label.y)).toBeLessThan(2);
       await snap(page, testInfo, `detail-1440-${colorScheme}`);
     });
   });

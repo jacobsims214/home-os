@@ -246,7 +246,7 @@ export default function EntityDetail({
   // Render field value in read-only mode
   const renderFieldValue = (fieldName: string) => {
     const value = getFieldValue(entity, fieldName);
-    return <Text size="sm" c="gray.9">{formatDisplayValue(value)}</Text>;
+    return formatDisplayValue(value);
   };
 
   // Render field input in edit mode
@@ -349,10 +349,11 @@ export default function EntityDetail({
     >
       {isEditing ? (
         // edit form content
-        <Stack>
+        // Below md, inputs grow to a 44 px touch target with 16 px text (no iOS zoom).
+        <Stack className="max-md:[&_.mantine-Input-input]:min-h-11 max-md:[&_.mantine-Input-input]:text-base">
           {(sections ?? []).map((section) => (
             <Box key={section.title} mb="md">
-              <Text size="sm" fw={600} mb="sm" c="gray.7">
+              <Text size="sm" fw={600} mb="sm" className="text-ink-2">
                 {section.title}
               </Text>
               <Stack>
@@ -369,22 +370,29 @@ export default function EntityDetail({
         // view content - sections with fields
         <>
           {(sections ?? []).map((section) => (
-            <div key={section.title} className="flex flex-col gap-4 mb-6">
-              <Text size="sm" fw={600} c="gray.7">
+            <div key={section.title} className="flex flex-col gap-2 mb-6">
+              <Text size="sm" fw={600} className="text-ink-2">
                 {section.title}
               </Text>
-              <Stack>
+              {/* Phone: label above value. md+: label/value grid. */}
+              <dl className="m-0 divide-y divide-line">
                 {section.fields.map((fieldName) => {
                   const field = getFieldConfig(fieldName);
                   if (!field) return null;
                   return (
-                    <div key={fieldName} className="flex justify-between py-2">
-                      <span className="font-medium text-sm text-gray-500">{field.label}</span>
-                      {renderFieldValue(fieldName)}
+                    <div
+                      key={fieldName}
+                      data-field={fieldName}
+                      className="flex flex-col gap-1 py-2.5 md:grid md:grid-cols-[minmax(7rem,1fr)_minmax(0,2fr)] md:gap-x-6"
+                    >
+                      <dt className="text-sm font-medium text-ink-3">{field.label}</dt>
+                      <dd className="m-0 text-sm text-ink break-words [overflow-wrap:anywhere] whitespace-pre-line">
+                        {renderFieldValue(fieldName)}
+                      </dd>
                     </div>
                   );
                 })}
-              </Stack>
+              </dl>
             </div>
           ))}
         </>
