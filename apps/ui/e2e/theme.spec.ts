@@ -108,3 +108,94 @@ test.describe("manual override", () => {
     expect(await page.evaluate(() => localStorage.getItem("home-os-color-scheme"))).toBe("dark");
   });
 });
+
+/*
+ * Dark-mode bridge (#4753): the legacy-colour remap at the bottom of
+ * app/globals.css must not outrank hover:/disabled: variants, and must cover
+ * the /NN opacity classes. Checked on a bill's Files tab (drop zone + one file).
+ */
+const BILL_URL = "/dashboard/bills/b1";
+const FILE = {
+  id: "f1",
+  household_id: "h1",
+  blob_id: "bl1",
+  name: "statement.pdf",
+  content_type: "application/pdf",
+  size: 48213,
+  entity_type: "bill",
+  entity_id: "b1",
+  ocr_status: "done",
+  tags: null,
+  created_at: "2026-11-01T12:00:00Z",
+  updated_at: "2026-11-01T12:00:00Z",
+};
+
+async function gotoBillFiles(page: Page) {
+  await page.route("**/bff/bills/b1", (route) =>
+    route.fulfill({ json: { data: { id: "b1", name: "Electric", amount: 42, due_day: 14, category: "Electric", is_autopay: false } } }),
+  );
+  await page.route((url) => url.pathname === "/bff/files", (route) => route.fulfill({ json: { data: [FILE] } }));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(BILL_URL);
+  await expect(page.getByRole("heading", { level: 2, name: "Electric" })).toBeVisible();
+  await expect(page.getByRole("button", { name: `Delete ${FILE.name}` })).toBeVisible();
+}
+
+/** A token resolved to rgb(), for comparing with computed colours. */
+const tokenRgb = (page: Page, name: string) =>
+  page.evaluate((n) => {
+    const el = document.createElement("span");
+    el.style.color = `var(${n})`;
+    document.body.appendChild(el);
+    const c = getComputedStyle(el).color;
+    el.remove();
+    return c;
+  }, name);
+
+for (const colorScheme of ["light", "dark"] as const) {
+  test.describe(`legacy-colour bridge, system ${colorScheme}`, () => {
+    test.use({ colorScheme });
+
+    test("delete button: hover turns it the danger colour; disabled shows no red hover", async ({ loggedInPage: page }, testInfo) => {
+      await gotoBillFiles(page);
+      const del = page.getByRole("button", { name: `Delete ${FILE.name}` });
+      const style = () => del.evaluate((el) => ({ color: getComputedStyle(el).color, bg: getComputedStyle(el).backgroundColor }));
+      // Light keeps Tailwind's own red-600 / red-50; dark maps them to tokens.
+      const danger = colorScheme === "light" ? "rgb(220, 38, 38)" : await tokenRgb(page, "--danger");
+      const dangerBg = colorScheme === "light" ? "rgb(254, 242, 242)" : "rgba(250, 82, 82, 0.14)";
+
+      await del.hover();
+      await expect.poll(style).toEqual({ color: danger, bg: dangerBg });
+      await snap(page, testInfo, `bridge-delete-hover-${colorScheme}`);
+
+      await page.mouse.move(0, 0);
+      await del.evaluate((el) => ((el as HTMLButtonElement).disabled = true));
+      await del.hover({ force: true });
+      const rest = colorScheme === "light" ? "rgb(156, 163, 175)" : await tokenRgb(page, "--ink-3");
+      await expect.poll(style).toEqual({ color: rest, bg: "rgba(0, 0, 0, 0)" });
+    });
+  });
+}
+
+test.describe("legacy-colour bridge, drop zone", () => {
+  test.use({ colorScheme: "dark" });
+
+  test("dark 1440: the Files drop zone passes axe colour-contrast", async ({ loggedInPage: page }, testInfo) => {
+    await gotoBillFiles(page);
+    const zone = page.getByRole("button", { name: "Drop files here or click to upload" });
+    await expect(zone).toBeVisible();
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(200); // transition-colors
+    expect(await zone.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(await tokenRgb(page, "--surface-2"));
+
+    await page.addScriptTag({ path: require.resolve("axe-core/axe.min.js") });
+    const violations = await zone.evaluate(async (el) => {
+      const axe = (window as unknown as { axe: { run: (ctx: Element, opts: object) => Promise<{ violations: { id: string; nodes: { target: string[]; failureSummary: string }[] }[] }> } }).axe;
+      const res = await axe.run(el, { runOnly: { type: "rule", values: ["color-contrast"] } });
+      return res.violations.flatMap((v) => v.nodes.map((n) => `${n.target.join(" ")}: ${n.failureSummary}`));
+    });
+    expect(violations).toEqual([]);
+    await zone.screenshot({ path: testInfo.outputPath("bridge-dropzone-dark.png") });
+    await testInfo.attach("bridge-dropzone-dark", { path: testInfo.outputPath("bridge-dropzone-dark.png"), contentType: "image/png" });
+  });
+});
