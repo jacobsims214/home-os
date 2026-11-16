@@ -68,16 +68,16 @@ func TestBillDue(t *testing.T) {
 				p := mustDate(t, tc.paidFor)
 				paidFor = &p
 			}
-			got, _ := billDue(mustDate(t, tc.today), MonthlySchedule(tc.dueDay), paid, paidFor)
-			if g := got.next.Format(time.DateOnly); g != tc.wantNext {
+			got, _ := BillDueFor(mustDate(t, tc.today), MonthlySchedule(tc.dueDay), paid, paidFor)
+			if g := got.Next.Format(time.DateOnly); g != tc.wantNext {
 				t.Errorf("next = %s, want %s", g, tc.wantNext)
 			}
-			if got.status != tc.wantStatus {
-				t.Errorf("status = %s, want %s", got.status, tc.wantStatus)
+			if got.Status != tc.wantStatus {
+				t.Errorf("status = %s, want %s", got.Status, tc.wantStatus)
 			}
 			gotPaidFor := ""
-			if got.paidFor != nil {
-				gotPaidFor = got.paidFor.Format(time.DateOnly)
+			if got.PaidFor != nil {
+				gotPaidFor = got.PaidFor.Format(time.DateOnly)
 			}
 			if gotPaidFor != tc.wantPaidFor {
 				t.Errorf("paid_for = %q, want %q", gotPaidFor, tc.wantPaidFor)

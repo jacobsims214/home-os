@@ -40,7 +40,7 @@ type fixture struct {
 // unset) and builds a router like cmd/api/main.go: the budget, bill and loan
 // routes behind the real RequireAuth with the Postgres member resolver, so
 // X-Household-ID is resolved exactly as in production.
-func setup(t *testing.T) *fixture {
+func setup(t *testing.T, tweak ...func(*budget.Handler) *budget.Handler) *fixture {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
@@ -59,7 +59,11 @@ func setup(t *testing.T) *fixture {
 	r := chi.NewRouter()
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(v))
-		budget.NewHandler(budget.NewRepo(pool)).RegisterRoutes(r)
+		h := budget.NewHandler(budget.NewRepo(pool))
+		for _, fn := range tweak {
+			h = fn(h)
+		}
+		h.RegisterRoutes(r)
 		bh := bill.NewHandler(bill.NewRepo(pool))
 		r.Post("/api/v1/bills", bh.Create)
 		r.Get("/api/v1/bills/{id}", bh.Get)

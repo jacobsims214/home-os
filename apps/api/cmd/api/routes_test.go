@@ -210,6 +210,7 @@ var expectedAccess = map[string][]string{
 	"PUT /api/v1/budget/categories/{id}":    family,
 	"DELETE /api/v1/budget/categories/{id}": family,
 	"GET /api/v1/budget/obligations":        readers,
+	"GET /api/v1/budget/due-soon":           readers,
 
 	"GET /api/v1/lists":                           sitters,
 	"POST /api/v1/lists":                          family,

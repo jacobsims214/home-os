@@ -43,6 +43,8 @@ jobs:
             parallel: ""
           - module: packages/billcal
             parallel: ""
+          - module: packages/billdue
+            parallel: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

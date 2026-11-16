@@ -154,6 +154,7 @@ services:
       - ../apps/api:/src/apps/api
       - ../packages/icalx:/src/packages/icalx
       - ../packages/billcal:/src/packages/billcal
+      - ../packages/billdue:/src/packages/billdue
       - api_gopath:/go/pkg/mod
     working_dir: /src/apps/api
     environment:
@@ -217,6 +218,7 @@ services:
       - ../apps/api:/src/apps/api
       - ../packages/icalx:/src/packages/icalx
       - ../packages/billcal:/src/packages/billcal
+      - ../packages/billdue:/src/packages/billdue
       - worker_gopath:/go/pkg/mod
     working_dir: /src/apps/worker
     environment:

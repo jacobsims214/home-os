@@ -1029,7 +1029,7 @@ func TestPaidForDueDate(t *testing.T) {
 	}
 	for _, tc := range tests {
 		paid, _ := time.Parse(time.DateOnly, tc.paid)
-		c, _ := MonthlySchedule(tc.dueDay).cadence()
+		c, _ := cadence(MonthlySchedule(tc.dueDay))
 		if got := paidForDueDate(paid, c).Format(time.DateOnly); got != tc.want {
 			t.Errorf("paidForDueDate(%s, %d) = %s, want %s", tc.paid, tc.dueDay, got, tc.want)
 		}
@@ -1606,7 +1606,7 @@ func TestBillPay_ForDueDate(t *testing.T) {
 		assertPayMatchesFind(t, ctx, pool, on)
 	})
 
-	monthly20, _ := MonthlySchedule(20).cadence()
+	monthly20, _ := cadence(MonthlySchedule(20))
 	t.Run("without for_due_date the grace rule is unchanged", func(t *testing.T) {
 		id := insertPayBill(t, pool, hh.HouseholdID, ptr(142.5), ptr(20))
 		got := payBill(t, ctx, pay, map[string]any{"bill_id": id.String(), "paid_date": paid.Format(time.DateOnly)})

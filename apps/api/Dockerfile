@@ -9,10 +9,12 @@ ENV GOWORK=off
 WORKDIR /src/apps/api
 COPY packages/icalx/go.mod packages/icalx/go.sum /src/packages/icalx/
 COPY packages/billcal/go.mod packages/billcal/go.sum /src/packages/billcal/
+COPY packages/billdue/go.mod /src/packages/billdue/
 COPY apps/api/go.mod apps/api/go.sum ./
 RUN go mod download
 COPY packages/icalx/ /src/packages/icalx/
 COPY packages/billcal/ /src/packages/billcal/
+COPY packages/billdue/ /src/packages/billdue/
 COPY apps/api/ ./
 RUN CGO_ENABLED=0 GOOS=linux go build -o /api ./cmd/api
 

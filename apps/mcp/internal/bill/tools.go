@@ -24,15 +24,6 @@ import (
 	"home-os/mcp/internal/server"
 )
 
-// Bill status values reported in bill output.
-const (
-	// statusDue means the bill's current due date has not been paid yet.
-	statusDue = "due"
-	// statusPaid means the last payment already covers the current due date,
-	// so next_due_date is the following one.
-	statusPaid = "paid"
-)
-
 // Pagination limits shared by every catalog find tool.
 const (
 	defaultLimit = 25
@@ -43,11 +34,6 @@ const (
 
 // exampleBillID is the UUID used in error examples.
 const exampleBillID = "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"
-
-// daysBetween returns the whole days from a to b (both midnight UTC dates).
-func daysBetween(a, b time.Time) int {
-	return int(b.Sub(a).Hours() / 24)
-}
 
 // billColumns is the column list every bill query selects or returns, in
 // the order scanBill reads it.
@@ -114,7 +100,7 @@ func (r billRow) schedule() Schedule {
 // hasSchedule reports whether the bill has a usable due schedule: a monthly
 // bill with a due_day of 1-31, or another bill with a due_date.
 func (r billRow) hasSchedule() bool {
-	_, ok := r.schedule().cadence()
+	_, ok := cadence(r.schedule())
 	return ok
 }
 

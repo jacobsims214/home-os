@@ -52,6 +52,7 @@ var stage2Routes = []string{
 	"PUT /api/v1/budget/categories/{id}",
 	"DELETE /api/v1/budget/categories/{id}",
 	"GET /api/v1/budget/obligations",
+	"GET /api/v1/budget/due-soon",
 
 	"GET /api/v1/lists",
 	"POST /api/v1/lists",
@@ -365,6 +366,7 @@ func TestStage2Routes_AuthAndMemberAccess(t *testing.T) {
 		{route: "PUT /api/v1/budget/categories/{id}", path: func() string { return "/api/v1/budget/categories/" + categoryID },
 			body: b(map[string]any{"name": "Food"})},
 		{route: "GET /api/v1/budget/obligations", path: p("/api/v1/budget/obligations")},
+		{route: "GET /api/v1/budget/due-soon", path: p("/api/v1/budget/due-soon")},
 		{route: "DELETE /api/v1/budget/categories/{id}", path: func() string { return "/api/v1/budget/categories/" + categoryID }},
 
 		// Lists and items.

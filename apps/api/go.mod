@@ -15,6 +15,7 @@ require (
 	golang.org/x/time v0.12.0
 	google.golang.org/grpc v1.76.0
 	home-os/billcal v0.0.0
+	home-os/billdue v0.0.0
 	home-os/icalx v0.0.0
 )
 
@@ -50,3 +51,5 @@ exclude google.golang.org/genproto v0.0.0-20211208223120-3a66f561d7aa
 replace home-os/icalx => ../../packages/icalx
 
 replace home-os/billcal => ../../packages/billcal
+
+replace home-os/billdue => ../../packages/billdue

@@ -62,6 +62,14 @@ func NewHandler(repo *Repo) *Handler {
 	return &Handler{repo: repo, policy: DefaultPolicy{}, now: time.Now}
 }
 
+// WithNow replaces the clock, so a test can pin "today" (the due-soon window
+// and the month default both come from it). The production constructor uses
+// time.Now.
+func (h *Handler) WithNow(now func() time.Time) *Handler {
+	h.now = now
+	return h
+}
+
 // WithPolicy replaces the access policy (for #4689's household role policy).
 func (h *Handler) WithPolicy(p Policy) *Handler {
 	h.policy = p
@@ -77,6 +85,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Put("/api/v1/budget/categories/{id}", h.UpdateCategory)
 	r.Delete("/api/v1/budget/categories/{id}", h.DeleteCategory)
 	r.Get("/api/v1/budget/obligations", h.Obligations)
+	r.Get("/api/v1/budget/due-soon", h.DueSoon)
 }
 
 // --- request / response types ---
@@ -153,6 +162,24 @@ func (h *Handler) reader(w http.ResponseWriter, r *http.Request) (caller, bool) 
 		return caller{}, false
 	}
 	return caller{householdID: hid, userID: uid, role: role}, true
+}
+
+// moneyReader is reader plus the money grant, for a response that carries
+// amounts, rates or account numbers. The route rule already names the
+// narrowest action that can succeed; this is the record-level half, asked the
+// same way wherever a record a role may otherwise read carries money
+// (auth.CanSeeMoney, #4806). The refusal names the role and the resource, as
+// every other policy refusal does.
+func (h *Handler) moneyReader(w http.ResponseWriter, r *http.Request) (caller, bool) {
+	c, ok := h.reader(w, r)
+	if !ok {
+		return caller{}, false
+	}
+	if !auth.CanSeeMoney(c.role) {
+		apierr.Forbidden(w, "the "+c.role+" role cannot see bills, loans or the budget")
+		return caller{}, false
+	}
+	return c, true
 }
 
 // writer resolves the caller and checks they may change the budget.

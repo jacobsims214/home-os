@@ -6,5 +6,6 @@ use (
 	./apps/mcp
 	./apps/worker
 	./packages/billcal
+	./packages/billdue
 	./packages/icalx
 )
