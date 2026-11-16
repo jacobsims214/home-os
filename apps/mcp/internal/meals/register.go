@@ -8,7 +8,7 @@ import (
 // recipe_create, recipe_update, recipe_delete), the meal plan tools
 // (meal_set, meal_rate; #4487) and meal_suggest (#4496) to srv. cmd/mcp
 // calls it once at startup, so changes to these tools stay inside this
-// package. The grocery-list tool (#4500) registers here too when it lands.
+// package. The grocery-list tool is meal_build_grocery_list (#4500).
 func Register(srv *server.Server, deps server.Deps) {
 	srv.RegisterTool(NewRecipeFindTool(deps.Pool))
 	srv.RegisterTool(NewRecipeGetTool(deps.Pool))

@@ -823,8 +823,7 @@ func parseSetInput(args map[string]any) (setInput, *mcp.CallToolResult) {
 func NewSetCategoryTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("budget_set_category",
 		mcp.WithDescription("Set the monthly budget for a category (creates the category if new). "+
-			"A monthly_amount of 0 removes the budget but keeps the category. "+
-			"See every category, its budget and what's committed against it with budget_summary."),
+			"A monthly_amount of 0 removes the budget but keeps the category. See all with budget_summary."),
 		mcp.WithString("category", mcp.Required(), mcp.Description("Category name, e.g. Groceries (matched in any case)")),
 		mcp.WithNumber("monthly_amount", mcp.Required(), mcp.Description("Monthly budget in dollars, e.g. 600; 0 removes the budget")),
 		mcp.WithString("notes", mcp.Description("Notes about this budget; \"\" clears them, leave out to keep them")),
