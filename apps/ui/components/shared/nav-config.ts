@@ -24,6 +24,29 @@ import {
 
 export type NavGroup = "main" | "household" | "you";
 
+/**
+ * Household membership roles (membership_role enum). What each may do is
+ * decided by the API's role policy (KB decisions/2026-11-15-role-policy.md,
+ * apps/api/internal/auth/roles.go). The UI only hides sections a role can't
+ * use; the API enforces.
+ */
+export type NavRole = "owner" | "family_manager" | "family_member" | "viewer" | "housesitter" | "vendor";
+
+export const NAV_ROLES: readonly NavRole[] = [
+  "owner",
+  "family_manager",
+  "family_member",
+  "viewer",
+  "housesitter",
+  "vendor",
+];
+
+const FAMILY: readonly NavRole[] = ["owner", "family_manager", "family_member"];
+/** Family roles plus viewer (read-only on everything). */
+const READERS: readonly NavRole[] = [...FAMILY, "viewer"];
+/** Readers plus housesitter (calendar, lists, meals, guides). */
+const SITTERS: readonly NavRole[] = [...READERS, "housesitter"];
+
 export type NavSectionId =
   | "today"
   | "calendar"
@@ -55,6 +78,11 @@ export interface NavSection {
    * surfaces show the item but don't link to a 404.
    */
   comingSoon?: boolean;
+  /**
+   * Roles that see this section. Left out: every role (including the
+   * vendor, who reaches properties and maintenance under People & House).
+   */
+  roles?: readonly NavRole[];
 }
 
 export const NAV_GROUP_LABELS: Record<NavGroup, string | null> = {
@@ -68,10 +96,10 @@ export const NAV_ICON_STROKE = 1.75;
 
 export const NAV_SECTIONS: readonly NavSection[] = [
   { id: "today", label: "Today", href: "/dashboard", icon: IconSun, group: "main", tab: true },
-  { id: "calendar", label: "Calendar", href: "/dashboard/calendar", icon: IconCalendar, group: "main", tab: true },
-  { id: "lists", label: "Lists", href: "/dashboard/lists", icon: IconListCheck, group: "main", tab: true, comingSoon: true },
-  { id: "meals", label: "Meals", href: "/dashboard/meals", icon: IconToolsKitchen, group: "main", tab: true, comingSoon: true },
-  { id: "documents", label: "Documents", href: "/dashboard/documents", icon: IconFileText, group: "household", comingSoon: true },
+  { id: "calendar", label: "Calendar", href: "/dashboard/calendar", icon: IconCalendar, group: "main", tab: true, roles: SITTERS },
+  { id: "lists", label: "Lists", href: "/dashboard/lists", icon: IconListCheck, group: "main", tab: true, comingSoon: true, roles: SITTERS },
+  { id: "meals", label: "Meals", href: "/dashboard/meals", icon: IconToolsKitchen, group: "main", tab: true, comingSoon: true, roles: SITTERS },
+  { id: "documents", label: "Documents", href: "/dashboard/documents", icon: IconFileText, group: "household", comingSoon: true, roles: READERS },
   {
     id: "people",
     label: "People & House",
@@ -97,8 +125,9 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     icon: IconWallet,
     group: "household",
     matches: ["/dashboard/money", "/dashboard/loans"],
+    roles: READERS,
   },
-  { id: "guides", label: "Guides", href: "/dashboard/guides", icon: IconBook, group: "household", comingSoon: true },
+  { id: "guides", label: "Guides", href: "/dashboard/guides", icon: IconBook, group: "household", comingSoon: true, roles: SITTERS },
   { id: "settings", label: "Settings", href: "/dashboard/settings", icon: IconSettings, group: "you", matches: ["/dashboard/admin"] },
 ];
 
@@ -158,3 +187,26 @@ export function sectionsInGroup(group: NavGroup): NavSection[] {
 
 /** The four phone tabs, in order (#4536 adds "More" as the fifth). */
 export const TAB_SECTIONS: readonly NavSection[] = NAV_SECTIONS.filter((s) => s.tab);
+
+/**
+ * Whether a role sees a section in the navigation.
+ * - `null`/`undefined`: the role isn't known yet (still loading, or the
+ *   request failed). Everything shows, so the common owner case doesn't
+ *   flicker; the API refuses what the role can't use.
+ * - A role this build doesn't know: only the sections every role sees
+ *   (fails closed, like the API's unknown entity kinds).
+ */
+export function canSeeSection(section: NavSection, role: string | null | undefined): boolean {
+  if (!section.roles) return true;
+  if (role == null || role === "") return true;
+  if (!(NAV_ROLES as readonly string[]).includes(role)) return false;
+  return section.roles.includes(role as NavRole);
+}
+
+/** NAV_SECTIONS (or the given list) narrowed to what a role sees. */
+export function sectionsForRole(
+  role: string | null | undefined,
+  sections: readonly NavSection[] = NAV_SECTIONS,
+): NavSection[] {
+  return sections.filter((s) => canSeeSection(s, role));
+}

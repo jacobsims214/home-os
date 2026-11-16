@@ -13,6 +13,9 @@
  * - More is a button that opens the More sheet: search, the four Household
  *   sections as tiles, then Notifications, Switch family, Settings and the
  *   account row. While the sheet is open More is the active tab.
+ * - Tabs and tiles are filtered by the user's household role
+ *   (useNavSections, #4543): a housesitter has no Money or Documents tile,
+ *   a vendor keeps Today and More only. The UI hides; the API enforces.
  * - DashboardShell mounts this in AppShell.Footer, below 48em only. The bar
  *   owns the bottom safe-area inset (env(safe-area-inset-bottom)).
  */
@@ -32,13 +35,13 @@ import {
   IconUsers,
 } from "@tabler/icons-react";
 import { apiFetch } from "@/lib/api";
+import { useNavSections } from "@/components/shared/use-nav-role";
 import { useAuthStore } from "@/stores/auth";
 import {
   NAV_ICON_STROKE,
   NAV_SECTIONS,
   TAB_SECTIONS,
   activeSection,
-  sectionsInGroup,
   type NavSection,
   type NavSectionId,
 } from "@/components/shared/nav-config";
@@ -63,6 +66,7 @@ export default function BottomNav({ onOpenNotifications, onOpenAccount }: Bottom
   const pathname = usePathname();
   const [moreOpened, setMoreOpened] = useState(false);
   const current = activeSection(pathname)?.id;
+  const tabs = useNavSections(TAB_SECTIONS);
 
   // Navigating closes the sheet.
   useEffect(() => setMoreOpened(false), [pathname]);
@@ -76,8 +80,12 @@ export default function BottomNav({ onOpenNotifications, onOpenAccount }: Bottom
 
   return (
     <>
-      <div className={classes.bar} data-testid="tab-bar">
-        {TAB_SECTIONS.map((s) => (
+      <div
+        className={classes.bar}
+        data-testid="tab-bar"
+        style={{ gridTemplateColumns: `repeat(${tabs.length + 1}, minmax(0, 1fr))` }}
+      >
+        {tabs.map((s) => (
           <Tab key={s.id} section={s} active={!moreOpened && current === s.id} />
         ))}
         <button
@@ -198,7 +206,9 @@ function MoreSheet({
       .slice(0, 2)
       .map((p) => p[0]!.toUpperCase())
       .join("") || "U";
-  const settings = NAV_SECTIONS.find((s) => s.id === "settings")!;
+  const sections = useNavSections();
+  const tiles = sections.filter((s) => s.group === "household");
+  const settings = sections.find((s) => s.id === "settings") ?? NAV_SECTIONS.find((s) => s.id === "settings")!;
   const SettingsIcon = settings.icon;
 
   const search = (e: React.FormEvent) => {
@@ -244,11 +254,13 @@ function MoreSheet({
         />
       </form>
 
-      <div className={classes.tiles}>
-        {sectionsInGroup("household").map((s) => (
-          <Tile key={s.id} section={s} active={current === s.id} />
-        ))}
-      </div>
+      {tiles.length > 0 && (
+        <div className={classes.tiles}>
+          {tiles.map((s) => (
+            <Tile key={s.id} section={s} active={current === s.id} />
+          ))}
+        </div>
+      )}
 
       <div className={classes.rows}>
         <UnstyledButton className={classes.row} onClick={onOpenNotifications} aria-haspopup="dialog">

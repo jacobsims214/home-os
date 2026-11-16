@@ -111,10 +111,116 @@ test.describe("desktop 1440px", () => {
     await expect(nav).toBeVisible();
     const box = await nav.boundingBox();
     expect(Math.round(box!.width)).toBe(260);
-    await expect(nav.getByRole("button", { name: "Logout" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Open menu" })).toHaveCount(0);
     await expect(page.locator("header").getByRole("heading", { level: 1, name: "Today" })).toBeVisible();
     await expectHeadingUncovered(page);
+    await expectNoHorizontalOverflow(page);
+
+    // Sidebar content from nav-config (#4543): all nine sections, Today current.
+    expect(await sectionNames(nav)).toEqual(ALL_SECTIONS);
+    await expect(nav.getByRole("link", { name: "Today" })).toHaveAttribute("aria-current", "page");
+    await expect(nav.getByRole("search")).toBeVisible();
+
+    // "/" focuses the sidebar search.
+    await page.locator("body").click({ position: { x: 900, y: 600 } });
+    await page.keyboard.press("/");
+    await expect(nav.getByRole("searchbox", { name: "Search" })).toBeFocused();
+
+    // The user button opens the account menu upward, with the logout form.
+    await nav.getByRole("button", { name: /^Account menu for/ }).click();
+    await expect(page.getByRole("menuitem", { name: "Log out" })).toBeVisible();
+    await expect(page.locator('form[method="post"][action="/api/auth/logout"]').filter({ has: page.getByRole("menuitem", { name: "Log out" }) })).toHaveCount(1);
+    await expect(page.getByRole("radiogroup", { name: "Theme" })).toBeVisible();
+  });
+});
+
+// ─── Sidebar / drawer content (#4543) ─────────────────────────
+
+const ALL_SECTIONS = ["Today", "Calendar", "Lists", "Meals", "Documents", "People & House", "Money", "Guides", "Settings"];
+
+/** Section names in a nav surface, in order ("Soon" tags stripped). */
+async function sectionNames(scope: ReturnType<Page["locator"]>) {
+  const rows = scope.locator('ul li > a, ul li > span[aria-disabled="true"]');
+  const texts = await rows.evaluateAll((els) =>
+    els.map((el) => (el.querySelector('[class*="rowLabel"]')?.textContent ?? el.textContent ?? "").trim()),
+  );
+  return texts;
+}
+
+/** Answers GET /bff/me/households as a member with `role` in the current household. */
+async function asRole(page: Page, role: string) {
+  await page.route("**/bff/me/households", (route) =>
+    route.fulfill({
+      json: { data: [{ id: "h1", name: "Sims", timezone: "UTC", role, joined_at: "2026-01-01T00:00:00Z", is_default: true, current: true }] },
+    }),
+  );
+}
+
+test.describe("phone 390px drawer content", () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test("the drawer shows the same nine sections as the sidebar, and logs out through the logout route", async ({ loggedInPage: page }) => {
+    await gotoHome(page);
+    await page.locator("header").getByRole("button", { name: "Open menu" }).click();
+    const drawer = page.getByRole("dialog", { name: /Home OS menu/ });
+    await expect(drawer).toBeVisible();
+    expect(await sectionNames(drawer)).toEqual(ALL_SECTIONS);
+    await expect(drawer.getByRole("link", { name: "Today" })).toHaveAttribute("aria-current", "page");
+    await expect(drawer.getByRole("searchbox", { name: "Search" })).toBeVisible();
+    // 16 px so iOS doesn't zoom on focus.
+    expect(await drawer.getByRole("searchbox", { name: "Search" }).evaluate((el) => getComputedStyle(el).fontSize)).toBe("16px");
+
+    const logout = drawer.getByRole("button", { name: "Log out" });
+    await expect(logout).toBeVisible();
+    const action = await logout.evaluate((el) => {
+      const f = el.closest("form");
+      return f ? `${f.method} ${f.getAttribute("action")}` : null;
+    });
+    expect(action).toBe("post /api/auth/logout");
+    await expectNoHorizontalOverflow(page);
+  });
+});
+
+test.describe("role-aware navigation", () => {
+  test("housesitter: no Money or Documents in the sidebar, drawer, rail or More sheet", async ({ loggedInPage: page }) => {
+    await asRole(page, "housesitter");
+    const expected = ["Today", "Calendar", "Lists", "Meals", "People & House", "Guides", "Settings"];
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await gotoHome(page);
+    const nav = page.getByRole("navigation", { name: "Main navigation" });
+    await expect.poll(() => sectionNames(nav)).toEqual(expected);
+
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await expect(nav.getByRole("link", { name: "Money" })).toHaveCount(0);
+    await expect(nav.getByRole("link", { name: "People & House" })).toBeVisible();
+    await nav.getByRole("button", { name: "Open menu" }).click();
+    const drawer = page.getByRole("dialog", { name: /Home OS menu/ });
+    await expect(drawer).toBeVisible();
+    expect(await sectionNames(drawer)).toEqual(expected);
+    await page.keyboard.press("Escape");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByTestId("tab-bar").getByRole("button", { name: "More" }).click();
+    const sheet = page.getByRole("dialog", { name: "More" });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.getByText("Money", { exact: true })).toHaveCount(0);
+    await expect(sheet.getByText("Documents", { exact: true })).toHaveCount(0);
+    await expect(sheet.getByText("People & House", { exact: true })).toBeVisible();
+  });
+
+  test("vendor: Today, People & House and Settings only; tab bar keeps Today and More", async ({ loggedInPage: page }) => {
+    await asRole(page, "vendor");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await gotoHome(page);
+    const nav = page.getByRole("navigation", { name: "Main navigation" });
+    await expect.poll(() => sectionNames(nav)).toEqual(["Today", "People & House", "Settings"]);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    const bar = page.getByTestId("tab-bar");
+    await expect(bar.getByRole("link", { name: "Today" })).toBeVisible();
+    await expect(bar.getByRole("button", { name: "More" })).toBeVisible();
+    await expect(bar.getByText("Calendar")).toHaveCount(0);
     await expectNoHorizontalOverflow(page);
   });
 });

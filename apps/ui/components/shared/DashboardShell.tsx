@@ -17,9 +17,12 @@
  * Now the navbar is collapsed on phones and the drawer is a real dialog
  * (focus trap, Esc, scrim, focus back to the opener).
  *
+ * Navigation content comes from nav-config, filtered by the user's
+ * household role (useNavSections, #4543): <Sidebar variant="sidebar"> in the
+ * desktop navbar, <Sidebar variant="drawer"> in the drawer, and the rail
+ * below.
+ *
  * Hooks for the follow-up tickets:
- * - #4543 renders <Sidebar /> from nav-config; it is mounted here in both
- *   the desktop navbar and the drawer.
  * - #4574 replaces the family chip's target with the family switcher.
  * - #4563 replaces the header bell's popover with the notifications sheet.
  */
@@ -44,22 +47,15 @@ import {
   VisuallyHidden,
 } from "@mantine/core";
 import { useDisclosure, useMediaQuery, useReducedMotion } from "@mantine/hooks";
-import { IconBell, IconChevronDown, IconLogout, IconMenu2, IconSettings } from "@tabler/icons-react";
+import { IconBell, IconChevronDown, IconMenu2 } from "@tabler/icons-react";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import BottomNav from "@/components/shared/BottomNav";
-import ColorSchemeControl from "@/components/ui/ColorSchemeControl";
-import Sidebar from "@/components/shared/Sidebar";
+import Sidebar, { AccountMenuItems, Brand } from "@/components/shared/Sidebar";
+import { useNavSections } from "@/components/shared/use-nav-role";
 import { apiFetch } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
-import {
-  NAV_ICON_STROKE,
-  NAV_SECTIONS,
-  activeSection,
-  pageTitle,
-  sectionsInGroup,
-  type NavSection,
-} from "@/components/shared/nav-config";
+import { NAV_ICON_STROKE, activeSection, pageTitle, type NavSection } from "@/components/shared/nav-config";
 import classes from "./DashboardShell.module.css";
 import bottomNavClasses from "./BottomNav.module.css";
 
@@ -116,7 +112,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
           <Rail pathname={pathname} drawerOpened={drawerOpened} onOpenDrawer={drawer.open} />
         </Box>
         <Box visibleFrom="md" className={classes.sidebar}>
-          <Sidebar />
+          <Sidebar variant="sidebar" />
         </Box>
       </AppShell.Navbar>
 
@@ -139,7 +135,12 @@ export default function DashboardShell({ children }: { children: React.ReactNode
         position="left"
         size="min(320px, 86%)"
         hiddenFrom="md"
-        title={<VisuallyHidden>Menu</VisuallyHidden>}
+        title={
+          <>
+            <Brand as="span" />
+            <VisuallyHidden> menu</VisuallyHidden>
+          </>
+        }
         closeButtonProps={{ "aria-label": "Close menu", size: "lg" }}
         scrollAreaComponent={ScrollArea.Autosize}
         transitionProps={{ duration: reduceMotion ? 0 : 240, timingFunction: "ease-out" }}
@@ -147,8 +148,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
         classNames={{ content: classes.drawerContent, header: classes.drawerHeader, body: classes.drawerBody }}
         data-testid="nav-drawer"
       >
-        {/* #4543 replaces Sidebar's content with the nav-config driven drawer. */}
-        <Sidebar />
+        <Sidebar variant="drawer" />
       </Drawer>
     </AppShell>
   );
@@ -362,43 +362,8 @@ function UserMenu({ opened, onChange }: { opened: boolean; onChange: (opened: bo
         </UnstyledButton>
       </Menu.Target>
       <Menu.Dropdown>
-        <Box px="sm" py="xs">
-          <Text size="sm" fw={600} truncate="end">
-            {name}
-          </Text>
-          {user?.email && (
-            <Text size="xs" c="var(--shell-ink-3)" truncate="end">
-              {user.email}
-            </Text>
-          )}
-        </Box>
-        <Menu.Divider />
-        <Menu.Item component={Link} href="/dashboard/settings" leftSection={<IconSettings size={18} stroke={NAV_ICON_STROKE} />}>
-          Settings
-        </Menu.Item>
-        <Menu.Divider />
-        {/* Theme row from the shell spec's user menu (#4529). */}
-        <Box px="sm" py="xs">
-          <Text size="xs" fw={500} c="var(--shell-ink-2)" mb={6}>
-            Theme
-          </Text>
-          <ColorSchemeControl />
-        </Box>
-        <Menu.Divider />
-        {/* Native POST to /api/auth/logout (#4424): the route expires the
-            session cookies and 303s to /login; the full page load drops the
-            React Query cache. Only the persisted profile is cleared here. */}
-        <form method="post" action="/api/auth/logout" onSubmit={() => useAuthStore.getState().setUser(null)}>
-          <Menu.Item
-            component="button"
-            type="submit"
-            color="red.9"
-            closeMenuOnClick={false}
-            leftSection={<IconLogout size={18} stroke={NAV_ICON_STROKE} />}
-          >
-            Log out
-          </Menu.Item>
-        </form>
+        {/* Name, Settings, Theme (#4529) and the native logout form (#4424). */}
+        <AccountMenuItems />
       </Menu.Dropdown>
     </Menu>
   );
@@ -416,7 +381,10 @@ function Rail({
   onOpenDrawer: () => void;
 }) {
   const current = activeSection(pathname)?.id;
-  const settings = NAV_SECTIONS.find((s) => s.id === "settings")!;
+  const sections = useNavSections();
+  const main = sections.filter((s) => s.group === "main");
+  const household = sections.filter((s) => s.group === "household");
+  const settings = sections.find((s) => s.id === "settings");
 
   return (
     // AppShell.Navbar is the <nav aria-label="Main navigation"> around this.
@@ -432,14 +400,14 @@ function Rail({
       >
         <IconMenu2 size={24} stroke={NAV_ICON_STROKE} />
       </ActionIcon>
-      {sectionsInGroup("main").map((s) => (
+      {main.map((s) => (
         <RailItem key={s.id} section={s} active={current === s.id} />
       ))}
-      <span className={classes.railRule} aria-hidden />
-      {sectionsInGroup("household").map((s) => (
+      {household.length > 0 && <span className={classes.railRule} aria-hidden />}
+      {household.map((s) => (
         <RailItem key={s.id} section={s} active={current === s.id} />
       ))}
-      <RailItem section={settings} active={current === "settings"} className={classes.railBottom} />
+      {settings && <RailItem section={settings} active={current === "settings"} className={classes.railBottom} />}
     </div>
   );
 }

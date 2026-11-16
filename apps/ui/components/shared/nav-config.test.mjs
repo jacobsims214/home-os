@@ -1,7 +1,15 @@
 // Run: npm test (node --test strips the TypeScript types natively).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { NAV_SECTIONS, TAB_SECTIONS, activeSection, pageTitle, sectionsInGroup } from "./nav-config.ts";
+import {
+  NAV_SECTIONS,
+  TAB_SECTIONS,
+  activeSection,
+  canSeeSection,
+  pageTitle,
+  sectionsForRole,
+  sectionsInGroup,
+} from "./nav-config.ts";
 
 test("all nine sections, in the approved order and groups", () => {
   assert.deepEqual(
@@ -45,4 +53,26 @@ test("every section has an icon and a /dashboard href", () => {
     assert.ok(s.icon, s.id);
     assert.match(s.href, /^\/dashboard(\/|$)/, s.id);
   }
+});
+
+// Mirrors the API role policy (KB decisions/2026-11-15-role-policy.md).
+test("sectionsForRole follows the household role policy", () => {
+  const ids = (role) => sectionsForRole(role).map((s) => s.id);
+  const all = NAV_SECTIONS.map((s) => s.id);
+  for (const role of ["owner", "family_manager", "family_member", "viewer"]) {
+    assert.deepEqual(ids(role), all, role);
+  }
+  // No money, documents (files) for a housesitter.
+  assert.deepEqual(ids("housesitter"), ["today", "calendar", "lists", "meals", "people", "guides", "settings"]);
+  // A vendor reads properties/assets/maintenance only (People & House).
+  assert.deepEqual(ids("vendor"), ["today", "people", "settings"]);
+});
+
+test("sectionsForRole: unknown role yet shows everything; an unrecognised role fails closed", () => {
+  assert.equal(sectionsForRole(null).length, NAV_SECTIONS.length);
+  assert.equal(sectionsForRole(undefined).length, NAV_SECTIONS.length);
+  assert.deepEqual(sectionsForRole("superuser").map((s) => s.id), ["today", "people", "settings"]);
+  const money = NAV_SECTIONS.find((s) => s.id === "money");
+  assert.equal(canSeeSection(money, "viewer"), true);
+  assert.equal(canSeeSection(money, "housesitter"), false);
 });
