@@ -197,16 +197,23 @@ type Member struct {
 	// (the vendor then sees every maintenance job) and for other roles.
 	VendorID   *string `json:"vendor_id"`
 	VendorName *string `json:"vendor_name"`
+	// Color is the member's people.color (#4821): the palette name the UI
+	// draws them in, the same value GET /people returns. Null only if the
+	// membership has no person row, which the 041 trigger prevents.
+	Color *string `json:"color"`
 }
 
 // ListMembers returns all members of a household with their user info.
 func (r *Repo) ListMembers(ctx context.Context, householdID uuid.UUID) ([]Member, error) {
+	// The colour comes from the member's person row (041 creates one per
+	// membership, so it is a left join for safety, not for a real case).
 	rows, err := r.pool.Query(ctx,
 		`SELECT m.user_id, u.email, u.name, m.role, m.created_at::text,
-		        m.vendor_id::text, v.name
+		        m.vendor_id::text, v.name, p.color
 		 FROM memberships m
 		 JOIN users u ON u.id = m.user_id
 		 LEFT JOIN vendors v ON v.id = m.vendor_id AND v.household_id = m.household_id
+		 LEFT JOIN people p ON p.household_id = m.household_id AND p.user_id = m.user_id
 		 WHERE m.household_id = $1
 		 ORDER BY m.created_at`,
 		householdID,
@@ -219,7 +226,7 @@ func (r *Repo) ListMembers(ctx context.Context, householdID uuid.UUID) ([]Member
 	var members []Member
 	for rows.Next() {
 		var m Member
-		if err := rows.Scan(&m.UserID, &m.Email, &m.Name, &m.Role, &m.JoinedAt, &m.VendorID, &m.VendorName); err != nil {
+		if err := rows.Scan(&m.UserID, &m.Email, &m.Name, &m.Role, &m.JoinedAt, &m.VendorID, &m.VendorName, &m.Color); err != nil {
 			return nil, fmt.Errorf("scan member: %w", err)
 		}
 		members = append(members, m)

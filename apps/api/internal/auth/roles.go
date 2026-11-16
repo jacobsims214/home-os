@@ -163,6 +163,11 @@ const (
 	ActRevoke Action = "revoke"
 	// ActMarkRead (notifications): mark one's notification read.
 	ActMarkRead Action = "mark_read"
+	// ActSetColor (people): set a person's colour. The route grants it to the
+	// family roles; the handler narrows it to the person themselves or a
+	// manager (owner/family_manager), so a family_member may recolour only
+	// their own record (#4821).
+	ActSetColor Action = "set_color"
 )
 
 // AllRoles lists every household role, most to least privileged.
@@ -231,7 +236,20 @@ var policy = map[Resource]map[Action][]string{
 	// "no search at all" and matches what the MCP has served since #4696.
 	ResSearch: {ActRead: rolesEveryone},
 
-	ResPeople:      {ActRead: rolesReaders, ActReadBasic: rolesSitter, ActWrite: rolesFamily},
+	// People: names/relationship/allergies to a housesitter (read_basic),
+	// everything to the family and the viewer, writes to the family roles.
+	// The colour is the one field with its own grant (#4821): it is a
+	// cosmetic, self-service setting, so it is named as its own action rather
+	// than riding on ActWrite. The grant is the same rolesFamily set the
+	// write has, and the handler narrows it further to self-or-manager; a
+	// viewer, housesitter or vendor may not recolour even their own record,
+	// because they may not edit a people record at all (see canEdit).
+	ResPeople: {
+		ActRead:      rolesReaders,
+		ActReadBasic: rolesSitter,
+		ActWrite:     rolesFamily,
+		ActSetColor:  rolesFamily,
+	},
 	ResPreferences: {ActRead: rolesReaders, ActWrite: rolesFamily},
 	ResLists: {
 		ActRead:       rolesSitter,

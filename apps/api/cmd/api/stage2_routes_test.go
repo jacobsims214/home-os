@@ -40,6 +40,7 @@ var stage2Routes = []string{
 	"POST /api/v1/people",
 	"GET /api/v1/people/{id}",
 	"PUT /api/v1/people/{id}",
+	"PATCH /api/v1/people/{id}",
 	"DELETE /api/v1/people/{id}",
 	"GET /api/v1/people/{id}/preferences",
 	"POST /api/v1/people/{id}/preferences",
@@ -347,6 +348,11 @@ func TestStage2Routes_AuthAndMemberAccess(t *testing.T) {
 		{route: "GET /api/v1/people/{id}", path: func() string { return "/api/v1/people/" + personID }},
 		{route: "PUT /api/v1/people/{id}", managers: true, path: func() string { return "/api/v1/people/" + personID },
 			body: b(map[string]any{"display_name": "Kiddo Two"})},
+		// PATCH sets the colour (#4821): a family_member may do it for
+		// themselves, so the kid's own record is not the member's to touch
+		// here — use the caller's own person.
+		{route: "PATCH /api/v1/people/{id}", path: func() string { return "/api/v1/people/" + m.personID },
+			body: b(map[string]any{"color": "teal"})},
 		{route: "POST /api/v1/people/{id}/preferences", managers: true, path: func() string { return "/api/v1/people/" + personID + "/preferences" },
 			body: b(map[string]any{"kind": "like", "value": "dinosaurs"}), save: func(d json.RawMessage) { prefID = idOf(t, d) }},
 		{route: "GET /api/v1/people/{id}/preferences", path: func() string { return "/api/v1/people/" + personID + "/preferences" }},
