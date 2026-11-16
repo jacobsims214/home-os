@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"home-os/mcp/internal/activity"
 	"home-os/mcp/internal/asset"
 	"home-os/mcp/internal/bill"
 	"home-os/mcp/internal/calendar"
@@ -49,6 +50,7 @@ var registrars = []func(*server.Server, server.Deps){
 	loan.Register,
 	finance.Register,
 	credential.Register,
+	activity.Register,
 	prompts.Register,
 	resources.Register,
 }

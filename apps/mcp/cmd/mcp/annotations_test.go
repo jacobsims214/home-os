@@ -50,6 +50,7 @@ var classHints = map[toolClass][4]bool{
 // must be added here (and to wantTools in protocol_test.go) in the ticket
 // that registers it, with the class the catalog gives it.
 var wantToolClass = map[string]toolClass{
+	"activity_find":           classR,
 	"agenda_get":              classR,
 	"asset_create":            classC,
 	"asset_delete":            classX,

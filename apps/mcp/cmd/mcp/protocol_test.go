@@ -26,7 +26,7 @@ import (
 // catalog v2 names as built (architecture/mcp-tool-catalog.md). Add a tool's
 // name here in the ticket that registers it.
 var wantTools = []string{
-	"agenda_get",
+	"activity_find", "agenda_get",
 	"asset_create", "asset_delete", "asset_find", "asset_update",
 	"bill_create", "bill_delete", "bill_find", "bill_pay", "bill_update",
 	"budget_summary",
