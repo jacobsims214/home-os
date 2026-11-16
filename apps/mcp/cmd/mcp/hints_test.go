@@ -22,8 +22,8 @@ import (
 // one of these must be a registered tool, because it is either a next-step
 // hint, an `open` tool, or text a tool description serves.
 //
-// The recipe_*, guide_*, contact_create/update/delete,
-// vehicle_ writes and meal_* names are not
+// The recipe_*, guide_*, contact_create/update/delete
+// and meal_* names are not
 // registered yet. When the ticket that registers one adds it
 // to wantTools (protocol_test.go), hints and `open` maps may name it again:
 // this test then passes for it without any change here.

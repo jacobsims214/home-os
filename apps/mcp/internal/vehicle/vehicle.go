@@ -1,6 +1,6 @@
 // Package vehicle provides the MCP vehicle tools (catalog v2, KB
-// architecture/mcp-tool-catalog.md "vehicle"). Stage 1 ships the read tool
-// vehicle_find; vehicle_create, vehicle_update and vehicle_delete are #4460.
+// architecture/mcp-tool-catalog.md "vehicle"): vehicle_find (find.go) and
+// vehicle_create, vehicle_update and vehicle_delete (write.go, #4460).
 // Every result is built with internal/respond and every tool declares all
 // four annotation hints and an outputSchema. All queries are scoped to the
 // authenticated household via JWT claims.
@@ -103,6 +103,8 @@ type vehicleData struct {
 	CreatedAt       time.Time       `json:"created_at"`
 	UpdatedAt       time.Time       `json:"updated_at"`
 	Related         *vehicleRelated `json:"related,omitempty" jsonschema_description:"Only when id is given: its loans, bills and pending upkeep."`
+	Duplicate       bool            `json:"duplicate,omitempty" jsonschema_description:"vehicle_create only: true when the same vehicle was added minutes ago and was returned instead."`
+	Changed         []string        `json:"changed,omitempty" jsonschema_description:"vehicle_update only: the fields that changed."`
 }
 
 // vehicleRelated is what is linked to one vehicle by vehicle_id.

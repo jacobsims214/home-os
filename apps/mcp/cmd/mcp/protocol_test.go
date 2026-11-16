@@ -45,7 +45,8 @@ var wantTools = []string{
 	"person_create", "person_delete", "person_find", "person_get", "person_update",
 	"pet_create", "pet_delete", "pet_find", "pet_update",
 	"property_create", "property_delete", "property_find", "property_update",
-	"room_delete", "search_all", "vehicle_find",
+	"room_delete", "search_all",
+	"vehicle_create", "vehicle_delete", "vehicle_find", "vehicle_update",
 }
 
 // TestLegacyInitializeClient proves that a pre-2026-07-28 client (one that

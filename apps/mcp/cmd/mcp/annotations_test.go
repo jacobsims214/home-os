@@ -116,7 +116,10 @@ var wantToolClass = map[string]toolClass{
 	"property_update":         classU,
 	"room_delete":             classX,
 	"search_all":              classR,
+	"vehicle_create":          classC,
+	"vehicle_delete":          classX,
 	"vehicle_find":            classR,
+	"vehicle_update":          classU,
 }
 
 // verbClass is the class a tool name's verb implies, for the verbs whose

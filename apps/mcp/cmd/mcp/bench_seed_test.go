@@ -242,6 +242,8 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 		`INSERT INTO notes (household_id, entity_type, entity_id, title, body) SELECT $1, 'household', $1, '` + benchDisposablePrefix + ` note ' || g, 'x' FROM generate_series(1, %[1]d) g`,
 		// Pets with nothing attached, for pet_delete.
 		`INSERT INTO pets (household_id, name, species) SELECT $1, '` + benchDisposablePrefix + ` pet ' || g, 'fish' FROM generate_series(1, %[1]d) g`,
+		// Vehicles with nothing attached, for vehicle_delete.
+		`INSERT INTO vehicles (household_id, make, model) SELECT $1, 'Junker', '` + benchDisposablePrefix + ` car ' || g FROM generate_series(1, %[1]d) g`,
 		// People without a login and with nothing attached, for person_delete.
 		`INSERT INTO people (household_id, display_name, relationship) SELECT $1, '` + benchDisposablePrefix + ` person ' || g, 'other' FROM generate_series(1, %[1]d) g`,
 		// Properties with nothing attached, for property_delete, and empty
@@ -288,6 +290,7 @@ type benchFixtures struct {
 	// Rows each measured call of a write tool consumes, in order.
 	DisposableAssets, DisposableBills, DisposableLoans, DisposableTasks, DisposableNotes, DisposableEvents []string
 	DisposableListItems, DisposablePeople, DisposablePets, DisposableProperties, DisposableRooms           []string
+	DisposableVehicles                                                                                     []string
 	PayableBills, PendingTasks, UnreadNotifications                                                        []string
 }
 
@@ -331,7 +334,7 @@ func loadFixtures(t testing.TB, pool *pgxpool.Pool, hh uuid.UUID) benchFixtures 
 		Loan:     one(`SELECT id::text FROM loans WHERE household_id = $1 AND name = 'Mortgage'`),
 		Task:     one(`SELECT id::text FROM maintenance_tasks WHERE household_id = $1 AND status = 'pending' AND name NOT LIKE 'Disposable%' ORDER BY name LIMIT 1`),
 		Property: one(`SELECT id::text FROM properties WHERE household_id = $1 AND name = 'Home'`),
-		Vehicle:  one(`SELECT id::text FROM vehicles WHERE household_id = $1 ORDER BY year DESC LIMIT 1`),
+		Vehicle:  one(`SELECT id::text FROM vehicles WHERE household_id = $1 AND year IS NOT NULL ORDER BY year DESC LIMIT 1`),
 		Calendar: one(`SELECT id::text FROM calendars WHERE household_id = $1 AND name = 'Family'`),
 		Person:   one(`SELECT id::text FROM people WHERE household_id = $1 AND display_name = 'Nora'`),
 		Pet:      one(`SELECT id::text FROM pets WHERE household_id = $1 AND name = 'Rex'`),
@@ -351,6 +354,7 @@ func loadFixtures(t testing.TB, pool *pgxpool.Pool, hh uuid.UUID) benchFixtures 
 		DisposablePets:       disp("pets", "name"),
 		DisposableProperties: disp("properties", "name"),
 		DisposableRooms:      disp("rooms", "name"),
+		DisposableVehicles:   disp("vehicles", "model"),
 		DisposableEvents: many(`SELECT co.id::text FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
 		                         WHERE c.household_id = $1 AND co.ical_data LIKE '%` + benchDisposablePrefix + ` event%' ORDER BY co.id`),
 		PayableBills: many(`SELECT id::text FROM bills WHERE household_id = $1 AND paid_date IS NULL AND frequency = 'monthly'

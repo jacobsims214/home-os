@@ -125,12 +125,11 @@ func findSummary(in findInput, page []vehicleData, total int) string {
 	}
 }
 
-// findNext is vehicle_find's next-step hints. It names only tools that are
-// registered today (vehicle writes are #4460).
+// findNext is vehicle_find's next-step hints.
 func findNext(in findInput, page []vehicleData) []string {
 	if len(page) == 0 {
 		if !in.filtered() {
-			return []string{"Vehicles are added in the Home OS app for now; then loans and upkeep can link to them by vehicle_id."}
+			return []string{"Add one with vehicle_create make=… model=… year=…; then loans, bills and upkeep link to it by vehicle_id."}
 		}
 		return []string{"Call vehicle_find without query to list every vehicle."}
 	}

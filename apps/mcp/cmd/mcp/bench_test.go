@@ -194,7 +194,14 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 		}},
 		{"room_delete", func(i int) map[string]any { return map[string]any{"room_id": pick(f.DisposableRooms, i)} }},
 		{"search_all", static(map[string]any{"query": "insurance"})},
+		{"vehicle_create", func(i int) map[string]any {
+			return map[string]any{"make": "Bench", "model": fmt.Sprintf("Wagon %d", i), "year": 2015 + i%10, "license_plate": fmt.Sprintf("BEN%03d", i)}
+		}},
+		{"vehicle_delete", func(i int) map[string]any { return map[string]any{"vehicle_id": pick(f.DisposableVehicles, i)} }},
 		{"vehicle_find", static(map[string]any{})},
+		{"vehicle_update", func(i int) map[string]any {
+			return map[string]any{"vehicle_id": f.Vehicle, "current_value": 18000 - i}
+		}},
 	}
 }
 
@@ -227,7 +234,7 @@ func TestMCPLatency(t *testing.T) {
 		"disposable loans": fx.DisposableLoans, "disposable tasks": fx.DisposableTasks,
 		"disposable notes": fx.DisposableNotes, "disposable events": fx.DisposableEvents,
 		"disposable list items": fx.DisposableListItems, "disposable people": fx.DisposablePeople,
-		"disposable properties": fx.DisposableProperties, "disposable rooms": fx.DisposableRooms,
+		"disposable properties": fx.DisposableProperties, "disposable rooms": fx.DisposableRooms, "disposable vehicles": fx.DisposableVehicles,
 		"payable bills": fx.PayableBills, "pending tasks": fx.PendingTasks, "unread notifications": fx.UnreadNotifications,
 	} {
 		if len(ids) < calls {
