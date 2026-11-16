@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"home-os/api/internal/auth"
@@ -258,6 +259,50 @@ func (h *Handler) ListInvites(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": views})
+}
+
+// RevokeInvite DELETE /api/v1/invites/{id}
+//
+// Revokes a pending invitation of the request's household (X-Household-ID
+// aware). Only an owner or family_manager there may revoke, and a
+// family_manager may not revoke an owner invitation (the same rule as
+// creating one, auth.CanGrantRole). The invitation row is deleted, so its
+// accept link stops working at once: accept and signup then answer 404, as
+// for an unknown token.
+//
+// Responses: 204 revoked; 403 not a manager, or a family_manager and an
+// owner invitation; 404 unknown id, malformed id, or another household's
+// invitation; 409 already accepted.
+func (h *Handler) RevokeInvite(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.ClaimsFromContext(r.Context())
+	if claims == nil {
+		apierr.Unauthorized(w, "not authenticated")
+		return
+	}
+	userID, _, ok := h.callerManagerRole(w, r, claims)
+	if !ok {
+		return
+	}
+	inviteID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		apierr.NotFound(w, "invitation not found")
+		return
+	}
+
+	switch err := h.repo.Revoke(r.Context(), claims.HouseholdID, inviteID, userID); {
+	case err == nil:
+		slog.Info("invite: revoked", "invitation_id", inviteID, "household_id", claims.HouseholdID, "user_id", userID)
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, ErrInviteNotFound):
+		apierr.NotFound(w, "invitation not found")
+	case errors.Is(err, ErrInviteAccepted):
+		apierr.Conflict(w, "invitation already accepted")
+	case errors.Is(err, ErrRevokeForbidden):
+		slog.Warn("invite: refused revoke", "invitation_id", inviteID, "household_id", claims.HouseholdID, "user_id", userID)
+		apierr.Forbidden(w, "only owners can revoke an owner invitation")
+	default:
+		apierr.InternalError(w, err)
+	}
 }
 
 // Signup password limits. bcrypt ignores (newer versions reject) input past

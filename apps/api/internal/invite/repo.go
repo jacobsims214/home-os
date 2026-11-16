@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/api/internal/auth"
 )
 
 // Repo provides read/write access to the invitations table.
@@ -384,6 +386,81 @@ func FindOrCreateUser(ctx context.Context, tx pgx.Tx, sub, email, name string) (
 		return uuid.Nil, false, fmt.Errorf("create user: %w", err)
 	}
 	return userID, true, nil
+}
+
+// Errors returned by Revoke.
+var (
+	// ErrRevokeForbidden: the actor is not an owner or family_manager of the
+	// household, or is a family_manager revoking an owner invitation.
+	ErrRevokeForbidden = errors.New("not allowed to revoke this invitation")
+)
+
+// Revoke deletes the pending invitation inviteID of householdID on behalf of
+// actorID, in one transaction:
+//
+//  1. re-reads the actor's role from memberships (FOR SHARE);
+//  2. locks the invitation row, scoped by household_id, so another
+//     household's invitation (or an unknown id) is ErrInviteNotFound;
+//  3. refuses an accepted invitation with ErrInviteAccepted (it is history,
+//     and the membership it created is managed through the members API);
+//  4. requires auth.CanGrantRole(actor, invitation role): a family_manager
+//     may not revoke an owner invitation (ErrRevokeForbidden);
+//  5. deletes the row.
+//
+// The row is deleted rather than marked, so the token then gets exactly what
+// an unknown token gets from Accept and Signup (ErrInviteNotFound, 404). The
+// row lock serialises Revoke with Accept/Signup (lockPendingInvitation): an
+// accept that commits first makes Revoke answer ErrInviteAccepted, and one
+// that waits on Revoke finds no row. Expired, unaccepted invitations may be
+// revoked too (cleanup).
+func (r *Repo) Revoke(ctx context.Context, householdID string, inviteID, actorID uuid.UUID) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("revoke invitation: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	// Memberships before invitations: the same lock order as
+	// household.Repo.ChangeMemberRole / RemoveMember, which delete the
+	// inviter's pending invitations after locking the membership rows.
+	var actorRole string
+	err = tx.QueryRow(ctx,
+		`SELECT role::text FROM memberships WHERE household_id = $1 AND user_id = $2 FOR SHARE`,
+		householdID, actorID,
+	).Scan(&actorRole)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("revoke invitation: actor role: %w", err)
+	}
+
+	var role string
+	var acceptedAt *time.Time
+	err = tx.QueryRow(ctx,
+		`SELECT role::text, accepted_at FROM invitations
+		 WHERE id = $1 AND household_id = $2
+		 FOR UPDATE`,
+		inviteID, householdID,
+	).Scan(&role, &acceptedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrInviteNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("revoke invitation: lock: %w", err)
+	}
+	if acceptedAt != nil {
+		return ErrInviteAccepted
+	}
+
+	if !auth.CanGrantRole(actorRole, role) {
+		return ErrRevokeForbidden
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM invitations WHERE id = $1`, inviteID); err != nil {
+		return fmt.Errorf("revoke invitation: delete: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("revoke invitation: commit: %w", err)
+	}
+	return nil
 }
 
 // GetHouseholdName returns the name of a household by its ID.

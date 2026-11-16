@@ -211,3 +211,96 @@ func TestMembers_RoleIsPerHousehold(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	assert.Equal(t, "viewer", f.role(t, targetID))
 }
+
+// #4688: removing a member, or demoting them below an invitation's role,
+// deletes the pending invitations they created in that household (in the
+// same transaction), so their leaked links stop working.
+
+// invite stores an invitation in hhID created by invitedBy and returns its id.
+func (f *mfix) invite(t *testing.T, hhID, invitedBy, role string, accepted bool) string {
+	t.Helper()
+	var id string
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`INSERT INTO invitations (household_id, email, token, role, invited_by, expires_at, accepted_at)
+		 VALUES ($1, $2, $3, $4, $5, NOW() + interval '7 days', CASE WHEN $6 THEN NOW() END)
+		 RETURNING id::text`,
+		hhID, "i-"+uuid.NewString()[:8]+"@example.com", uuid.NewString(), role, invitedBy, accepted).Scan(&id))
+	return id
+}
+
+func (f *mfix) inviteExists(t *testing.T, id string) bool {
+	t.Helper()
+	var n int
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM invitations WHERE id = $1`, id).Scan(&n))
+	return n == 1
+}
+
+func TestMembers_RemovalDropsPendingInvites(t *testing.T) {
+	f := newMFix(t)
+	ownerTok, ownerID := f.member(t, f.hhID, "owner")
+	_, mgrID := f.member(t, f.hhID, "family_manager")
+
+	pending := f.invite(t, f.hhID, mgrID, "family_member", false)
+	pendingViewer := f.invite(t, f.hhID, mgrID, "viewer", false)
+	accepted := f.invite(t, f.hhID, mgrID, "viewer", true)
+	othersInvite := f.invite(t, f.hhID, ownerID, "viewer", false)
+	// The manager's invite into another household they also manage is not
+	// touched by removal from this one.
+	hhB := addHousehold(t, f.pool, "B", mgrID, "family_manager", 0)
+	t.Cleanup(func() { _, _ = f.pool.Exec(context.Background(), `DELETE FROM households WHERE id = $1`, hhB) })
+	inB := f.invite(t, hhB, mgrID, "viewer", false)
+
+	rec := f.do(http.MethodDelete, mgrID, ownerTok, f.hhID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assert.False(t, f.inviteExists(t, pending))
+	assert.False(t, f.inviteExists(t, pendingViewer))
+	assert.True(t, f.inviteExists(t, accepted), "accepted invitations are history")
+	assert.True(t, f.inviteExists(t, othersInvite), "other inviters' invitations stay")
+	assert.True(t, f.inviteExists(t, inB), "other households are untouched")
+
+	t.Run("a refused removal deletes nothing", func(t *testing.T) {
+		mtok, _ := f.member(t, f.hhID, "family_manager")
+		inv := f.invite(t, f.hhID, ownerID, "owner", false)
+		rec := f.do(http.MethodDelete, ownerID, mtok, f.hhID, nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.True(t, f.inviteExists(t, inv))
+	})
+}
+
+func TestMembers_DemotionDropsInvitesTheyCouldNoLongerCreate(t *testing.T) {
+	cases := []struct {
+		from, to string
+		kept     []string // invitation roles that survive; the rest are deleted
+	}{
+		{"owner", "family_manager", []string{"family_manager", "family_member", "viewer", "housesitter", "vendor"}},
+		{"owner", "family_member", nil},
+		{"family_manager", "viewer", nil},
+		{"family_manager", "owner", []string{"owner", "family_manager", "family_member", "viewer", "housesitter", "vendor"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.from+" to "+tc.to, func(t *testing.T) {
+			f := newMFix(t)
+			ownerTok, _ := f.member(t, f.hhID, "owner")
+			_, target := f.member(t, f.hhID, tc.from)
+			ids := map[string]string{}
+			for _, r := range []string{"owner", "family_manager", "family_member", "viewer", "housesitter", "vendor"} {
+				ids[r] = f.invite(t, f.hhID, target, r, false)
+			}
+			acceptedOwner := f.invite(t, f.hhID, target, "owner", true)
+
+			rec := f.do(http.MethodPatch, target, ownerTok, f.hhID, map[string]string{"role": tc.to})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			kept := map[string]bool{}
+			for _, r := range tc.kept {
+				kept[r] = true
+			}
+			for r, id := range ids {
+				assert.Equal(t, kept[r], f.inviteExists(t, id), "%s invitation", r)
+			}
+			assert.True(t, f.inviteExists(t, acceptedOwner), "accepted invitations are history")
+		})
+	}
+}

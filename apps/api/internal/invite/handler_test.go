@@ -85,7 +85,11 @@ func linkRouter(pool *pgxpool.Pool, v *auth.Verifier, dex invite.PasswordStore) 
 		r.Use(middleware.RequireAuth(v))
 		r.Post("/api/v1/invites", ih.CreateInvite)
 		r.Get("/api/v1/invites", ih.ListInvites)
-		r.Get("/api/v1/households/me/members", household.NewHandler(household.NewRepo(pool)).ListMembers)
+		r.Delete("/api/v1/invites/{id}", ih.RevokeInvite)
+		hh := household.NewHandler(household.NewRepo(pool))
+		r.Get("/api/v1/households/me/members", hh.ListMembers)
+		r.Patch("/api/v1/households/me/members/{userId}", hh.UpdateMemberRole)
+		r.Delete("/api/v1/households/me/members/{userId}", hh.RemoveMember)
 	})
 	return r
 }
@@ -579,5 +583,193 @@ func TestAcceptInvite_SignupWithUnusableTokenNeverHashes(t *testing.T) {
 		assert.Equal(t, int32(1), hashes.Load())
 		_, called := dex.get(email)
 		assert.True(t, called)
+	})
+}
+
+// --- #4688: pending invitations can be revoked ---
+
+// insertInvite stores a pending invitation in hhID created by invitedBy and
+// returns its id and token.
+func (f *fixture) insertInvite(t *testing.T, hhID, invitedBy, role, email string) (id, token string) {
+	t.Helper()
+	token = uuid.NewString()
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`INSERT INTO invitations (household_id, email, token, role, invited_by, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, NOW() + interval '7 days') RETURNING id::text`,
+		hhID, email, token, role, invitedBy).Scan(&id))
+	return id, token
+}
+
+func (f *fixture) inviteExists(t *testing.T, id string) bool {
+	t.Helper()
+	var n int
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM invitations WHERE id = $1`, id).Scan(&n))
+	return n == 1
+}
+
+// assertTokenDead checks that both accept modes refuse token exactly like an
+// unknown token: 404 NOT_FOUND, and nothing is created.
+func (f *fixture) assertTokenDead(t *testing.T, token, email string) {
+	t.Helper()
+	rec := do(f.h, http.MethodPost, "/api/v1/invites/accept", "",
+		map[string]string{"token": token, "name": "Leaked", "password": "correct-horse"})
+	assert.Equal(t, http.StatusNotFound, rec.Code, "signup: %s", rec.Body.String())
+	assert.Equal(t, "NOT_FOUND", errCode(t, rec))
+
+	sub := "CiQ" + uuid.NewString()
+	rec = do(f.h, http.MethodPost, "/api/v1/invites/accept", f.s.token(t, sub, email),
+		map[string]string{"token": token})
+	assert.Equal(t, http.StatusNotFound, rec.Code, "accept: %s", rec.Body.String())
+
+	unknown := do(f.h, http.MethodPost, "/api/v1/invites/accept", "",
+		map[string]string{"token": uuid.NewString(), "name": "Leaked", "password": "correct-horse"})
+	assert.Equal(t, unknown.Code, http.StatusNotFound)
+	assert.JSONEq(t, unknown.Body.String(), do(f.h, http.MethodPost, "/api/v1/invites/accept", "",
+		map[string]string{"token": token, "name": "Leaked", "password": "correct-horse"}).Body.String(),
+		"a revoked token answers exactly like an unknown one")
+
+	var users int
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM users WHERE lower(email) = lower($1)`, email).Scan(&users))
+	assert.Zero(t, users, "no account was created from the dead link")
+}
+
+func TestRevokeInvite_OwnerRevokesAndTheLinkStopsWorking(t *testing.T) {
+	f := setup(t)
+	f.withDex(t)
+	email := "leak-" + uuid.NewString()[:8] + "@example.com"
+	f.cleanupUser(t, email)
+
+	rec := do(f.h, http.MethodPost, "/api/v1/invites", f.owner, map[string]string{"email": email, "role": "owner"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created struct{ Data inviteJSON }
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	var token string
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`SELECT token FROM invitations WHERE id = $1`, created.Data.ID).Scan(&token))
+
+	rec = do(f.h, http.MethodDelete, "/api/v1/invites/"+created.Data.ID, f.owner, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.Empty(t, rec.Body.String())
+	assert.False(t, f.inviteExists(t, created.Data.ID))
+
+	rec = do(f.h, http.MethodGet, "/api/v1/invites", f.owner, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), created.Data.ID, "a revoked invitation is no longer listed")
+
+	f.assertTokenDead(t, token, email)
+
+	rec = do(f.h, http.MethodDelete, "/api/v1/invites/"+created.Data.ID, f.owner, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "revoking twice: %s", rec.Body.String())
+}
+
+func TestRevokeInvite_Authorization(t *testing.T) {
+	f := setup(t)
+	f.withDex(t)
+	mail := func() string { return "rv-" + uuid.NewString()[:8] + "@example.com" }
+
+	// want[actor][invited role] is the DELETE status for a pending invitation
+	// (created by the household's owner) in the actor's own household.
+	for _, actor := range allRoles {
+		tok, _ := f.addMember(t, f.hhID, actor)
+		for _, invited := range allRoles {
+			want := http.StatusForbidden
+			if auth.CanGrantRole(actor, invited) {
+				want = http.StatusNoContent
+			}
+			t.Run(actor+" revokes "+invited+" invite", func(t *testing.T) {
+				id, _ := f.insertInvite(t, f.hhID, f.ownerID, invited, mail())
+				rec := do(f.h, http.MethodDelete, "/api/v1/invites/"+id, tok, nil)
+				require.Equal(t, want, rec.Code, rec.Body.String())
+				assert.Equal(t, want == http.StatusForbidden, f.inviteExists(t, id), "a refused revoke keeps the invitation")
+			})
+		}
+	}
+
+	t.Run("another household's invitation is 404 and untouched", func(t *testing.T) {
+		_, otherID := f.addMember(t, f.hhID, "family_member") // a user to own household A
+		var hhA string
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`INSERT INTO households (name) VALUES ('Other') RETURNING id::text`).Scan(&hhA))
+		t.Cleanup(func() { _, _ = f.pool.Exec(context.Background(), `DELETE FROM households WHERE id = $1`, hhA) })
+		_, err := f.pool.Exec(context.Background(),
+			`INSERT INTO memberships (household_id, user_id, role) VALUES ($1, $2, 'owner')`, hhA, otherID)
+		require.NoError(t, err)
+		id, token := f.insertInvite(t, hhA, otherID, "family_member", mail())
+
+		rec := do(f.h, http.MethodDelete, "/api/v1/invites/"+id, f.owner, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+		assert.True(t, f.inviteExists(t, id))
+		var still string
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`SELECT token FROM invitations WHERE id = $1`, id).Scan(&still))
+		assert.Equal(t, token, still)
+	})
+
+	t.Run("an accepted invitation is 409", func(t *testing.T) {
+		email := mail()
+		f.cleanupUser(t, email)
+		id, token := f.insertInvite(t, f.hhID, f.ownerID, "viewer", email)
+		rec := do(f.h, http.MethodPost, "/api/v1/invites/accept", "",
+			map[string]string{"token": token, "name": "V", "password": "correct-horse"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		rec = do(f.h, http.MethodDelete, "/api/v1/invites/"+id, f.owner, nil)
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.True(t, f.inviteExists(t, id))
+	})
+
+	t.Run("a malformed or unknown id is 404", func(t *testing.T) {
+		for _, id := range []string{"not-a-uuid", uuid.NewString()} {
+			rec := do(f.h, http.MethodDelete, "/api/v1/invites/"+id, f.owner, nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s: %s", id, rec.Body.String())
+		}
+	})
+
+	t.Run("an expired, unaccepted invitation can be revoked", func(t *testing.T) {
+		id, _ := f.insertInvite(t, f.hhID, f.ownerID, "viewer", mail())
+		_, err := f.pool.Exec(context.Background(),
+			`UPDATE invitations SET expires_at = NOW() - interval '1 day' WHERE id = $1`, id)
+		require.NoError(t, err)
+		rec := do(f.h, http.MethodDelete, "/api/v1/invites/"+id, f.owner, nil)
+		assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	})
+}
+
+// Removing or demoting an inviter kills the pending links they could no
+// longer create, end to end through the members API and the accept route.
+func TestRevokeInvite_RemovedOrDemotedInvitersLinksStopWorking(t *testing.T) {
+	f := setup(t)
+	f.withDex(t)
+	mail := func() string { return "ri-" + uuid.NewString()[:8] + "@example.com" }
+
+	t.Run("removed inviter", func(t *testing.T) {
+		_, mgrID := f.addMember(t, f.hhID, "family_manager")
+		email := mail()
+		f.cleanupUser(t, email)
+		_, token := f.insertInvite(t, f.hhID, mgrID, "family_member", email)
+		rec := do(f.h, http.MethodDelete, "/api/v1/households/me/members/"+mgrID, f.owner, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		f.assertTokenDead(t, token, email)
+	})
+
+	t.Run("owner demoted to family_manager", func(t *testing.T) {
+		_, ownerID := f.addMember(t, f.hhID, "owner")
+		ownerMail, viewerMail := mail(), mail()
+		f.cleanupUser(t, ownerMail)
+		f.cleanupUser(t, viewerMail)
+		ownerInv, ownerTok := f.insertInvite(t, f.hhID, ownerID, "owner", ownerMail)
+		viewerInv, viewerTok := f.insertInvite(t, f.hhID, ownerID, "viewer", viewerMail)
+
+		rec := do(f.h, http.MethodPatch, "/api/v1/households/me/members/"+ownerID, f.owner,
+			map[string]string{"role": "family_manager"})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.False(t, f.inviteExists(t, ownerInv), "a family_manager could not create an owner invite")
+		f.assertTokenDead(t, ownerTok, ownerMail)
+		assert.True(t, f.inviteExists(t, viewerInv), "a family_manager can still invite a viewer")
+		rec = do(f.h, http.MethodPost, "/api/v1/invites/accept", "",
+			map[string]string{"token": viewerTok, "name": "V", "password": "correct-horse"})
+		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 }

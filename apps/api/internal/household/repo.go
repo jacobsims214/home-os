@@ -226,6 +226,9 @@ func (r *Repo) ChangeMemberRole(ctx context.Context, householdID, actorID, targe
 	); err != nil {
 		return fmt.Errorf("update member role: %w", err)
 	}
+	if err := deletePendingInvites(ctx, tx, householdID, targetID, ungrantableRoles(role)); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -260,7 +263,58 @@ func (r *Repo) RemoveMember(ctx context.Context, householdID, actorID, targetID 
 	); err != nil {
 		return fmt.Errorf("remove member: %w", err)
 	}
+	if err := deletePendingInvites(ctx, tx, householdID, targetID, nil); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
+}
+
+// allRoles lists the membership_role values (see auth.ValidRole).
+var allRoles = []string{
+	auth.RoleOwner, auth.RoleFamilyManager, auth.RoleFamilyMember,
+	auth.RoleViewer, auth.RoleHousesitter, auth.RoleVendor,
+}
+
+// ungrantableRoles returns the invitation roles a member with role could no
+// longer create (auth.CanGrantRole is false): every role for a non-manager,
+// owner for a family_manager, none for an owner.
+func ungrantableRoles(role string) []string {
+	out := []string{}
+	for _, r := range allRoles {
+		if !auth.CanGrantRole(role, r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// deletePendingInvites deletes the pending (unaccepted) invitations userID
+// created in householdID, inside the caller's transaction: all of them when
+// roles is nil (the inviter was removed), otherwise only those whose role is
+// in roles (the inviter was demoted and could no longer create them). Their
+// accept links then answer 404 like unknown tokens. An empty, non-nil roles
+// deletes nothing. Accepted invitations are history and are kept.
+func deletePendingInvites(ctx context.Context, tx pgx.Tx, householdID, userID uuid.UUID, roles []string) error {
+	if roles != nil && len(roles) == 0 {
+		return nil
+	}
+	var err error
+	if roles == nil {
+		_, err = tx.Exec(ctx,
+			`DELETE FROM invitations
+			 WHERE household_id = $1 AND invited_by = $2 AND accepted_at IS NULL`,
+			householdID, userID)
+	} else {
+		_, err = tx.Exec(ctx,
+			`DELETE FROM invitations
+			 WHERE household_id = $1 AND invited_by = $2 AND accepted_at IS NULL
+			   AND role::text = ANY($3::text[])`,
+			householdID, userID, roles)
+	}
+	if err != nil {
+		return fmt.Errorf("delete pending invitations: %w", err)
+	}
+	return nil
 }
 
 // Errors returned by CreateFamily.

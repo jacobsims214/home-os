@@ -383,6 +383,7 @@ func main() {
 		// Invite routes (accept is registered above, outside this group).
 		r.Post("/api/v1/invites", inviteHandler.CreateInvite)
 		r.Get("/api/v1/invites", inviteHandler.ListInvites)
+		r.Delete("/api/v1/invites/{id}", inviteHandler.RevokeInvite)
 
 		// Agent tokens: each member creates, lists and revokes their own.
 		agenttoken.NewHandler(agenttoken.NewRepo(pool)).RegisterRoutes(r)
