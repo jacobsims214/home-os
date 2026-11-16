@@ -3,8 +3,10 @@ package people
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -28,8 +30,11 @@ import (
 //   - any member may update their own person record (the one linked to their
 //     login) and its preferences. People without a login (kids and others)
 //     are therefore editable only by owner/family_manager;
-//   - a person linked to a current member can't be deleted (409): remove the
-//     member instead, which unlinks the person.
+//   - a person linked to a current member can't be deleted (409
+//     LINKED_MEMBER): remove the member instead, which unlinks the person;
+//   - deleting a person that notes, documents, list items, meal ratings or
+//     events point at needs ?confirm=true (409 CONFIRM_REQUIRED with the
+//     counts otherwise), like MCP person_delete.
 //
 // Ids from another household answer 404. People records hold sensitive data
 // about kids (birthdate, school, allergies): they are never indexed for
@@ -470,9 +475,56 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": toPersonResponse(updated)})
 }
 
-// Delete removes a person and their preferences. Owner/family_manager only;
-// 409 if the person is linked to a current member.
-// DELETE /api/v1/people/{id}
+// Error codes of the two DELETE /api/v1/people/{id} conflicts, so a client
+// can tell "confirm and repeat" from "remove the member instead".
+const (
+	codeConfirmRequired = "CONFIRM_REQUIRED"
+	codeLinkedMember    = "LINKED_MEMBER"
+)
+
+// deleteConflictResponse is the 409 body of a delete that needs confirm=true:
+// the usual error object plus the counts of what points at the person.
+type deleteConflictResponse struct {
+	Error      apierr.ErrorDetail `json:"error"`
+	References References         `json:"references"`
+}
+
+// referencesPhrase lists the non-zero counts, e.g. "3 notes about them
+// (deleted with them), 2 list items".
+func referencesPhrase(refs References) string {
+	var parts []string
+	for _, it := range []struct {
+		n         int
+		one, many string
+	}{
+		{refs.Notes, "note about them (deleted with them)", "notes about them (deleted with them)"},
+		{refs.Documents, "document", "documents"},
+		{refs.ListItems, "list item", "list items"},
+		{refs.MealRatings, "meal rating", "meal ratings"},
+		{refs.Events, "event", "events"},
+	} {
+		switch {
+		case it.n == 1:
+			parts = append(parts, "1 "+it.one)
+		case it.n > 1:
+			parts = append(parts, strconv.Itoa(it.n)+" "+it.many)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// Delete removes a person and their preferences. Owner/family_manager only.
+//
+//   - 409 LINKED_MEMBER: the person is linked to a current member; remove
+//     the member instead.
+//   - 409 CONFIRM_REQUIRED with {"error":{...},"references":{notes,
+//     documents,list_items,meal_ratings,events}}: records point at the
+//     person (notes about them are deleted with them, the rest are
+//     unlinked). Nothing is deleted; repeat with ?confirm=true. Same rule
+//     and counts as the MCP person_delete tool.
+//   - 204: deleted (nothing pointed at the person, or confirm=true).
+//
+// DELETE /api/v1/people/{id}[?confirm=true]
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	c, ok := h.resolveCaller(w, r)
 	if !ok {
@@ -486,13 +538,27 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		forbidEdit(w, c, p, "person delete")
 		return
 	}
-	switch err := h.repo.Delete(r.Context(), c.householdID, p.ID); {
+	confirm := strings.EqualFold(r.URL.Query().Get("confirm"), "true")
+	refs, err := h.repo.Delete(r.Context(), c.householdID, p.ID, confirm)
+	switch {
 	case err == nil:
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, ErrNotFound):
 		apierr.NotFound(w, "person not found")
 	case errors.Is(err, ErrLinkedMember):
-		apierr.Conflict(w, "this person is a member of the household; remove the member instead")
+		apierr.JSON(w, http.StatusConflict, apierr.ErrorResponse{Error: apierr.ErrorDetail{
+			Code:    codeLinkedMember,
+			Message: "this person is a member of the household; remove the member instead",
+		}})
+	case errors.Is(err, ErrConfirmRequired):
+		apierr.JSON(w, http.StatusConflict, deleteConflictResponse{
+			Error: apierr.ErrorDetail{
+				Code: codeConfirmRequired,
+				Message: fmt.Sprintf("%s has %s; repeat with ?confirm=true to delete them",
+					p.DisplayName, referencesPhrase(refs)),
+			},
+			References: refs,
+		})
 	default:
 		apierr.InternalError(w, err)
 	}

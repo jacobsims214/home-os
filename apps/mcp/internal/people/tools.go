@@ -1563,15 +1563,13 @@ func NewPersonDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 		}
 
 		out := Deleted{PersonID: row.id, Name: row.name, Removed: Removed{Allergies: len(row.allergies)}}
+		// person_reference_counts (migration 063) is shared with the REST API's
+		// DELETE /api/v1/people/{id}, so both ask for the same confirmation.
 		if err := tx.QueryRow(ctx, `
 SELECT (SELECT count(*) FROM person_preferences WHERE household_id = $1 AND person_id = $2),
-       (SELECT count(*) FROM notes WHERE household_id = $1 AND entity_type = 'person' AND entity_id = $2),
-       (SELECT count(*) FROM files WHERE household_id = $1 AND (person_id = $2 OR (entity_type = 'person' AND entity_id = $2))),
-       (SELECT count(*) FROM list_items WHERE household_id = $1 AND assignee_person_id = $2),
-       (SELECT count(*) FROM meal_feedback WHERE household_id = $1 AND person_id = $2),
-       (SELECT count(*) FROM calendar_objects co JOIN calendars cal ON cal.id = co.calendar_id
-         WHERE cal.household_id = $1 AND co.ical_raw LIKE $3)`,
-			c.householdID, id, "%X-HOMEOS-PERSON-ID="+id+"%").Scan(
+       r.notes, r.documents, r.list_items, r.meal_ratings, r.events
+  FROM person_reference_counts($1, $2) r`,
+			c.householdID, id).Scan(
 			&out.Removed.Preferences, &out.Removed.Notes, &out.Unlinked.Documents, &out.Unlinked.ListItems,
 			&out.Unlinked.MealRatings, &out.Unlinked.Events); err != nil {
 			return respond.Failed("delete the person", err), nil

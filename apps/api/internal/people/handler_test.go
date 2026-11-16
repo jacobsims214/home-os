@@ -337,6 +337,7 @@ func TestPeople_LinkedMemberCantBeDeleted(t *testing.T) {
 	for _, target := range []member{spouse, owner} {
 		rec := f.do(t, req{method: http.MethodDelete, path: "/api/v1/people/" + target.personID, as: owner})
 		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Equal(t, "LINKED_MEMBER", decodeConflict(t, rec).Error.Code)
 	}
 
 	// Removing the member unlinks the person (041 trigger); now it can go.
@@ -348,6 +349,119 @@ func TestPeople_LinkedMemberCantBeDeleted(t *testing.T) {
 	assert.False(t, decode[personJSON](t, rec).HasLogin)
 	rec = f.do(t, req{method: http.MethodDelete, path: "/api/v1/people/" + spouse.personID, as: owner})
 	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+}
+
+type deleteConflictJSON struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+	References *people.References `json:"references"`
+}
+
+func decodeConflict(t *testing.T, rec *httptest.ResponseRecorder) deleteConflictJSON {
+	t.Helper()
+	var out deleteConflictJSON
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out), rec.Body.String())
+	return out
+}
+
+// TestPeople_DeleteNeedsConfirmWhenReferenced: a person that notes, list
+// items or events point at is deleted only with ?confirm=true (MCP
+// person_delete parity, #4743). Without it the API answers 409
+// CONFIRM_REQUIRED with the counts and deletes nothing.
+func TestPeople_DeleteNeedsConfirmWhenReferenced(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	hh := f.household(t)
+	owner := f.member(t, hh, "owner")
+	kid := f.createKid(t, owner, "Nora")
+
+	for _, title := range []string{"Shoe size", "Pediatrician"} {
+		_, err := f.pool.Exec(ctx,
+			`INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'person', $2, $3, 'x')`,
+			hh, kid.ID, title)
+		require.NoError(t, err)
+	}
+	var listID string
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`INSERT INTO lists (household_id, name, kind, entity_type, entity_id)
+		 VALUES ($1, 'Chores', 'chores', 'household', $1) RETURNING id::text`, hh).Scan(&listID))
+	_, err := f.pool.Exec(ctx,
+		`INSERT INTO list_items (list_id, household_id, text, assignee_person_id, position)
+		 VALUES ($1, $2, 'Feed the cat', $3, 1)`, listID, hh, kid.ID)
+	require.NoError(t, err)
+	var calID string
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`INSERT INTO calendars (household_id, name, type, caldav_uid)
+		 VALUES ($1, 'Family', 'family', $2) RETURNING id::text`, hh, "cal-"+uuid.NewString()).Scan(&calID))
+	_, err = f.pool.Exec(ctx,
+		`INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, ical_raw)
+		 VALUES ($1, $2, '{}', 'e1', $3)`, calID, "ev-"+uuid.NewString(),
+		"BEGIN:VEVENT\r\nSUMMARY:Soccer\r\nX-HOMEOS-PERSON-ID="+kid.ID+"\r\nEND:VEVENT")
+	require.NoError(t, err)
+
+	path := "/api/v1/people/" + kid.ID
+	want := people.References{Notes: 2, ListItems: 1, Events: 1}
+
+	got, err := people.NewRepo(f.pool).References(ctx, uuid.MustParse(hh), uuid.MustParse(kid.ID))
+	require.NoError(t, err)
+	assert.Equal(t, want, got, "repo References")
+
+	for _, q := range []string{"", "?confirm=false", "?confirm=1"} {
+		rec := f.do(t, req{method: http.MethodDelete, path: path + q, as: owner})
+		require.Equal(t, http.StatusConflict, rec.Code, "%q: %s", q, rec.Body.String())
+		body := decodeConflict(t, rec)
+		assert.Equal(t, "CONFIRM_REQUIRED", body.Error.Code)
+		assert.Equal(t, "Nora has 2 notes about them (deleted with them), 1 list item, 1 event; repeat with ?confirm=true to delete them",
+			body.Error.Message)
+		require.NotNil(t, body.References, rec.Body.String())
+		assert.Equal(t, want, *body.References)
+		assert.Contains(t, rec.Body.String(), `"meal_ratings":0`, "every count is present, zeros too")
+	}
+	var notes int
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM notes WHERE entity_type = 'person' AND entity_id = $1`, kid.ID).Scan(&notes))
+	assert.Equal(t, 2, notes, "nothing deleted without confirm")
+	rec := f.do(t, req{method: http.MethodGet, path: path, as: owner})
+	require.Equal(t, http.StatusOK, rec.Code, "person still there: %s", rec.Body.String())
+
+	rec = f.do(t, req{method: http.MethodDelete, path: path + "?confirm=true", as: owner})
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	rec = f.do(t, req{method: http.MethodGet, path: path, as: owner})
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM notes WHERE entity_type = 'person' AND entity_id = $1`, kid.ID).Scan(&notes))
+	assert.Zero(t, notes, "notes about the person are deleted with them")
+	var text string
+	var assignee *string
+	require.NoError(t, f.pool.QueryRow(ctx,
+		`SELECT text, assignee_person_id::text FROM list_items WHERE list_id = $1`, listID).Scan(&text, &assignee))
+	assert.Equal(t, "Feed the cat", text, "list item stays")
+	assert.Nil(t, assignee, "list item is unassigned")
+
+	t.Run("nothing attached deletes without confirm", func(t *testing.T) {
+		plain := f.createKid(t, owner, "Leo")
+		rec := f.do(t, req{method: http.MethodDelete, path: "/api/v1/people/" + plain.ID, as: owner})
+		assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	})
+
+	t.Run("a member is refused even with confirm", func(t *testing.T) {
+		spouse := f.member(t, hh, "family_member")
+		_, err := f.pool.Exec(ctx,
+			`INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'person', $2, 'Gift ideas', 'x')`,
+			hh, spouse.personID)
+		require.NoError(t, err)
+		for _, q := range []string{"", "?confirm=true"} {
+			rec := f.do(t, req{method: http.MethodDelete, path: "/api/v1/people/" + spouse.personID + q, as: owner})
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			body := decodeConflict(t, rec)
+			assert.Equal(t, "LINKED_MEMBER", body.Error.Code, q)
+			assert.Nil(t, body.References, "no counts for a member: %s", rec.Body.String())
+		}
+		rec := f.do(t, req{method: http.MethodGet, path: "/api/v1/people/" + spouse.personID, as: owner})
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
 }
 
 func TestPeople_CrossHouseholdIsNotFound(t *testing.T) {

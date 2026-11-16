@@ -28,6 +28,9 @@ var (
 	// ErrDuplicate: the person already has this preference (same kind,
 	// category and value, ignoring case).
 	ErrDuplicate = errors.New("duplicate preference")
+	// ErrConfirmRequired: records point at the person (see References) and
+	// the caller did not confirm the delete.
+	ErrConfirmRequired = errors.New("person delete needs confirmation")
 )
 
 // Person is a row of people.
@@ -208,26 +211,108 @@ func (r *Repo) Update(ctx context.Context, householdID, id uuid.UUID, in PersonI
 	return p, err
 }
 
-// Delete removes a person and (by cascade) their preferences. A person linked
-// to a current member of the household is refused with ErrLinkedMember: the
-// check and the delete are one statement, so a concurrent join can't slip in.
-func (r *Repo) Delete(ctx context.Context, householdID, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx,
+// References counts the records that point at a person and are deleted
+// (notes) or unlinked (the rest) when the person is deleted. The counts come
+// from the SQL function person_reference_counts (migration 063), which the
+// MCP person_delete tool uses too, so the API and MCP ask for the same
+// confirmation.
+type References struct {
+	Notes       int `json:"notes"`
+	Documents   int `json:"documents"`
+	ListItems   int `json:"list_items"`
+	MealRatings int `json:"meal_ratings"`
+	Events      int `json:"events"`
+}
+
+// Any reports whether anything points at the person.
+func (r References) Any() bool {
+	return r.Notes+r.Documents+r.ListItems+r.MealRatings+r.Events > 0
+}
+
+type querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func references(ctx context.Context, q querier, householdID, id uuid.UUID) (References, error) {
+	var refs References
+	err := q.QueryRow(ctx,
+		`SELECT notes, documents, list_items, meal_ratings, events
+		   FROM person_reference_counts($1, $2)`, householdID, id).
+		Scan(&refs.Notes, &refs.Documents, &refs.ListItems, &refs.MealRatings, &refs.Events)
+	if err != nil {
+		return References{}, fmt.Errorf("count person references: %w", err)
+	}
+	return refs, nil
+}
+
+// References returns what points at a person of the household. It does not
+// check that the person exists.
+func (r *Repo) References(ctx context.Context, householdID, id uuid.UUID) (References, error) {
+	return references(ctx, r.pool, householdID, id)
+}
+
+// Delete removes a person and (by cascade) their preferences, in one
+// transaction with the people row locked FOR UPDATE (as MCP person_delete
+// does), so nothing can be attached between the count and the delete:
+//   - ErrNotFound: no such person in the household;
+//   - ErrLinkedMember: the person is linked to a current member (remove the
+//     member instead); checked before the references;
+//   - ErrConfirmRequired, with the counts: records point at the person and
+//     confirm is false. Nothing is deleted.
+//
+// With confirm, or when nothing points at the person, the person is deleted
+// and the returned counts say what was deleted or unlinked with them.
+func (r *Repo) Delete(ctx context.Context, householdID, id uuid.UUID, confirm bool) (References, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return References{}, fmt.Errorf("delete person: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var linked bool
+	err = tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM memberships m
+		                 WHERE m.household_id = p.household_id AND m.user_id = p.user_id)
+		   FROM people p
+		  WHERE p.id = $1 AND p.household_id = $2
+		    FOR UPDATE OF p`,
+		id, householdID).Scan(&linked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return References{}, ErrNotFound
+	}
+	if err != nil {
+		return References{}, fmt.Errorf("delete person: %w", err)
+	}
+	if linked {
+		return References{}, ErrLinkedMember
+	}
+
+	refs, err := references(ctx, tx, householdID, id)
+	if err != nil {
+		return References{}, err
+	}
+	if refs.Any() && !confirm {
+		return refs, ErrConfirmRequired
+	}
+
+	// The membership check is repeated in the DELETE: a membership insert
+	// doesn't take the people row lock.
+	tag, err := tx.Exec(ctx,
 		`DELETE FROM people p
 		  WHERE p.id = $1 AND p.household_id = $2
 		    AND NOT EXISTS (SELECT 1 FROM memberships m
 		                     WHERE m.household_id = p.household_id AND m.user_id = p.user_id)`,
 		id, householdID)
 	if err != nil {
-		return fmt.Errorf("delete person: %w", err)
+		return References{}, fmt.Errorf("delete person: %w", err)
 	}
-	if tag.RowsAffected() == 1 {
-		return nil
+	if tag.RowsAffected() != 1 {
+		return References{}, ErrLinkedMember
 	}
-	if _, err := r.Get(ctx, householdID, id); err != nil {
-		return err // ErrNotFound or a lookup failure
+	if err := tx.Commit(ctx); err != nil {
+		return References{}, fmt.Errorf("delete person: %w", err)
 	}
-	return ErrLinkedMember
+	return refs, nil
 }
 
 // ListPreferences returns a person's preferences (the person must be in the
