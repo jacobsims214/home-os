@@ -126,19 +126,19 @@ func dietRules(e eater, value string) ([]rule, bool) {
 	v = strings.Join(strings.Fields(v), " ")
 	label := strings.TrimSpace(value)
 	mk := func(phrases ...[]string) rule {
-		m := allergyMatcher{personID: e.id, person: e.name, allergy: label}
+		m := allergyMatcher{PersonID: e.id, Person: e.name, Allergy: label}
 		for _, p := range phrases {
 			// Group words, so a vegan's "no fish" catches catfish and
 			// swordfish too (#4805). Only curated words get the compound
 			// forms, so the meat lists are unchanged.
-			m.group = append(m.group, compileGroupPhrases(p)...)
+			m.Group = append(m.Group, compileGroupPhrases(p)...)
 		}
 		return rule{kind: "diet", m: m}
 	}
 	group := func(key string) rule {
 		// key is a normalised allergen already (a group name like "dairy").
 		m, _ := newAllergyMatcher(e.id, e.name, key)
-		m.allergy = label
+		m.Allergy = label
 		return rule{kind: "diet", m: m}
 	}
 	fish, shellfish := allergenGroups["fish"], allergenGroups["shellfish"]
@@ -173,7 +173,7 @@ func dietRules(e eater, value string) ([]rule, bool) {
 		case "pork":
 			out = append(out, mk(porkWords))
 		default:
-			if r := group(t); len(r.m.own) > 0 {
+			if r := group(t); len(r.m.Own) > 0 {
 				out = append(out, r)
 			}
 		}
@@ -254,7 +254,7 @@ SELECT person_id::text, kind::text, category, value, coalesce(notes, '')
 			// ("shrimp - anaphylaxis" means shrimp). The label stays the saved
 			// value, so reasons read "Sam dislikes chicken" (#4802).
 			for _, m := range preferenceMatchers(e.id, e.name, p.value) {
-				m.allergy = p.value
+				m.Allergy = p.value
 				rules = append(rules, rule{kind: p.kind, m: m})
 			}
 		}
@@ -488,7 +488,7 @@ func (c *candidate) score(date time.Time, eaters []eater, rules []rule) (float64
 		}
 		hit := ""
 		for _, it := range items {
-			if r.m.matches(it) {
+			if r.m.Matches(it) {
 				hit = it
 				break
 			}
@@ -501,10 +501,10 @@ func (c *candidate) score(date time.Time, eaters []eater, rules []rule) (float64
 				likes += 1.5
 				s += 1.5
 			}
-			pros = append(pros, fmt.Sprintf("%s likes %s", r.m.person, r.m.allergy))
+			pros = append(pros, fmt.Sprintf("%s likes %s", r.m.Person, r.m.Allergy))
 		} else {
 			s -= 3
-			cons = append(cons, fmt.Sprintf("%s dislikes %s", r.m.person, r.m.allergy))
+			cons = append(cons, fmt.Sprintf("%s dislikes %s", r.m.Person, r.m.Allergy))
 		}
 	}
 	return round1(s), rd, pros, cons
@@ -790,10 +790,10 @@ func NewMealSuggestTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 					continue
 				}
 				for _, it := range items {
-					if r.m.matches(it) {
-						line := fmt.Sprintf("%s (%s): %s", r.m.person, r.m.allergy, it)
+					if r.m.Matches(it) {
+						line := fmt.Sprintf("%s (%s): %s", r.m.Person, r.m.Allergy, it)
 						if r.kind == "diet" {
-							line = fmt.Sprintf("%s (diet: %s): %s", r.m.person, r.m.allergy, it)
+							line = fmt.Sprintf("%s (diet: %s): %s", r.m.Person, r.m.Allergy, it)
 						}
 						if !slices.Contains(why, line) {
 							why = append(why, line)
@@ -824,8 +824,8 @@ func NewMealSuggestTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			}
 			for _, r := range others {
 				for _, it := range items {
-					if r.m.matches(it) {
-						sg.Cautions = append(sg.Cautions, fmt.Sprintf("Contains %s for %s (%s), who is not eating.", it, r.m.person, r.m.allergy))
+					if r.m.Matches(it) {
+						sg.Cautions = append(sg.Cautions, fmt.Sprintf("Contains %s for %s (%s), who is not eating.", it, r.m.Person, r.m.Allergy))
 						break
 					}
 				}

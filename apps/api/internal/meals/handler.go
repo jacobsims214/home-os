@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/allergen"
 	"home-os/api/internal/auth"
 	"home-os/api/internal/middleware"
 	"home-os/api/pkg/apierr"
@@ -32,6 +33,11 @@ type Policy interface {
 	// CanRateOthers: record or remove feedback for any person of the
 	// household (kids have no login, so a parent rates for them).
 	CanRateOthers(role string) bool
+	// CanQuotePreferences: a failed allergy read may quote the stored
+	// preference's own value and notes in `checks`. False for a role that may
+	// see allergies but not preferences (housesitter): the allergy is still
+	// applied, its wording just stops short of the preference text.
+	CanQuotePreferences(role string) bool
 }
 
 // DefaultPolicy is the meals policy until #4689 lands:
@@ -53,6 +59,13 @@ func (DefaultPolicy) CanWrite(role string) bool {
 
 // CanRateOthers implements Policy.
 func (DefaultPolicy) CanRateOthers(role string) bool { return auth.CanManageMembers(role) }
+
+// CanQuotePreferences implements Policy: reading preferences is the family
+// roles' grant (ResPreferences read), so a housesitter's allergy checks never
+// repeat what a preference said.
+func (DefaultPolicy) CanQuotePreferences(role string) bool {
+	return auth.Can(role, auth.ResPreferences, auth.ActRead)
+}
 
 // Handler serves the recipe, meal plan and meal feedback endpoints. Ids from
 // another household answer 404. Plan dates are calendar dates in the
@@ -134,6 +147,16 @@ type recipeResponse struct {
 	SourceURL   *string      `json:"source_url"`
 	CreatedAt   string       `json:"created_at"`
 	UpdatedAt   string       `json:"updated_at"`
+
+	// AllergyWarnings and Checks are the allergy surface the Recipes UI reads
+	// (#4567 expects both, and renders Checks verbatim). They are always
+	// present — an empty array, never null and never absent — because the UI
+	// treats an absent key as "nobody looked" and an empty one as "checked and
+	// clear" (KB ui/recipes-pages.md, reportAllergies). Computed by the same
+	// engine the MCP tools use (home-os/allergen), so the API and the
+	// assistant cannot disagree (#4891).
+	AllergyWarnings []allergen.Warning `json:"allergy_warnings"`
+	Checks          []string           `json:"checks"`
 }
 
 type mealResponse struct {
@@ -169,13 +192,59 @@ func optUUID(id *uuid.UUID) *string {
 	return &s
 }
 
-func toRecipeResponse(rc *Recipe) recipeResponse {
-	return recipeResponse{
+// toRecipeResponse serializes one recipe, checking its allergies if the caller
+// has the family's matchers. matchers nil means this response carries no
+// allergy data at all — only a path that cannot check (none today) would pass
+// nil, and even then both keys are present and empty rather than absent.
+//
+// checksSeed is what Loading the family's allergies already produced: one line
+// per allergy that could not be read as an allergen. It is the same for every
+// recipe in a list, so the loader runs once per request and the seed is copied
+// per row (#4891: this is a LIST endpoint, and a family with 200 recipes must
+// not turn one allergies query into 400).
+func toRecipeResponse(rc *Recipe, matchers []allergen.Matcher, checksSeed []string) recipeResponse {
+	out := recipeResponse{
 		ID: rc.ID.String(), HouseholdID: rc.HouseholdID.String(), Title: rc.Title,
 		Description: rc.Description, Servings: rc.Servings, PrepMinutes: rc.PrepMinutes,
 		CookMinutes: rc.CookMinutes, Ingredients: rc.Ingredients, Steps: rc.Steps, Tags: rc.Tags,
 		SourceURL: rc.SourceURL, CreatedAt: ts(rc.CreatedAt), UpdatedAt: ts(rc.UpdatedAt),
+		// Empty slices, never nil: `json:"..."` on a nil slice marshals as
+		// null, and the UI must see [] as "checked, nothing matched".
+		AllergyWarnings: []allergen.Warning{},
+		Checks:          append([]string{}, checksSeed...),
 	}
+	if len(matchers) == 0 {
+		return out
+	}
+	warnings, ingChecks := allergen.RecipeCheck(matchers, rc.Title, ingredientNames(rc.Ingredients))
+	if len(warnings) > 0 {
+		out.AllergyWarnings = warnings
+	}
+	out.Checks = append(out.Checks, ingChecks...)
+	return out
+}
+
+// ingredientNames is what a recipe's allergies are checked against: the names,
+// not the quantities. It matches the MCP's own ingredientNames so the API and
+// the tools hand the engine the same list (#4803, #4891).
+func ingredientNames(ings []Ingredient) []string {
+	out := make([]string, 0, len(ings))
+	for _, ing := range ings {
+		if name := strings.TrimSpace(ing.Name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// allergyContext loads the family's allergies once for a request and returns
+// what every recipe response in it needs. quotePreferenceText is decided from
+// the caller's role: only a role that may read people's preferences may have a
+// preference's own words appear in a checks line (KB
+// decisions/2026-11-15-role-policy.md: a housesitter sees names, relationship
+// and allergies, not preferences). The allergy itself is applied either way.
+func (h *Handler) allergyContext(r *http.Request, c caller) ([]allergen.Matcher, []string, error) {
+	return h.repo.FamilyAllergies(r.Context(), c.householdID, h.policy.CanQuotePreferences(c.role))
 }
 
 func toFeedbackResponse(f *Feedback) feedbackResponse {
@@ -450,9 +519,14 @@ func (h *Handler) ListRecipes(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
+	matchers, checks, err := h.allergyContext(r, c)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
 	out := make([]recipeResponse, 0, len(list))
 	for _, rc := range list {
-		out = append(out, toRecipeResponse(rc))
+		out = append(out, toRecipeResponse(rc, matchers, checks))
 	}
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": out})
 }
@@ -477,7 +551,12 @@ func (h *Handler) GetRecipe(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	apierr.JSON(w, http.StatusOK, map[string]any{"data": toRecipeResponse(rc)})
+	matchers, checks, err := h.allergyContext(r, c)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": toRecipeResponse(rc, matchers, checks)})
 }
 
 // CreateRecipe adds a recipe.
@@ -501,7 +580,15 @@ func (h *Handler) CreateRecipe(w http.ResponseWriter, r *http.Request) {
 		apierr.DB(w, err)
 		return
 	}
-	apierr.JSON(w, http.StatusCreated, map[string]any{"data": toRecipeResponse(rc)})
+	// A write's response carries the allergy fields too, checked, never empty
+	// as a stand-in: an empty allergy_warnings on a response that did NOT look
+	// reads as "safe for everyone" (ui/recipes-pages.md).
+	matchers, checks, err := h.allergyContext(r, c)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	apierr.JSON(w, http.StatusCreated, map[string]any{"data": toRecipeResponse(rc, matchers, checks)})
 }
 
 // UpdateRecipe replaces a recipe's fields (omitted optional fields are
@@ -534,7 +621,12 @@ func (h *Handler) UpdateRecipe(w http.ResponseWriter, r *http.Request) {
 		apierr.DB(w, err)
 		return
 	}
-	apierr.JSON(w, http.StatusOK, map[string]any{"data": toRecipeResponse(rc)})
+	matchers, checks, err := h.allergyContext(r, c)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": toRecipeResponse(rc, matchers, checks)})
 }
 
 // DeleteRecipe removes a recipe. Planned meals that used it keep their title.

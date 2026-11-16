@@ -242,7 +242,7 @@ func TestDietRules(t *testing.T) {
 		if !ok {
 			t.Fatalf("diet %q not applied", tc.diet)
 		}
-		got := slices.ContainsFunc(rs, func(r rule) bool { return r.m.matches(tc.item) })
+		got := slices.ContainsFunc(rs, func(r rule) bool { return r.m.Matches(tc.item) })
 		if got != tc.want {
 			t.Errorf("diet %q vs %q = %v, want %v", tc.diet, tc.item, got, tc.want)
 		}
@@ -624,11 +624,11 @@ func TestMealSuggestRoles(t *testing.T) {
 // neutered before #4875 — its ingredients were "catfish fillets", "cornmeal"
 // and "cream cheese", every one of which carries a literal group member.
 func wholeWordMatcher(personID, person, allergen string) allergyMatcher {
-	m := allergyMatcher{personID: personID, person: person, allergy: allergen}
-	m.own = compilePhrases([]string{allergen})
+	m := allergyMatcher{PersonID: personID, Person: person, Allergy: allergen}
+	m.Own = compilePhrases([]string{allergen})
 	for _, key := range allergyGroupKeys(allergen) {
-		m.group = append(m.group, compilePhrases(allergenGroups[key])...)
-		m.except = append(m.except, compilePhrases(allergenExceptions[key])...)
+		m.Group = append(m.Group, compilePhrases(allergenGroups[key])...)
+		m.Except = append(m.Except, compilePhrases(allergenExceptions[key])...)
 	}
 	return m
 }
@@ -698,7 +698,7 @@ func TestMealSuggestCompoundIngredients(t *testing.T) {
 	for _, c := range cases {
 		wm := wholeWordMatcher("p", "x", c.allergy)
 		for _, text := range append(append([]string{}, c.ingredients...), c.recipe) {
-			if wm.matches(text) {
+			if wm.Matches(text) {
 				t.Fatalf("fixture %q: %q matches the pre-#4805 whole-word matcher for %q, so this case does not guard compound matching; pick a different compound",
 					c.recipe, text, c.allergy)
 			}
