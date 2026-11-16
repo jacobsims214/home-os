@@ -29,6 +29,7 @@ import (
 )
 
 const (
+	// collectionName is the default household_search collection name.
 	collectionName = "household_search"
 
 	// filesCollectionName is the worker-owned collection of OCR'd files
@@ -85,6 +86,10 @@ type Client struct {
 	// schemaClient is used for collection create/alter, which may download
 	// the embedding model and re-embed documents.
 	schemaClient *http.Client
+	// household and files are the collection names (collectionName and
+	// filesCollectionName unless overridden by WithCollections).
+	household string
+	files     string
 }
 
 // SearchDocument represents a document to be indexed in Typesense.
@@ -135,7 +140,18 @@ func NewClient(cfg *config.Config) *Client {
 		apiKey:       cfg.TypesenseAPIKey,
 		httpClient:   &http.Client{Timeout: 10 * time.Second},
 		schemaClient: &http.Client{Timeout: schemaTimeout},
+		household:    collectionName,
+		files:        filesCollectionName,
 	}
+}
+
+// WithCollections returns a copy of c that uses the given collection names
+// instead of household_search and files. Integration tests use it to get
+// collections of their own on a shared Typesense (see package searchtest).
+func (c *Client) WithCollections(household, files string) *Client {
+	cp := *c
+	cp.household, cp.files = household, files
+	return &cp
 }
 
 // --- schema types -----------------------------------------------------------
@@ -179,9 +195,9 @@ func embeddingFieldDef(from []string) field {
 
 // householdSchema is the household_search schema. withEmbedding=false yields
 // the keyword-only fallback used when the model cannot be loaded.
-func householdSchema(withEmbedding bool) collectionSchema {
+func householdSchema(name string, withEmbedding bool) collectionSchema {
 	s := collectionSchema{
-		Name: collectionName,
+		Name: name,
 		Fields: []field{
 			{Name: "id", Type: "string"},
 			{Name: "household_id", Type: "string", Facet: true},
@@ -312,14 +328,14 @@ func (c *Client) getCollection(ctx context.Context, name string) (*collectionSch
 // is created keyword-only and the migration is retried on the next start or
 // reindex; search keeps working, just without the semantic half.
 func (c *Client) InitCollection(ctx context.Context) error {
-	existing, err := c.getCollection(ctx, collectionName)
+	existing, err := c.getCollection(ctx, c.household)
 	if err != nil {
 		var se *statusError
 		if !errors.As(err, &se) {
 			slog.Warn("search: typesense unreachable, skipping init", "error", err)
 			return nil
 		}
-		return fmt.Errorf("search: get collection %s: %w", collectionName, err)
+		return fmt.Errorf("search: get collection %s: %w", c.household, err)
 	}
 
 	if existing == nil {
@@ -328,12 +344,12 @@ func (c *Client) InitCollection(ctx context.Context) error {
 		}
 	} else if err := c.ensureEmbedding(ctx, existing, householdEmbedFrom); err != nil {
 		slog.Warn("search: semantic search unavailable for collection, keyword search still works",
-			"collection", collectionName, "error", err)
+			"collection", c.household, "error", err)
 	}
 
 	if err := c.EnsureFilesEmbedding(ctx); err != nil {
 		slog.Warn("search: semantic search unavailable for collection, keyword search still works",
-			"collection", filesCollectionName, "error", err)
+			"collection", c.files, "error", err)
 	}
 	return nil
 }
@@ -342,20 +358,20 @@ func (c *Client) InitCollection(ctx context.Context) error {
 // When fallback is true and the embedded create fails (model unavailable),
 // it creates the keyword-only schema instead so search still works.
 func (c *Client) createHousehold(ctx context.Context, fallback bool) error {
-	err := c.do(ctx, c.schemaClient, http.MethodPost, "/collections", householdSchema(true), nil)
+	err := c.do(ctx, c.schemaClient, http.MethodPost, "/collections", householdSchema(c.household, true), nil)
 	if err == nil {
-		slog.Info("search: created collection", "collection", collectionName, "embedding_model", EmbeddingModel)
+		slog.Info("search: created collection", "collection", c.household, "embedding_model", EmbeddingModel)
 		return nil
 	}
 	if !fallback {
-		return fmt.Errorf("search: create collection %s: %w", collectionName, err)
+		return fmt.Errorf("search: create collection %s: %w", c.household, err)
 	}
 	slog.Warn("search: could not create collection with embeddings, falling back to keyword-only",
-		"collection", collectionName, "error", err)
-	if err := c.do(ctx, c.schemaClient, http.MethodPost, "/collections", householdSchema(false), nil); err != nil {
-		return fmt.Errorf("search: create collection %s: %w", collectionName, err)
+		"collection", c.household, "error", err)
+	if err := c.do(ctx, c.schemaClient, http.MethodPost, "/collections", householdSchema(c.household, false), nil); err != nil {
+		return fmt.Errorf("search: create collection %s: %w", c.household, err)
 	}
-	slog.Info("search: created collection (keyword-only)", "collection", collectionName)
+	slog.Info("search: created collection (keyword-only)", "collection", c.household)
 	return nil
 }
 
@@ -382,9 +398,9 @@ func (c *Client) ensureEmbedding(ctx context.Context, s *collectionSchema, from 
 // that collection; if it does not exist yet this is a no-op and the next
 // InitCollection or reindex migrates it.
 func (c *Client) EnsureFilesEmbedding(ctx context.Context) error {
-	s, err := c.getCollection(ctx, filesCollectionName)
+	s, err := c.getCollection(ctx, c.files)
 	if err != nil {
-		return fmt.Errorf("search: get collection %s: %w", filesCollectionName, err)
+		return fmt.Errorf("search: get collection %s: %w", c.files, err)
 	}
 	if s == nil {
 		slog.Info("search: files collection not created yet (worker owns it), skipping embedding migration")
@@ -398,9 +414,9 @@ func (c *Client) EnsureFilesEmbedding(ctx context.Context) error {
 // re-imports every document from Postgres. Unlike InitCollection it does not
 // fall back to keyword-only: a rebuild must produce the full schema.
 func (c *Client) RecreateCollection(ctx context.Context) error {
-	err := c.do(ctx, c.httpClient, http.MethodDelete, "/collections/"+collectionName, nil, nil)
+	err := c.do(ctx, c.httpClient, http.MethodDelete, "/collections/"+c.household, nil, nil)
 	if err != nil && !isStatus(err, http.StatusNotFound) {
-		return fmt.Errorf("search: drop collection %s: %w", collectionName, err)
+		return fmt.Errorf("search: drop collection %s: %w", c.household, err)
 	}
 	return c.createHousehold(ctx, false)
 }
@@ -415,7 +431,7 @@ func (c *Client) IndexDocument(ctx context.Context, doc SearchDocument) error {
 	if doc.Tags == nil {
 		doc.Tags = []string{}
 	}
-	path := fmt.Sprintf("/collections/%s/documents?action=upsert", collectionName)
+	path := fmt.Sprintf("/collections/%s/documents?action=upsert", c.household)
 	if err := c.do(ctx, c.httpClient, http.MethodPost, path, doc, nil); err != nil {
 		return fmt.Errorf("search: index document %s: %w", doc.ID, err)
 	}
@@ -424,7 +440,7 @@ func (c *Client) IndexDocument(ctx context.Context, doc SearchDocument) error {
 
 // DeleteDocument removes a document from the household_search collection by ID.
 func (c *Client) DeleteDocument(ctx context.Context, id string) error {
-	path := fmt.Sprintf("/collections/%s/documents/%s", collectionName, url.PathEscape(id))
+	path := fmt.Sprintf("/collections/%s/documents/%s", c.household, url.PathEscape(id))
 	err := c.do(ctx, c.httpClient, http.MethodDelete, path, nil, nil)
 	if err != nil && !isStatus(err, http.StatusNotFound) {
 		return fmt.Errorf("search: delete document %s: %w", id, err)
@@ -442,7 +458,7 @@ func (c *Client) DeleteDocument(ctx context.Context, id string) error {
 func (c *Client) DeleteFileDocuments(ctx context.Context, fileID string) error {
 	q := url.Values{"filter_by": {fmt.Sprintf("file_id:=`%s`", fileID)}}
 	err := c.do(ctx, c.httpClient, http.MethodDelete,
-		"/collections/"+filesCollectionName+"/documents?"+q.Encode(), nil, nil)
+		"/collections/"+c.files+"/documents?"+q.Encode(), nil, nil)
 	if err != nil {
 		if isStatus(err, http.StatusNotFound) {
 			return nil // no collection, so nothing indexed
@@ -450,7 +466,7 @@ func (c *Client) DeleteFileDocuments(ctx context.Context, fileID string) error {
 		return fmt.Errorf("search: delete file %s: %w", fileID, err)
 	}
 	err = c.do(ctx, c.httpClient, http.MethodDelete,
-		"/collections/"+filesCollectionName+"/documents/"+url.PathEscape(fileID), nil, nil)
+		"/collections/"+c.files+"/documents/"+url.PathEscape(fileID), nil, nil)
 	if err != nil && !isStatus(err, http.StatusNotFound) {
 		return fmt.Errorf("search: delete file %s: %w", fileID, err)
 	}
@@ -468,14 +484,14 @@ const documentEntityType = "document"
 // semantic, fused by Typesense's rank fusion). Results from all collections
 // are merged and returned.
 func (c *Client) Search(ctx context.Context, householdID, query string, filters SearchFilters) ([]SearchResult, error) {
-	mainResults, err := c.searchCollection(ctx, collectionName, householdID, query, filters, "title,body,tags", 0)
+	mainResults, err := c.searchCollection(ctx, c.household, householdID, query, filters, "title,body,tags", 0)
 	if err != nil {
 		slog.Warn("search: household_search query failed", "error", err)
 	}
 
 	// Files use entity_type for the attached entity, not the file itself.
 	// If the user filters by entity type, we want to match files attached to that type.
-	fileResults, err := c.searchCollection(ctx, filesCollectionName, householdID, query, filters, "name,extracted_text", filesPerPage)
+	fileResults, err := c.searchCollection(ctx, c.files, householdID, query, filters, "name,extracted_text", filesPerPage)
 	if err != nil {
 		slog.Warn("search: files query failed", "error", err)
 	}
@@ -566,7 +582,7 @@ func (c *Client) searchCollection(ctx context.Context, collName, householdID, qu
 	if err != nil {
 		return nil, fmt.Errorf("search %s: %w", collName, err)
 	}
-	return toResults(resp.Hits, collName == filesCollectionName), nil
+	return toResults(resp.Hits, collName == c.files), nil
 }
 
 // toResults maps Typesense hits to SearchResults. Score is the rank-fusion

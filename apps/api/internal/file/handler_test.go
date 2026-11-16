@@ -25,6 +25,7 @@ import (
 	"home-os/api/internal/config"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/search/searchtest"
 )
 
 // These tests cover #4602: deleting a file removes its blob and every
@@ -32,7 +33,8 @@ import (
 //
 // They need TEST_DATABASE_URL (all migrations applied, run with -p 1).
 // TestDeleteFile_RemovesBlobAndSearchDocs also needs a Typesense (30.2) at
-// TEST_TYPESENSE_HOST / TEST_TYPESENSE_PORT with key TEST_TYPESENSE_API_KEY.
+// TYPESENSE_TEST_ADDR (host:port) with key TYPESENSE_TEST_KEY; it works on
+// per-test collections (package searchtest has the docker run line).
 // Each test skips when its services are not configured. The worker's
 // TestDeletedFilesLeaveSearchIntegration runs the same flow in containers.
 
@@ -110,8 +112,17 @@ func count(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) int {
 	return n
 }
 
-// ts is a minimal Typesense admin client for the test fixtures.
-type ts struct{ base, key string }
+// ts is a minimal Typesense admin client for the test fixtures. files is
+// the test's own files collection (searchtest.New).
+type ts struct{ base, key, files string }
+
+// newTS returns a search client on per-test collections and the matching
+// fixture client, or skips when TYPESENSE_TEST_ADDR/KEY are unset.
+func newTS(t *testing.T) (*search.Client, ts) {
+	t.Helper()
+	client, env := searchtest.New(t)
+	return client, ts{base: env.Base, key: env.Key, files: env.Files}
+}
 
 func (c ts) do(t *testing.T, method, path, contentType string, body io.Reader) []byte {
 	t.Helper()
@@ -134,7 +145,7 @@ func (c ts) found(t *testing.T, params url.Values) int {
 	var r struct {
 		Found int `json:"found"`
 	}
-	require.NoError(t, json.Unmarshal(c.do(t, http.MethodGet, "/collections/files/documents/search?"+params.Encode(), "", nil), &r))
+	require.NoError(t, json.Unmarshal(c.do(t, http.MethodGet, "/collections/"+c.files+"/documents/search?"+params.Encode(), "", nil), &r))
 	return r.Found
 }
 
@@ -156,7 +167,7 @@ func (c ts) index(t *testing.T, f File, chunks []string) {
 		})
 		lines = append(lines, string(b))
 	}
-	out := c.do(t, http.MethodPost, "/collections/files/documents/import?action=upsert", "text/plain",
+	out := c.do(t, http.MethodPost, "/collections/"+c.files+"/documents/import?action=upsert", "text/plain",
 		strings.NewReader(strings.Join(lines, "\n")))
 	require.NotContains(t, string(out), `"success":false`)
 }
@@ -165,27 +176,14 @@ func (c ts) index(t *testing.T, f File, chunks []string) {
 // search finds nothing. Another file in the household is untouched.
 func TestDeleteFile_RemovesBlobAndSearchDocs(t *testing.T) {
 	pool := testDB(t)
-	host, port, key := os.Getenv("TEST_TYPESENSE_HOST"), os.Getenv("TEST_TYPESENSE_PORT"), os.Getenv("TEST_TYPESENSE_API_KEY")
-	if host == "" || port == "" {
-		t.Skip("TEST_TYPESENSE_HOST/PORT not set; skipping Typesense integration test")
-	}
-	tsc := ts{base: fmt.Sprintf("http://%s:%s", host, port), key: key}
-	// Use the worker's collection if it exists, otherwise an auto-schema one
-	// with the fields the delete filters on.
-	if req, _ := http.NewRequest(http.MethodGet, tsc.base+"/collections/files", nil); req != nil {
-		req.Header.Set("X-TYPESENSE-API-KEY", key)
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusNotFound {
-			tsc.do(t, http.MethodPost, "/collections", "application/json", strings.NewReader(
-				`{"name":"files","fields":[{"name":"household_id","type":"string","facet":true},`+
-					`{"name":"file_id","type":"string","optional":true},{"name":".*","type":"auto"}]}`))
-		}
-	}
+	client, tsc := newTS(t)
+	// A files collection with the fields the delete filters on (the worker's
+	// chunked schema has the same file_id and household_id).
+	tsc.do(t, http.MethodPost, "/collections", "application/json", strings.NewReader(
+		`{"name":"`+tsc.files+`","fields":[{"name":"household_id","type":"string","facet":true},`+
+			`{"name":"file_id","type":"string","optional":true},{"name":".*","type":"auto"}]}`))
 
 	hh := household(t, pool)
-	client := search.NewClient(&config.Config{TypesenseHost: host, TypesensePort: port, TypesenseAPIKey: key})
 	h := fileRouter(NewHandler(NewRepo(pool)).WithSearch(client))
 
 	secret := upload(t, h, hh, "safe.txt", "the zanzibarquokka safe combination")

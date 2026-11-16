@@ -4,12 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +19,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"home-os/api/internal/auth"
-	"home-os/api/internal/config"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
 )
@@ -30,7 +27,7 @@ import (
 // through upload, GET, list and PATCH; viewers never see files attached to
 // credentials; and the metadata is found by hybrid search. They need
 // TEST_DATABASE_URL; TestDocumentHybridSearch also needs Typesense 30.2 at
-// TEST_TYPESENSE_HOST / TEST_TYPESENSE_PORT (key TEST_TYPESENSE_API_KEY).
+// TYPESENSE_TEST_ADDR (key TYPESENSE_TEST_KEY), on per-test collections.
 
 func metaRouter(h *Handler) http.Handler {
 	r := chi.NewRouter()
@@ -291,19 +288,16 @@ func TestSearchDocumentBuilder(t *testing.T) {
 	assert.Equal(t, "scan.pdf", (&File{Name: "scan.pdf"}).DisplayTitle())
 }
 
-// tsReady creates household_search with the auto-embedding field (the
-// API's InitCollection) and returns a client, or skips.
+// tsReady creates the test's own household_search_<8hex> with the
+// auto-embedding field (the API's InitCollection) and returns a client on it,
+// or skips.
 func tsReady(t *testing.T) (*search.Client, ts) {
 	t.Helper()
-	host, port, key := os.Getenv("TEST_TYPESENSE_HOST"), os.Getenv("TEST_TYPESENSE_PORT"), os.Getenv("TEST_TYPESENSE_API_KEY")
-	if host == "" || port == "" {
-		t.Skip("TEST_TYPESENSE_HOST/PORT not set; skipping Typesense integration test")
-	}
-	client := search.NewClient(&config.Config{TypesenseHost: host, TypesensePort: port, TypesenseAPIKey: key})
+	client, tsc := newTS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	require.NoError(t, client.InitCollection(ctx))
-	return client, ts{base: fmt.Sprintf("http://%s:%s", host, port), key: key}
+	return client, tsc
 }
 
 type searchOut struct {

@@ -2,6 +2,9 @@ package search
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -78,6 +81,36 @@ func TestSearchParams(t *testing.T) {
 
 // --- integration ------------------------------------------------------------
 
+// testClient returns a client on household_search_<8hex> / files_<8hex>
+// (not created yet; both dropped when the test ends), so this package never
+// touches the real collections or another package's test collections on a
+// shared Typesense. It skips unless TYPESENSE_TEST_ADDR and
+// TYPESENSE_TEST_KEY are set. (Other packages use package searchtest, which
+// this package cannot import.)
+func testClient(t *testing.T) *Client {
+	t.Helper()
+	addr, key := os.Getenv("TYPESENSE_TEST_ADDR"), os.Getenv("TYPESENSE_TEST_KEY")
+	if addr == "" || key == "" {
+		t.Skip("TYPESENSE_TEST_ADDR/TYPESENSE_TEST_KEY not set; skipping Typesense integration test")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	b := make([]byte, 4)
+	_, err = rand.Read(b)
+	require.NoError(t, err)
+	sfx := hex.EncodeToString(b)
+	c := NewClient(&config.Config{TypesenseHost: host, TypesensePort: port, TypesenseAPIKey: key}).
+		WithCollections("household_search_"+sfx, "files_"+sfx)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		for _, n := range []string{c.household, c.files} {
+			_ = c.do(ctx, c.httpClient, http.MethodDelete, "/collections/"+url.PathEscape(n), nil, nil)
+		}
+	})
+	return c
+}
+
 // TestTypesenseHybridIntegration runs against a real Typesense (30.x) and
 // downloads the local embedding model on first run (~128MB). Enable with
 //
@@ -86,32 +119,21 @@ func TestSearchParams(t *testing.T) {
 //	TYPESENSE_TEST_ADDR=127.0.0.1:$(docker port ts-test 8108 | cut -d: -f2) \
 //	  TYPESENSE_TEST_KEY=k go test ./internal/search/ -run Integration
 //
-// It drops and recreates the household_search and files collections, so
-// never point it at a real instance.
+// It works on its own per-test collections (testClient), so it is safe next
+// to the file and guides tests on one Typesense.
 func TestTypesenseHybridIntegration(t *testing.T) {
-	addr := os.Getenv("TYPESENSE_TEST_ADDR")
-	if addr == "" {
-		t.Skip("TYPESENSE_TEST_ADDR not set")
-	}
-	host, port, _ := strings.Cut(addr, ":")
-	key := os.Getenv("TYPESENSE_TEST_KEY")
-	c := NewClient(&config.Config{TypesenseHost: host, TypesensePort: port, TypesenseAPIKey: key})
+	c := testClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	// Start from the pre-#4438 state: household_search with the plain float[]
-	// placeholder, and files as the worker creates it (no embedding).
-	for _, n := range []string{collectionName, filesCollectionName} {
-		err := c.do(ctx, c.httpClient, http.MethodDelete, "/collections/"+n, nil, nil)
-		if err != nil && !isStatus(err, http.StatusNotFound) {
-			require.NoError(t, err)
-		}
-	}
-	legacy := householdSchema(false)
+	// placeholder, and files as the worker created it before chunking (no
+	// embedding, no file_id).
+	legacy := householdSchema(c.household, false)
 	legacy.Fields = append(legacy.Fields, field{Name: EmbeddingField, Type: "float[]", NumDim: 384, Optional: true})
 	require.NoError(t, c.do(ctx, c.httpClient, http.MethodPost, "/collections", legacy, nil))
 	require.NoError(t, c.do(ctx, c.httpClient, http.MethodPost, "/collections", collectionSchema{
-		Name: filesCollectionName,
+		Name: c.files,
 		Fields: []field{
 			{Name: "id", Type: "string"},
 			{Name: "household_id", Type: "string", Facet: true},
@@ -139,12 +161,12 @@ func TestTypesenseHybridIntegration(t *testing.T) {
 		"extracted_text": "Homeowners insurance declarations page. Dwelling coverage and liability limits.",
 		"entity_type":    "property", "entity_id": "p1", "tags": []string{}, "created_at": 1}
 	require.NoError(t, c.do(ctx, c.httpClient, http.MethodPost,
-		"/collections/files/documents?action=upsert", file, nil))
+		"/collections/"+c.files+"/documents?action=upsert", file, nil))
 
 	// Migration: both collections gain the auto-embedding field and existing
 	// documents are embedded in place.
 	require.NoError(t, c.InitCollection(ctx))
-	for _, n := range []string{collectionName, filesCollectionName} {
+	for _, n := range []string{c.household, c.files} {
 		s, err := c.getCollection(ctx, n)
 		require.NoError(t, err)
 		assert.True(t, hasAutoEmbedding(s), "%s should have the auto-embedding field", n)
@@ -174,7 +196,7 @@ func TestTypesenseHybridIntegration(t *testing.T) {
 
 	// Reindex path: recreate, re-import, still hybrid.
 	require.NoError(t, c.RecreateCollection(ctx))
-	s, err := c.getCollection(ctx, collectionName)
+	s, err := c.getCollection(ctx, c.household)
 	require.NoError(t, err)
 	require.True(t, hasAutoEmbedding(s))
 	require.NoError(t, c.IndexDocument(ctx, docs[0]))
@@ -183,7 +205,7 @@ func TestTypesenseHybridIntegration(t *testing.T) {
 	}
 	q := url.Values{"q": {"heating maintenance"}, "query_by": {"embedding"}, "exclude_fields": {"embedding"}}
 	require.NoError(t, c.do(ctx, c.httpClient, http.MethodGet,
-		"/collections/household_search/documents/search?"+q.Encode(), nil, &count))
+		"/collections/"+c.household+"/documents/search?"+q.Encode(), nil, &count))
 	assert.Equal(t, 1, count.Found, "reindexed document is embedded")
 }
 

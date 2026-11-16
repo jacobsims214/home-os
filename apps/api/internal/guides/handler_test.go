@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,10 +18,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"home-os/api/internal/auth"
-	"home-os/api/internal/config"
 	"home-os/api/internal/guides"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/search/searchtest"
 )
 
 // Integration tests: they need TEST_DATABASE_URL (all migrations applied) and
@@ -480,17 +479,11 @@ func TestGuideIndexing(t *testing.T) {
 }
 
 // TestGuideHybridSearchIntegration indexes guides into a real Typesense
-// household_search (local embedding model) and checks they come back from
+// (its own household_search_<8hex>) (local embedding model) and checks they come back from
 // /search's hybrid query, including on meaning alone, and leave on delete.
 func TestGuideHybridSearchIntegration(t *testing.T) {
-	addr, key := os.Getenv("TYPESENSE_TEST_ADDR"), os.Getenv("TYPESENSE_TEST_KEY")
-	if addr == "" || key == "" {
-		t.Skip("TYPESENSE_TEST_ADDR/TYPESENSE_TEST_KEY not set; skipping Typesense integration test")
-	}
+	sc, _ := searchtest.New(t) // per-test collections; skips without TYPESENSE_TEST_ADDR/KEY
 	pool := testDB(t)
-	host, port, err := net.SplitHostPort(addr)
-	require.NoError(t, err)
-	sc := search.NewClient(&config.Config{TypesenseHost: host, TypesensePort: port, TypesenseAPIKey: key})
 	ctx := context.Background()
 	require.NoError(t, sc.InitCollection(ctx))
 
