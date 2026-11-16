@@ -649,15 +649,17 @@ func (b *agendaBuilder) eventVisible(ev Event, calendars map[string]bool) bool {
 	return kind == "calendar_event" || auth.CanSeeEntity(b.view.role, kind)
 }
 
-// agendaEventKind is what an event mirrors: a bill mirror is a bill, a
-// maintenance task's event is a maintenance task, everything else is a calendar
-// event. It is the event half of #4807's rule; the calendar's own kind is
-// calendarKind.
+// agendaEventKind is what an event mirrors, the event half of #4807's rule
+// (apps/api/internal/calendar/access.go, objectKindSQL): a bill mirror is a
+// bill, a maintenance task's event is a maintenance task, everything else is a
+// calendar event. The link matters as much as the type — an event someone made
+// on the Family calendar and linked to a bill carries the bill's name, so it is
+// a money record wherever it sits.
 func agendaEventKind(ev Event) string {
-	switch ev.EventType {
-	case "bill":
+	switch {
+	case ev.EventType == "bill" || ev.EntityType == "bill":
 		return "bill"
-	case "maintenance":
+	case ev.EventType == "maintenance" || ev.EntityType == "maintenance_task" || ev.EntityType == "maintenance":
 		return "maintenance_task"
 	}
 	return "calendar_event"

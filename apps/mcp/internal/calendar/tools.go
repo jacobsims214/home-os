@@ -68,6 +68,13 @@ type Event struct {
 	ReminderMinutes []int         `json:"reminder_minutes,omitempty" jsonschema_description:"Phone alerts, minutes before the start."`
 	People          []EventPerson `json:"people,omitempty" jsonschema_description:"Family members the event is for."`
 	RecurrenceID    string        `json:"recurrence_id,omitempty" jsonschema_description:"For one occurrence: its original start; pass it as occurrence_date."`
+
+	// EntityType is calendar_objects.entity_type: what the event is a mirror
+	// of ('bill', 'maintenance_task', a person or pet link, or nothing). It is
+	// never serialized; the role rule uses it to classify an event by what it
+	// mirrors (#4807), because a bill-linked event on the Family calendar still
+	// carries the bill's name.
+	EntityType string `json:"-"`
 }
 
 // eventJSON is the JSON structure stored in ical_data column.
@@ -210,6 +217,7 @@ type eventRow struct {
 	CalendarID   string
 	IcalData     string
 	EventType    string
+	EntityType   *string
 	CalendarName string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -246,6 +254,9 @@ func parseRow(row eventRow, loc *time.Location) (*Event, storedSeries, error) {
 		Color:        ej.Color,
 		EventType:    row.EventType,
 		CalendarName: row.CalendarName,
+	}
+	if row.EntityType != nil {
+		ev.EntityType = *row.EntityType
 	}
 	if row.Rrule != nil || row.IcalRaw != nil {
 		series = loadSeries(ej, row.ID, row.Rrule, row.IcalRaw)
@@ -509,11 +520,11 @@ func loadHouseholdLocation(ctx context.Context, pool *pgxpool.Pool, householdID 
 
 // eventColumns selects an eventRow from calendar_objects co JOIN calendars c;
 // scanEventRow reads it.
-const eventColumns = `co.id::text, co.calendar_id::text, co.ical_data, co.event_type, c.name, co.created_at, co.updated_at, co.rrule, co.ical_raw`
+const eventColumns = `co.id::text, co.calendar_id::text, co.ical_data, co.event_type, co.entity_type::text, c.name, co.created_at, co.updated_at, co.rrule, co.ical_raw`
 
 func scanEventRow(row pgx.Row) (eventRow, error) {
 	var r eventRow
-	err := row.Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt, &r.Rrule, &r.IcalRaw)
+	err := row.Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.EntityType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt, &r.Rrule, &r.IcalRaw)
 	return r, err
 }
 

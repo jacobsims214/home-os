@@ -265,6 +265,26 @@ func TestAgendaGetTrimsEventKinds(t *testing.T) {
 	today10 := time.Date(now.Year(), now.Month(), now.Day(), 10, 0, 0, 0, time.UTC)
 	insertAgendaEvent(t, pool, vehicles, "Oil change", today10)
 
+	// A bill-linked event on the FAMILY calendar: someone put the water bill's
+	// due date on the family calendar and linked it to the bill. The link makes
+	// it a money record wherever it sits, so #4807 classifies it 'bill' and a
+	// housesitter must not read its title either.
+	var waterBill string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO bills (household_id, name, amount, due_day) VALUES ($1, 'Water', 60, $2) RETURNING id::text`,
+		hh.HouseholdID, now.Day()).Scan(&waterBill); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, event_type, entity_type, entity_id)
+		 VALUES ($1, $2, $3, 'e1', 'event', 'bill', $4)`,
+		family, uuid.NewString(),
+		`{"title":"Water bill due","description":"","start":"`+now.Format(time.DateOnly)+`T00:00:00Z","end":"`+
+			now.AddDate(0, 0, 1).Format(time.DateOnly)+`T00:00:00Z","all_day":true,"event_type":"event"}`,
+		waterBill); err != nil {
+		t.Fatal(err)
+	}
+
 	titles := func(t *testing.T, role string) ([]string, agendaCoverage, string) {
 		t.Helper()
 		rctx, _ := agendaAsRole(t, pool, hh, role)
@@ -292,7 +312,7 @@ func TestAgendaGetTrimsEventKinds(t *testing.T) {
 		if !contains(got, "Dentist") {
 			t.Errorf("housesitter sees no Dentist: %v", got)
 		}
-		for _, leak := range []string{"Service furnace", "Oil change"} {
+		for _, leak := range []string{"Service furnace", "Oil change", "Water bill due"} {
 			if contains(got, leak) {
 				t.Errorf("housesitter sees the %q event: %v", leak, got)
 			}
@@ -310,7 +330,7 @@ func TestAgendaGetTrimsEventKinds(t *testing.T) {
 	t.Run("the family roles and a viewer keep every event", func(t *testing.T) {
 		for _, role := range []string{auth.RoleOwner, auth.RoleFamilyMember, auth.RoleViewer} {
 			got, cov, _ := titles(t, role)
-			for _, want := range []string{"Dentist", "Service furnace", "Oil change"} {
+			for _, want := range []string{"Dentist", "Service furnace", "Oil change", "Water bill due"} {
 				if !contains(got, want) {
 					t.Errorf("%s is missing %q: %v", role, want, got)
 				}

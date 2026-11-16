@@ -1238,7 +1238,7 @@ func NewEventDeleteTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			  WHERE co.id = $1 AND c.id = co.calendar_id AND c.household_id = $2
 			RETURNING `+eventColumns,
 			eventID, claims.HouseholdID,
-		).Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt, &r.Rrule, &r.IcalRaw)
+		).Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.EntityType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt, &r.Rrule, &r.IcalRaw)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return respond.NotFound("event", eventID, "Call event_find to find the event_id; it may already be deleted."), nil
 		}
