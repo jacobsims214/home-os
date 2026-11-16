@@ -104,8 +104,15 @@ test("overflow check catches a too-wide element", async ({ page }) => {
 // Regression (#4626): with only home-os-refresh, middleware and the dashboard
 // layout both let the page render, and the first /bff call renews the session
 // through Dex's refresh_token grant instead of bouncing the user to /dex/auth.
-test("refresh-only session renews silently on the home screen", async ({ page, baseURL, stubStats }) => {
+test("refresh-only session renews silently on the home screen", async ({ page, baseURL, stubStats, browserName }) => {
   test.skip(!!process.env.E2E_BASE_URL, "needs the stub");
+  // The production build sets the renewed cookie with Secure, and WebKit
+  // drops Secure cookies on http://localhost (Chromium keeps them). The
+  // standalone harness has no TLS, so WebKit runs this only against next dev.
+  test.skip(
+    browserName === "webkit" && process.env.E2E_UI === "standalone",
+    "Secure cookies need https on WebKit; covered by Chromium and by next dev",
+  );
   await signInWithStub(page, baseURL!, { idToken: false });
   const before = (await stubStats()).dexRefreshes;
   await page.goto(HOME);

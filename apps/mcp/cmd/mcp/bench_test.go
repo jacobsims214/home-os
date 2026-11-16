@@ -339,7 +339,15 @@ func TestMCPLatency(t *testing.T) {
 		}
 	}
 	if len(over) > 0 {
-		t.Errorf("tools over the %v p95 budget: %s", budget, strings.Join(over, ", "))
+		// List every tool's p95 too (slowest first), so a CI failure shows
+		// whether one tool regressed or the whole run was slow (a loaded
+		// runner) without opening the report.
+		all := make([]string, len(rows))
+		for i, r := range rows {
+			all[i] = fmt.Sprintf("%s %s", r.tool, ms(r.p95))
+		}
+		t.Errorf("tools over the %v p95 budget: %s\np95 per tool (slowest first): %s",
+			budget, strings.Join(over, ", "), strings.Join(all, ", "))
 	}
 }
 

@@ -2,25 +2,85 @@ name: PR Checks
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, feat/family-hub]
+  push:
+    branches: [feat/family-hub]
+
+concurrency:
+  group: pr-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
+  # calendar, mcp and worker tests start their own Postgres through
+  # testcontainers (Docker is on the runner). mcp's latency-sensitive tests
+  # are flaky at default package parallelism, so they run with -p 4.
   go-build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        module: [apps/api, apps/calendar, apps/mcp, apps/worker]
+        include:
+          - module: apps/calendar
+            parallel: ""
+          - module: apps/mcp
+            parallel: "-p 4"
+          - module: apps/worker
+            parallel: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
+          cache-dependency-path: ${{ matrix.module }}/go.sum
       - run: go build ./...
         working-directory: ${{ matrix.module }}
       - run: go vet ./...
         working-directory: ${{ matrix.module }}
-      - run: go test ./...
+      - run: go test ${{ matrix.parallel }} ./...
         working-directory: ${{ matrix.module }}
+
+  # apps/api integration tests read TEST_DATABASE_URL (a migrated database)
+  # and share it, so packages run one at a time (-p 1).
+  api:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: homeos_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d homeos_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/homeos_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: apps/api/go.sum
+      # Migrations GRANT to the application role, which the real database has.
+      - name: Create app role and apply migrations
+        run: |
+          psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE ROLE app"
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE/packages/db/migrations:/migrations:ro" \
+            migrate/migrate:v4.18.3 -path /migrations -database "$TEST_DATABASE_URL" up
+      - run: go build ./...
+        working-directory: apps/api
+      - run: go vet ./...
+        working-directory: apps/api
+      - run: go test -p 1 ./...
+        working-directory: apps/api
 
   ui-build:
     runs-on: ubuntu-latest
@@ -29,10 +89,96 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/ui/package-lock.json
       - run: npm ci
         working-directory: apps/ui
       - run: npm run build
         working-directory: apps/ui
+
+  # Playwright suite (phone projects + desktop-chrome) against the production
+  # (standalone) build, with e2e/stub-server.mjs standing in for Dex and the
+  # Go API. playwright.config.ts gives CI one retry and an HTML report.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/ui
+    env:
+      CI: "true"
+      E2E_UI: standalone
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker compose file
+        run: docker compose -f deploy/docker-compose.yml config -q
+        working-directory: .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/ui/package-lock.json
+      - run: npm ci
+      - name: Playwright version
+        id: pw
+        run: echo "version=$(node -p 'require("@playwright/test/package.json").version')" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: Install Playwright browsers
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium webkit
+      - name: Install Playwright system dependencies
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium webkit
+      - run: npm run build
+      - run: npx playwright test
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            apps/ui/e2e/.report
+            apps/ui/e2e/.results
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # MCP latency benchmark (KB testing/mcp-latency-benchmark.md): every tool over
+  # the authed /mcp handler against a seeded household, p95 budget 100 ms. Its
+  # own job so it does not compete with other tests for the runner's CPU. On a
+  # failure the test error lists p95 for every tool; the full report goes to
+  # the job summary either way.
+  mcp-bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: apps/mcp/go.sum
+      - name: Run benchmark
+        run: make -C apps/mcp bench BENCH_REPORT="$RUNNER_TEMP/bench-report.md"
+      - name: Report to job summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/bench-report.md" ]; then
+            cat "$RUNNER_TEMP/bench-report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No benchmark report was written; see the Run benchmark log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-bench-report
+          path: ${{ runner.temp }}/bench-report.md
+          if-no-files-found: ignore
 
   helm-template:
     runs-on: ubuntu-latest
