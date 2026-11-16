@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -969,6 +970,96 @@ func TestAgeOn(t *testing.T) {
 		age, b := ageOn(d(tc.birth), d(tc.today))
 		if age != tc.age || b.LocalDate != tc.next || b.Turns != tc.turns || b.Weekday != d(tc.next).Format("Mon") {
 			t.Errorf("ageOn(%s, %s) = %d %+v, want %d %s turns %d", tc.birth, tc.today, age, b, tc.age, tc.next, tc.turns)
+		}
+	}
+}
+
+// hintValue matches a quoted JSON key/value pair inside a next hint.
+var hintValue = regexp.MustCompile(`"(\w+)"\s*:\s*"([^"]*)"`)
+
+// commonAllergens are values a hint must never suggest: a small model that
+// follows a hint would record them for a real person (#4745).
+var commonAllergens = regexp.MustCompile(`(?i)\b(peanuts?|tree nuts?|milk|eggs?|shellfish|soy|wheat|sesame|gluten)\b`)
+
+// inventedHintValues returns the concrete values in hint that a caller did
+// not supply: every quoted value other than the "…" placeholder, except the
+// enum key "kind", plus any common allergen.
+func inventedHintValues(hint string) []string {
+	var bad []string
+	for _, m := range hintValue.FindAllStringSubmatch(hint, -1) {
+		if m[1] != "kind" && m[2] != "…" {
+			bad = append(bad, m[1]+"="+m[2])
+		}
+	}
+	return append(bad, commonAllergens.FindAllString(hint, -1)...)
+}
+
+// TestNextHintsHaveNoInventedValues calls every person_* tool on every path
+// that returns next hints and fails when a hint carries a concrete value,
+// such as the former `add_preferences=[{"kind":"allergy","item":"peanuts"}]`
+// with the person's real id: a ready-to-run call that adds a false allergy.
+func TestNextHintsHaveNoInventedValues(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	tl := newTools(t, pool)
+	insertKid(t, pool, hh.HouseholdID, "Nora")
+
+	var hints []string
+	collect := func(name string, next []string, ok bool) {
+		t.Helper()
+		if !ok {
+			t.Fatalf("%s failed", name)
+		}
+		hints = append(hints, next...)
+	}
+	created := tl.create.call(t, ctx, map[string]any{"display_name": "Leo", "relationship": "child"})
+	collect("person_create", created.Next, created.OK)
+	if !strings.Contains(strings.Join(created.Next, " "), `"item":"…"`) {
+		t.Errorf("person_create next %v lacks the placeholder hint", created.Next)
+	}
+	env := tl.create.call(t, ctx, map[string]any{"display_name": "Leo", "relationship": "child"}) // duplicate path
+	collect("person_create (duplicate)", env.Next, env.OK)
+	env = tl.create.call(t, ctx, map[string]any{"display_name": "Mia", "relationship": "child", "allergies": []any{"peanuts"}})
+	collect("person_create (with allergies)", env.Next, env.OK)
+	env = tl.create.call(t, ctx, map[string]any{"display_name": "Nora", "relationship": "grandparent"}) // same name
+	collect("person_create (same name)", env.Next, env.OK)
+	got := tl.get.call(t, ctx, map[string]any{"person_id": created.Data.PersonID})
+	collect("person_get", got.Next, got.OK)
+	if !strings.Contains(strings.Join(got.Next, " "), `"item":"…"`) {
+		t.Errorf("person_get next %v lacks the placeholder hint", got.Next)
+	}
+	env = tl.update.call(t, ctx, map[string]any{"person_id": created.Data.PersonID, "add_preferences": []any{map[string]any{"kind": "like", "item": "pasta"}}})
+	collect("person_update", env.Next, env.OK)
+	del := tl.del.call(t, ctx, map[string]any{"person_id": created.Data.PersonID})
+	collect("person_delete", del.Next, del.OK)
+
+	if len(hints) == 0 {
+		t.Fatal("no next hints collected")
+	}
+	for _, h := range hints {
+		if bad := inventedHintValues(h); len(bad) > 0 {
+			t.Errorf("next hint %q carries concrete values %v; use … placeholders", h, bad)
+		}
+	}
+}
+
+// TestInventedHintValuesDetects proves the hint check flags the old peanut
+// hint and passes placeholder hints.
+func TestInventedHintValuesDetects(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		hint string
+		bad  bool
+	}{
+		{`Add allergies or likes with person_update person_id=abc add_preferences=[{"kind":"allergy","item":"peanuts"}].`, true},
+		{`Add allergies or likes with person_update person_id=abc add_preferences=[{"kind":"allergy","item":"milk"}].`, true},
+		{`Add allergies or likes with person_update person_id=abc add_preferences=[{"kind":"allergy","item":"…"}].`, false},
+		{`Put them on events with event_create person_ids=["abc"].`, false},
+		{`Read it back with person_get person_id=abc.`, false},
+	}
+	for _, tc := range tests {
+		if got := len(inventedHintValues(tc.hint)) > 0; got != tc.bad {
+			t.Errorf("inventedHintValues(%q) = %v, want bad=%v", tc.hint, inventedHintValues(tc.hint), tc.bad)
 		}
 	}
 }

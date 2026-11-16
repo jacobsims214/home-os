@@ -212,3 +212,112 @@ func TestUnregisteredCatalogToolsDetects(t *testing.T) {
 		}
 	}
 }
+
+// writeCall matches a tool name followed by its key=value arguments, as
+// next-step hints write a call ("person_update person_id=%s add_preferences=[…]").
+var writeCall = regexp.MustCompile(`\b([a-z]+(?:_[a-z]+)+)((?:\s+[a-z_]+=\S+)+)`)
+
+// hintArg is one key=value argument of a hinted call.
+var hintArg = regexp.MustCompile(`([a-z_]+)=(\S+)`)
+
+// jsonPair is a quoted "key":"value" pair inside an argument value.
+var jsonPair = regexp.MustCompile(`"(\w+)"\s*:\s*"([^"]*)"`)
+
+// isPlaceholder reports whether v stands for a value the caller fills in: the
+// … placeholder or a format verb the tool fills with real data (an id).
+func isPlaceholder(v string) bool {
+	v = strings.Trim(v, `"`)
+	return v == "" || v == "…" || regexp.MustCompile(`^%[a-z]$`).MatchString(v)
+}
+
+// inventedWriteArgs returns the arguments of ready-to-run write-tool calls in
+// text whose value is concrete free text the hint invented: a quoted string, a
+// JSON "key":"value" (other than the enum "kind"), or a list element that is
+// not a placeholder. A call with any … placeholder is a template the model
+// must fill in, so its examples (trades=[plumber] next to name=…) and names of
+// existing records (list_id="Grocery" next to items=[…]) are not flagged. Bare
+// scalars (ids from %s, true/false, enum words such as scope=this) are never
+// flagged. A hint like
+// person_update person_id=%s add_preferences=[{"kind":"allergy","item":"peanuts"}]
+// is a ready-to-run call that records a false allergy for a real person (#4745).
+func inventedWriteArgs(text string, write map[string]bool) []string {
+	var bad []string
+	for _, call := range writeCall.FindAllStringSubmatch(text, -1) {
+		if !write[call[1]] || strings.Contains(call[2], "…") {
+			continue
+		}
+		for _, a := range hintArg.FindAllStringSubmatch(call[2], -1) {
+			key, val := a[1], strings.TrimRight(a[2], ".,;:)")
+			switch {
+			case strings.HasPrefix(val, `"`):
+				if !isPlaceholder(val) {
+					bad = append(bad, call[1]+" "+key+"="+val)
+				}
+			case strings.Contains(val, `":`):
+				for _, m := range jsonPair.FindAllStringSubmatch(val, -1) {
+					if m[1] != "kind" && !isPlaceholder(m[2]) {
+						bad = append(bad, call[1]+" "+key+"="+val)
+						break
+					}
+				}
+			case strings.HasPrefix(val, "["):
+				for _, el := range strings.Split(strings.Trim(val, "[]"), ",") {
+					if !isPlaceholder(strings.TrimSpace(el)) {
+						bad = append(bad, call[1]+" "+key+"="+val)
+						break
+					}
+				}
+			}
+		}
+	}
+	return bad
+}
+
+// TestHintsInventNoWriteValues fails when a string literal under internal/
+// (next-step hints are built from these) suggests a write-tool call with a
+// concrete value the user never gave. Small models run hints as written, so
+// values a caller must supply are written as … placeholders. Concrete
+// examples belong in tool and param descriptions and isError examples, which
+// are maps, not hint strings.
+func TestHintsInventNoWriteValues(t *testing.T) {
+	t.Parallel()
+	write := map[string]bool{}
+	for name, class := range wantToolClass {
+		if class != classR {
+			write[name] = true
+		}
+	}
+	for _, lit := range internalLiterals(t) {
+		if bad := inventedWriteArgs(lit.text, write); len(bad) > 0 {
+			t.Errorf("%s: hint %q invents write values %v; use … placeholders", lit.pos, lit.text, bad)
+		}
+	}
+}
+
+// TestInventedWriteArgsDetects proves the scanner flags invented values and
+// passes placeholders, format verbs and bare scalars.
+func TestInventedWriteArgsDetects(t *testing.T) {
+	t.Parallel()
+	write := map[string]bool{"person_update": true, "list_add_items": true, "event_create": true, "event_update": true, "contact_create": true}
+	tests := []struct {
+		text string
+		bad  bool
+	}{
+		{`Add allergies with person_update person_id=%s add_preferences=[{"kind":"allergy","item":"peanuts"}].`, true},
+		{`Add allergies with person_update person_id=%s add_preferences=[{"kind":"allergy","item":"…"}].`, false},
+		{`Add one with list_add_items list_id=%s items=[milk].`, true},
+		{`Add one with list_add_items list_id=%s items=[…].`, false},
+		{`Rename it with person_update person_id=%s display_name="Leo".`, true},
+		{`Put them on events with event_create person_ids=["%s"].`, false},
+		{`Use event_update event_id=%s scope=this occurrence_date=%s; scope=all changes every one`, false},
+		{`Add a contact with contact_create name=… trades=[%s] phone=….`, false},
+		{`Add a contact with contact_create name=… trades=[plumber] phone=….`, false}, // a template, not runnable
+		{`Add them with list_add_items list_id="Grocery" items=[…].`, false},
+		{`Read it with person_get person_id="Nora".`, false}, // read tools are not checked
+	}
+	for _, tc := range tests {
+		if got := inventedWriteArgs(tc.text, write); (len(got) > 0) != tc.bad {
+			t.Errorf("inventedWriteArgs(%q) = %v, want bad=%v", tc.text, got, tc.bad)
+		}
+	}
+}

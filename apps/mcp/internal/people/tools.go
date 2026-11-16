@@ -1132,7 +1132,7 @@ func NewPersonGetTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 		if n := len(p.Preferences); n > 0 {
 			summary += fmt.Sprintf(" %d %s.", n, plural(n, "preference", "preferences"))
 		}
-		next := []string{fmt.Sprintf(`Add or remove allergies and likes with person_update person_id=%s add_preferences=[{"kind":"allergy","item":"peanuts"}].`, p.PersonID)}
+		next := []string{fmt.Sprintf(`Add or remove allergies and likes with person_update person_id=%s add_preferences=[{"kind":"allergy","item":"…"}].`, p.PersonID)}
 		if p.Linked != nil && p.Linked.Notes > 0 {
 			next = append(next, fmt.Sprintf("Read notes about them with note_find about_type=person about_id=%s.", p.PersonID))
 		}
@@ -1289,7 +1289,7 @@ VALUES ($1, $2, $3, $4::date, $5, $6, $7) RETURNING id::text`,
 		}
 		next := []string{fmt.Sprintf(`Put them on events with event_create person_ids=["%s"].`, p.PersonID)}
 		if len(adds) == 0 {
-			next = append([]string{fmt.Sprintf(`Add allergies or likes with person_update person_id=%s add_preferences=[{"kind":"allergy","item":"peanuts"}].`, p.PersonID)}, next...)
+			next = append([]string{fmt.Sprintf(`Add allergies or likes with person_update person_id=%s add_preferences=[{"kind":"allergy","item":"…"}].`, p.PersonID)}, next...)
 		}
 		if len(sameName) > 0 {
 			next = append(next, fmt.Sprintf("Another person is also named %s (%s); pass person ids, not the name, from now on.", p.Name, strings.Join(sameName, ", ")))
