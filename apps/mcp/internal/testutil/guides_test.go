@@ -24,6 +24,7 @@ func TestGuides049_Reversible(t *testing.T) {
 	blob := insertID(t, pool, `INSERT INTO file_blobs (data, size) VALUES ('x', 1) RETURNING id`)
 	file := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'filter.jpg', 1, 'guide', $3) RETURNING id`, f.household, blob, guide)
 
+	applyMigration(t, pool, "061_notify_creator_role.down.sql")  // newest first: restores 054's notify_entity_creator
 	applyMigration(t, pool, "060_drop_pet_vet_columns.down.sql") // newest first: restores pets.vet_name / vet_phone
 	applyMigration(t, pool, "058_same_family_fks.down.sql")      // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "057_secret_agent_share.down.sql")

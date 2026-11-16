@@ -156,6 +156,7 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	pet := insertID(t, pool, `INSERT INTO pets (household_id, name) VALUES ($1, 'Rex') RETURNING id`, f.household)
 	asset := insertID(t, pool, `INSERT INTO assets (household_id, room_id, name) VALUES ($1, $2, 'Fridge') RETURNING id`, f.household, f.room)
 
+	applyMigration(t, pool, "061_notify_creator_role.down.sql")  // newest first: restores 054's notify_entity_creator
 	applyMigration(t, pool, "060_drop_pet_vet_columns.down.sql") // newest first: restores pets.vet_name / vet_phone
 	applyMigration(t, pool, "058_same_family_fks.down.sql")      // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "057_secret_agent_share.down.sql")
@@ -243,6 +244,7 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	before := countAll()
 
 	// Down: the legacy columns come back, filled from the typed FKs.
+	applyMigration(t, pool, "061_notify_creator_role.down.sql")  // newest first: restores 054's notify_entity_creator
 	applyMigration(t, pool, "060_drop_pet_vet_columns.down.sql") // newest first: restores pets.vet_name / vet_phone
 	applyMigration(t, pool, "058_same_family_fks.down.sql")      // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "057_secret_agent_share.down.sql")
