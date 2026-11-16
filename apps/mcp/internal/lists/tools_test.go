@@ -795,3 +795,137 @@ func TestConcurrentAddsCreateOneList(t *testing.T) {
 		t.Errorf("lists = %d, items = %d; want 1 and 8", lists, items)
 	}
 }
+
+// TestAddAfterArchiveCreatesNewList (#4713): once the auto-created Grocery
+// list is archived, "the grocery list" starts a fresh one instead of hitting
+// the archived error, and the archived list is left alone.
+func TestAddAfterArchiveCreatesNewList(t *testing.T) {
+	tt := setup(t)
+	ctx := tt.ctx
+	first := tt.add.ok(t, ctx, map[string]any{"list_id": "the grocery list", "items": []any{"milk"}})
+	oldID := first.Data.List.ID
+	tt.update.ok(t, ctx, map[string]any{"list_id": "Grocery", "archived": true})
+
+	env := tt.add.ok(t, ctx, map[string]any{"list_id": "the grocery list", "items": []any{"eggs"}})
+	d := env.Data
+	if !d.CreatedList || d.List.ID == oldID || d.List.Name != "Grocery" || d.List.Archived {
+		t.Fatalf("want a new active Grocery list, got created=%v %+v", d.CreatedList, d.List)
+	}
+	if !strings.Contains(env.Summary, "Created the grocery list") || !strings.Contains(env.Summary, oldID) ||
+		!strings.Contains(env.Summary, "archived list") {
+		t.Errorf("summary %q should say a new list was made and name the archived one", env.Summary)
+	}
+	if s := state(t, tt.pool, oldID); len(s) != 1 || s["milk"] {
+		t.Errorf("archived list changed: %v", s)
+	}
+	if s := state(t, tt.pool, d.List.ID); len(s) != 1 || s["eggs"] {
+		t.Errorf("new list items: %v", s)
+	}
+	// The new active list now wins every way of naming it.
+	for _, ref := range []string{"grocery", "Groceries", "Grocery", "the grocery list"} {
+		if g := tt.get.ok(t, ctx, map[string]any{"list_id": ref}); g.Data.List.ID != d.List.ID {
+			t.Errorf("list_id %q resolved to %s, want the active %s", ref, g.Data.List.ID, d.List.ID)
+		}
+	}
+	// The archived one is still reachable by id, and an explicit id keeps
+	// the archived error.
+	if g := tt.get.ok(t, ctx, map[string]any{"list_id": oldID}); !g.Data.List.Archived {
+		t.Errorf("by id: %+v", g.Data.List)
+	}
+	tt.add.fail(t, ctx, map[string]any{"list_id": oldID, "items": []any{"bread"}}, "list_id", "is archived")
+
+	// Parallel adds after the archive still make exactly one new list.
+	tt.update.ok(t, ctx, map[string]any{"list_id": d.List.ID, "archived": true})
+	var wg sync.WaitGroup
+	for i := range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if isErr, env := tt.add.call(t, ctx, map[string]any{"list_id": "groceries", "items": []any{fmt.Sprintf("thing %d", i)}}); isErr {
+				t.Errorf("add: %s", env.Summary)
+			}
+		}()
+	}
+	wg.Wait()
+	var active int
+	if err := tt.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM lists WHERE household_id = $1 AND kind = 'grocery' AND NOT archived`,
+		tt.hh.HouseholdID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Errorf("active grocery lists = %d, want 1", active)
+	}
+}
+
+// TestActiveListBeatsArchivedName (#4713): an active grocery list with
+// another name wins over an archived list named "Grocery", and a template
+// named like a kind word is not written to.
+func TestActiveListBeatsArchivedName(t *testing.T) {
+	tt := setup(t)
+	ctx := tt.ctx
+	old := tt.create.ok(t, ctx, map[string]any{"name": "Grocery", "kind": "grocery", "items": []any{"flour"}})
+	tt.update.ok(t, ctx, map[string]any{"list_id": old.Data.List.ID, "archived": true})
+	weekly := tt.create.ok(t, ctx, map[string]any{"name": "Weekly shop", "kind": "grocery"}).Data.List.ID
+
+	for _, ref := range []string{"grocery list", "the grocery list", "Grocery", "groceries"} {
+		env := tt.add.ok(t, ctx, map[string]any{"list_id": ref, "items": []any{"milk"}})
+		if env.Data.List.ID != weekly || env.Data.CreatedList {
+			t.Errorf("list_id %q: got %q (created=%v), want Weekly shop", ref, env.Data.List.Name, env.Data.CreatedList)
+		}
+	}
+	if s := state(t, tt.pool, old.Data.List.ID); len(s) != 1 {
+		t.Errorf("archived list changed: %v", s)
+	}
+
+	// A template named "Chores" with no active chores list: add creates a
+	// real Chores list rather than writing to the template.
+	tpl := tt.create.ok(t, ctx, map[string]any{"name": "Chores", "kind": "chores", "is_template": true, "items": []any{"Dishes"}}).Data.List.ID
+	env := tt.add.ok(t, ctx, map[string]any{"list_id": "chores", "items": []any{"Laundry"}})
+	if !env.Data.CreatedList || env.Data.List.ID == tpl || !strings.Contains(env.Summary, "template") {
+		t.Errorf("chores: created=%v list=%+v summary %q", env.Data.CreatedList, env.Data.List, env.Summary)
+	}
+	if s := state(t, tt.pool, tpl); len(s) != 1 || !slices.Contains(mapsKeys(s), "Dishes") {
+		t.Errorf("template changed: %v", s)
+	}
+	// Now the active list wins over the template for check-offs too.
+	if c := tt.check.ok(t, ctx, map[string]any{"list_id": "Chores", "texts": []string{"laundry"}}); c.Data.List.ID != env.Data.List.ID {
+		t.Errorf("check resolved to %s, want %s", c.Data.List.ID, env.Data.List.ID)
+	}
+	// The template is still found by name where templates belong.
+	if f := tt.create.ok(t, ctx, map[string]any{"name": "Saturday", "kind": "chores", "from_template_id": "Chores"}); f.Data.FromTemplate == nil || *f.Data.FromTemplate != "Chores" {
+		t.Errorf("from_template: %+v", f.Data)
+	}
+}
+
+// TestUnarchiveByName (#4713): list_update archived=false "Grocery" still
+// finds the archived list when it is the only Grocery.
+func TestUnarchiveByName(t *testing.T) {
+	tt := setup(t)
+	ctx := tt.ctx
+	id := tt.add.ok(t, ctx, map[string]any{"list_id": "grocery", "items": []any{"milk"}}).Data.List.ID
+	tt.update.ok(t, ctx, map[string]any{"list_id": "Grocery", "archived": true})
+	if g := tt.get.ok(t, ctx, map[string]any{"list_id": "Grocery"}); g.Data.List.ID != id || !g.Data.List.Archived {
+		t.Fatalf("get archived by name: %+v", g.Data.List)
+	}
+	env := tt.update.ok(t, ctx, map[string]any{"list_id": "Grocery", "archived": false})
+	if env.Data.ID != id || env.Data.Archived {
+		t.Fatalf("unarchive: %+v", env.Data)
+	}
+	// Back to normal: adds go to it, no new list.
+	if a := tt.add.ok(t, ctx, map[string]any{"list_id": "the grocery list", "items": []any{"eggs"}}); a.Data.List.ID != id || a.Data.CreatedList {
+		t.Errorf("add after unarchive: %+v", a.Data)
+	}
+	// A non-kind name of an archived list keeps the archived error.
+	tt.create.ok(t, ctx, map[string]any{"name": "Costco run", "kind": "shopping"})
+	tt.update.ok(t, ctx, map[string]any{"list_id": "Costco run", "archived": true})
+	tt.add.fail(t, ctx, map[string]any{"list_id": "Costco run", "items": []any{"paper towels"}}, "list_id", "is archived")
+}
+
+func mapsKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

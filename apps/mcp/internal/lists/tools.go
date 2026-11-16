@@ -600,12 +600,15 @@ func (c listCand) String() string {
 }
 
 // resolution is the outcome of resolveList. Exactly one of List and Bad is
-// set; MissingKind is set (with Bad) when list_id named a kind the family
-// has no active list of, so list_add_items can create one.
+// set, except for MissingKind: it is set when list_id named a kind the family
+// has no active list of, so list_add_items can create one. With MissingKind,
+// List is an archived list or template whose name matched (Shadowed holds
+// every such match), and Bad is set when there was none or several.
 type resolution struct {
 	List        listCand
 	Bad         *mcp.CallToolResult
 	MissingKind string
+	Shadowed    []listCand
 }
 
 func familyLists(ctx context.Context, q querier, hid uuid.UUID) ([]listCand, error) {
@@ -661,9 +664,11 @@ func ambiguous(field, ref string, cands []listCand, example map[string]any) *mcp
 }
 
 // resolveList turns list_id (an id, a name, or a kind such as "grocery")
-// into one of the family's lists. Archived lists and templates are found by
-// id or exact name; by kind or partial name only active, non-template lists
-// count.
+// into one of the family's lists. An id finds any list. Otherwise active,
+// non-template lists are tried first: (1) exact name, (2) kind word, (3) part
+// of a name. Only then (4) archived lists and templates by exact name, so an
+// archived "Grocery" never beats an active grocery list, and list_update
+// archived=false "Grocery" still finds it.
 func resolveList(ctx context.Context, q querier, hid uuid.UUID, ref string, example map[string]any) (resolution, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -687,62 +692,80 @@ func resolveList(ctx context.Context, q querier, hid uuid.UUID, ref string, exam
 		return resolution{}, err
 	}
 	raw, norm := normText(ref), normListRef(ref)
-
-	// 1. Exact name, any case.
-	var exact []listCand
-	for _, c := range all {
-		if n := normText(c.Name); n == raw || n == norm || normListRef(c.Name) == norm {
-			exact = append(exact, c)
-		}
-	}
-	if len(exact) > 0 {
-		if p := prefer(exact, false); len(p) == 1 {
-			return resolution{List: p[0]}, nil
-		} else {
-			return resolution{Bad: ambiguous("list_id", ref, p, example)}, nil
-		}
-	}
-
-	active := func(keep func(listCand) bool) []listCand {
+	pick := func(keep func(listCand) bool) []listCand {
 		var out []listCand
 		for _, c := range all {
-			if !c.Archived && !c.IsTemplate && keep(c) {
+			if keep(c) {
 				out = append(out, c)
 			}
 		}
 		return out
 	}
+	live := func(c listCand) bool { return !c.Archived && !c.IsTemplate }
+	exactName := func(c listCand) bool {
+		n := normText(c.Name)
+		return n == raw || n == norm || normListRef(c.Name) == norm
+	}
+	one := func(m []listCand) (resolution, bool) {
+		switch len(m) {
+		case 0:
+			return resolution{}, false
+		case 1:
+			return resolution{List: m[0]}, true
+		default:
+			return resolution{Bad: ambiguous("list_id", ref, m, example)}, true
+		}
+	}
+
+	// 1. Exact name of an active list, any case.
+	if r, ok := one(pick(func(c listCand) bool { return live(c) && exactName(c) })); ok {
+		return r, nil
+	}
+
+	// 4 (used below). Exact name of an archived list or template; archived
+	// lists before templates.
+	stale := pick(func(c listCand) bool { return !live(c) && exactName(c) })
+	if lists := pick(func(c listCand) bool { return !live(c) && exactName(c) && !c.IsTemplate }); len(lists) > 0 {
+		stale = lists
+	}
 
 	// 2. A kind: "grocery", "groceries", "the to-do list".
 	if kind, ok := kindWords[norm]; ok {
-		m := active(func(c listCand) bool { return c.Kind == kind })
-		switch len(m) {
+		if r, ok := one(pick(func(c listCand) bool { return live(c) && c.Kind == kind })); ok {
+			return r, nil
+		}
+		// No active list of that kind. An archived "Grocery" or a template
+		// is still returned for reading or unarchiving, but list_add_items
+		// sees MissingKind and starts a fresh list instead.
+		r := resolution{MissingKind: kind, Shadowed: stale}
+		switch len(stale) {
 		case 1:
-			return resolution{List: m[0]}, nil
+			r.List = stale[0]
 		case 0:
-			return resolution{MissingKind: kind, Bad: respond.Invalid("list_id",
+			r.Bad = respond.Invalid("list_id",
 				fmt.Sprintf("The family has no %s list yet.", kind),
 				fmt.Sprintf("Start one with list_create name=%q kind=%q, or add items with list_add_items list_id=%q, which creates it.", kindTitle[kind], kind, kind),
-				map[string]any{"name": kindTitle[kind], "kind": kind})}, nil
+				map[string]any{"name": kindTitle[kind], "kind": kind})
 		default:
-			return resolution{Bad: ambiguous("list_id", ref, m, example)}, nil
+			r.Bad = ambiguous("list_id", ref, stale, example)
+		}
+		return r, nil
+	}
+
+	// 3. Part of an active list's name: "costco" finds "Costco run".
+	if utf8.RuneCountInString(norm) >= 3 {
+		if r, ok := one(pick(func(c listCand) bool { return live(c) && strings.Contains(normText(c.Name), norm) })); ok {
+			return r, nil
 		}
 	}
 
-	// 3. Part of a name: "costco" finds "Costco run".
-	if utf8.RuneCountInString(norm) >= 3 {
-		m := active(func(c listCand) bool { return strings.Contains(normText(c.Name), norm) })
-		switch len(m) {
-		case 1:
-			return resolution{List: m[0]}, nil
-		case 0:
-		default:
-			return resolution{Bad: ambiguous("list_id", ref, m, example)}, nil
-		}
+	// 4. Exact name of an archived list or template.
+	if r, ok := one(stale); ok {
+		return r, nil
 	}
 
 	names := []string{}
-	for _, c := range active(func(listCand) bool { return true }) {
+	for _, c := range pick(live) {
 		if len(names) == 8 {
 			break
 		}
@@ -1735,8 +1758,10 @@ func NewListAddItemsTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 		var (
 			out       addResult
 			badResult *mcp.CallToolResult
+			shadowed  []listCand
 		)
 		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			shadowed = nil
 			res, err := resolveList(ctx, tx, hid, str(args, "list_id"), example)
 			if err != nil {
 				return err
@@ -1746,9 +1771,9 @@ func NewListAddItemsTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 				return nil
 			}
 			if res.MissingKind != "" {
-				// "add milk to the grocery list" with no grocery list yet:
-				// make it. The advisory lock stops two parallel adds from
-				// making two lists.
+				// "add milk to the grocery list" with no active grocery list
+				// (maybe only last week's, archived): make one. The advisory
+				// lock stops two parallel adds from making two lists.
 				kind := res.MissingKind
 				if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('list_kind:' || $1::text || ':' || $2, 0))`, hid, kind); err != nil {
 					return err
@@ -1765,6 +1790,7 @@ func NewListAddItemsTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 						return err
 					}
 					out.CreatedList = true
+					shadowed = res.Shadowed
 				case err != nil:
 					return err
 				}
@@ -1878,6 +1904,16 @@ func NewListAddItemsTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) {
 		summary = strings.ToUpper(summary[:1]) + summary[1:] + fmt.Sprintf(" (%d open).", l.OpenCount)
 		if out.CreatedList {
 			summary = fmt.Sprintf("Created the %s list %q. ", l.Kind, l.Name) + summary
+			if len(shadowed) > 0 {
+				what := "archived list"
+				if shadowed[0].IsTemplate {
+					what = "template"
+				}
+				if len(shadowed) > 1 {
+					what += fmt.Sprintf(" (and %d more)", len(shadowed)-1)
+				}
+				summary += fmt.Sprintf(" The %s %q (%s) was left as it is.", what, shadowed[0].Name, shadowed[0].ID)
+			}
 		}
 		first := out.Added
 		if len(first) == 0 {
