@@ -7,8 +7,11 @@ package domainv2_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -137,4 +140,118 @@ func TestPetLegacyVetFieldsMapToFamilyVendor(t *testing.T) {
 	require.NoError(t, pool.QueryRow(context.Background(),
 		`SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'pets' AND column_name IN ('vet_name', 'vet_phone')`).Scan(&legacy))
 	assert.Zero(t, legacy)
+}
+
+// #4768: a vendor matched by legacy vet_name / vet_phone gets trade vet and a
+// blank phone filled, as migrations 043/060 do, so it shows in
+// GET /vendors?trade=vet. An explicit vet_vendor_id is never changed.
+func TestPetLegacyVetMatchTagsVendor(t *testing.T) {
+	pool := testDB(t)
+	r := petRouter(pool)
+	a := family(t, pool)
+	bg := context.Background()
+	old := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	vendor := func(name string, trades []string, phone *string) string {
+		var id string
+		require.NoError(t, pool.QueryRow(bg,
+			`INSERT INTO vendors (household_id, name, trades, phone, updated_at) VALUES ($1, $2, $3, $4, $5) RETURNING id::text`,
+			a, name, trades, phone, old).Scan(&id))
+		return id
+	}
+	type row struct {
+		trades  []string
+		phone   *string
+		updated time.Time
+	}
+	read := func(id string) row {
+		var v row
+		require.NoError(t, pool.QueryRow(bg, `SELECT trades, phone, updated_at FROM vendors WHERE id = $1`, id).Scan(&v.trades, &v.phone, &v.updated))
+		return v
+	}
+	p := func(s string) *string { return &s }
+
+	// No trades, no phone: tagged vet, phone filled.
+	smith := vendor("Dr. Smith", []string{}, nil)
+	res := call(t, r, a, "POST", "/pets", map[string]any{"name": "Rex", "vet_name": "dr. smith", "vet_phone": " 555-0111 "})
+	require.Equal(t, http.StatusCreated, res.Code, res.Body)
+	assert.Equal(t, smith, res.data()["vet_vendor_id"])
+	assert.Equal(t, "555-0111", res.data()["vet_phone"])
+	v := read(smith)
+	assert.Equal(t, []string{"vet"}, v.trades)
+	require.NotNil(t, v.phone)
+	assert.Equal(t, "555-0111", *v.phone)
+	assert.True(t, v.updated.After(old))
+
+	// It is listed by GET /vendors?trade=vet.
+	vr := chi.NewRouter()
+	vr.Get("/vendors", vendors.NewHandler(vendors.NewRepo(pool)).List)
+	list := call(t, vr, a, "GET", "/vendors?trade=vet", nil)
+	require.Equal(t, http.StatusOK, list.Code, list.Body)
+	items, _ := list.Body["data"].([]any)
+	require.Len(t, items, 1)
+	assert.Equal(t, smith, items[0].(map[string]any)["id"])
+
+	// Other trades, no phone given: vet appended; a blank phone becomes NULL
+	// (COALESCE(NULLIF(btrim(phone), ''), NULL), as in 060).
+	jones := vendor("Dr. Jones", []string{"groomer"}, p(" "))
+	res = call(t, r, a, "POST", "/pets", map[string]any{"name": "Max", "vet_name": "Dr. Jones"})
+	require.Equal(t, http.StatusCreated, res.Code, res.Body)
+	v = read(jones)
+	assert.Equal(t, []string{"groomer", "vet"}, v.trades)
+	assert.Nil(t, v.phone)
+
+	// Already a vet with a phone: not written at all.
+	ready := vendor("Dr. Ready", []string{"vet"}, p("555-0133"))
+	res = call(t, r, a, "POST", "/pets", map[string]any{"name": "Luna", "vet_name": "Dr. Ready", "vet_phone": "5550133"})
+	require.Equal(t, http.StatusCreated, res.Code, res.Body)
+	assert.Equal(t, ready, res.data()["vet_vendor_id"])
+	v = read(ready)
+	assert.Equal(t, []string{"vet"}, v.trades)
+	assert.Equal(t, "555-0133", *v.phone)
+	assert.True(t, v.updated.Equal(old), "updated_at changed: %v", v.updated)
+
+	// Phone only (PUT): matched by digits, tagged, its phone kept.
+	clinic := vendor("Corner Clinic", []string{}, p("(555) 0144"))
+	luna := res.id(t)
+	res = call(t, r, a, "PUT", "/pets/"+luna, map[string]any{"name": "Luna", "vet_phone": "555-0144"})
+	require.Equal(t, http.StatusOK, res.Code, res.Body)
+	assert.Equal(t, clinic, res.data()["vet_vendor_id"])
+	v = read(clinic)
+	assert.Equal(t, []string{"vet"}, v.trades)
+	assert.Equal(t, "(555) 0144", *v.phone)
+
+	// Explicit vet_vendor_id (even with legacy fields): untouched.
+	plain := vendor("Plain Contact", []string{}, nil)
+	res = call(t, r, a, "PUT", "/pets/"+luna, map[string]any{"name": "Luna", "vet_vendor_id": plain, "vet_name": "Plain Contact", "vet_phone": "555-0166"})
+	require.Equal(t, http.StatusOK, res.Code, res.Body)
+	assert.Equal(t, plain, res.data()["vet_vendor_id"])
+	res = call(t, r, a, "POST", "/pets", map[string]any{"name": "Bo", "vet_vendor_id": plain})
+	require.Equal(t, http.StatusCreated, res.Code, res.Body)
+	v = read(plain)
+	assert.Empty(t, v.trades)
+	assert.Nil(t, v.phone)
+	assert.True(t, v.updated.Equal(old), "updated_at changed: %v", v.updated)
+}
+
+// #4768: parallel legacy creates naming the same new vet make one vendor
+// (resolveVet takes the pet_vet advisory lock, like the MCP pet tools).
+func TestPetLegacyVetParallelOneVendor(t *testing.T) {
+	pool := testDB(t)
+	r := petRouter(pool)
+	a := family(t, pool)
+	var wg sync.WaitGroup
+	codes := make([]int, 6)
+	for i := range codes {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			codes[i] = call(t, r, a, "POST", "/pets", map[string]any{"name": fmt.Sprintf("Pet %d", i), "vet_name": "Brand New Vet"}).Code
+		}(i)
+	}
+	wg.Wait()
+	for i, c := range codes {
+		assert.Equal(t, http.StatusCreated, c, "create %d", i)
+	}
+	assert.Equal(t, 1, vendorCount(t, pool, a))
 }

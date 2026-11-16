@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -76,6 +77,7 @@ func (r *Repo) Get(ctx context.Context, householdID, id uuid.UUID) (*Pet, error)
 }
 
 type querier interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
@@ -104,11 +106,41 @@ func getPet(ctx context.Context, q querier, householdID, id uuid.UUID) (*Pet, er
 // one with trades {vet}. It mirrors migration 043's backfill: with a name, a
 // vendor with the same name (case-insensitive) whose phone does not
 // contradict; with only a phone, a vendor with the same digits. Vendors that
-// already have the vet trade win ties.
+// already have the vet trade win ties. A matched vendor gets trade vet and a
+// blank phone filled with the given one, as 043/060 do. It takes the same
+// advisory locks as the MCP pet tools (pet_vet:<household>, then
+// contact_create's contact_create:<household>:<lower(name)>), so parallel
+// calls naming the same new vet, or a parallel MCP contact_create of that
+// name, make one vendor.
+// tagVetSQL is 043 section 4 / 060's update of a matched vendor: add trade
+// vet when missing and fill a blank phone with the given one ($3, NULL when
+// none). It writes nothing when the vendor is already a vet with a phone.
+const tagVetSQL = `
+UPDATE vendors
+   SET trades = CASE WHEN 'vet' = ANY (trades) THEN trades ELSE array_append(trades, 'vet') END,
+       phone  = COALESCE(NULLIF(btrim(phone), ''), $3),
+       updated_at = NOW()
+ WHERE id = $1 AND household_id = $2
+   AND (NOT ('vet' = ANY (trades)) OR NULLIF(btrim(phone), '') IS NULL)`
+
 func resolveVet(ctx context.Context, q querier, householdID uuid.UUID, ref VetRef) (uuid.UUID, error) {
 	name := trimmed(ref.Name)
 	phone := trimmed(ref.Phone)
 	digits := nonDigits.ReplaceAllString(phone, "")
+	var phoneArg any
+	if phone != "" {
+		phoneArg = phone
+	}
+	newName := name
+	if newName == "" {
+		newName = "Vet"
+	}
+	if _, err := q.Exec(ctx, `
+SELECT pg_advisory_xact_lock(hashtextextended('pet_vet:' || $1::text, 0)),
+       pg_advisory_xact_lock(hashtextextended('contact_create:' || $1::text || ':' || lower($2), 0))`,
+		householdID, newName); err != nil {
+		return uuid.Nil, fmt.Errorf("lock vet vendor: %w", err)
+	}
 
 	var id uuid.UUID
 	var err error
@@ -135,24 +167,20 @@ func resolveVet(ctx context.Context, q querier, householdID uuid.UUID, ref VetRe
 		).Scan(&id)
 	}
 	if err == nil {
+		if _, err := q.Exec(ctx, tagVetSQL, id, householdID, phoneArg); err != nil {
+			return uuid.Nil, fmt.Errorf("tag vet vendor: %w", err)
+		}
 		return id, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, fmt.Errorf("find vet vendor: %w", err)
 	}
 
-	if name == "" {
-		name = "Vet"
-	}
-	var phoneArg any
-	if phone != "" {
-		phoneArg = phone
-	}
 	if err := q.QueryRow(ctx,
 		`INSERT INTO vendors (household_id, name, specialty, phone, trades)
 		 VALUES ($1, $2, 'Veterinarian', $3, ARRAY['vet'])
 		 RETURNING id`,
-		householdID, name, phoneArg,
+		householdID, newName, phoneArg,
 	).Scan(&id); err != nil {
 		return uuid.Nil, fmt.Errorf("create vet vendor: %w", err)
 	}

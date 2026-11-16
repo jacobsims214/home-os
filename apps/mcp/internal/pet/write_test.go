@@ -370,6 +370,134 @@ func TestPetCreateParallel(t *testing.T) {
 	}
 }
 
+// vendorRow reads a contact's trades, phone and updated_at.
+func vendorRow(t *testing.T, pool *pgxpool.Pool, id string) (trades []string, phone *string, updated time.Time) {
+	t.Helper()
+	if err := pool.QueryRow(context.Background(), `SELECT trades, phone, updated_at FROM vendors WHERE id = $1`, id).Scan(&trades, &phone, &updated); err != nil {
+		t.Fatal(err)
+	}
+	return trades, phone, updated
+}
+
+// TestPetVetMatchTagsContact (#4768): a contact found by vet_name / vet_phone
+// gets trade vet and a blank phone filled, as migrations 043/060 do; an
+// explicit vet_contact_id is never changed.
+func TestPetVetMatchTagsContact(t *testing.T) {
+	t.Parallel()
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	create, update, _ := newWriteTools(pool)
+	old := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	vendor := func(name string, trades []string, phone *string) string {
+		return insertID(t, pool, `INSERT INTO vendors (household_id, name, trades, phone, updated_at) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+			hh.HouseholdID, name, trades, phone, old)
+	}
+	p := func(s string) *string { return &s }
+
+	// No trades, no phone: tagged vet, phone filled.
+	smith := vendor("Dr. Smith", []string{}, nil)
+	d := create.run(t, ctx, map[string]any{"name": "Biscuit", "species": "dog", "vet_name": "dr. smith", "vet_phone": " 555-0111 "}).pet(t)
+	if d.VetCreated || d.Vet == nil || str(d.Vet.ContactID) != smith {
+		t.Fatalf("smith vet = %+v", d.Vet)
+	}
+	if tr, ph, up := vendorRow(t, pool, smith); strings.Join(tr, ",") != "vet" || str(ph) != "555-0111" || !up.After(old) {
+		t.Errorf("smith after match: trades %v phone %s updated %v", tr, str(ph), up)
+	}
+	// Found through contact_find's filter: trade vet.
+	if n := count(t, pool, `SELECT count(*) FROM vendors WHERE household_id = $1 AND 'vet' = ANY (trades)`, hh.HouseholdID); n != 1 {
+		t.Errorf("vet contacts = %d", n)
+	}
+
+	// Other trades and a blank (spaces) phone, no phone given: vet appended;
+	// the blank phone becomes NULL (COALESCE(NULLIF(btrim(phone), ''), NULL), as in 060).
+	jones := vendor("Dr. Jones", []string{"groomer"}, p("  "))
+	create.run(t, ctx, map[string]any{"name": "Max", "species": "dog", "vet": "Dr. Jones"}).pet(t)
+	if tr, ph, _ := vendorRow(t, pool, jones); strings.Join(tr, ",") != "groomer,vet" || ph != nil {
+		t.Errorf("jones after match: trades %v phone %q", tr, str(ph))
+	}
+
+	// Already a vet with a phone: not written at all.
+	ready := vendor("Dr. Ready", []string{"vet"}, p("555-0133"))
+	create.run(t, ctx, map[string]any{"name": "Luna", "species": "cat", "vet_name": "Dr. Ready", "vet_phone": "5550133"}).pet(t)
+	if tr, ph, up := vendorRow(t, pool, ready); strings.Join(tr, ",") != "vet" || str(ph) != "555-0133" || !up.Equal(old) {
+		t.Errorf("ready vet was written: trades %v phone %s updated %v", tr, str(ph), up)
+	}
+
+	// Phone only, matched by digits: tagged, its phone kept.
+	clinic := vendor("Corner Clinic", []string{}, p("(555) 0144"))
+	if d := create.run(t, ctx, map[string]any{"name": "Pip", "species": "bird", "vet_phone": "555-0144"}).pet(t); str(d.Vet.ContactID) != clinic {
+		t.Fatalf("pip vet = %+v", d.Vet)
+	}
+	if tr, ph, _ := vendorRow(t, pool, clinic); strings.Join(tr, ",") != "vet" || str(ph) != "(555) 0144" {
+		t.Errorf("clinic after phone match: trades %v phone %s", tr, str(ph))
+	}
+
+	// pet_update resolves the same way.
+	walker := vendor("Wally", []string{"dog_walker"}, nil)
+	update.run(t, ctx, map[string]any{"pet_id": "Pip", "vet_name": "Wally", "vet_phone": "555-0155"}).pet(t)
+	if tr, ph, _ := vendorRow(t, pool, walker); strings.Join(tr, ",") != "dog_walker,vet" || str(ph) != "555-0155" {
+		t.Errorf("wally after update match: trades %v phone %s", tr, str(ph))
+	}
+
+	// An explicit vet_contact_id is the user's choice: the contact is untouched.
+	plain := vendor("Plain Contact", []string{}, nil)
+	if d := create.run(t, ctx, map[string]any{"name": "Rex", "species": "dog", "vet_contact_id": plain, "vet_phone": "555-0166"}).pet(t); str(d.Vet.ContactID) != plain {
+		t.Fatalf("rex vet = %+v", d.Vet)
+	}
+	update.run(t, ctx, map[string]any{"pet_id": "Biscuit", "vet_vendor_id": plain}).pet(t)
+	if tr, ph, up := vendorRow(t, pool, plain); len(tr) != 0 || ph != nil || !up.Equal(old) {
+		t.Errorf("explicit contact was changed: trades %v phone %s updated %v", tr, str(ph), up)
+	}
+}
+
+// TestPetVetSharesContactCreateLock (#4768): a pet's vet lookup waits on
+// contact_create's per-name lock, so a contact being saved under that name
+// is found instead of a second contact being made.
+func TestPetVetSharesContactCreateLock(t *testing.T) {
+	t.Parallel()
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	create, _, _ := newWriteTools(pool)
+	bg := context.Background()
+
+	tx, err := pool.Begin(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(bg) }()
+	// What contact_create does for "Dr. Lock": its lock, then the insert.
+	if _, err := tx.Exec(bg, `SELECT pg_advisory_xact_lock(hashtextextended('contact_create:' || $1::text || ':' || lower($2), 0))`, hh.HouseholdID, "Dr. Lock"); err != nil {
+		t.Fatal(err)
+	}
+	var vid string
+	if err := tx.QueryRow(bg, `INSERT INTO vendors (household_id, name, trades) VALUES ($1, 'Dr. Lock', '{}') RETURNING id::text`, hh.HouseholdID).Scan(&vid); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan writeEnv, 1)
+	go func() {
+		done <- create.run(t, ctx, map[string]any{"name": "Locky", "species": "dog", "vet_name": "Dr. Lock"})
+	}()
+	select {
+	case env := <-done:
+		t.Fatalf("pet_create did not wait for contact_create's lock: %s", env.Summary)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := tx.Commit(bg); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case env := <-done:
+		if d := env.pet(t); d.VetCreated || str(d.Vet.ContactID) != vid {
+			t.Errorf("locky vet = %+v (want the contact being created, %s)", d.Vet, vid)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("pet_create still waiting after the lock was released")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM vendors WHERE household_id = $1`, hh.HouseholdID); n != 1 {
+		t.Errorf("vendors = %d, want 1", n)
+	}
+}
+
 // TestPetUpdate: only given fields change, null clears, a no-op writes
 // nothing, the vet moves through vet_vendor_id, pet_id takes a name, and
 // another family's pet is never touched.

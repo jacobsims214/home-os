@@ -368,8 +368,9 @@ type vetChoice struct {
 // rules (#4700, migration 043): with a name, the family contact with the
 // same name whose phone does not contradict; with only a phone, the contact
 // with the same digits; ties go to contacts with trade vet, then the
-// oldest. No match saves a new contact {name or "Vet", specialty
-// Veterinarian, phone, trades [vet]}. JSON null vet_contact_id clears the
+// oldest. A matched contact gets trade vet and a blank phone filled (as
+// 043/060); an explicit vet_contact_id is never changed. No match saves a new
+// contact {name or "Vet", specialty Veterinarian, phone, trades [vet]}. JSON null vet_contact_id clears the
 // vet. A non-nil result is the isError to return.
 func chooseVet(ctx context.Context, tx pgx.Tx, hid uuid.UUID, f petFields, example map[string]any) (vetChoice, *mcp.CallToolResult, error) {
 	if f.vetID != nil {
@@ -395,9 +396,11 @@ func chooseVet(ctx context.Context, tx pgx.Tx, hid uuid.UUID, f petFields, examp
 		return vetChoice{}, nil, nil
 	}
 
-	// One vet lookup-or-create at a time per family, so two parallel calls
-	// naming the same new vet save one contact.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('pet_vet:' || $1::text, 0))`, hid); err != nil {
+	vetName := "Vet"
+	if name.set {
+		vetName = name.val
+	}
+	if err := lockVet(ctx, tx, hid, vetName); err != nil {
 		return vetChoice{}, nil, err
 	}
 	digits := nonDigits.ReplaceAllString(phone.val, "")
@@ -421,14 +424,15 @@ SELECT id FROM vendors
  LIMIT 1`, hid, digits).Scan(&id)
 	}
 	if err == nil {
+		// Same as 043/060: the matched contact becomes a vet and a blank
+		// phone takes the given one.
+		if _, err := tx.Exec(ctx, tagVetSQL, id, hid, phone.ptr()); err != nil {
+			return vetChoice{}, nil, err
+		}
 		return vetChoice{given: true, id: &id}, nil, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return vetChoice{}, nil, err
-	}
-	vetName := "Vet"
-	if name.set {
-		vetName = name.val
 	}
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO vendors (household_id, name, specialty, phone, trades)
@@ -440,6 +444,30 @@ SELECT id FROM vendors
 }
 
 var nonDigits = regexp.MustCompile(`\D`)
+
+// lockVet serializes vet lookup-or-create: pet_vet:<household> (one vet
+// resolution at a time per family, shared with apps/api resolveVet) and then
+// contact_create's own key contact_create:<household>:<lower(name)>, so a
+// parallel contact_create of the same name and a pet's new vet make one
+// contact. The order is always pet_vet first; contact_create takes only its
+// own key, so the two cannot deadlock.
+func lockVet(ctx context.Context, tx pgx.Tx, hid uuid.UUID, name string) error {
+	_, err := tx.Exec(ctx, `
+SELECT pg_advisory_xact_lock(hashtextextended('pet_vet:' || $1::text, 0)),
+       pg_advisory_xact_lock(hashtextextended('contact_create:' || $1::text || ':' || lower($2), 0))`, hid, name)
+	return err
+}
+
+// tagVetSQL is 043 section 4 / 060's update of a matched vendor: add trade
+// vet when missing and fill a blank phone with the given one ($3, NULL when
+// none). It writes nothing when the vendor is already a vet with a phone.
+const tagVetSQL = `
+UPDATE vendors
+   SET trades = CASE WHEN 'vet' = ANY (trades) THEN trades ELSE array_append(trades, 'vet') END,
+       phone  = COALESCE(NULLIF(btrim(phone), ''), $3),
+       updated_at = NOW()
+ WHERE id = $1 AND household_id = $2
+   AND (NOT ('vet' = ANY (trades)) OR NULLIF(btrim(phone), '') IS NULL)`
 
 // vetFKError maps the composite vet FK (a contact deleted meanwhile) to an
 // isError result; nil for any other error.
