@@ -611,50 +611,138 @@ func TestMealSuggestRoles(t *testing.T) {
 	}
 }
 
-// TestMealSuggestCompoundIngredients is #4805's end-to-end case: the one the
-// wave check found. A recipe called "Blackened Catfish" whose ingredient says
-// "catfish fillets" was suggested to a fish-allergic eater with no warning,
-// because every group word was wrapped in \b...\b and "catfish" is one word.
-// It is the same story for cornbread (gluten, corn) and cheesecake (dairy).
+// wholeWordMatcher builds the matcher exactly as it was BEFORE #4805: group
+// words compiled with compilePhrases, so every word is anchored \b...\b and a
+// group word inside a one-word ingredient cannot be seen. newAllergyMatcher
+// differs from this by one line (compileGroupPhrases), which is what makes it a
+// faithful oracle for "what happens if compound matching is reverted".
+//
+// It exists for the fixture guard in TestMealSuggestCompoundIngredients: a case
+// whose ingredient (or title) also matches this matcher would be excluded by a
+// whole-word match alone, so it would pass with the compound support reverted
+// and would not be guarding #4805 at all. That is exactly how this test was
+// neutered before #4875 — its ingredients were "catfish fillets", "cornmeal"
+// and "cream cheese", every one of which carries a literal group member.
+func wholeWordMatcher(personID, person, allergen string) allergyMatcher {
+	m := allergyMatcher{personID: personID, person: person, allergy: allergen}
+	m.own = compilePhrases([]string{allergen})
+	for _, key := range allergyGroupKeys(allergen) {
+		m.group = append(m.group, compilePhrases(allergenGroups[key])...)
+		m.except = append(m.except, compilePhrases(allergenExceptions[key])...)
+	}
+	return m
+}
+
+// TestMealSuggestCompoundIngredients is #4805's end-to-end case on real
+// Postgres: a recipe whose ONLY route to an eater's allergen is a compound word
+// (whitefish, shortbread, cheesecake, cornflakes, eggnog) must be excluded, not
+// suggested. Before #4805 every group word was wrapped in \b...\b, so none of
+// those were seen and the recipe was suggested with no warning — a live
+// food-safety control failing open.
+//
+// The cases are chosen so that reverting newAllergyMatcher's one
+// compileGroupPhrases line fails this test, and the guard asserts that: for
+// every case, no ingredient and not the title may match wholeWordMatcher, the
+// pre-#4805 matcher. Without that guard the fixtures can quietly decay into
+// whole-word matches, which is what happened here (#4875): the original
+// ingredients were "catfish fillets", "cornmeal" and "cream cheese", all
+// literal group members, so the test stayed green with compound matching
+// reverted. If a future vocabulary widening makes a case fail the guard, pick a
+// different compound; do not delete the guard.
 func TestMealSuggestCompoundIngredients(t *testing.T) {
 	t.Parallel()
+
+	type compoundCase struct {
+		recipe      string
+		ingredients []string
+		allergy     string // the allergen text wholeWordMatcher is built for
+		reason      string // the exclusion reason substring: person, allergen, matched text
+	}
+	cases := []compoundCase{
+		// suffix: fish -> whitefish. "fish" is a group word; "whitefish" is not.
+		{"Friday Tray Bake", []string{"whitefish fillets", "lemon", "potatoes"}, "fish", "Nora (fish): whitefish fillets"},
+		// suffix + prefix: bread -> shortbread (the tail) and breaded (the head).
+		{"Tea Time Treat", []string{"shortbread", "jam"}, "gluten", "Sam (gluten): shortbread"},
+		{"Crispy Chicken", []string{"breaded chicken cutlets", "rice"}, "gluten", "Sam (gluten): breaded chicken cutlets"},
+		// prefix: cheese -> cheesecake, and the recipe title as the only compound.
+		{"Birthday Dessert", []string{"cheesecake", "strawberries", "sugar"}, "dairy", "Ada (dairy): cheesecake"},
+		{"Cheeseburger Night", []string{"vegetarian patty", "pickles", "onions"}, "dairy", "Ada (dairy): Cheeseburger Night"},
+		// prefix: corn -> cornflakes (the corn group's own word is "corn").
+		{"Breakfast Cereal", []string{"cornflakes", "banana", "oat drink"}, "corn", "Leo (corn): cornflakes"},
+		// prefix: egg -> eggnog. eggplant stays a negative below.
+		{"Holiday Punch", []string{"eggnog", "cinnamon", "cloves"}, "egg", "Ivy (egg): eggnog"},
+	}
+
 	k := newKitchen(t)
 	k.person("Nora", "fish allergy")
-	k.person("Sam", "gluten") // a preference-style entry
-	k.person("Ada", "dairy")  // ...
+	k.person("Sam", "gluten")
+	k.person("Ada", "dairy")
+	k.person("Ivy", "egg")
 	k.pref(k.person("Leo"), "dietary", "corn allergy", "")
+	for _, c := range cases {
+		k.recipe(c.recipe, 30, nil, c.ingredients...)
+	}
+	// The negatives, in the same catalogue: each carries a word that looks like
+	// an allergen but is not one (allergenExceptions), so a test that excluded
+	// everything would not pass either. They are also the control that proves the
+	// catalogue was actually searched — seven positives plus these three makes ten
+	// recipes, and count is capped at ten, so nothing is hidden by the limit and a
+	// suggestion list that came back empty cannot pass this test.
+	k.recipe("Aubergine Bake", 40, nil, "eggplant", "tomatoes", "olive oil")          // egg prefix, excepted
+	k.recipe("Breadfruit Curry", 30, nil, "breadfruit", "coconut milk", "rice")       // bread prefix, excepted
+	k.recipe("Carrot Ribbons", 15, nil, "carrots", "butterfly cut zucchini", "pesto") // butter prefix, excepted
 
-	k.recipe("Blackened Catfish", 25, nil, "catfish fillets", "cayenne", "butter")
-	k.recipe("Cornbread", 35, nil, "cornmeal", "buttermilk", "eggs")
-	k.recipe("Cheesecake", 60, nil, "cream cheese", "sugar", "eggs")
-	k.recipe("Veggie Tray", 5, nil, "carrots", "cucumber")
-
-	st := suggestTool(k.pool)
-	r := st.run(t, k.ctx, map[string]any{"count": 10}).suggest(t)
-	for _, bad := range []string{"Blackened Catfish", "Cornbread", "Cheesecake"} {
-		if slices.Contains(suggested(r), bad) {
-			t.Errorf("suggested %s, which has a compound allergen: %v", bad, suggested(r))
-		}
-		if !slices.Contains(excludedNames(r), bad) {
-			t.Errorf("%s not listed in excluded: %+v", bad, r.Excluded)
+	// Fixture guard, before any DB work: every positive case must be reachable
+	// ONLY through compound matching. If one is not, this fails loudly instead of
+	// letting the test pass with #4805 reverted.
+	for _, c := range cases {
+		wm := wholeWordMatcher("p", "x", c.allergy)
+		for _, text := range append(append([]string{}, c.ingredients...), c.recipe) {
+			if wm.matches(text) {
+				t.Fatalf("fixture %q: %q matches the pre-#4805 whole-word matcher for %q, so this case does not guard compound matching; pick a different compound",
+					c.recipe, text, c.allergy)
+			}
 		}
 	}
-	if !slices.Contains(suggested(r), "Veggie Tray") {
-		t.Errorf("the safe recipe was left out: %v", suggested(r))
+
+	r := suggestTool(k.pool).run(t, k.ctx, map[string]any{"count": 10}).suggest(t)
+
+	for _, c := range cases {
+		if slices.Contains(suggested(r), c.recipe) {
+			t.Errorf("suggested %s, whose only allergen is a compound: suggested=%v excluded=%+v",
+				c.recipe, suggested(r), r.Excluded)
+		}
+		if !slices.Contains(excludedNames(r), c.recipe) {
+			t.Errorf("%s not listed in excluded: %+v", c.recipe, r.Excluded)
+		}
+	}
+	// The negatives stay suggested. If one of these is missing it was excluded on
+	// an exception word (eggplant, breadfruit, butterfly), which would be the
+	// over-match direction #4805's exception list exists to prevent.
+	for _, ok := range []string{"Aubergine Bake", "Breadfruit Curry", "Carrot Ribbons"} {
+		if slices.Contains(excludedNames(r), ok) {
+			t.Errorf("%s was excluded but carries no allergen (an exception word at most): %+v", ok, r.Excluded)
+			continue
+		}
+		if !slices.Contains(suggested(r), ok) {
+			t.Errorf("%s is neither suggested nor excluded: suggested=%v excluded=%+v", ok, suggested(r), r.Excluded)
+		}
+	}
+	if r.ExcludedTotal != len(cases) {
+		t.Errorf("excluded_total = %d, want %d: %+v", r.ExcludedTotal, len(cases), r.Excluded)
+	}
+	if len(r.Checks) != 0 {
+		t.Errorf("checks = %v, want none: every allergy here is readable", r.Checks)
 	}
 	reasons := map[string]string{}
 	for _, e := range r.Excluded {
 		reasons[e.Name] = e.Reason
 	}
-	// The warning names the person, the allergen as saved, and the ingredient
-	// text that matched (the compound word, not the whole line).
-	for name, want := range map[string]string{
-		"Blackened Catfish": "Nora (fish): catfish fillets",
-		"Cornbread":         "Leo (corn): cornmeal",
-		"Cheesecake":        "Ada (dairy): cream cheese",
-	} {
-		if !strings.Contains(reasons[name], want) {
-			t.Errorf("%s reason %q lacks %q", name, reasons[name], want)
+	// The warning names the person, the allergen as saved, and the text that
+	// matched: the compound word, not the whole ingredient line.
+	for _, c := range cases {
+		if !strings.Contains(reasons[c.recipe], c.reason) {
+			t.Errorf("%s reason %q lacks %q", c.recipe, reasons[c.recipe], c.reason)
 		}
 	}
 }
