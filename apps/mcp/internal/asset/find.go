@@ -104,6 +104,11 @@ func NewAssetFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			page = append(page, r.data(today))
 		}
 		next := findNext(in, page)
+		if len(page) == 1 && total == 1 {
+			if h := guideHint(ctx, pool, page[0].ID); h != "" {
+				next = append(next, h)
+			}
+		}
 		return respond.List(findSummary(in, page, total), page, respond.Page{
 			Total:      total - in.offset,
 			NextCursor: respond.CursorAfter(end, total),

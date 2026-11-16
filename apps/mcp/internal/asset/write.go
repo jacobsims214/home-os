@@ -343,7 +343,11 @@ func NewAssetCreateTool(pool *pgxpool.Pool, idx searchIndexer) (string, mcp.Tool
 		indexAsset(idx, r)
 
 		d := r.data(today)
-		return respond.OK(fmt.Sprintf("Added %s.", d.describe()), d, createNext(d)...), nil
+		next := createNext(d)
+		if h := createGuideHint(ctx, pool, d.ID); h != "" {
+			next = append(next, h)
+		}
+		return respond.OK(fmt.Sprintf("Added %s.", d.describe()), d, next...), nil
 	}
 	return "asset_create", tool, handler
 }

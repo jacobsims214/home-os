@@ -103,7 +103,11 @@ func NewMaintenanceFindTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) 
 				return respond.Failed("load the task", err), nil
 			}
 			d := r.data(today, loc)
-			return respond.List(fmt.Sprintf("Found upkeep task %q%s.", r.Name, r.about()), []taskData{d}, respond.Page{}, taskHints(d)...), nil
+			next := taskHints(d)
+			if h := guideHint(ctx, pool, claims, d); h != "" {
+				next = append(next, h)
+			}
+			return respond.List(fmt.Sprintf("Found upkeep task %q%s.", r.Name, r.about()), []taskData{d}, respond.Page{}, next...), nil
 		}
 
 		status := strings.ToLower(str(args, "status"))
@@ -207,6 +211,11 @@ func NewMaintenanceFindTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) 
 		var next []string
 		if len(items) > 0 {
 			next = taskHints(items[0])
+			if total == 1 && len(items) == 1 {
+				if h := guideHint(ctx, pool, claims, items[0]); h != "" {
+					next = append(next, h)
+				}
+			}
 		}
 		// respond marks a list truncated whenever Total exceeds the items, so
 		// the last page passes no Total (the summary still gives it).
