@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/billcal"
 )
 
 // Repo provides read/write access to the bills table using a pgx connection pool.
@@ -134,6 +136,12 @@ func (r *Repo) Create(ctx context.Context, b *Bill) (*Bill, error) {
 		return nil, fmt.Errorf("create bill: insert: %w", err)
 	}
 
+	// Mirror the bill onto the household's Bills calendar, as the MCP
+	// bill_create does (#4716).
+	if _, err := billcal.SyncByID(ctx, tx, created.HouseholdID.String(), created.ID.String()); err != nil {
+		return nil, fmt.Errorf("create bill: %w", err)
+	}
+
 	payload, err := json.Marshal(billEventPayload{ID: created.ID.String(), Name: created.Name})
 	if err != nil {
 		return nil, fmt.Errorf("create bill: marshal payload: %w", err)
@@ -194,6 +202,12 @@ func (r *Repo) Update(ctx context.Context, b *Bill) (*Bill, error) {
 		return nil, fmt.Errorf("update bill: %w", err)
 	}
 
+	// Keep the bill's Bills-calendar event in step (#4716); unchanged when
+	// only fields the event doesn't show changed.
+	if _, err := billcal.SyncByID(ctx, tx, updated.HouseholdID.String(), updated.ID.String()); err != nil {
+		return nil, fmt.Errorf("update bill: %w", err)
+	}
+
 	payload, err := json.Marshal(billEventPayload{ID: updated.ID.String(), Name: updated.Name})
 	if err != nil {
 		return nil, fmt.Errorf("update bill: marshal payload: %w", err)
@@ -222,6 +236,13 @@ func (r *Repo) Delete(ctx context.Context, id, householdID uuid.UUID) error {
 		return fmt.Errorf("delete bill: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
+	// The mirror event goes first: the 038 rehome trigger would only unlink
+	// it from the deleted bill, leaving it on phones. Rolled back with the
+	// transaction when the bill is not found.
+	if _, err := billcal.Delete(ctx, tx, householdID.String(), id.String()); err != nil {
+		return fmt.Errorf("delete bill: %w", err)
+	}
 
 	tag, err := tx.Exec(ctx,
 		`DELETE FROM bills WHERE id = $1 AND household_id = $2`,

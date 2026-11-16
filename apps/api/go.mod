@@ -14,6 +14,7 @@ require (
 	golang.org/x/crypto v0.52.0
 	golang.org/x/time v0.12.0
 	google.golang.org/grpc v1.76.0
+	home-os/billcal v0.0.0
 	home-os/icalx v0.0.0
 )
 
@@ -44,6 +45,8 @@ require (
 
 exclude google.golang.org/genproto v0.0.0-20211208223120-3a66f561d7aa
 
-// Local module (also listed in go.work). The replace lets the Docker build
+// Local modules (also listed in go.work). The replaces let the Docker build
 // (GOWORK=off, repository-root context) resolve it without the workspace.
 replace home-os/icalx => ../../packages/icalx
+
+replace home-os/billcal => ../../packages/billcal

@@ -41,6 +41,8 @@ jobs:
             typesense_tests: "TestDocumentSemanticSearch|TestGuideFindByMeaning"
           - module: apps/worker
             parallel: ""
+          - module: packages/billcal
+            parallel: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

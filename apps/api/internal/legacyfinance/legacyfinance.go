@@ -35,6 +35,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"home-os/billcal"
 )
 
 // Querier is what the write helpers need: a pgx.Tx in practice, so the
@@ -495,19 +497,20 @@ func ApplyBill(ctx context.Context, q Querier, s Subject, k BillKind, f BillFiel
 		}
 		// The new bill's frequency is k.Frequency, so its amount is the
 		// old value converted from InputPeriods to that frequency.
-		_, err = q.Exec(ctx,
+		err = q.QueryRow(ctx,
 			fmt.Sprintf(`INSERT INTO bills (household_id, name, amount, category, frequency, due_date,
 			                    `+s.Col+`, vendor_id, notes)
 			 VALUES ($1, $2, round($3::numeric * $4::numeric / %s, 2), $5, $6,
 			         CASE WHEN $7::int IS NOT NULL THEN `+fmt.Sprintf(nextMonthStartSQL, "$7")+` END,
-			         $8, $9, $10)`, periodsSQL("$6::text")),
+			         $8, $9, $10)
+			 RETURNING id`, periodsSQL("$6::text")),
 			s.HouseholdID, joinName(s.Name, k.NameSuffix), f.Amount, k.InputPeriods, k.Category, k.Frequency,
 			m, s.ID, vendorID, newNotes,
-		)
+		).Scan(&id)
 		if err != nil {
 			return fmt.Errorf("create %s bill: %w", k.NameSuffix, err)
 		}
-		return nil
+		return syncBillEvent(ctx, q, s.HouseholdID, id, k)
 	}
 	if err != nil {
 		return fmt.Errorf("find %s bill: %w", k.NameSuffix, err)
@@ -548,6 +551,16 @@ func ApplyBill(ctx context.Context, q Querier, s Subject, k BillKind, f BillFiel
 	)
 	if err != nil {
 		return fmt.Errorf("update %s bill: %w", k.NameSuffix, err)
+	}
+	return syncBillEvent(ctx, q, s.HouseholdID, id, k)
+}
+
+// syncBillEvent keeps the bill's Bills-calendar event in step with a bill
+// written here, as the bill endpoints and the MCP bill tools do (#4716). A
+// bill without a due date (no due month given) has no event.
+func syncBillEvent(ctx context.Context, q Querier, householdID, billID uuid.UUID, k BillKind) error {
+	if _, err := billcal.SyncByID(ctx, q, householdID.String(), billID.String()); err != nil {
+		return fmt.Errorf("%s bill calendar event: %w", k.NameSuffix, err)
 	}
 	return nil
 }

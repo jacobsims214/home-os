@@ -5,13 +5,17 @@ import (
 	"testing"
 	"time"
 
+	"home-os/billcal"
 	"home-os/icalx"
 )
 
-// TestBillRuleMatchesDueRule checks that the RRULE written to the Bills
-// calendar gives exactly the due dates of the bill rule (cadence) for six
-// years, including day 29-31 clamping and leap days, by expanding it with
-// icalx (the expander CalDAV PUT validation and the calendar tools use).
+// TestBillRuleMatchesDueRule checks that the RRULE home-os/billcal writes to
+// the Bills calendar (for the MCP, the API and the worker backfill alike)
+// gives exactly the due dates of this module's bill rule (cadence) for six
+// years, for every frequency, including day 29-31 clamping and leap days, by
+// expanding it with icalx (the expander CalDAV PUT validation and the
+// calendar tools use). This is what proves the shared RRULE and the due rule
+// identical.
 func TestBillRuleMatchesDueRule(t *testing.T) {
 	d := func(s string) *time.Time {
 		v, err := time.Parse(time.DateOnly, s)
@@ -47,12 +51,12 @@ func TestBillRuleMatchesDueRule(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			start, rule, ok := billRule(tt.s, created)
+			start, rule, ok := billcal.Rule(tt.s.Frequency, tt.s.DueDay, tt.s.DueDate, created)
 			if !ok {
-				t.Fatal("billRule not ok")
+				t.Fatal("billcal.Rule not ok")
 			}
 			if rule != tt.wantRule || start.Format(time.DateOnly) != tt.wantStart {
-				t.Fatalf("billRule = %s %q, want %s %q", start.Format(time.DateOnly), rule, tt.wantStart, tt.wantRule)
+				t.Fatalf("billcal.Rule = %s %q, want %s %q", start.Format(time.DateOnly), rule, tt.wantStart, tt.wantRule)
 			}
 
 			// The due rule's dates from the series start for six years.
@@ -64,9 +68,9 @@ func TestBillRuleMatchesDueRule(t *testing.T) {
 			}
 
 			r := billRow{Name: "Power", Frequency: tt.s.Frequency, DueDay: tt.s.DueDay, DueDate: tt.s.DueDate, CreatedAt: created}
-			m, ok := billMaster(r, "uid-1", 0)
+			m, ok := billcal.Master(calendarBill(r), "uid-1", 0)
 			if !ok {
-				t.Fatal("billMaster not ok")
+				t.Fatal("billcal.Master not ok")
 			}
 			obj := &icalx.Object{UID: m.UID, Master: m}
 			if err := obj.Validate(); err != nil {
@@ -88,69 +92,12 @@ func TestBillRuleMatchesDueRule(t *testing.T) {
 
 	t.Run("unusable schedules give no event", func(t *testing.T) {
 		for _, s := range []Schedule{{Frequency: FrequencyMonthly}, {Frequency: FrequencyAnnual}, {Frequency: "weekly", DueDay: day(3)}} {
-			if _, _, ok := billRule(s, created); ok {
-				t.Errorf("billRule(%+v) ok", s)
+			if _, _, ok := billcal.Rule(s.Frequency, s.DueDay, s.DueDate, created); ok {
+				t.Errorf("billcal.Rule(%+v) ok", s)
 			}
-			if _, ok := billMaster(billRow{Name: "X", Frequency: s.Frequency, DueDay: s.DueDay, DueDate: s.DueDate}, "u", 0); ok {
-				t.Errorf("billMaster(%+v) ok", s)
+			if _, ok := billcal.Master(calendarBill(billRow{Name: "X", Frequency: s.Frequency, DueDay: s.DueDay, DueDate: s.DueDate}), "u", 0); ok {
+				t.Errorf("billcal.Master(%+v) ok", s)
 			}
 		}
 	})
-}
-
-// TestBillEventEncoding checks the stored views of a mirror event: an
-// all-day VEVENT with the RRULE and one VALARM 3 days before at 9:00, no
-// attendees, and JSON whose times match the raw.
-func TestBillEventEncoding(t *testing.T) {
-	amount, cat := 142.5, "Utilities"
-	r := billRow{Name: "Electric", Amount: &amount, Category: &cat, AutoPay: true,
-		Frequency: FrequencyMonthly, DueDay: func() *int { n := 31; return &n }(),
-		CreatedAt: time.Date(2027, time.February, 3, 0, 0, 0, 0, time.UTC)}
-	m, ok := billMaster(r, "uid-e", 2)
-	if !ok {
-		t.Fatal("no master")
-	}
-	data, raw, rule, err := encodeBillEvent(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rule == nil || *rule != "FREQ=MONTHLY;BYMONTHDAY=-1" {
-		t.Errorf("rrule = %v", rule)
-	}
-	for _, want := range []string{"DTSTART;VALUE=DATE:20270228", "DTEND;VALUE=DATE:20270301", "RRULE:FREQ=MONTHLY;BYMONTHDAY=-1",
-		"BEGIN:VALARM", "TRIGGER:-P2DT15H", "SUMMARY:Electric due", "SEQUENCE:2"} {
-		if !strings.Contains(raw, want) {
-			t.Errorf("raw lacks %q:\n%s", want, raw)
-		}
-	}
-	if strings.Contains(raw, "ATTENDEE") || strings.Contains(strings.ToLower(raw), "mailto") {
-		t.Errorf("raw has attendees:\n%s", raw)
-	}
-	wantJSON := `"start":"2027-02-28T00:00:00Z"`
-	if !strings.Contains(data, wantJSON) || !strings.Contains(data, `"all_day":true`) || !strings.Contains(data, `"sequence":2`) ||
-		!strings.Contains(data, `"event_type":"bill"`) {
-		t.Errorf("json = %s", data)
-	}
-	obj, err := icalx.Parse([]byte(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := obj.Master.Description; !strings.Contains(got, "Amount: $142.50") || !strings.Contains(got, "Category: Utilities") ||
-		!strings.Contains(got, "autopay") {
-		t.Errorf("description = %q", got)
-	}
-	if len(obj.Master.Alarms) != 1 || obj.Master.Alarms[0].Trigger != -63*time.Hour {
-		t.Errorf("alarms = %+v", obj.Master.Alarms)
-	}
-
-	once := billRow{Name: "Registration", Frequency: FrequencyOnce,
-		DueDate: func() *time.Time { v := time.Date(2027, 5, 1, 0, 0, 0, 0, time.UTC); return &v }()}
-	m, _ = billMaster(once, "uid-o", 0)
-	_, raw, rule, err = encodeBillEvent(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rule != nil || strings.Contains(raw, "RRULE") || !strings.Contains(raw, "DTSTART;VALUE=DATE:20270501") {
-		t.Errorf("once bill: rrule %v raw\n%s", rule, raw)
-	}
 }

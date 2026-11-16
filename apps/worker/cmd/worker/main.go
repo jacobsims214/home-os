@@ -16,6 +16,7 @@ import (
 
 	"home-os/api/pkg/smtp"
 	"home-os/worker/internal/alarms"
+	"home-os/worker/internal/billmirror"
 	"home-os/worker/internal/config"
 	"home-os/worker/internal/fileprocessor"
 	"home-os/worker/internal/files"
@@ -80,8 +81,12 @@ func main() {
 	// notifications, one per household member per firing (deduped in DB).
 	alarmJob := alarms.New(pool)
 
+	// Bills calendar backfill (#4716): bills with no mirror event on the
+	// Bills calendar get one, at startup and then hourly. Idempotent.
+	billMirrorJob := billmirror.New(pool, billmirror.DefaultInterval)
+
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		runNotificationLoop(ctx, pool, smtpClient, cfg.PollInterval)
@@ -96,6 +101,12 @@ func main() {
 		defer wg.Done()
 		if err := alarmJob.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("alarm job exited", "error", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := billMirrorJob.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("bill calendar backfill exited", "error", err)
 		}
 	}()
 

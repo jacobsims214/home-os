@@ -5,5 +5,6 @@ use (
 	./apps/calendar
 	./apps/mcp
 	./apps/worker
+	./packages/billcal
 	./packages/icalx
 )

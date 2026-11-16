@@ -151,6 +151,7 @@ services:
     volumes:
       - ../apps/api:/src/apps/api
       - ../packages/icalx:/src/packages/icalx
+      - ../packages/billcal:/src/packages/billcal
       - api_gopath:/go/pkg/mod
     working_dir: /src/apps/api
     environment:
@@ -213,6 +214,7 @@ services:
       - ../apps/worker:/src/apps/worker
       - ../apps/api:/src/apps/api
       - ../packages/icalx:/src/packages/icalx
+      - ../packages/billcal:/src/packages/billcal
       - worker_gopath:/go/pkg/mod
     working_dir: /src/apps/worker
     environment:

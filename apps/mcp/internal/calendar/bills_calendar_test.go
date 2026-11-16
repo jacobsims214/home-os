@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/billcal"
 	"home-os/mcp/internal/bill"
 )
 
@@ -132,6 +133,32 @@ func TestBillsMirroredOnBillsCalendar(t *testing.T) {
 		}
 		if ctag(t, env.pool, bills) == before {
 			t.Error("Bills ctag not bumped")
+		}
+	})
+
+	t.Run("the API's and the backfill's writer see the MCP event as current", func(t *testing.T) {
+		// The API bill endpoints, legacyfinance and the worker backfill
+		// load the bill from the table (billcal.SyncByID) instead of the
+		// tool's row: the event they would write is the one bill_create
+		// wrote, so syncing again changes nothing (#4716).
+		ctx := context.Background()
+		tx, err := env.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+		ch, err := billcal.SyncByID(ctx, tx, env.household.String(), electric)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ch.Action != billcal.ActionNone || ch.EventID != ev.id {
+			t.Errorf("SyncByID after bill_create = %+v, want no change to %s", ch, ev.id)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := billcal.Backfill(ctx, env.pool); err != nil || n != 0 {
+			t.Errorf("Backfill after bill_create created %d (err %v), want 0", n, err)
 		}
 	})
 
