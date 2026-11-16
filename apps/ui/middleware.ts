@@ -28,7 +28,7 @@ export const PUBLIC_PREFIXES = [
   "/reset-password",
   "/invite", // invite accept page
   "/onboarding",
-  "/api/auth", // OIDC login start + callback, session restore/logout
+  "/api/auth", // OIDC login start + callback, logout
 ];
 
 // Paths the guard never redirects:

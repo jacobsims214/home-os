@@ -113,9 +113,20 @@ test("a household set up before migration 051 unlocks with the same password and
   expect(await vault(page)).toMatchObject({ set_up: true, legacy: false, upgraded: true });
 });
 
-test("entity Secrets tab: probe offers setup, then unlock after a reload", async ({ loggedInPage: page }) => {
-  await page.goto("/dashboard/properties/p1");
+// On phones the resource tabs sit in the collapsed "Resources" section of the
+// stacked detail layout (#4531); expand it first.
+async function openSecretsTab(page: Page, isMobile: boolean) {
+  if (isMobile) {
+    const resources = page.getByRole("main").getByRole("button", { name: /^Resources/ });
+    await expect(resources).toHaveAttribute("aria-expanded", "false");
+    await resources.click();
+  }
   await page.getByRole("tab", { name: "Secrets" }).click();
+}
+
+test("entity Secrets tab: probe offers setup, then unlock after a reload", async ({ loggedInPage: page, isMobile }) => {
+  await page.goto("/dashboard/properties/p1");
+  await openSecretsTab(page, isMobile);
 
   const probe = page.waitForRequest(isSecrets("key", "GET"));
   await page.getByRole("button", { name: "Unlock Secrets" }).click();
@@ -128,7 +139,7 @@ test("entity Secrets tab: probe offers setup, then unlock after a reload", async
 
   // The key lives only in memory: a reload locks the vault again.
   await page.reload();
-  await page.getByRole("tab", { name: "Secrets" }).click();
+  await openSecretsTab(page, isMobile);
   await page.getByRole("button", { name: "Unlock Secrets" }).click();
   const unlock = page.getByRole("dialog", { name: "Enter your master password" });
   await unlock.getByLabel("Master password").fill(PASSWORD);
