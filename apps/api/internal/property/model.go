@@ -25,21 +25,27 @@ type Property struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 
 	// Financial fields. All nullable — use *string.
-	PurchasePrice          *string `json:"purchase_price"`
-	PurchaseDate           *string `json:"purchase_date"`
-	CurrentValue           *string `json:"current_value"`
-	DownPayment            *string `json:"down_payment"`
-	MortgageAmount         *string `json:"mortgage_amount"`
-	MortgageRate           *string `json:"mortgage_rate"`
-	MortgageTermMonths     *string `json:"mortgage_term_months"`
-	MortgageStartDate      *string `json:"mortgage_start_date"`
-	MortgageLender         *string `json:"mortgage_lender"`
-	MortgageAccountNumber  *string `json:"mortgage_account_number"`
-	PropertyTaxAnnual      *string `json:"property_tax_annual"`
-	PropertyTaxDueMonths   *string `json:"property_tax_due_months"`
-	InsuranceAnnual        *string `json:"insurance_annual"`
-	InsuranceProvider      *string `json:"insurance_provider"`
-	HOAFeeMonthly          *string `json:"hoa_fee_monthly"`
+	PurchasePrice *string `json:"purchase_price"`
+	PurchaseDate  *string `json:"purchase_date"`
+	CurrentValue  *string `json:"current_value"`
+	DownPayment   *string `json:"down_payment"`
+
+	// Legacy finance fields (#4704). They are NOT columns of properties any
+	// more as far as the API is concerned: each one is derived from the
+	// property's loan or bills (typed property_id, same family) by
+	// selectProperty, and written there by legacyfinance.Apply*. See
+	// KB apis/property-vehicle-finance.md for the mapping.
+	MortgageAmount        *string `json:"mortgage_amount"`         // loan.original_amount
+	MortgageRate          *string `json:"mortgage_rate"`           // loan.interest_rate
+	MortgageTermMonths    *string `json:"mortgage_term_months"`    // loan.term_months
+	MortgageStartDate     *string `json:"mortgage_start_date"`     // loan.start_date
+	MortgageLender        *string `json:"mortgage_lender"`         // loan.lender
+	MortgageAccountNumber *string `json:"mortgage_account_number"` // loan.account_number
+	PropertyTaxAnnual     *string `json:"property_tax_annual"`     // tax bill amount, per year
+	PropertyTaxDueMonths  *string `json:"property_tax_due_months"` // tax bill due_date month / notes
+	InsuranceAnnual       *string `json:"insurance_annual"`        // insurance bill amount, per year
+	InsuranceProvider     *string `json:"insurance_provider"`      // insurance bill vendor
+	HOAFeeMonthly         *string `json:"hoa_fee_monthly"`         // HOA bill amount, per month
 }
 
 // Room represents a room within a property from the rooms table.

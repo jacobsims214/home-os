@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/legacyfinance"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
@@ -37,14 +39,30 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexVehicle(ctx context.Context, v *Vehicle) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("vehicle: panic during search indexing", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("vehicle: panic during search indexing", "panic", r)
+		}
+	}()
 	body := ""
-	if v.Make != nil { body = *v.Make }
-	if v.Model != nil { body += " " + *v.Model }
-	if v.VIN != nil { body += " " + *v.VIN }
-	if v.LicensePlate != nil { body += " " + *v.LicensePlate }
-	if v.Color != nil { body += " " + *v.Color }
+	if v.Make != nil {
+		body = *v.Make
+	}
+	if v.Model != nil {
+		body += " " + *v.Model
+	}
+	if v.VIN != nil {
+		body += " " + *v.VIN
+	}
+	if v.LicensePlate != nil {
+		body += " " + *v.LicensePlate
+	}
+	if v.Color != nil {
+		body += " " + *v.Color
+	}
 	doc := search.SearchDocument{
 		ID: "vehicle-" + v.ID.String(), HouseholdID: v.HouseholdID.String(),
 		EntityType: "vehicle", EntityID: v.ID.String(),
@@ -57,8 +75,14 @@ func (h *Handler) indexVehicle(ctx context.Context, v *Vehicle) {
 }
 
 func (h *Handler) deleteVehicleIndex(ctx context.Context, id string) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("vehicle: panic during search deletion", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("vehicle: panic during search deletion", "panic", r)
+		}
+	}()
 	if err := h.search.DeleteDocument(context.Background(), "vehicle-"+id); err != nil {
 		slog.Warn("vehicle: failed to delete from search", "id", id, "error", err)
 	}
@@ -66,97 +90,145 @@ func (h *Handler) deleteVehicleIndex(ctx context.Context, id string) {
 
 // --- request / response types ---
 
+// legacyFields are the old vehicle finance fields (#4704). They are accepted
+// on create and update because the UI still sends them, and applied to the
+// vehicle's loan and bills; they are never stored on the vehicle row.
+type legacyFields struct {
+	LoanAmount               *string `json:"loan_amount"`
+	InsuranceCost            *string `json:"insurance_cost"`
+	RegistrationCost         *string `json:"registration_cost"`
+	Lender                   *string `json:"lender"`
+	LoanTermMonths           *int    `json:"loan_term_months"`
+	MonthlyPayment           *string `json:"monthly_payment"`
+	RegistrationRenewalMonth *int    `json:"registration_renewal_month"`
+	InsuranceProvider        *string `json:"insurance_provider"`
+}
+
+// legacyFinance parses the old fields. Each one is a partial update of the
+// vehicle's loan or bill (KB apis/property-vehicle-finance.md): absent, null,
+// "" or 0 leaves the stored value alone.
+func legacyFinance(l legacyFields) (Finance, error) {
+	var f Finance
+	var err error
+	if f.Loan.OriginalAmount, err = legacyfinance.Amount("loan_amount", l.LoanAmount); err != nil {
+		return f, err
+	}
+	if f.Loan.MonthlyPayment, err = legacyfinance.Amount("monthly_payment", l.MonthlyPayment); err != nil {
+		return f, err
+	}
+	if f.Loan.TermMonths, err = legacyfinance.PositiveInt("loan_term_months", l.LoanTermMonths); err != nil {
+		return f, err
+	}
+	f.Loan.Lender = legacyfinance.Text(l.Lender)
+
+	if f.Registration.Amount, err = legacyfinance.Amount("registration_cost", l.RegistrationCost); err != nil {
+		return f, err
+	}
+	month, err := legacyfinance.PositiveInt("registration_renewal_month", l.RegistrationRenewalMonth)
+	if err != nil {
+		return f, err
+	}
+	if month != nil {
+		if *month > 12 {
+			return f, &legacyfinance.InvalidError{Field: "registration_renewal_month", Reason: "must be a month 1-12"}
+		}
+		m := strconv.Itoa(*month)
+		f.Registration.DueMonths = &m
+	}
+	if f.Insurance.Amount, err = legacyfinance.Amount("insurance_cost", l.InsuranceCost); err != nil {
+		return f, err
+	}
+	f.Insurance.Provider = legacyfinance.Text(l.InsuranceProvider)
+	return f, nil
+}
+
+// writeError reports a create/update error: a bad legacy field is 400,
+// database constraint errors go through apierr.DB.
+func writeError(w http.ResponseWriter, err error) {
+	if ie, ok := legacyfinance.IsInvalid(err); ok {
+		apierr.BadRequest(w, ie.Error())
+		return
+	}
+	apierr.DB(w, err)
+}
+
 type createVehicleRequest struct {
-	Year                   *int    `json:"year"`
-	Make                   *string `json:"make"`
-	Model                  *string `json:"model"`
-	VIN                    *string `json:"vin"`
-	LicensePlate           *string `json:"license_plate"`
-	Color                  *string `json:"color"`
-	Notes                  *string `json:"notes"`
-	PurchasePrice          *string `json:"purchase_price"`
-	PurchaseDate           *string `json:"purchase_date"`
-	CurrentValue           *string `json:"current_value"`
-	LoanAmount             *string `json:"loan_amount"`
-	InsuranceCost          *string `json:"insurance_cost"`
-	RegistrationCost       *string `json:"registration_cost"`
-	Lender                 *string `json:"lender"`
-	LoanTermMonths         *int    `json:"loan_term_months"`
-	MonthlyPayment         *string `json:"monthly_payment"`
-	RegistrationRenewalMonth *int  `json:"registration_renewal_month"`
-	InsuranceProvider      *string `json:"insurance_provider"`
+	Year          *int    `json:"year"`
+	Make          *string `json:"make"`
+	Model         *string `json:"model"`
+	VIN           *string `json:"vin"`
+	LicensePlate  *string `json:"license_plate"`
+	Color         *string `json:"color"`
+	Notes         *string `json:"notes"`
+	PurchasePrice *string `json:"purchase_price"`
+	PurchaseDate  *string `json:"purchase_date"`
+	CurrentValue  *string `json:"current_value"`
+	legacyFields
 }
 
 type updateVehicleRequest struct {
-	Year                   *int    `json:"year"`
-	Make                   *string `json:"make"`
-	Model                  *string `json:"model"`
-	VIN                    *string `json:"vin"`
-	LicensePlate           *string `json:"license_plate"`
-	Color                  *string `json:"color"`
-	Notes                  *string `json:"notes"`
-	PurchasePrice          *string `json:"purchase_price"`
-	PurchaseDate           *string `json:"purchase_date"`
-	CurrentValue           *string `json:"current_value"`
-	LoanAmount             *string `json:"loan_amount"`
-	InsuranceCost          *string `json:"insurance_cost"`
-	RegistrationCost       *string `json:"registration_cost"`
-	Lender                 *string `json:"lender"`
-	LoanTermMonths         *int    `json:"loan_term_months"`
-	MonthlyPayment         *string `json:"monthly_payment"`
-	RegistrationRenewalMonth *int  `json:"registration_renewal_month"`
-	InsuranceProvider      *string `json:"insurance_provider"`
+	Year          *int    `json:"year"`
+	Make          *string `json:"make"`
+	Model         *string `json:"model"`
+	VIN           *string `json:"vin"`
+	LicensePlate  *string `json:"license_plate"`
+	Color         *string `json:"color"`
+	Notes         *string `json:"notes"`
+	PurchasePrice *string `json:"purchase_price"`
+	PurchaseDate  *string `json:"purchase_date"`
+	CurrentValue  *string `json:"current_value"`
+	legacyFields
 }
 
 type vehicleResponse struct {
-	ID                     string  `json:"id"`
-	HouseholdID            string  `json:"household_id"`
-	Year                   *int    `json:"year,omitempty"`
-	Make                   *string `json:"make,omitempty"`
-	Model                  *string `json:"model,omitempty"`
-	VIN                    *string `json:"vin,omitempty"`
-	LicensePlate           *string `json:"license_plate,omitempty"`
-	Color                  *string `json:"color,omitempty"`
-	Notes                  *string `json:"notes,omitempty"`
-	PurchasePrice          *string `json:"purchase_price"`
-	PurchaseDate           *string `json:"purchase_date"`
-	CurrentValue           *string `json:"current_value"`
-	LoanAmount             *string `json:"loan_amount"`
-	InsuranceCost          *string `json:"insurance_cost"`
-	RegistrationCost       *string `json:"registration_cost"`
-	Lender                 *string `json:"lender"`
-	LoanTermMonths         *int    `json:"loan_term_months"`
-	MonthlyPayment         *string `json:"monthly_payment"`
-	RegistrationRenewalMonth *int  `json:"registration_renewal_month"`
-	InsuranceProvider      *string `json:"insurance_provider"`
-	CreatedAt              string  `json:"created_at"`
-	UpdatedAt              string  `json:"updated_at"`
+	ID                       string  `json:"id"`
+	HouseholdID              string  `json:"household_id"`
+	Year                     *int    `json:"year,omitempty"`
+	Make                     *string `json:"make,omitempty"`
+	Model                    *string `json:"model,omitempty"`
+	VIN                      *string `json:"vin,omitempty"`
+	LicensePlate             *string `json:"license_plate,omitempty"`
+	Color                    *string `json:"color,omitempty"`
+	Notes                    *string `json:"notes,omitempty"`
+	PurchasePrice            *string `json:"purchase_price"`
+	PurchaseDate             *string `json:"purchase_date"`
+	CurrentValue             *string `json:"current_value"`
+	LoanAmount               *string `json:"loan_amount"`
+	InsuranceCost            *string `json:"insurance_cost"`
+	RegistrationCost         *string `json:"registration_cost"`
+	Lender                   *string `json:"lender"`
+	LoanTermMonths           *int    `json:"loan_term_months"`
+	MonthlyPayment           *string `json:"monthly_payment"`
+	RegistrationRenewalMonth *int    `json:"registration_renewal_month"`
+	InsuranceProvider        *string `json:"insurance_provider"`
+	CreatedAt                string  `json:"created_at"`
+	UpdatedAt                string  `json:"updated_at"`
 }
 
 func toVehicleResponse(v *Vehicle) vehicleResponse {
 	return vehicleResponse{
-		ID:                     v.ID.String(),
-		HouseholdID:            v.HouseholdID.String(),
-		Year:                   v.Year,
-		Make:                   v.Make,
-		Model:                  v.Model,
-		VIN:                    v.VIN,
-		LicensePlate:           v.LicensePlate,
-		Color:                  v.Color,
-		Notes:                  v.Notes,
-		PurchasePrice:          v.PurchasePrice,
-		PurchaseDate:           v.PurchaseDate,
-		CurrentValue:           v.CurrentValue,
-		LoanAmount:             v.LoanAmount,
-		InsuranceCost:          v.InsuranceCost,
-		RegistrationCost:       v.RegistrationCost,
-		Lender:                 v.Lender,
-		LoanTermMonths:         v.LoanTermMonths,
-		MonthlyPayment:         v.MonthlyPayment,
+		ID:                       v.ID.String(),
+		HouseholdID:              v.HouseholdID.String(),
+		Year:                     v.Year,
+		Make:                     v.Make,
+		Model:                    v.Model,
+		VIN:                      v.VIN,
+		LicensePlate:             v.LicensePlate,
+		Color:                    v.Color,
+		Notes:                    v.Notes,
+		PurchasePrice:            v.PurchasePrice,
+		PurchaseDate:             v.PurchaseDate,
+		CurrentValue:             v.CurrentValue,
+		LoanAmount:               v.LoanAmount,
+		InsuranceCost:            v.InsuranceCost,
+		RegistrationCost:         v.RegistrationCost,
+		Lender:                   v.Lender,
+		LoanTermMonths:           v.LoanTermMonths,
+		MonthlyPayment:           v.MonthlyPayment,
 		RegistrationRenewalMonth: v.RegistrationRenewalMonth,
-		InsuranceProvider:      v.InsuranceProvider,
-		CreatedAt:              v.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:              v.UpdatedAt.Format(time.RFC3339),
+		InsuranceProvider:        v.InsuranceProvider,
+		CreatedAt:                v.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:                v.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -243,30 +315,26 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	v := &Vehicle{
-		Year:                   req.Year,
-		Make:                   req.Make,
-		Model:                  req.Model,
-		VIN:                    req.VIN,
-		LicensePlate:           req.LicensePlate,
-		Color:                  req.Color,
-		Notes:                  req.Notes,
-		PurchasePrice:          req.PurchasePrice,
-		PurchaseDate:           req.PurchaseDate,
-		CurrentValue:           req.CurrentValue,
-		LoanAmount:             req.LoanAmount,
-		InsuranceCost:          req.InsuranceCost,
-		RegistrationCost:       req.RegistrationCost,
-		Lender:                 req.Lender,
-		LoanTermMonths:         req.LoanTermMonths,
-		MonthlyPayment:         req.MonthlyPayment,
-		RegistrationRenewalMonth: req.RegistrationRenewalMonth,
-		InsuranceProvider:      req.InsuranceProvider,
+		Year:          req.Year,
+		Make:          req.Make,
+		Model:         req.Model,
+		VIN:           req.VIN,
+		LicensePlate:  req.LicensePlate,
+		Color:         req.Color,
+		Notes:         req.Notes,
+		PurchasePrice: req.PurchasePrice,
+		PurchaseDate:  req.PurchaseDate,
+		CurrentValue:  req.CurrentValue,
+	}
+	fin, err := legacyFinance(req.legacyFields)
+	if err != nil {
+		writeError(w, err)
+		return
 	}
 
-	created, err := h.repo.Create(r.Context(), hid, v)
-
+	created, err := h.repo.Create(r.Context(), hid, v, fin)
 	if err != nil {
-		apierr.InternalError(w, err)
+		writeError(w, err)
 		return
 	}
 
@@ -299,29 +367,26 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	v := &Vehicle{
-		Year:                   req.Year,
-		Make:                   req.Make,
-		Model:                  req.Model,
-		VIN:                    req.VIN,
-		LicensePlate:           req.LicensePlate,
-		Color:                  req.Color,
-		Notes:                  req.Notes,
-		PurchasePrice:          req.PurchasePrice,
-		PurchaseDate:           req.PurchaseDate,
-		CurrentValue:           req.CurrentValue,
-		LoanAmount:             req.LoanAmount,
-		InsuranceCost:          req.InsuranceCost,
-		RegistrationCost:       req.RegistrationCost,
-		Lender:                 req.Lender,
-		LoanTermMonths:         req.LoanTermMonths,
-		MonthlyPayment:         req.MonthlyPayment,
-		RegistrationRenewalMonth: req.RegistrationRenewalMonth,
-		InsuranceProvider:      req.InsuranceProvider,
+		Year:          req.Year,
+		Make:          req.Make,
+		Model:         req.Model,
+		VIN:           req.VIN,
+		LicensePlate:  req.LicensePlate,
+		Color:         req.Color,
+		Notes:         req.Notes,
+		PurchasePrice: req.PurchasePrice,
+		PurchaseDate:  req.PurchaseDate,
+		CurrentValue:  req.CurrentValue,
+	}
+	fin, err := legacyFinance(req.legacyFields)
+	if err != nil {
+		writeError(w, err)
+		return
 	}
 
-	updated, err := h.repo.Update(r.Context(), hid, id, v)
+	updated, err := h.repo.Update(r.Context(), hid, id, v, fin)
 	if err != nil {
-		apierr.InternalError(w, err)
+		writeError(w, err)
 		return
 	}
 	if updated == nil {

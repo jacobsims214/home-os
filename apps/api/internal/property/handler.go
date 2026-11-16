@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/legacyfinance"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
@@ -37,12 +38,24 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexProperty(ctx context.Context, p *Property) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("property: panic during search indexing", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("property: panic during search indexing", "panic", r)
+		}
+	}()
 	body := ""
-	if p.Address != nil { body = *p.Address }
-	if p.PropertyType != nil { body += " " + *p.PropertyType }
-	if p.Notes != nil { body += " " + *p.Notes }
+	if p.Address != nil {
+		body = *p.Address
+	}
+	if p.PropertyType != nil {
+		body += " " + *p.PropertyType
+	}
+	if p.Notes != nil {
+		body += " " + *p.Notes
+	}
 	doc := search.SearchDocument{
 		ID: "property-" + p.ID.String(), HouseholdID: p.HouseholdID.String(),
 		EntityType: "property", EntityID: p.ID.String(),
@@ -55,8 +68,14 @@ func (h *Handler) indexProperty(ctx context.Context, p *Property) {
 }
 
 func (h *Handler) deletePropertyIndex(ctx context.Context, id string) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("property: panic during search deletion", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("property: panic during search deletion", "panic", r)
+		}
+	}()
 	if err := h.search.DeleteDocument(context.Background(), "property-"+id); err != nil {
 		slog.Warn("property: failed to delete from search", "id", id, "error", err)
 	}
@@ -65,6 +84,9 @@ func (h *Handler) deletePropertyIndex(ctx context.Context, id string) {
 // --- request / response types ---
 
 // propertyRequest is the JSON body for create and update property requests.
+// The mortgage_*, property_tax_*, insurance_* and hoa_fee_monthly fields are
+// legacy (#4704): they are applied to the property's loan and bills, never
+// stored on the property row.
 // All fields are optional except name. Nullable numeric/date fields use *string
 // to match the Property model (numeric values serialize as strings to avoid
 // float precision loss; null in JSON = NULL in DB).
@@ -90,7 +112,9 @@ type propertyRequest struct {
 	HoaFeeMonthly         *string `json:"hoa_fee_monthly"`
 }
 
-// toProperty builds a *Property from a propertyRequest, copying every field.
+// toProperty builds a *Property from a propertyRequest with the columns of
+// the properties row. The legacy finance fields are not properties columns;
+// finance() maps them onto the property's loan and bills.
 // Name is optional on update, so a nil req.Name yields "" which the repo's
 // UpdateProperty treats as "leave unchanged" via COALESCE(NULLIF(...), name).
 // CreateProperty handlers validate name is non-empty before calling this.
@@ -100,26 +124,65 @@ func (req *propertyRequest) toProperty() *Property {
 		name = *req.Name
 	}
 	return &Property{
-		Name:                  name,
-		Address:               req.Address,
-		PropertyType:          req.PropertyType,
-		Notes:                 req.Notes,
-		PurchasePrice:         req.PurchasePrice,
-		PurchaseDate:          req.PurchaseDate,
-		CurrentValue:          req.CurrentValue,
-		DownPayment:           req.DownPayment,
-		MortgageAmount:        req.MortgageAmount,
-		MortgageRate:          req.MortgageRate,
-		MortgageTermMonths:    req.MortgageTermMonths,
-		MortgageStartDate:     req.MortgageStartDate,
-		MortgageLender:        req.MortgageLender,
-		MortgageAccountNumber: req.MortgageAccountNumber,
-		PropertyTaxAnnual:     req.PropertyTaxAnnual,
-		PropertyTaxDueMonths:  req.PropertyTaxDueMonths,
-		InsuranceAnnual:       req.InsuranceAnnual,
-		InsuranceProvider:     req.InsuranceProvider,
-		HOAFeeMonthly:         req.HoaFeeMonthly,
+		Name:          name,
+		Address:       req.Address,
+		PropertyType:  req.PropertyType,
+		Notes:         req.Notes,
+		// The property edit page sends "" for a blank field; a NUMERIC/DATE
+		// column can't take "", so it means "not sent" (COALESCE keeps the
+		// value on update), the same as for the legacy fields.
+		PurchasePrice: legacyfinance.Text(req.PurchasePrice),
+		PurchaseDate:  legacyfinance.Text(req.PurchaseDate),
+		CurrentValue:  legacyfinance.Text(req.CurrentValue),
+		DownPayment:   legacyfinance.Text(req.DownPayment),
 	}
+}
+
+// finance parses the legacy finance fields (#4704). Each maps onto the
+// property's loan or bill (KB apis/property-vehicle-finance.md); absent,
+// null or "" leaves the stored value alone. A malformed value is an
+// *legacyfinance.InvalidError (400).
+func (req *propertyRequest) finance() (Finance, error) {
+	var f Finance
+	var err error
+	lf := &f.Mortgage
+	if lf.OriginalAmount, err = legacyfinance.Amount("mortgage_amount", req.MortgageAmount); err != nil {
+		return f, err
+	}
+	if lf.InterestRate, err = legacyfinance.Rate("mortgage_rate", req.MortgageRate); err != nil {
+		return f, err
+	}
+	if lf.TermMonths, err = legacyfinance.Months("mortgage_term_months", req.MortgageTermMonths); err != nil {
+		return f, err
+	}
+	if lf.StartDate, err = legacyfinance.Date("mortgage_start_date", req.MortgageStartDate); err != nil {
+		return f, err
+	}
+	lf.Lender = legacyfinance.Text(req.MortgageLender)
+	lf.AccountNumber = legacyfinance.Text(req.MortgageAccountNumber)
+
+	if f.Tax.Amount, err = legacyfinance.Amount("property_tax_annual", req.PropertyTaxAnnual); err != nil {
+		return f, err
+	}
+	f.Tax.DueMonths = legacyfinance.Text(req.PropertyTaxDueMonths)
+	if f.Insurance.Amount, err = legacyfinance.Amount("insurance_annual", req.InsuranceAnnual); err != nil {
+		return f, err
+	}
+	f.Insurance.Provider = legacyfinance.Text(req.InsuranceProvider)
+	if f.HOA.Amount, err = legacyfinance.Amount("hoa_fee_monthly", req.HoaFeeMonthly); err != nil {
+		return f, err
+	}
+	return f, nil
+}
+
+// writeError reports a create/update error: a bad legacy field is 400,
+// database constraint errors go through apierr.DB.
+func writeError(w http.ResponseWriter, err error) {
+	if ie, ok := legacyfinance.IsInvalid(err); ok {
+		apierr.BadRequest(w, ie.Error())
+		return
+	}
+	apierr.DB(w, err)
 }
 
 type propertyResponse struct {
@@ -134,6 +197,8 @@ type propertyResponse struct {
 
 	// Financial fields. Carried as *string (no omitempty) so NULL in the DB
 	// serializes as JSON null, matching the TS `string | null` type exactly.
+	// mortgage_* through hoa_fee_monthly are derived from the property's
+	// loan and bills (#4704); null when there is no such row.
 	PurchasePrice         *string `json:"purchase_price"`
 	PurchaseDate          *string `json:"purchase_date"`
 	CurrentValue          *string `json:"current_value"`
@@ -278,9 +343,15 @@ func (h *Handler) CreateProperty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	property, err := h.repo.CreateProperty(r.Context(), hhID, req.toProperty())
+	fin, err := req.finance()
 	if err != nil {
-		apierr.InternalError(w, err)
+		writeError(w, err)
+		return
+	}
+
+	property, err := h.repo.CreateProperty(r.Context(), hhID, req.toProperty(), fin)
+	if err != nil {
+		writeError(w, err)
 		return
 	}
 
@@ -338,9 +409,15 @@ func (h *Handler) UpdateProperty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	property, err := h.repo.UpdateProperty(r.Context(), propertyID, hhID, req.toProperty())
+	fin, err := req.finance()
 	if err != nil {
-		apierr.InternalError(w, err)
+		writeError(w, err)
+		return
+	}
+
+	property, err := h.repo.UpdateProperty(r.Context(), propertyID, hhID, req.toProperty(), fin)
+	if err != nil {
+		writeError(w, err)
 		return
 	}
 	if property == nil {
