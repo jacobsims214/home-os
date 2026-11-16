@@ -71,6 +71,9 @@ type area struct {
 	// $5 is the caller's current role (text), e.g. role_can_see_entity($5,
 	// t.entity_type::text).
 	RoleWhere string
+	// ScopeWhere, when set, is an extra literal condition forRole adds for
+	// one caller (a linked vendor's own maintenance jobs).
+	ScopeWhere string
 }
 
 // areas lists every area search_all covers, in result order (the catalog's
@@ -246,10 +249,11 @@ func NewSearchTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Conte
 				map[string]any{"query": query, "limit": defaultPerType}), nil
 		}
 
-		role, fail := callerRole(ctx, pool, claims)
+		who, fail := callerRole(ctx, pool, claims)
 		if fail != nil {
 			return fail, nil
 		}
+		role := who.Role
 		visible := []string{}
 		for _, t := range types {
 			if canSearch(role, t) {
@@ -276,7 +280,7 @@ func NewSearchTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Conte
 			if a.Name == "event" {
 				g, err = searchEventGroup(ctx, pool, claims.HouseholdID, query, limit)
 			} else {
-				g, err = searchArea(ctx, pool, forRole(a, role), role, claims.HouseholdID, query, limit)
+				g, err = searchArea(ctx, pool, forRole(a, who), role, claims.HouseholdID, query, limit)
 			}
 			if err != nil {
 				return respond.Failed("search "+a.Plural, err), nil
@@ -305,6 +309,9 @@ func searchArea(ctx context.Context, pool *pgxpool.Pool, a area, role, household
 	if a.RoleWhere != "" {
 		where += " AND " + a.RoleWhere
 		args = append(args, role)
+	}
+	if a.ScopeWhere != "" {
+		where += " AND " + a.ScopeWhere
 	}
 	sql := fmt.Sprintf(`
 		SELECT s.id, s.title, s.open_ref,

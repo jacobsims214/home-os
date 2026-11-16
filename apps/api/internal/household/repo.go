@@ -120,14 +120,21 @@ type Member struct {
 	Name     string `json:"name"`
 	Role     string `json:"role"`
 	JoinedAt string `json:"joined_at"`
+	// VendorID / VendorName: for role vendor, the family vendors row the
+	// login works for (memberships.vendor_id, #4799). Null when unlinked
+	// (the vendor then sees every maintenance job) and for other roles.
+	VendorID   *string `json:"vendor_id"`
+	VendorName *string `json:"vendor_name"`
 }
 
 // ListMembers returns all members of a household with their user info.
 func (r *Repo) ListMembers(ctx context.Context, householdID uuid.UUID) ([]Member, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT m.user_id, u.email, u.name, m.role, m.created_at::text
+		`SELECT m.user_id, u.email, u.name, m.role, m.created_at::text,
+		        m.vendor_id::text, v.name
 		 FROM memberships m
 		 JOIN users u ON u.id = m.user_id
+		 LEFT JOIN vendors v ON v.id = m.vendor_id AND v.household_id = m.household_id
 		 WHERE m.household_id = $1
 		 ORDER BY m.created_at`,
 		householdID,
@@ -140,7 +147,7 @@ func (r *Repo) ListMembers(ctx context.Context, householdID uuid.UUID) ([]Member
 	var members []Member
 	for rows.Next() {
 		var m Member
-		if err := rows.Scan(&m.UserID, &m.Email, &m.Name, &m.Role, &m.JoinedAt); err != nil {
+		if err := rows.Scan(&m.UserID, &m.Email, &m.Name, &m.Role, &m.JoinedAt, &m.VendorID, &m.VendorName); err != nil {
 			return nil, fmt.Errorf("scan member: %w", err)
 		}
 		members = append(members, m)
@@ -159,6 +166,12 @@ var (
 	ErrLastOwner = errors.New("household must keep at least one owner")
 	// ErrInvalidRole: the role is not a membership_role value.
 	ErrInvalidRole = errors.New("invalid role")
+	// ErrVendorLinkRole: a vendor link was given for a member whose
+	// (resulting) role is not vendor.
+	ErrVendorLinkRole = errors.New("vendor_id is only allowed for the vendor role")
+	// ErrVendorNotFound: the vendor link is not a vendors row of the
+	// household (another family's, or unknown).
+	ErrVendorNotFound = errors.New("vendor not found")
 )
 
 // lockMemberRoles locks the household's membership rows and returns the
@@ -195,9 +208,32 @@ func lockMemberRoles(ctx context.Context, tx pgx.Tx, householdID, actorID, targe
 // from request claims): see auth.CanModifyMember and auth.CanGrantRole. The
 // last owner cannot be demoted.
 func (r *Repo) ChangeMemberRole(ctx context.Context, householdID, actorID, targetID uuid.UUID, role string) error {
-	if !auth.ValidRole(role) {
+	return r.UpdateMember(ctx, householdID, actorID, targetID, MemberUpdate{Role: role})
+}
+
+// MemberUpdate is a change to one membership. Role "" keeps the current
+// role. SetVendor applies VendorID (nil clears the link); without it the
+// link is kept while the member stays a vendor.
+type MemberUpdate struct {
+	Role      string
+	SetVendor bool
+	VendorID  *uuid.UUID
+}
+
+// UpdateMember changes targetID's role and/or vendor link in householdID on
+// behalf of actorID, in one transaction, with ChangeMemberRole's rules
+// (owner/family_manager only, judged from the locked memberships rows).
+//
+// The vendor link (memberships.vendor_id, #4799) exists only on vendor
+// memberships: setting one for a member whose resulting role is not vendor
+// is ErrVendorLinkRole, a vendor of another family (or unknown) is
+// ErrVendorNotFound, and a role change away from vendor clears the link, so
+// a later demotion back to vendor starts unlinked.
+func (r *Repo) UpdateMember(ctx context.Context, householdID, actorID, targetID uuid.UUID, u MemberUpdate) error {
+	if u.Role != "" && !auth.ValidRole(u.Role) {
 		return ErrInvalidRole
 	}
+	role := u.Role
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
@@ -214,17 +250,45 @@ func (r *Repo) ChangeMemberRole(ctx context.Context, householdID, actorID, targe
 	if targetRole == "" {
 		return ErrMemberNotFound
 	}
+	if role == "" {
+		role = targetRole
+	}
 	if !auth.CanModifyMember(actorRole, targetRole) || !auth.CanGrantRole(actorRole, role) {
 		return ErrNotManager
 	}
 	if targetRole == auth.RoleOwner && role != auth.RoleOwner && owners <= 1 {
 		return ErrLastOwner
 	}
+	if u.SetVendor && u.VendorID != nil {
+		if role != auth.RoleVendor {
+			return ErrVendorLinkRole
+		}
+		var ok bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM vendors WHERE id = $1 AND household_id = $2)`,
+			*u.VendorID, householdID,
+		).Scan(&ok); err != nil {
+			return fmt.Errorf("check vendor: %w", err)
+		}
+		if !ok {
+			return ErrVendorNotFound
+		}
+	}
+	// vendor_id: the new link when one is set, NULL for a non-vendor role,
+	// otherwise unchanged.
+	setVendor := u.SetVendor || role != auth.RoleVendor
+	var vendorID *uuid.UUID
+	if u.SetVendor && role == auth.RoleVendor {
+		vendorID = u.VendorID
+	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE memberships SET role = $3::membership_role WHERE household_id = $1 AND user_id = $2`,
-		householdID, targetID, role,
+		`UPDATE memberships
+		 SET role = $3::membership_role,
+		     vendor_id = CASE WHEN $4 THEN $5::uuid ELSE vendor_id END
+		 WHERE household_id = $1 AND user_id = $2`,
+		householdID, targetID, role, setVendor, vendorID,
 	); err != nil {
-		return fmt.Errorf("update member role: %w", err)
+		return fmt.Errorf("update member: %w", err)
 	}
 	if err := deletePendingInvites(ctx, tx, householdID, targetID, ungrantableRoles(role)); err != nil {
 		return err

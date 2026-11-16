@@ -17,6 +17,15 @@ interface Member {
   email: string;
   role: string;
   created_at: string;
+  // Vendor members only (#4799): the family contact this login works for.
+  // Null = unlinked, the vendor then sees every maintenance job.
+  vendor_id?: string | null;
+  vendor_name?: string | null;
+}
+
+interface VendorOption {
+  id: string;
+  name: string;
 }
 
 interface MembersResponse {
@@ -40,6 +49,9 @@ const AVAILABLE_ROLES = [
   { value: "vendor", label: "Vendor" },
 ];
 
+// Picker value meaning "no link": the vendor sees every maintenance job.
+const ANY_VENDOR = "none";
+
 // ─── Page ─────────────────────────────────────────────────────
 
 export default function MembersPage() {
@@ -50,9 +62,23 @@ export default function MembersPage() {
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<string | null>(null);
+  const [inviteVendor, setInviteVendor] = useState<string>(ANY_VENDOR);
+  const [selectedVendor, setSelectedVendor] = useState<string>(ANY_VENDOR);
+
+  // Family contacts, for linking a vendor login to the business it works for.
+  const { data: vendorsData } = useQuery({
+    queryKey: ["vendors", "member-link"],
+    queryFn: () => apiFetch<{ data: VendorOption[] }>("/api/v1/vendors"),
+    enabled: inviteRole === "vendor" || changeRoleFor !== null,
+    staleTime: 60_000,
+  });
+  const vendorOptions = [
+    { value: ANY_VENDOR, label: "Not linked (sees every maintenance job)" },
+    ...(vendorsData?.data ?? []).map((v) => ({ value: v.id, label: v.name })),
+  ];
 
   const inviteMutation = useMutation({
-    mutationFn: (body: { email: string; role: string }) =>
+    mutationFn: (body: { email: string; role: string; vendor_id?: string }) =>
       apiFetch("/api/v1/invites", { method: "POST", body }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["household", "members"] });
@@ -60,6 +86,7 @@ export default function MembersPage() {
       setInviteModalOpen(false);
       setInviteEmail("");
       setInviteRole(null);
+      setInviteVendor(ANY_VENDOR);
     },
     onError: (err: Error) => {
       notifications.show({ message: err.message, color: "red" });
@@ -75,15 +102,21 @@ export default function MembersPage() {
   const members = data?.data ?? [];
 
   const changeRoleMutation = useMutation({
-    mutationFn: ({ userId, role }: { userId: string; role: string }) =>
+    mutationFn: ({ userId, role, vendorId }: { userId: string; role: string; vendorId: string }) =>
       apiFetch(`/api/v1/households/me/members/${userId}`, {
         method: "PATCH",
-        body: { role },
+        // vendor_id only for the vendor role (null clears the link); the API
+        // clears it by itself when the role changes away from vendor.
+        body: role === "vendor" ? { role, vendor_id: vendorId === ANY_VENDOR ? null : vendorId } : { role },
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["household", "members"] });
       setChangeRoleFor(null);
       setSelectedRole("");
+      setSelectedVendor(ANY_VENDOR);
+    },
+    onError: (err: Error) => {
+      notifications.show({ message: err.message, color: "red" });
     },
   });
 
@@ -100,7 +133,7 @@ export default function MembersPage() {
 
   const handleChangeRole = () => {
     if (!changeRoleFor || !selectedRole) return;
-    changeRoleMutation.mutate({ userId: changeRoleFor.user_id, role: selectedRole });
+    changeRoleMutation.mutate({ userId: changeRoleFor.user_id, role: selectedRole, vendorId: selectedVendor });
   };
 
   return (
@@ -179,6 +212,9 @@ export default function MembersPage() {
                       }`}>
                         {ROLE_LABELS[member.role] ?? member.role}
                       </span>
+                      {member.role === "vendor" && member.vendor_name && (
+                        <span className="ml-2 text-xs text-gray-500">{member.vendor_name}</span>
+                      )}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-500">
                       {member.created_at
@@ -192,7 +228,7 @@ export default function MembersPage() {
                       {member.role !== "owner" ? (
                         <div className="flex justify-end gap-1">
                           <button
-                            onClick={() => { setChangeRoleFor(member); setSelectedRole(member.role); }}
+                            onClick={() => { setChangeRoleFor(member); setSelectedRole(member.role); setSelectedVendor(member.vendor_id ?? ANY_VENDOR); }}
                             className="inline-flex items-center rounded-md px-2.5 py-1.5 text-xs font-medium text-indigo-600 hover:bg-indigo-50 transition-colors"
                           >
                             Change Role
@@ -235,9 +271,19 @@ export default function MembersPage() {
                   <option key={r.value} value={r.value}>{r.label}</option>
                 ))}
               </select>
+              {selectedRole === "vendor" && (
+                <Select
+                  label="Works for"
+                  description="A linked vendor only sees that contact's maintenance jobs."
+                  value={selectedVendor}
+                  onChange={(v) => setSelectedVendor(v ?? ANY_VENDOR)}
+                  data={vendorOptions}
+                  allowDeselect={false}
+                />
+              )}
               <div className="flex justify-end gap-2">
                 <button
-                  onClick={() => { setChangeRoleFor(null); setSelectedRole(""); }}
+                  onClick={() => { setChangeRoleFor(null); setSelectedRole(""); setSelectedVendor(ANY_VENDOR); }}
                   className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
                 >
                   Cancel
@@ -280,9 +326,21 @@ export default function MembersPage() {
               { value: "family_manager", label: "Family Manager" },
               { value: "family_member", label: "Family Member" },
               { value: "viewer", label: "Viewer" },
+              { value: "housesitter", label: "House Sitter" },
+              { value: "vendor", label: "Vendor" },
             ]}
             required
           />
+          {inviteRole === "vendor" && (
+            <Select
+              label="Works for"
+              description="A linked vendor only sees that contact's maintenance jobs."
+              value={inviteVendor}
+              onChange={(v) => setInviteVendor(v ?? ANY_VENDOR)}
+              data={vendorOptions}
+              allowDeselect={false}
+            />
+          )}
           <Group justify="flex-end" mt="md">
             <Button
               variant="default"
@@ -293,7 +351,11 @@ export default function MembersPage() {
             <Button
               onClick={() => {
                 if (!inviteEmail.trim() || !inviteRole) return;
-                inviteMutation.mutate({ email: inviteEmail.trim(), role: inviteRole });
+                inviteMutation.mutate({
+                  email: inviteEmail.trim(),
+                  role: inviteRole,
+                  ...(inviteRole === "vendor" && inviteVendor !== ANY_VENDOR ? { vendor_id: inviteVendor } : {}),
+                });
               }}
               loading={inviteMutation.isPending}
             >

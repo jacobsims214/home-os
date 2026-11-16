@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -50,15 +51,22 @@ func canSearch(role, areaName string) bool {
 	return limitedAreas[role][areaName]
 }
 
-// forRole adapts an area's SQL to the role: records attached to a secret are
-// dropped unless the role may see credentials, and a housesitter searches
-// only the part of a record they may see.
-func forRole(a area, role string) area {
-	if credentialRoles[role] {
+// forRole adapts an area's SQL to the caller: records attached to a secret
+// are dropped unless the role may see credentials, a housesitter searches
+// only the part of a record they may see, and a linked vendor finds only
+// their own maintenance tasks (#4799, the same rule as maintenance_find,
+// the API and CalDAV).
+func forRole(a area, who caller) area {
+	if credentialRoles[who.Role] {
 		a.SecretWhere = ""
 	}
-	if role == "housesitter" && a.SitterDoc != "" {
+	if who.Role == "housesitter" && a.SitterDoc != "" {
 		a.Doc = a.SitterDoc
+	}
+	if who.Role == "vendor" && who.VendorID != nil && a.Name == "maintenance" {
+		// A uuid.UUID prints only hex digits and dashes, so it is safe as a
+		// literal; searchArea's parameters are positional and shared.
+		a.ScopeWhere = fmt.Sprintf("t.vendor_id = '%s'::uuid", who.VendorID.String())
 	}
 	return a
 }
@@ -71,33 +79,44 @@ func roleLabel(role string) string {
 	return role
 }
 
+// caller is the search_all caller's current access: the role and, for a
+// vendor linked to a vendors row (memberships.vendor_id, #4799), that
+// vendor's id. A linked vendor's maintenance hits are only their own jobs;
+// an unlinked vendor (nil) still finds every maintenance task.
+type caller struct {
+	Role     string
+	VendorID *uuid.UUID
+}
+
 // callerRole resolves the caller's current role the way credential.checkAccess
 // does: the role is re-read from memberships for the claims' user and
 // household, so a demoted member loses access at once and a removed one gets
-// nothing. A non-nil result is the isError to return.
-func callerRole(ctx context.Context, pool *pgxpool.Pool, c *auth.Claims) (string, *mcp.CallToolResult) {
+// nothing. The vendor link is read in the same query. A non-nil result is
+// the isError to return.
+func callerRole(ctx context.Context, pool *pgxpool.Pool, c *auth.Claims) (caller, *mcp.CallToolResult) {
 	hid, err := uuid.Parse(c.HouseholdID)
 	if err != nil {
-		return "", notSignedIn()
+		return caller{}, notSignedIn()
 	}
 	uid, err := uuid.Parse(c.UserID)
 	if err != nil {
 		if c.AgentTokenID != "" {
 			// An agent token always resolves to a users.id.
-			return "", notSignedIn()
+			return caller{}, notSignedIn()
 		}
-		return c.Role, nil
+		return caller{Role: c.Role}, nil
 	}
-	var role string
+	var who caller
 	err = pool.QueryRow(ctx,
-		`SELECT role::text FROM memberships WHERE household_id = $1 AND user_id = $2`, hid, uid).Scan(&role)
+		`SELECT role::text, CASE WHEN role = 'vendor' THEN vendor_id END
+		 FROM memberships WHERE household_id = $1 AND user_id = $2`, hid, uid).Scan(&who.Role, &who.VendorID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", notSignedIn()
+		return caller{}, notSignedIn()
 	}
 	if err != nil {
-		return "", respond.Failed("check your access", err)
+		return caller{}, respond.Failed("check your access", err)
 	}
-	return role, nil
+	return who, nil
 }
 
 func notSignedIn() *mcp.CallToolResult {

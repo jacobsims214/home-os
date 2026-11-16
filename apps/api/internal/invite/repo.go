@@ -25,13 +25,16 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 	return &Repo{pool: pool}
 }
 
-// Create inserts a new invitation and returns the created record.
-func (r *Repo) Create(ctx context.Context, householdID, email, token, role string, invitedByID uuid.UUID, expiresAt time.Time) (*Invitation, error) {
+// Create inserts a new invitation and returns the created record. vendorID
+// (role vendor only, may be nil) must be a vendors row of householdID: the
+// composite FK from migration 066 refuses another family's vendor, which
+// Create reports as ErrVendorNotFound.
+func (r *Repo) Create(ctx context.Context, householdID, email, token, role string, invitedByID uuid.UUID, expiresAt time.Time, vendorID *uuid.UUID) (*Invitation, error) {
 	rows, err := r.pool.Query(ctx,
-		`INSERT INTO invitations (household_id, email, token, role, invited_by, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at`,
-		householdID, email, token, role, invitedByID, expiresAt,
+		`INSERT INTO invitations (household_id, email, token, role, invited_by, expires_at, vendor_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 RETURNING id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at, vendor_id::text`,
+		householdID, email, token, role, invitedByID, expiresAt, vendorID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create invitation: %w", err)
@@ -40,6 +43,10 @@ func (r *Repo) Create(ctx context.Context, householdID, email, token, role strin
 
 	inv, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[Invitation])
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" && pgErr.ConstraintName == "invitations_vendor_household_fkey" {
+			return nil, ErrVendorNotFound
+		}
 		return nil, fmt.Errorf("collect invitation: %w", err)
 	}
 	return inv, nil
@@ -48,7 +55,7 @@ func (r *Repo) Create(ctx context.Context, householdID, email, token, role strin
 // ListByHousehold returns all pending invitations for a household.
 func (r *Repo) ListByHousehold(ctx context.Context, householdID string) ([]Invitation, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at
+		`SELECT id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at, vendor_id::text
 		 FROM invitations
 		 WHERE household_id = $1
 		 ORDER BY created_at`,
@@ -62,7 +69,7 @@ func (r *Repo) ListByHousehold(ctx context.Context, householdID string) ([]Invit
 	var invs []Invitation
 	for rows.Next() {
 		var inv Invitation
-		if err := rows.Scan(&inv.ID, &inv.HouseholdID, &inv.Email, &inv.Token, &inv.Role, &inv.InvitedBy, &inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt); err != nil {
+		if err := rows.Scan(&inv.ID, &inv.HouseholdID, &inv.Email, &inv.Token, &inv.Role, &inv.InvitedBy, &inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt, &inv.VendorID); err != nil {
 			return nil, fmt.Errorf("scan invitation: %w", err)
 		}
 		invs = append(invs, inv)
@@ -73,14 +80,14 @@ func (r *Repo) ListByHousehold(ctx context.Context, householdID string) ([]Invit
 // GetByToken returns an invitation by its token.
 func (r *Repo) GetByToken(ctx context.Context, token string) (*Invitation, error) {
 	row := r.pool.QueryRow(ctx,
-		`SELECT id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at
+		`SELECT id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at, vendor_id::text
 		 FROM invitations
 		 WHERE token = $1`,
 		token,
 	)
 
 	inv := &Invitation{}
-	err := row.Scan(&inv.ID, &inv.HouseholdID, &inv.Email, &inv.Token, &inv.Role, &inv.InvitedBy, &inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt)
+	err := row.Scan(&inv.ID, &inv.HouseholdID, &inv.Email, &inv.Token, &inv.Role, &inv.InvitedBy, &inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt, &inv.VendorID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -99,6 +106,9 @@ var (
 	ErrAlreadyMember       = errors.New("user is already a member of this household")
 	ErrUserInactive        = errors.New("user account is deactivated")
 	ErrAccountExists       = errors.New("an account with this email already exists")
+	// ErrVendorNotFound: the vendor_id given for a vendor invitation is not a
+	// vendors row of the invitation's household.
+	ErrVendorNotFound = errors.New("vendor not found in this household")
 )
 
 // ErrNoEmail is returned by FindOrCreateUser when no user matches and the
@@ -135,12 +145,12 @@ type AcceptResult struct {
 func lockPendingInvitation(ctx context.Context, tx pgx.Tx, token string, now time.Time) (*Invitation, error) {
 	inv := &Invitation{}
 	err := tx.QueryRow(ctx,
-		`SELECT id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at
+		`SELECT id, household_id, email, token, role, COALESCE(invited_by::text, ''), expires_at, accepted_at, created_at, vendor_id::text
 		 FROM invitations
 		 WHERE token = $1
 		 FOR UPDATE`,
 		token,
-	).Scan(&inv.ID, &inv.HouseholdID, &inv.Email, &inv.Token, &inv.Role, &inv.InvitedBy, &inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt)
+	).Scan(&inv.ID, &inv.HouseholdID, &inv.Email, &inv.Token, &inv.Role, &inv.InvitedBy, &inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt, &inv.VendorID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrInviteNotFound
 	}
@@ -158,15 +168,17 @@ func lockPendingInvitation(ctx context.Context, tx pgx.Tx, token string, now tim
 
 // joinHousehold inserts the membership with the invitation's role
 // (ErrAlreadyMember if the user already belongs to the household) and marks
-// the invitation accepted.
+// the invitation accepted. A vendor invitation's vendor_id is copied to
+// memberships.vendor_id (#4799), so the new login sees only that vendor's
+// maintenance jobs; for any other role the link is never copied.
 func joinHousehold(ctx context.Context, tx pgx.Tx, inv *Invitation, userID uuid.UUID, now time.Time) (string, error) {
 	var role string
 	err := tx.QueryRow(ctx,
-		`INSERT INTO memberships (household_id, user_id, role)
-		 VALUES ($1, $2, $3::membership_role)
+		`INSERT INTO memberships (household_id, user_id, role, vendor_id)
+		 VALUES ($1, $2, $3::membership_role, CASE WHEN $3 = 'vendor' THEN $4::uuid END)
 		 ON CONFLICT (household_id, user_id) DO NOTHING
 		 RETURNING role::text`,
-		inv.HouseholdID, userID, inv.Role,
+		inv.HouseholdID, userID, inv.Role, inv.VendorID,
 	).Scan(&role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrAlreadyMember
@@ -471,6 +483,19 @@ func (r *Repo) GetHouseholdName(ctx context.Context, householdID string) (string
 		return "", fmt.Errorf("get household name: %w", err)
 	}
 	return name, nil
+}
+
+// VendorInHousehold reports whether vendorID is a vendors row of householdID.
+func (r *Repo) VendorInHousehold(ctx context.Context, householdID string, vendorID uuid.UUID) (bool, error) {
+	var ok bool
+	err := r.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM vendors WHERE id = $1 AND household_id = $2)`,
+		vendorID, householdID,
+	).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("vendor in household: %w", err)
+	}
+	return ok, nil
 }
 
 // MemberRole returns userID's current role in householdID, read from

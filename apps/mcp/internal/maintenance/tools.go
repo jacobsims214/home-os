@@ -82,6 +82,10 @@ func NewMaintenanceFindTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) 
 		args := req.GetArguments()
 		loc := location(ctx, pool, claims.HouseholdID)
 		today := todayIn(loc)
+		ownJobs, fail := vendorScope(ctx, pool, claims)
+		if fail != nil {
+			return fail, nil
+		}
 
 		if raw := str(args, "id"); raw != "" {
 			id, bad := parseID("id", raw, "maintenance_find")
@@ -89,6 +93,9 @@ func NewMaintenanceFindTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) 
 				return bad, nil
 			}
 			r, err := loadTask(ctx, pool, claims.HouseholdID, id, false)
+			if err == nil && ownJobs != nil && (r.VendorID == nil || *r.VendorID != *ownJobs) {
+				err = pgx.ErrNoRows // another vendor's job is not there for a linked vendor
+			}
 			if errors.Is(err, pgx.ErrNoRows) {
 				return respond.NotFound("upkeep task", raw, "Call maintenance_find without id to list the family's tasks."), nil
 			}
@@ -108,6 +115,9 @@ func NewMaintenanceFindTool(pool *pgxpool.Pool) (string, mcp.Tool, handlerFunc) 
 		add := func(cond string, v any) {
 			params = append(params, v)
 			where = append(where, fmt.Sprintf(cond, len(params)))
+		}
+		if ownJobs != nil {
+			add("t.vendor_id = $%d", *ownJobs)
 		}
 		order := "t.due_date ASC NULLS LAST, t.name, t.id"
 		switch status {

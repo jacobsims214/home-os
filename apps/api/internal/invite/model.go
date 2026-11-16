@@ -14,4 +14,8 @@ type Invitation struct {
 	ExpiresAt  time.Time  `json:"expires_at"`
 	AcceptedAt *time.Time `json:"accepted_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
+	// VendorID is the family vendors row a vendor invitation is linked to
+	// (migration 066, #4799); null for other roles and unlinked vendors.
+	// Accepting copies it to memberships.vendor_id.
+	VendorID *string `json:"vendor_id"`
 }

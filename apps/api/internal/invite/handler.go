@@ -133,6 +133,9 @@ func (h *Handler) CreateInvite(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email string `json:"email"`
 		Role  string `json:"role"`
+		// VendorID (role vendor only): the family vendors row the invitee
+		// works for. Accepting copies it to memberships.vendor_id (#4799).
+		VendorID *string `json:"vendor_id"`
 	}
 	userID, inviterRole, ok := h.callerManagerRole(w, r, claims)
 	if !ok {
@@ -161,10 +164,19 @@ func (h *Handler) CreateInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	vendorID, ok := h.inviteVendor(w, r, claims.HouseholdID, req.Role, req.VendorID)
+	if !ok {
+		return
+	}
+
 	token := uuid.New().String()
 	expiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	inv, err := h.repo.Create(r.Context(), claims.HouseholdID, req.Email, token, req.Role, userID, expiresAt)
+	inv, err := h.repo.Create(r.Context(), claims.HouseholdID, req.Email, token, req.Role, userID, expiresAt, vendorID)
+	if errors.Is(err, ErrVendorNotFound) {
+		apierr.NotFound(w, "vendor not found")
+		return
+	}
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -175,6 +187,36 @@ func (h *Handler) CreateInvite(w http.ResponseWriter, r *http.Request) {
 	go h.sendInviteEmail(context.WithoutCancel(r.Context()), inv, req.Email)
 
 	apierr.JSON(w, http.StatusCreated, map[string]any{"data": inviteView{Invitation: *inv, AcceptURL: h.acceptURL(inv.Token)}})
+}
+
+// inviteVendor validates the optional vendor_id of an invitation (#4799).
+// Empty or null means no link. A link is only for role vendor (400 on any
+// other role, so a typo cannot silently make an unlinked invite); a
+// malformed id is 400; a vendor that is not a vendors row of the household
+// (another family's, or unknown) is 404, never confirming foreign ids.
+func (h *Handler) inviteVendor(w http.ResponseWriter, r *http.Request, householdID, role string, raw *string) (*uuid.UUID, bool) {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil, true
+	}
+	if role != auth.RoleVendor {
+		apierr.BadRequest(w, "vendor_id is only allowed for the vendor role")
+		return nil, false
+	}
+	id, err := uuid.Parse(strings.TrimSpace(*raw))
+	if err != nil {
+		apierr.BadRequest(w, "invalid vendor_id")
+		return nil, false
+	}
+	ok, err := h.repo.VendorInHousehold(r.Context(), householdID, id)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return nil, false
+	}
+	if !ok {
+		apierr.NotFound(w, "vendor not found")
+		return nil, false
+	}
+	return &id, true
 }
 
 // sendInviteEmail sends an HTML invitation email if SMTP is configured.

@@ -3,6 +3,7 @@ package maintenance
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -350,6 +351,41 @@ func toScheduleResponse(s *Schedule) scheduleResponse {
 	return resp
 }
 
+// vendorScope returns the caller's vendor scope (#4799): for a member with
+// role vendor whose membership is linked to a vendors row, that vendor's id,
+// and the handlers then show and update only that vendor's tasks and
+// schedules (others are absent: omitted from lists, 404 on update). nil for
+// every other caller, including an unlinked vendor, who keeps seeing every
+// job. The link is read from memberships on each request, so setting or
+// clearing it applies at once. A vendor without a membership row (or
+// without a users.id in the claims) is refused, failing closed.
+func (h *Handler) vendorScope(w http.ResponseWriter, r *http.Request, claims *auth.Claims, householdID uuid.UUID) (*uuid.UUID, bool) {
+	if claims.Role != auth.RoleVendor {
+		return nil, true
+	}
+	userID, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		apierr.Forbidden(w, "the vendor role needs a signed-in user")
+		return nil, false
+	}
+	vendorID, err := h.repo.LinkedVendor(r.Context(), householdID, userID)
+	if errors.Is(err, ErrNotMember) {
+		apierr.Forbidden(w, "not a member of this household")
+		return nil, false
+	}
+	if err != nil {
+		apierr.InternalError(w, err)
+		return nil, false
+	}
+	return vendorID, true
+}
+
+// ownJob reports whether a record assigned to vendorID is visible in scope
+// (nil scope: everything).
+func ownJob(scope, vendorID *uuid.UUID) bool {
+	return scope == nil || (vendorID != nil && *vendorID == *scope)
+}
+
 // ListTasks returns all maintenance tasks for the authenticated household.
 // Supports optional query params: status and property_id.
 // GET /api/v1/maintenance/tasks.
@@ -386,7 +422,12 @@ func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
 		propertyID = &id
 	}
 
-	tasks, err := h.repo.ListTasks(r.Context(), householdID, status, propertyID)
+	scope, ok := h.vendorScope(w, r, claims, householdID)
+	if !ok {
+		return
+	}
+
+	tasks, err := h.repo.ListTasks(r.Context(), householdID, status, propertyID, scope)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -512,6 +553,16 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if existing.HouseholdID.String() != claims.HouseholdID {
 		apierr.Forbidden(w, "task does not belong to your household")
+		return
+	}
+	// A linked vendor may only touch their own jobs; anyone else's task is
+	// treated as not existing (#4799).
+	scope, ok := h.vendorScope(w, r, claims, householdID)
+	if !ok {
+		return
+	}
+	if !ownJob(scope, existing.VendorID) {
+		apierr.NotFound(w, "task not found")
 		return
 	}
 
@@ -699,7 +750,12 @@ func (h *Handler) ListSchedules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schedules, err := h.repo.ListSchedules(r.Context(), householdID)
+	scope, ok := h.vendorScope(w, r, claims, householdID)
+	if !ok {
+		return
+	}
+
+	schedules, err := h.repo.ListSchedules(r.Context(), householdID, scope)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return

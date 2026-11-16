@@ -286,6 +286,10 @@ func writeMemberError(w http.ResponseWriter, err error) {
 		apierr.Conflict(w, "the household must keep at least one owner")
 	case errors.Is(err, ErrInvalidRole):
 		apierr.BadRequest(w, "invalid role")
+	case errors.Is(err, ErrVendorLinkRole):
+		apierr.BadRequest(w, "vendor_id is only allowed for the vendor role")
+	case errors.Is(err, ErrVendorNotFound):
+		apierr.NotFound(w, "vendor not found")
 	default:
 		apierr.InternalError(w, err)
 	}
@@ -298,6 +302,12 @@ func writeMemberError(w http.ResponseWriter, err error) {
 // family_manager may not grant owner or change an owner. The last owner may
 // not be demoted. 403 not allowed; 404 not a member; 409 last owner; 400 bad
 // role.
+//
+// Body {"role"?, "vendor_id"?} (#4799): at least one. vendor_id links a
+// vendor member to the family's vendors row (only their own maintenance
+// jobs are then visible); null clears it. 400 when the resulting role is not
+// vendor, 404 for another family's vendor. Changing the role away from
+// vendor clears the link.
 func (h *Handler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())
 	if claims == nil {
@@ -316,20 +326,40 @@ func (h *Handler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Role string `json:"role"`
+		// VendorID: absent keeps the link, null or "" clears it, a vendors
+		// id sets it (vendor members only).
+		VendorID json.RawMessage `json:"vendor_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		apierr.BadRequest(w, "invalid body")
 		return
 	}
-	if req.Role == "" {
-		apierr.BadRequest(w, "role is required")
+	upd := MemberUpdate{Role: req.Role}
+	if len(req.VendorID) > 0 {
+		upd.SetVendor = true
+		var raw *string
+		if err := json.Unmarshal(req.VendorID, &raw); err != nil {
+			apierr.BadRequest(w, "vendor_id must be a string or null")
+			return
+		}
+		if raw != nil && strings.TrimSpace(*raw) != "" {
+			id, err := uuid.Parse(strings.TrimSpace(*raw))
+			if err != nil {
+				apierr.BadRequest(w, "invalid vendor_id")
+				return
+			}
+			upd.VendorID = &id
+		}
+	}
+	if req.Role == "" && !upd.SetVendor {
+		apierr.BadRequest(w, "role or vendor_id is required")
 		return
 	}
 	actorID, ok := callerUserID(w, claims)
 	if !ok {
 		return
 	}
-	if err := h.repo.ChangeMemberRole(r.Context(), hid, actorID, userID, req.Role); err != nil {
+	if err := h.repo.UpdateMember(r.Context(), hid, actorID, userID, upd); err != nil {
 		writeMemberError(w, err)
 		return
 	}
