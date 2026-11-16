@@ -33,6 +33,9 @@ type agendaView struct {
 	events      bool
 	lists       bool
 	ownJobs     *uuid.UUID
+	// role is the caller's current role, for the per-kind event rule #4807
+	// applies (an upkeep job's mirror is not an appointment).
+	role string
 }
 
 // agendaViewFor resolves the caller's current role and vendor link from
@@ -74,6 +77,7 @@ func agendaViewFor(ctx context.Context, pool *pgxpool.Pool, c *auth.Claims) (age
 // newAgendaView decides what role may see of the agenda.
 func newAgendaView(role string, vendorID *uuid.UUID) agendaView {
 	return agendaView{
+		role:        role,
 		bills:       auth.CanSeeMoney(role),
 		maintenance: auth.CanSeeEntity(role, "maintenance_task"),
 		events:      auth.CanSeeEntity(role, "calendar_event"),
