@@ -15,6 +15,7 @@ type Vendor struct {
 	ID          uuid.UUID
 	HouseholdID uuid.UUID
 	Name        string
+	Trades      []string // lower-case trades (plumber, vet, hvac, pest_control); never nil
 	Specialty   *string
 	Phone       *string
 	Email       *string
