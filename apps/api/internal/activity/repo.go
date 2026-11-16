@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -57,7 +58,10 @@ type Entry struct {
 type Filter struct {
 	// Before returns entries with id < Before (the next page, newest first).
 	Before int64
-	// After returns entries with id > After (polling for new entries).
+	// After polls for new entries: it is the PollAfter of the previous
+	// response (an entry id). Entries come in (xact_id, id) order after that
+	// entry's position, and only from transactions every later snapshot sees
+	// as finished, so a late commit is never skipped (see List).
 	After int64
 	// Since returns entries created at or after Since.
 	Since time.Time
@@ -102,20 +106,81 @@ func (r *Repo) MemberRole(ctx context.Context, householdID, userID uuid.UUID) (s
 	return role, nil
 }
 
-// List returns householdID's entries matching f, newest first (id DESC).
-// It reads up to f.Limit+1 rows; more reports whether another page exists.
-func (r *Repo) List(ctx context.Context, householdID uuid.UUID, f Filter) (entries []Entry, more bool, err error) {
+// Page is one response of the feed.
+type Page struct {
+	// Entries, newest first: id DESC, or for a poll (Filter.After) the poll
+	// order (xact_id, id) DESC.
+	Entries []Entry
+	// More: another page exists. For a head or cursor page, page on with the
+	// last entry's id as Filter.Before. For a poll, poll again at once.
+	More bool
+	// PollAfter is the entry id to pass as Filter.After on the next poll; 0
+	// when the household has no settled entry yet. It is set for the head
+	// of the feed and for polls, not for older pages (Filter.Before).
+	PollAfter int64
+}
+
+// snapXmin is the reading snapshot's xmin: every transaction below it has
+// finished, and every row not yet visible belongs to one at or above it.
+const snapXmin = "pg_snapshot_xmin(pg_current_snapshot())"
+
+// List returns householdID's entries matching f, newest first. It reads up
+// to f.Limit+1 rows to tell whether another page exists.
+//
+// Polling (f.After) is safe against transactions that commit out of id
+// order (#4741). activity_log.id is taken at INSERT, so "id > newest seen"
+// misses a row whose transaction commits after a newer one was returned.
+// Instead a poll walks the log in (xact_id, id) order, xact_id being the
+// writing transaction (migration 062), and returns only rows with xact_id
+// below the snapshot's xmin. Those rows form a prefix of that order that
+// can no longer change: their transactions have all finished, and every row
+// still to become visible has xact_id >= xmin, so it sorts after anything a
+// poll returned. Comparing xids alone is not enough, since a transaction
+// can take its xid before another but log after it.
+//
+// Everything runs in one REPEATABLE READ snapshot so the rows and PollAfter
+// agree. A write transaction that stays open holds polls back (anywhere in
+// the database: xmin is global) until it ends; the head of the feed and
+// older pages are not held back.
+func (r *Repo) List(ctx context.Context, householdID uuid.UUID, f Filter) (Page, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return Page{}, fmt.Errorf("list activity: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	where := []string{"a.household_id = $1"}
 	args := []any{householdID}
-	add := func(cond string, v any) {
-		args = append(args, v)
-		where = append(where, strings.ReplaceAll(cond, "?", fmt.Sprintf("$%d", len(args))))
+	add := func(cond string, v ...any) {
+		for _, x := range v {
+			args = append(args, x)
+			cond = strings.Replace(cond, "?", fmt.Sprintf("$%d", len(args)), 1)
+		}
+		where = append(where, cond)
 	}
+	order := "a.id DESC"
 	if f.Before > 0 {
 		add("a.id < ?", f.Before)
 	}
 	if f.After > 0 {
-		add("a.id > ?", f.After)
+		add("a.xact_id < " + snapXmin)
+		// The poll position is the After entry's (xact_id, id). An id that
+		// is not in this household (a forged or stale one) falls back to
+		// plain id order.
+		var xact *string
+		err := tx.QueryRow(ctx,
+			`SELECT xact_id::text FROM activity_log WHERE id = $1 AND household_id = $2`,
+			f.After, householdID).Scan(&xact)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			add("a.id > ?", f.After)
+		case err != nil:
+			return Page{}, fmt.Errorf("list activity: poll position: %w", err)
+		default:
+			add("(a.xact_id, a.id) > (?::xid8, ?)", *xact, f.After)
+		}
+		// Oldest first, so a full page is continued by the next poll.
+		order = "a.xact_id, a.id"
 	}
 	if !f.Since.IsZero() {
 		add("a.created_at >= ?", f.Since)
@@ -126,7 +191,7 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID, f Filter) (entri
 		// Both placeholders bind the same argument.
 		add(`a.actor_user_id = COALESCE(
 			(SELECT mp.user_id FROM people mp WHERE mp.id = ? AND mp.household_id = $1), ?)`,
-			*f.Member)
+			*f.Member, *f.Member)
 	}
 	if f.EntityType != "" {
 		add("a.entity_type = ?", f.EntityType)
@@ -168,14 +233,15 @@ LEFT JOIN LATERAL (
       AND co.id = a.entity_id
 ) ev ON true
 WHERE ` + strings.Join(where, " AND ") + fmt.Sprintf(`
-ORDER BY a.id DESC
-LIMIT $%d`, len(args))
+ORDER BY %s
+LIMIT $%d`, order, len(args))
 
-	rows, err := r.pool.Query(ctx, q, args...)
+	rows, err := tx.Query(ctx, q, args...)
 	if err != nil {
-		return nil, false, fmt.Errorf("list activity: %w", err)
+		return Page{}, fmt.Errorf("list activity: %w", err)
 	}
 	defer rows.Close()
+	var entries []Entry
 	for rows.Next() {
 		var e Entry
 		var icalData, icalRaw *string
@@ -183,7 +249,7 @@ LIMIT $%d`, len(args))
 			&e.ParentType, &e.ParentID, &e.ChangedFields, &e.Summary, &e.CreatedAt,
 			&e.ActorUserID, &e.ActorPersonID, &e.ActorName,
 			&e.AgentTokenID, &e.AgentName, &icalData, &icalRaw); err != nil {
-			return nil, false, fmt.Errorf("scan activity: %w", err)
+			return Page{}, fmt.Errorf("scan activity: %w", err)
 		}
 		if icalData != nil {
 			e.Summary = withLabel(e.Summary, "calendar event", eventName(*icalData, icalRaw))
@@ -191,12 +257,40 @@ LIMIT $%d`, len(args))
 		entries = append(entries, e)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("list activity: %w", err)
+		return Page{}, fmt.Errorf("list activity: %w", err)
 	}
+	rows.Close()
+
+	p := Page{Entries: entries}
 	if len(entries) > f.Limit {
-		return entries[:f.Limit], true, nil
+		p.Entries, p.More = entries[:f.Limit], true
 	}
-	return entries, false, nil
+	if f.After > 0 {
+		// Present a poll newest first, like the rest of the feed.
+		slices.Reverse(p.Entries)
+	}
+	switch {
+	case f.Before > 0:
+		// An older page: polling starts from the head, not from here.
+	case f.After > 0 && p.More:
+		// A cut poll continues right after its newest entry.
+		p.PollAfter = p.Entries[0].ID
+	default:
+		// The settled end of the log: the last (xact_id, id) below xmin. A
+		// head page may show newer rows from transactions at or above xmin;
+		// the next poll returns them again (dedupe by id), never skips them.
+		err := tx.QueryRow(ctx, `
+SELECT id FROM activity_log
+WHERE household_id = $1 AND xact_id < `+snapXmin+`
+ORDER BY xact_id DESC, id DESC
+LIMIT 1`, householdID).Scan(&p.PollAfter)
+		if errors.Is(err, pgx.ErrNoRows) {
+			p.PollAfter = f.After
+		} else if err != nil {
+			return Page{}, fmt.Errorf("list activity: poll position: %w", err)
+		}
+	}
+	return p, nil
 }
 
 // summaryRe matches a VEVENT's SUMMARY line (with or without parameters).

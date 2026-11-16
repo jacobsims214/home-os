@@ -136,16 +136,21 @@ func toResponse(e Entry) entryResponse {
 
 // List handles GET /api/v1/activity.
 //
-// Entries come newest first (id DESC). Query parameters, all optional:
+// Entries come newest first (id DESC; a poll in its own order, see
+// Repo.List). Query parameters, all optional:
 //   - limit: page size, 1..200 (default 50);
 //   - cursor: the next_cursor of the previous page (entries older than it);
-//   - after: an entry id; only newer entries (poll with the first id seen);
+//   - after: the poll_after of the previous response; only entries that
+//     became visible since. A poll that returns limit entries is cut: poll
+//     again at once. Dedupe by id: an entry may come twice, never not at all;
 //   - since: RFC 3339 time; only entries created at or after it;
 //   - member: a user id or person id; only that member's changes;
 //   - entity_type, entity_id: one kind of record, or one record;
 //   - parent_type, parent_id: records inside one parent (a list's items).
 //
-// Response: {"data": [...], "next_cursor": "<id>" | null}.
+// Response: {"data": [...], "next_cursor": "<id>" | null,
+// "poll_after": "<id>" | null}. next_cursor is null for a poll; poll_after
+// is null for an older page (cursor) and while the household has no entry.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	claims := middleware.ClaimsFromContext(r.Context())
@@ -181,21 +186,25 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	f.ExcludeEntityTypes = hidden
 
-	entries, more, err := h.repo.List(r.Context(), hid, f)
+	pg, err := h.repo.List(r.Context(), hid, f)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
-	data := make([]entryResponse, 0, len(entries))
-	for _, e := range entries {
+	data := make([]entryResponse, 0, len(pg.Entries))
+	for _, e := range pg.Entries {
 		data = append(data, toResponse(e))
 	}
-	var next *string
-	if more && len(entries) > 0 {
-		s := strconv.FormatInt(entries[len(entries)-1].ID, 10)
+	var next, pollAfter *string
+	if pg.More && len(pg.Entries) > 0 && f.After == 0 {
+		s := strconv.FormatInt(pg.Entries[len(pg.Entries)-1].ID, 10)
 		next = &s
 	}
-	apierr.JSON(w, http.StatusOK, map[string]any{"data": data, "next_cursor": next})
+	if pg.PollAfter > 0 {
+		s := strconv.FormatInt(pg.PollAfter, 10)
+		pollAfter = &s
+	}
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": data, "next_cursor": next, "poll_after": pollAfter})
 }
 
 // parseFilter reads the query parameters; msg is non-empty for a bad one.

@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -166,6 +167,7 @@ type entry struct {
 type page struct {
 	Data       []entry `json:"data"`
 	NextCursor *string `json:"next_cursor"`
+	PollAfter  *string `json:"poll_after"`
 }
 
 func get(t *testing.T, h http.Handler, as member, query url.Values, household string) (*httptest.ResponseRecorder, page) {
@@ -469,4 +471,176 @@ func TestList_NamesCalendarEvents(t *testing.T) {
 	assert.Equal(t, []string{`Dana deleted calendar event "Cancelled"`, `Sam created calendar event "Cancelled"`}, got[gone],
 		"055 names a JSON event in the log itself, so it stays named after delete")
 	assert.NotContains(t, rec.Body.String(), "PRIVATE-DETAILS")
+}
+
+// openWrite starts a transaction that writes as userID and leaves it open:
+// the caller commits it later, so its activity row commits out of id order.
+func (f *fixture) openWrite(t *testing.T, userID string) pgx.Tx {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := f.pool.Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	_, err = tx.Exec(ctx, `SELECT set_config('app.user_id', $1, true)`, userID)
+	require.NoError(t, err)
+	return tx
+}
+
+// newestActivity returns the id of the newest activity_log row tx can see
+// in hh (its own uncommitted rows included).
+func newestActivity(t *testing.T, tx pgx.Tx, hh string) int64 {
+	t.Helper()
+	var id int64
+	require.NoError(t, tx.QueryRow(context.Background(),
+		`SELECT max(id) FROM activity_log WHERE household_id = $1`, hh).Scan(&id))
+	return id
+}
+
+// poller is a client of the polling contract: it loads the head of the
+// feed, then polls with the poll_after of the previous response. Before
+// poll_after existed, clients passed "the newest id seen" as after; poller
+// falls back to that so the test reproduces the old miss.
+type poller struct {
+	t     *testing.T
+	h     http.Handler
+	as    member
+	after string
+	seen  map[int64]bool
+}
+
+func (p *poller) poll() []int64 {
+	p.t.Helper()
+	q := url.Values{}
+	if p.after != "" {
+		q.Set("after", p.after)
+	}
+	rec, pg := get(p.t, p.h, p.as, q, "")
+	require.Equal(p.t, http.StatusOK, rec.Code, rec.Body.String())
+	var got []int64
+	for _, e := range pg.Data {
+		got = append(got, e.ID)
+		p.seen[e.ID] = true
+	}
+	switch {
+	case pg.PollAfter != nil:
+		p.after = *pg.PollAfter
+	case len(pg.Data) > 0:
+		newest := pg.Data[0].ID
+		for _, e := range pg.Data {
+			if e.ID > newest {
+				newest = e.ID
+			}
+		}
+		p.after = jsonInt(newest)
+	}
+	return got
+}
+
+// TestList_PollingSeesLateCommits: activity_log ids are taken at INSERT, but
+// transactions commit in any order. A poller must still get every row, even
+// one that commits after a newer row was already returned (#4741).
+func TestList_PollingSeesLateCommits(t *testing.T) {
+	f := setup(t)
+	s := seed(t, f)
+	h := f.router(nil)
+	ctx := context.Background()
+
+	t.Run("older row commits after a newer one", func(t *testing.T) {
+		p := &poller{t: t, h: h, as: s.dana, seen: map[int64]bool{}}
+		p.poll()
+
+		a := f.openWrite(t, s.dana.userID)
+		_, err := a.Exec(ctx, `INSERT INTO lists (household_id, name) VALUES ($1, 'Slow import')`, s.hh)
+		require.NoError(t, err)
+		aID := newestActivity(t, a, s.hh)
+
+		f.write(t, s.sam.userID, "", `UPDATE list_items SET text = 'Whole milk' WHERE id = $1`, s.itemID)
+		for _, id := range p.poll() {
+			assert.Less(t, id, aID, "nothing newer than the open transaction's row is handed out yet")
+		}
+
+		require.NoError(t, a.Commit(ctx))
+		p.poll()
+		assert.True(t, p.seen[aID], "the late-committing row (id %d) reaches the poller", aID)
+		var newest int64
+		require.NoError(t, f.pool.QueryRow(ctx, `SELECT max(id) FROM activity_log WHERE household_id = $1`, s.hh).Scan(&newest))
+		assert.True(t, p.seen[newest], "and so does the newer row (id %d)", newest)
+		assert.Empty(t, p.poll(), "a quiet feed polls empty")
+	})
+
+	// The xid order differs from the id order: B takes its transaction id
+	// first but logs after A, then commits while A is still open. Holding
+	// back only rows whose xid is at or above the snapshot's xmin would
+	// return B's row (newer id) and lose A's.
+	t.Run("xid order differs from id order", func(t *testing.T) {
+		p := &poller{t: t, h: h, as: s.dana, seen: map[int64]bool{}}
+		p.poll()
+
+		b := f.openWrite(t, s.sam.userID)
+		_, err := b.Exec(ctx, `SELECT pg_current_xact_id()`)
+		require.NoError(t, err)
+
+		a := f.openWrite(t, s.dana.userID)
+		_, err = a.Exec(ctx, `INSERT INTO lists (household_id, name) VALUES ($1, 'Meal plan')`, s.hh)
+		require.NoError(t, err)
+		aID := newestActivity(t, a, s.hh)
+
+		_, err = b.Exec(ctx, `UPDATE list_items SET text = 'Skim milk' WHERE id = $1`, s.itemID)
+		require.NoError(t, err)
+		bID := newestActivity(t, b, s.hh)
+		require.Greater(t, bID, aID)
+		require.NoError(t, b.Commit(ctx))
+
+		p.poll()
+		require.NoError(t, a.Commit(ctx))
+		p.poll()
+		assert.True(t, p.seen[aID], "A's row (id %d) reaches the poller", aID)
+		assert.True(t, p.seen[bID], "B's row (id %d) reaches the poller", bID)
+	})
+}
+
+// TestList_PollAfterContract: the head gives a poll_after, older pages do
+// not, a full poll is continued by the next one, and an unknown after id
+// still answers (plain id order) instead of failing.
+func TestList_PollAfterContract(t *testing.T) {
+	f := setup(t)
+	s := seed(t, f)
+	h := f.router(nil)
+
+	_, head := get(t, h, s.dana, url.Values{"limit": {"2"}}, "")
+	require.NotNil(t, head.PollAfter)
+	require.NotNil(t, head.NextCursor)
+	assert.Equal(t, jsonInt(head.Data[0].ID), *head.PollAfter, "nothing in flight: the head's newest entry")
+	_, older := get(t, h, s.dana, url.Values{"limit": {"2"}, "cursor": {*head.NextCursor}}, "")
+	assert.Nil(t, older.PollAfter, "an older page is no place to poll from")
+
+	for _, text := range []string{"Bread", "Eggs", "Butter"} {
+		f.write(t, s.sam.userID, "",
+			`INSERT INTO list_items (list_id, household_id, text, position) VALUES ($1, $2, $3, 2)`, s.listID, s.hh, text)
+	}
+	q := url.Values{"limit": {"2"}, "after": {*head.PollAfter}}
+	_, p1 := get(t, h, s.dana, q, "")
+	require.Len(t, p1.Data, 2, "a full poll")
+	assert.Nil(t, p1.NextCursor, "a poll never pages backwards")
+	assert.Equal(t, `Sam created list item "Eggs"`, p1.Data[0].Description, "the two oldest new entries, newest first")
+	assert.Equal(t, `Sam created list item "Bread"`, p1.Data[1].Description)
+	require.NotNil(t, p1.PollAfter)
+	q.Set("after", *p1.PollAfter)
+	_, p2 := get(t, h, s.dana, q, "")
+	require.Len(t, p2.Data, 1)
+	assert.Equal(t, `Sam created list item "Butter"`, p2.Data[0].Description)
+	q.Set("after", *p2.PollAfter)
+	_, p3 := get(t, h, s.dana, q, "")
+	assert.Empty(t, p3.Data)
+	assert.Equal(t, *p2.PollAfter, *p3.PollAfter)
+
+	// Another family's entry id is not a poll position here.
+	var foreign int64
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`SELECT max(id) FROM activity_log WHERE household_id = $1`, s.other).Scan(&foreign))
+	rec, p4 := get(t, h, s.dana, url.Values{"after": {jsonInt(foreign)}}, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, e := range p4.Data {
+		assert.Greater(t, e.ID, foreign)
+	}
 }
