@@ -76,3 +76,16 @@ test("sectionsForRole: unknown role yet shows everything; an unrecognised role f
   assert.equal(canSeeSection(money, "viewer"), true);
   assert.equal(canSeeSection(money, "housesitter"), false);
 });
+
+// #4567: the recipe pages made Meals a real section. Its tab must link to a
+// page that EXISTS (no 404), and /dashboard/recipes must highlight it.
+test("Meals links to the recipe box and owns /dashboard/recipes (#4567)", () => {
+  const meals = NAV_SECTIONS.find((s) => s.id === "meals");
+  assert.equal(meals.comingSoon, undefined, "Meals is built");
+  assert.equal(meals.href, "/dashboard/recipes", "the tab links to a page that exists");
+  assert.equal(activeSection("/dashboard/recipes")?.id, "meals");
+  assert.equal(activeSection("/dashboard/recipes/abc-123")?.id, "meals");
+  // The week plan (#4568) will live here; it must already belong to Meals.
+  assert.equal(activeSection("/dashboard/meals")?.id, "meals");
+  assert.equal(pageTitle("/dashboard/recipes"), "Recipes");
+});

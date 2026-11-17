@@ -120,3 +120,36 @@ export const secretKeys = {
   details: () => [...secretKeys.all, "detail"] as const,
   detail: (id: string) => [...secretKeys.details(), id] as const,
 };
+
+/**
+ * Recipes (#4567). The list key carries the SERVER-side filters (q, tag)
+ * because the API filters, not the client: two different searches are two
+ * different cached lists, and invalidating `recipeKeys.all` refreshes both.
+ */
+export const recipeKeys = {
+  all: ["recipes"] as const,
+  lists: () => [...recipeKeys.all, "list"] as const,
+  list: (q = "", tag = "") => [...recipeKeys.lists(), q, tag] as const,
+  details: () => [...recipeKeys.all, "detail"] as const,
+  detail: (id: string) => [...recipeKeys.details(), id] as const,
+};
+
+/**
+ * Meal plans and their ratings (#4567, and #4568's week view). The range is
+ * part of the key so a week view and a "next planned" lookup don't fight over
+ * one cache entry.
+ */
+export const mealKeys = {
+  all: ["meals"] as const,
+  ranges: () => [...mealKeys.all, "range"] as const,
+  range: (from: string, to: string) => [...mealKeys.ranges(), from, to] as const,
+  feedback: (mealId: string) => [...mealKeys.all, "feedback", mealId] as const,
+};
+
+/** The household's people, including their allergies (#4567's safety context). */
+export const personKeys = {
+  all: ["people"] as const,
+  lists: () => [...personKeys.all, "list"] as const,
+  list: () => [...personKeys.lists()] as const,
+  detail: (id: string) => [...personKeys.all, "detail", id] as const,
+};
