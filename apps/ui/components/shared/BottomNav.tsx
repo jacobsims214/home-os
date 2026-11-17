@@ -18,24 +18,23 @@
  *   a vendor keeps Today and More only. The UI hides; the API enforces.
  * - DashboardShell mounts this in AppShell.Footer, below 48em only. The bar
  *   owns the bottom safe-area inset (env(safe-area-inset-bottom)).
+ * - The "Switch family" row (#4574) is the family switcher's phone entry point:
+ *   it closes this sheet and opens the picker the header chip owns, so a thumb
+ *   can switch families without reaching the header. A single-family account
+ *   gets the Members link instead.
  */
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
 import { Avatar, Drawer, TextInput, UnstyledButton, VisuallyHidden } from "@mantine/core";
 import { useReducedMotion } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
-import {
-  IconBell,
-  IconChevronRight,
-  IconLayoutGrid,
-  IconSearch,
-  IconUsers,
-} from "@tabler/icons-react";
-import { apiFetch } from "@/lib/api";
+import { IconBell, IconChevronRight, IconLayoutGrid, IconSearch } from "@tabler/icons-react";
 import { useNavSections } from "@/components/shared/use-nav-role";
+import HouseholdSwitcher, {
+  type HouseholdSwitcherControl,
+} from "@/components/shared/HouseholdSwitcher";
 import { useUnreadCount } from "@/components/notifications/use-notifications";
 import { useAuthStore } from "@/stores/auth";
 import {
@@ -61,9 +60,11 @@ interface BottomNavProps {
   onOpenNotifications: () => void;
   /** Opens the account menu (the header avatar's). */
   onOpenAccount: () => void;
+  /** The shell's family-switcher state (#4574). */
+  switcher: HouseholdSwitcherControl;
 }
 
-export default function BottomNav({ onOpenNotifications, onOpenAccount }: BottomNavProps) {
+export default function BottomNav({ onOpenNotifications, onOpenAccount, switcher }: BottomNavProps) {
   const pathname = usePathname();
   const [moreOpened, setMoreOpened] = useState(false);
   const current = activeSection(pathname)?.id;
@@ -110,6 +111,7 @@ export default function BottomNav({ onOpenNotifications, onOpenAccount }: Bottom
         current={current}
         onOpenNotifications={closeThen(onOpenNotifications)}
         onOpenAccount={closeThen(onOpenAccount)}
+        switcher={switcher}
       />
     </>
   );
@@ -159,22 +161,20 @@ function Tab({ section, active }: { section: NavSection; active: boolean }) {
 
 // ─── More sheet ───────────────────────────────────────────────
 
-interface HouseholdResponse {
-  data?: { name?: string } | null;
-}
-
 function MoreSheet({
   opened,
   onClose,
   current,
   onOpenNotifications,
   onOpenAccount,
+  switcher,
 }: {
   opened: boolean;
   onClose: () => void;
   current: NavSectionId | undefined;
   onOpenNotifications: () => void;
   onOpenAccount: () => void;
+  switcher: HouseholdSwitcherControl;
 }) {
   const router = useRouter();
   const reduceMotion = useReducedMotion();
@@ -184,13 +184,6 @@ function MoreSheet({
   // The notifications query is the header bell's (#4563), so the pill here and
   // the bell's badge can never disagree.
   const unread = useUnreadCount();
-  const household = useQuery({
-    queryKey: ["household", "me"],
-    queryFn: () => apiFetch<HouseholdResponse>("/api/v1/households/me"),
-    staleTime: 5 * 60_000,
-    retry: false,
-  });
-  const familyName = household.data?.data?.name?.trim() || "Your family";
   const name = user?.name || "Account";
   const initials =
     (user?.name || user?.email || "U")
@@ -268,14 +261,14 @@ function MoreSheet({
           <IconChevronRight size={18} stroke={NAV_ICON_STROKE} className={classes.chevron} aria-hidden />
         </UnstyledButton>
 
-        {/* Until the family switcher (#4574) exists, this goes to the
-            members page, like the header family chip. */}
-        <Link href="/dashboard/members" className={classes.row} onClick={onClose}>
-          <IconUsers size={22} stroke={NAV_ICON_STROKE} className={classes.rowIcon} aria-hidden />
-          <span className={classes.rowLabel}>Switch family</span>
-          <span className={classes.rowMeta}>{familyName}</span>
-          <IconChevronRight size={18} stroke={NAV_ICON_STROKE} className={classes.chevron} aria-hidden />
-        </Link>
+        {/* The family switcher's phone entry point (#4574): closes this sheet,
+            then opens the picker the header chip owns. */}
+        <HouseholdSwitcher
+          variant="row"
+          surfaceAt="none"
+          control={switcher}
+          onBeforeOpen={onClose}
+        />
 
         <Link
           href={settings.href}

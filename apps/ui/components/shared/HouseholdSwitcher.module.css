@@ -1,0 +1,312 @@
+/*
+ * Family switcher (#4574), built to the approved shell spec
+ * (KB design/app-shell.md, artifact #75 v1, "Family switcher, user menu,
+ * notifications"): a bottom sheet on phones, a 340 px popover from 768 px up.
+ * One 64 px radiogroup row per family: family mark, name, "You're here ·
+ * Owner", and an accent check on the selected row.
+ *
+ * Theme tokens only (app/globals.css through the --shell-* aliases). The
+ * overlay renders in a portal, outside the shell's .root, so it composes the
+ * shell variables itself — same as the More sheet and the notifications panel.
+ */
+
+/* ---------- the trigger's shape is owned by its host (chip / card / row) ---------- */
+
+/* A chevron that says "this opens a picker". */
+.chevron {
+  flex: none;
+  color: var(--shell-ink-3);
+}
+
+/* The More sheet's row (phones), matching BottomNav's notifications/Settings
+   rows: 52 px, an icon column, the label, then the current family. */
+.sheetRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 52px;
+  padding: 8px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--shell-line);
+  background: none;
+  color: var(--shell-ink);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.sheetRow > svg {
+  flex: none;
+  width: 32px;
+  color: var(--shell-ink-2);
+}
+
+.sheetRow > span:nth-of-type(1) {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.sheetRow > span:nth-of-type(2) {
+  max-width: 45%;
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--shell-ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- panel (shared by sheet and popover) ---------- */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 100%;
+  background: var(--shell-raised);
+  color: var(--shell-ink);
+}
+
+.head {
+  flex: none;
+  padding: 0 4px 6px;
+}
+
+.title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: var(--shell-ink);
+}
+
+.hint {
+  margin: 2px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--shell-ink-3);
+}
+
+.list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* ---------- one family ---------- */
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: none;
+  color: var(--shell-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.row + .row {
+  margin-top: 2px;
+}
+
+.row:hover:not([aria-checked="true"]) {
+  background: var(--shell-surface-2);
+}
+
+/* The selected family: accent-soft fill and an accent check (spec). Not colour
+   alone — the row also says "You're here", so the state survives a grayscale
+   screen and a colour-blind reader. */
+.row[aria-checked="true"] {
+  background: var(--shell-accent-soft);
+}
+
+.row[aria-busy="true"] {
+  cursor: progress;
+  opacity: 0.65;
+}
+
+.mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-sm);
+  background: var(--shell-surface-2);
+  color: var(--shell-ink-2);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.row[aria-checked="true"] .mark {
+  background: var(--accent-fill);
+  color: var(--mantine-color-white);
+}
+
+.text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.name {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  overflow: hidden;
+  font-size: 12.5px;
+  color: var(--shell-ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row[aria-checked="true"] .meta {
+  color: var(--shell-accent);
+  font-weight: 500;
+}
+
+.check {
+  flex: none;
+  color: var(--shell-accent);
+}
+
+/* The row's accessible name includes its state, so a screen reader hears the
+   selection without relying on aria-checked alone. */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- error / loading ---------- */
+
+.error {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: var(--warn-bg);
+  box-shadow: inset 0 0 0 1px var(--warn-line);
+  color: var(--warn-ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.skeleton {
+  height: 48px;
+  border-radius: var(--r-sm);
+  background: var(--shell-line);
+}
+
+.skeleton + .skeleton {
+  margin-top: 8px;
+}
+
+/* ---------- phone: bottom sheet above the tab bar ---------- */
+
+.sheetInner {
+  padding: 0 0 calc(57px + env(safe-area-inset-bottom, 0px));
+}
+
+.sheet {
+  composes: shellVars from "./DashboardShell.module.css";
+  display: flex;
+  flex-direction: column;
+  height: auto !important;
+  max-height: calc(
+    100dvh - 57px - env(safe-area-inset-bottom, 0px) - env(safe-area-inset-top, 0px) - 12px
+  ) !important;
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  background: var(--shell-raised);
+  color: var(--shell-ink);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.sheet:focus,
+.sheet:focus-visible {
+  outline: none;
+}
+
+.sheetHeader {
+  position: relative;
+  flex: none;
+  min-height: 0;
+  padding: 22px 8px 2px 16px;
+  background: inherit;
+}
+
+.sheetTitle {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--shell-ink);
+}
+
+.sheetBody {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+
+.handle {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  width: 36px;
+  height: 4px;
+  margin-left: -18px;
+  border-radius: 2px;
+  background: var(--shell-line);
+}
+
+/* ---------- 768 px and up: popover ---------- */
+
+.popover {
+  composes: shellVars from "./DashboardShell.module.css";
+  width: 340px;
+  max-width: calc(100vw - 16px);
+  max-height: 70vh;
+  overflow: hidden;
+  border: 1px solid var(--shell-line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+}
+
+.popoverBody {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: calc(70vh - 24px);
+  padding: 12px 8px 8px;
+}

@@ -22,8 +22,11 @@
  * desktop navbar, <Sidebar variant="drawer"> in the drawer, and the rail
  * below.
  *
- * Hooks for the follow-up tickets:
- * - #4574 replaces the family chip's target with the family switcher.
+ * The family chip (#4574) above the title is the phone/tablet family switcher:
+ * it names the family the whole app is scoped to and opens the picker (a bottom
+ * sheet below 48em, a popover above). With a single family it is a plain label.
+ * The open state lives here so the chip, the sidebar card and the More sheet row
+ * can never have two pickers open at once.
  *
  * The header bell is #4563's notifications opener: the bottom sheet on phones,
  * the popover from 768 px up (components/notifications/NotificationsSurface).
@@ -50,6 +53,10 @@ import dayjs from "dayjs";
 import BottomNav from "@/components/shared/BottomNav";
 import NotificationsSurface from "@/components/notifications/NotificationsSurface";
 import Sidebar, { AccountMenuItems, Brand } from "@/components/shared/Sidebar";
+import HouseholdSwitcher, {
+  useHouseholdSwitcherControl,
+  type HouseholdSwitcherControl,
+} from "@/components/shared/HouseholdSwitcher";
 import { useNavSections } from "@/components/shared/use-nav-role";
 import { apiFetch } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
@@ -69,6 +76,9 @@ export default function DashboardShell({ children }: { children: React.ReactNode
   // the More sheet's rows, so their state lives here.
   const [bellOpened, setBellOpened] = useState(false);
   const [accountOpened, setAccountOpened] = useState(false);
+  // One family-switcher state for the whole shell (#4574): the header chip, the
+  // sidebar/drawer card and the More sheet row all open this one picker.
+  const switcher = useHouseholdSwitcherControl();
 
   // Navigating, or widening the window to desktop, closes the drawer.
   useEffect(() => {
@@ -100,6 +110,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
           onBellChange={setBellOpened}
           accountOpened={accountOpened}
           onAccountChange={setAccountOpened}
+          switcher={switcher}
         />
       </AppShell.Header>
 
@@ -108,7 +119,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
           <Rail pathname={pathname} drawerOpened={drawerOpened} onOpenDrawer={drawer.open} />
         </Box>
         <Box visibleFrom="md" className={classes.sidebar}>
-          <Sidebar variant="sidebar" />
+          <Sidebar variant="sidebar" familySlot={<HouseholdSwitcher variant="card" surfaceAt="wide" control={switcher} />} />
         </Box>
       </AppShell.Navbar>
 
@@ -121,6 +132,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
           <BottomNav
             onOpenNotifications={() => setBellOpened(true)}
             onOpenAccount={() => setAccountOpened(true)}
+            switcher={switcher}
           />
         </nav>
       </AppShell.Footer>
@@ -144,7 +156,14 @@ export default function DashboardShell({ children }: { children: React.ReactNode
         classNames={{ content: classes.drawerContent, header: classes.drawerHeader, body: classes.drawerBody }}
         data-testid="nav-drawer"
       >
-        <Sidebar variant="drawer" />
+        <Sidebar
+          variant="drawer"
+          familySlot={
+            // The drawer closes first: two focus traps at once fight over focus
+            // return, and the drawer's is the one being dismissed.
+            <HouseholdSwitcher variant="card" surfaceAt="none" control={switcher} onBeforeOpen={drawer.close} />
+          }
+        />
       </Drawer>
     </AppShell>
   );
@@ -160,6 +179,7 @@ function ShellHeader({
   onBellChange,
   accountOpened,
   onAccountChange,
+  switcher,
 }: {
   pathname: string;
   drawerOpened: boolean;
@@ -168,6 +188,8 @@ function ShellHeader({
   onBellChange: (opened: boolean) => void;
   accountOpened: boolean;
   onAccountChange: (opened: boolean) => void;
+  /** The shell's single family-switcher state (#4574). */
+  switcher: HouseholdSwitcherControl;
 }) {
   // Rendered after mount so server and client agree (the server's timezone
   // may differ from the browser's).
@@ -191,7 +213,7 @@ function ShellHeader({
 
       <div className={classes.titleBlock}>
         <Box hiddenFrom="md">
-          <FamilyChip />
+          <HouseholdSwitcher variant="chip" surfaceAt="compact" control={switcher} />
         </Box>
         <div className={classes.titleLine}>
           <h1 className={classes.title}>{pageTitle(pathname)}</h1>
@@ -204,35 +226,6 @@ function ShellHeader({
         <UserMenu opened={accountOpened} onChange={onAccountChange} />
       </Box>
     </div>
-  );
-}
-
-interface HouseholdResponse {
-  data?: { name?: string } | null;
-}
-
-/** "Sims family ⌄" above the title on phone and tablet. */
-function FamilyChip() {
-  const household = useQuery({
-    queryKey: ["household", "me"],
-    queryFn: () => apiFetch<HouseholdResponse>("/api/v1/households/me"),
-    staleTime: 5 * 60_000,
-    retry: false,
-  });
-  const name = household.data?.data?.name?.trim() || "Your family";
-
-  // Until the family switcher (#4574) exists, the chip goes to the members
-  // page, where the family is managed today.
-  return (
-    <UnstyledButton
-      component={Link}
-      href="/dashboard/members"
-      className={classes.familyChip}
-      aria-label={`Family: ${name}. Manage family`}
-    >
-      <span>{name}</span>
-      <IconChevronDown size={14} stroke={NAV_ICON_STROKE} aria-hidden />
-    </UnstyledButton>
   );
 }
 

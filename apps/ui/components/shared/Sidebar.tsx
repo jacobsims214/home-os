@@ -22,18 +22,19 @@
  * old in-sidebar bell is gone. Log out is a native POST to /api/auth/logout
  * (#4424) in both variants.
  *
- * `familySlot` replaces the family card; the family switcher (#4574) plugs in
- * there.
+ * `familySlot` IS the family card: the shell passes the family switcher (#4574)
+ * so the name, the role and the "5 members" line come from the same household
+ * the whole app is scoped to. There is no fallback card on purpose — a second
+ * implementation reading GET /households/me would be a second source of truth
+ * about which family you are in.
  */
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
 import { Avatar, Box, Menu, Text, TextInput, UnstyledButton, VisuallyHidden } from "@mantine/core";
-import { IconChevronRight, IconLogout, IconSearch, IconSelector, IconSettings } from "@tabler/icons-react";
+import { IconChevronRight, IconLogout, IconSearch, IconSettings } from "@tabler/icons-react";
 import ColorSchemeControl from "@/components/ui/ColorSchemeControl";
-import { apiFetch } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
 import {
   NAV_GROUP_LABELS,
@@ -49,8 +50,8 @@ export type SidebarVariant = "sidebar" | "drawer";
 
 interface SidebarProps {
   variant?: SidebarVariant;
-  /** Replaces the family card (the family switcher, #4574). */
-  familySlot?: React.ReactNode;
+  /** The family card: the family switcher (#4574), supplied by the shell. */
+  familySlot: React.ReactNode;
 }
 
 export default function Sidebar({ variant = "sidebar", familySlot }: SidebarProps) {
@@ -68,7 +69,7 @@ export default function Sidebar({ variant = "sidebar", familySlot }: SidebarProp
     <div className={classes.root} data-variant={variant} data-testid={`nav-${variant}`}>
       {!drawer && <Brand />}
 
-      <div className={classes.family}>{familySlot ?? <FamilyCard />}</div>
+      <div className={classes.family}>{familySlot}</div>
 
       <SidebarSearch variant={variant} />
 
@@ -100,49 +101,6 @@ export function Brand({ as: Tag = "div" }: { as?: "div" | "span" }) {
       </span>
       <span className={classes.brandName}>Home OS</span>
     </Tag>
-  );
-}
-
-// ─── Family card ──────────────────────────────────────────────
-
-interface HouseholdResponse {
-  data?: { name?: string } | null;
-}
-
-/**
- * "Sims family · 5 members". Until the family switcher (#4574) exists, it
- * goes to the members page, where the family is managed today.
- */
-function FamilyCard() {
-  // Same query key as the header family chip and the More sheet.
-  const household = useQuery({
-    queryKey: ["household", "me"],
-    queryFn: () => apiFetch<HouseholdResponse>("/api/v1/households/me"),
-    staleTime: 5 * 60_000,
-    retry: false,
-  });
-  // Vendors can't list members (403); the card then shows the name only.
-  const members = useQuery({
-    queryKey: ["household", "me", "members"],
-    queryFn: () => apiFetch<{ data: unknown[] }>("/api/v1/households/me/members"),
-    staleTime: 5 * 60_000,
-    retry: false,
-  });
-  const name = household.data?.data?.name?.trim() || "Your family";
-  const count = Array.isArray(members.data?.data) ? members.data!.data.length : 0;
-  const meta = count > 0 ? `${count} ${count === 1 ? "member" : "members"}` : "Manage family";
-
-  return (
-    <UnstyledButton component={Link} href="/dashboard/members" className={classes.familyCard}>
-      <span className={classes.familyMark} aria-hidden>
-        {name[0]?.toUpperCase() ?? "F"}
-      </span>
-      <span className={classes.familyText}>
-        <span className={classes.familyName}>{name}</span>
-        <span className={classes.familyMeta}>{meta}</span>
-      </span>
-      <IconSelector size={18} stroke={NAV_ICON_STROKE} className={classes.familyIcon} aria-hidden />
-    </UnstyledButton>
   );
 }
 

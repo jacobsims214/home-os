@@ -1,4 +1,4 @@
-import { test as base, expect, type Locator, type Page } from "@playwright/test";
+import { test as base, expect, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 
 /**
  * Shared E2E fixtures (#4510).
@@ -28,18 +28,23 @@ export type StubStats = { dexRefreshes: number; apiRequests: number; apiUnauthor
 type Fixtures = {
   /** Page signed in as the seeded test user. */
   loggedInPage: Page;
+  /**
+   * The stub session's id, so a spec can seed per-session data for the page it
+   * signed in (POST /e2e/households, #4574). Null in external mode.
+   */
+  stubSid: string | null;
   /** Reads the stub's counters. Stub mode only. */
   stubStats: () => Promise<StubStats>;
 };
 
-type Tokens = { id_token: string; refresh_token: string; expires_in: number };
+type Tokens = { id_token: string; refresh_token: string; expires_in: number; sid?: string };
 
 /** Signs a context in with stub-minted tokens, set as the callback sets them. */
 export async function signInWithStub(
   page: Page,
   baseURL: string,
   opts: { idToken?: boolean } = {},
-): Promise<void> {
+): Promise<Tokens> {
   const res = await page.request.post(`${stubUrl}/e2e/login`, { data: { email: testUser.email } });
   expect(res.ok(), `stub login for ${testUser.email}`).toBeTruthy();
   const tokens = (await res.json()) as Tokens;
@@ -51,6 +56,23 @@ export async function signInWithStub(
     cookies.push({ ...cookie, name: SESSION_COOKIE, value: tokens.id_token, expires: expires + tokens.expires_in });
   }
   await page.context().addCookies(cookies);
+  // The stub's sign-in id: POST /e2e/households seeds a multi-family account
+  // with it (#4574), the way the secrets endpoints use it per session.
+  return tokens;
+}
+
+/**
+ * Gives the signed-in session a list of families (#4574). Without this, every
+ * session is the single seed household, which is what the single-family specs
+ * (and the "no switcher for one family" spec) rely on.
+ */
+export async function seedHouseholds(
+  request: APIRequestContext,
+  sid: string,
+  households: Array<{ id: string; name: string; role: string; timezone?: string; bills?: unknown[] }>,
+): Promise<void> {
+  const res = await request.post(`${stubUrl}/e2e/households`, { data: { sid, households } });
+  expect(res.ok(), "seed households").toBeTruthy();
 }
 
 /** Real Dex login (external mode). Dex's default theme: #login, #password, #submit-login. */
@@ -64,9 +86,20 @@ async function signInWithDex(page: Page): Promise<void> {
 }
 
 export const test = base.extend<Fixtures>({
-  loggedInPage: async ({ page, baseURL }, use) => {
+  // One sign-in per test, shared by both fixtures: loggedInPage is the page with
+  // the session cookies, stubSid is the stub-side id of that same session.
+  stubSid: async ({ page, baseURL }, use) => {
+    if (external) {
+      await use(null);
+      return;
+    }
+    const tokens = await signInWithStub(page, baseURL!);
+    await use(tokens.sid ?? null);
+  },
+  loggedInPage: async ({ page, baseURL, stubSid }, use) => {
     if (external) await signInWithDex(page);
-    else await signInWithStub(page, baseURL!);
+    // stubSid's sign-in already set the cookies on this page's context.
+    void stubSid;
     await use(page);
   },
   stubStats: async ({ request }, use) => {

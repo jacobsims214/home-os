@@ -13,6 +13,8 @@ const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
 const TOKEN = `${b64({ alg: "none" })}.${b64({ exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`;
 
 let calls;
+/** Headers of each upstream fetch, in the same order as `calls`. */
+let sentHeaders;
 let savedFetch;
 let savedEnv;
 
@@ -22,7 +24,15 @@ beforeEach(() => {
   savedEnv = { API_INTERNAL_URL: process.env.API_INTERNAL_URL, PUBLIC_URL: process.env.PUBLIC_URL };
   process.env.API_INTERNAL_URL = API;
   delete process.env.PUBLIC_URL;
+  sentHeaders = [];
   globalThis.fetch = async (url, init) => {
+    // The headers the API would see (the household header lives here), kept
+    // apart from `calls` so the existing assertions on it stay exact.
+    const sent = {};
+    new Headers(init?.headers).forEach((value, key) => {
+      sent[key] = value;
+    });
+    sentHeaders.push(sent);
     calls.push({ url: String(url), method: init?.method });
     return new Response(JSON.stringify({ data: { id: "p1" } }), {
       status: init?.method === "POST" ? 201 : 200,
@@ -116,4 +126,48 @@ test("reads stay allowed from anywhere (GET/HEAD are not state-changing)", async
   const plain = await bff("GET", {});
   assert.equal(plain.status, 200);
   assert.equal(calls.length, 3);
+});
+
+// ─── Active household (#4574) ─────────────────────────────────
+
+const HID_A = "0b9d4f1e-6a3c-4b8e-9f52-1c7d2a5e8b10";
+const HID_B = "f3a7c2d1-8e4b-4c9f-a1d6-5b2e7c9f0a34";
+
+/** A GET with extra cookies/headers, through the real proxy. */
+function get(headers = {}) {
+  const request = new NextRequest("https://home.example/bff/bills", {
+    method: "GET",
+    headers: { host: "home.example", cookie: `home-os-token=${TOKEN}`, ...headers },
+  });
+  return route.GET(request, { params: { path: ["bills"] } });
+}
+
+test("the household cookie becomes X-Household-ID on the upstream request", async () => {
+  const res = await get({ cookie: `home-os-token=${TOKEN}; home-os-household=${HID_A}` });
+  assert.equal(res.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(sentHeaders[0]["x-household-id"], HID_A);
+});
+
+test("no household cookie: no header, so the API uses the default membership", async () => {
+  await get();
+  assert.equal(sentHeaders[0]["x-household-id"], undefined);
+});
+
+test("a browser-supplied X-Household-ID is dropped: the cookie decides", async () => {
+  // Without a cookie the header alone must not scope anything.
+  await get({ "x-household-id": HID_B });
+  assert.equal(sentHeaders[0]["x-household-id"], undefined, "a header from the page cannot choose a family");
+
+  // With a cookie, the cookie wins over the header (switching is one write).
+  await get({ "x-household-id": HID_B, cookie: `home-os-token=${TOKEN}; home-os-household=${HID_A}` });
+  assert.equal(sentHeaders[1]["x-household-id"], HID_A);
+});
+
+test("a malformed household cookie is not forwarded (no 400 for a corrupted value)", async () => {
+  for (const value of ["family-2", "", "%E0%A4%A", `${HID_A}-x`]) {
+    await get({ cookie: `home-os-token=${TOKEN}; home-os-household=${value}` });
+  }
+  for (const headers of sentHeaders) assert.equal(headers["x-household-id"], undefined);
+  assert.equal(calls.length, 4, "all four requests still reached the API, unscoped");
 });
