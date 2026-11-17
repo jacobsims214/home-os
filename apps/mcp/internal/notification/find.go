@@ -179,9 +179,9 @@ func findNext(in findInput, res findResult) []string {
 			}
 		}
 		if firstUnread != "" {
-			next = append(next, fmt.Sprintf("After telling the user, mark them read with notification_mark_read notification_ids=[%q] or all=true.", firstUnread))
+			next = append(next, fmt.Sprintf("After telling the user, mark the ones they saw read with notification_mark_read notification_ids=[%q].", firstUnread))
 		} else {
-			next = append(next, "Mark them read with notification_mark_read all=true once the user has seen them.")
+			next = append(next, "After telling the user, mark the ones they saw read with notification_mark_read notification_ids=[…].")
 		}
 	case res.Total == 0 && !in.unreadOnly:
 		next = append(next, "Bill and upkeep reminders appear here when they come due; see what's coming with agenda_get.")

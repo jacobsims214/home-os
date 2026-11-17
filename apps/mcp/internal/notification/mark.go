@@ -24,10 +24,16 @@ var markAliases = map[string]string{"notification_id": "notification_ids", "id":
 // markExample is a valid notification_mark_read call for error examples.
 var markExample = map[string]any{"notification_ids": []string{"3f2b8c1e-5d4a-4e7b-9c1f-2a6d8e0b7c45"}}
 
+// retiredAllParams are the parameter names that used to ask for a blanket
+// mark-read (all:true), plus the shorthands small models invent for it. They
+// are refused by name with a fix (#4947): one boolean marked every unread
+// notification read with no evidence the agent had seen any of them, which is
+// how a war-game agent "tidying up" consumed a whole household's unread state.
+var retiredAllParams = []string{"all", "mark_all", "all_unread"}
+
 // markInput is the validated notification_mark_read arguments.
 type markInput struct {
 	ids []uuid.UUID
-	all bool
 }
 
 // markResult is notification_mark_read's data.
@@ -38,12 +44,6 @@ type markResult struct {
 	NotificationIDs []string `json:"notification_ids" jsonschema_description:"The ids this call marked read."`
 	UnreadCount     int      `json:"unread_count" jsonschema_description:"How many of your notifications are still unread."`
 }
-
-// markAllSQL marks every unread visible notification read.
-var markAllSQL = `
-	UPDATE notifications n SET read_at = NOW()
-	WHERE ` + visibleSQL + ` AND n.read_at IS NULL
-	RETURNING n.id, n.user_id IS NULL`
 
 // lockSQL locks the named visible notifications and reports which are read.
 var lockSQL = `
@@ -63,12 +63,12 @@ var markIDsSQL = `
 // only set on unread rows).
 func NewNotificationMarkReadTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	opts := []mcp.ToolOption{
-		mcp.WithDescription("Mark notifications read by id, or all at once."),
+		mcp.WithDescription("Mark the notifications you just told the user about read, by id. There is no mark-all."),
 		mcp.WithArray("notification_ids",
 			mcp.Description("Ids from notification_find to mark read, e.g. [\"3f2b8c1e-...\"]"),
 			mcp.WithStringItems(),
+			mcp.Required(),
 		),
-		mcp.WithBoolean("all", mcp.Description("true to mark all your unread notifications read")),
 		respond.Schema[markResult](),
 	}
 	tool := mcp.NewTool("notification_mark_read", append(opts, annotations("Mark notifications read", false, false, true)...)...)
@@ -89,7 +89,7 @@ func NewNotificationMarkReadTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHand
 		if len(missing) > 0 {
 			return notFound(missing), nil
 		}
-		return respond.OK(markSummary(in, res), res, markNext(res)...), nil
+		return respond.OK(markSummary(res), res, markNext(res)...), nil
 	}
 	return "notification_mark_read", tool, handler
 }
@@ -111,38 +111,33 @@ func markRead(ctx context.Context, pool *pgxpool.Pool, householdID string, userI
 	if err != nil {
 		return res, nil, err
 	}
-	var rows pgx.Rows
-	if in.all {
-		rows, err = tx.Query(ctx, markAllSQL, householdID, userID, role)
-	} else {
-		found := make(map[uuid.UUID]bool, len(in.ids))
-		lock, qerr := tx.Query(ctx, lockSQL, householdID, userID, role, in.ids)
-		if qerr != nil {
-			return res, nil, qerr
-		}
-		var (
-			id      uuid.UUID
-			wasRead bool
-		)
-		if _, err = pgx.ForEachRow(lock, []any{&id, &wasRead}, func() error {
-			found[id] = true
-			if wasRead {
-				res.AlreadyRead++
-			}
-			return nil
-		}); err != nil {
-			return res, nil, err
-		}
-		for _, id := range in.ids {
-			if !found[id] {
-				missing = append(missing, id.String())
-			}
-		}
-		if len(missing) > 0 {
-			return res, missing, nil
-		}
-		rows, err = tx.Query(ctx, markIDsSQL, householdID, userID, role, in.ids)
+	found := make(map[uuid.UUID]bool, len(in.ids))
+	lock, err := tx.Query(ctx, lockSQL, householdID, userID, role, in.ids)
+	if err != nil {
+		return res, nil, err
 	}
+	var (
+		lockedID uuid.UUID
+		wasRead  bool
+	)
+	if _, err = pgx.ForEachRow(lock, []any{&lockedID, &wasRead}, func() error {
+		found[lockedID] = true
+		if wasRead {
+			res.AlreadyRead++
+		}
+		return nil
+	}); err != nil {
+		return res, nil, err
+	}
+	for _, id := range in.ids {
+		if !found[id] {
+			missing = append(missing, id.String())
+		}
+	}
+	if len(missing) > 0 {
+		return res, missing, nil
+	}
+	rows, err := tx.Query(ctx, markIDsSQL, householdID, userID, role, in.ids)
 	if err != nil {
 		return res, nil, err
 	}
@@ -182,12 +177,10 @@ func notFound(missing []string) *mcp.CallToolResult {
 }
 
 // markSummary is notification_mark_read's one-line summary.
-func markSummary(in markInput, res markResult) string {
+func markSummary(res markResult) string {
 	left := plural(res.UnreadCount, "unread notification") + " left"
 	var s string
 	switch {
-	case res.Marked == 0 && in.all:
-		s = "You had no unread notifications; nothing changed."
 	case res.Marked == 0:
 		s = fmt.Sprintf("%s already read; nothing changed. %s.", alreadyNoun(res.AlreadyRead), capitalize(left))
 	default:
@@ -224,29 +217,45 @@ func markNext(res markResult) []string {
 	return []string{"All caught up; see what's coming with agenda_get."}
 }
 
-// parseMarkInput validates notification_mark_read arguments: exactly one of
-// notification_ids (an array, or a comma-separated string) or all=true.
+// parseMarkInput validates notification_mark_read arguments. notification_ids
+// (an array, or a comma-separated string) is required: mark-read names what it
+// changes. The retired blanket form is refused by name rather than ignored, so
+// an agent working from an old habit gets a fix instead of a silent no-op.
 func parseMarkInput(raw map[string]any) (markInput, error) {
 	var in markInput
 	args := withAliases(raw, markAliases)
-	all, err := optionalBool(args, "all", false)
-	if err != nil {
+	if err := refuseMarkAll(args); err != nil {
 		return in, err
 	}
 	ids, err := idList(args["notification_ids"])
 	if err != nil {
 		return in, err
 	}
-	switch {
-	case all && len(ids) > 0:
-		return in, badArg("all", "Pass notification_ids or all=true, not both.",
-			"Leave out all to mark only the given ids, or leave out notification_ids to mark everything read.")
-	case !all && len(ids) == 0:
+	if len(ids) == 0 {
 		return in, badArg("notification_ids", "Say which notifications to mark read.",
-			"Pass notification_ids from notification_find, or all=true to mark every unread notification read.")
+			"Pass the ids notification_find returned for the notifications you told the user about; nothing is marked in bulk.")
 	}
-	in.all, in.ids = all, ids
+	in.ids = ids
 	return in, nil
+}
+
+// refuseMarkAll rejects a blanket mark-read (#4947). Read state is the family's
+// record of what each adult has seen, so a bulk write is not a convenience an
+// agent may take on its own initiative: it has to name each notification it is
+// about to consume.
+func refuseMarkAll(args map[string]any) error {
+	for _, key := range retiredAllParams {
+		v, present := args[key]
+		if !present || v == nil {
+			continue
+		}
+		if b, ok := v.(bool); ok && !b {
+			continue
+		}
+		return badArg(key, "Marking every notification read is not allowed; there is no mark-all.",
+			"Pass notification_ids=[...] with the ids notification_find returned for the notifications you told the user about. A notification about another member's record stays unread until they see it.")
+	}
+	return nil
 }
 
 // idList reads notification_ids: an array of UUID strings, or one string
@@ -293,7 +302,7 @@ func idList(v any) ([]uuid.UUID, error) {
 	}
 	if len(ids) > maxMarkIDs {
 		return nil, badArg("notification_ids", fmt.Sprintf("At most %d ids per call; got %d.", maxMarkIDs, len(ids)),
-			"Split the ids over several calls, or pass all=true.")
+			"Split the ids over several calls, or narrow with notification_find unread_only=true.")
 	}
 	return ids, nil
 }
