@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Button, Card, Text, Loader } from "@mantine/core";
 import { DEFAULT_RETURN_PATH, returnPath } from "@/lib/auth/return-path";
+import { hasSessionRemnants, teardownSession } from "@/lib/session-teardown";
 
 // Server route that creates the PKCE verifier (httpOnly cookie) and redirects
 // to Dex's authorize endpoint with code_challenge + S256.
@@ -21,6 +22,7 @@ export default function LoginPage() {
   const [startUrl, setStartUrl] = useState(LOGIN_START);
 
   useEffect(() => {
+    let cancelled = false;
     const params = new URLSearchParams(window.location.search);
     const start = loginStartUrl(params.get("redirect"));
     setStartUrl(start);
@@ -28,9 +30,27 @@ export default function LoginPage() {
     if (err) {
       // Don't bounce straight back to Dex after a failed callback: that loops.
       setError(err);
-      return;
     }
-    window.location.replace(start);
+
+    // Session-expiry sweep (#4648). Every way a session ends lands here: the
+    // middleware's 307 with no cookie, the dashboard layout's redirect, a /bff
+    // 401 (lib/api.ts) and the logout route's 303. If this browser is still
+    // holding a signed-in person's leftovers — cached /bff responses from a
+    // worker built before #4648, or the persisted home-os-auth profile — drop
+    // them before signing anyone in, so an expired session can never serve
+    // cached authenticated data. Nothing to do on a first visit, which is why
+    // this asks first.
+    const sweep = hasSessionRemnants().then((remnants) => (remnants ? teardownSession() : undefined));
+
+    void sweep
+      .catch(() => undefined)
+      .then(() => {
+        // A failed sweep must never block the sign-in.
+        if (!cancelled && !err) window.location.replace(start);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (

@@ -15,10 +15,24 @@
  * means dropping the cookies. The id token stays valid at the Go API until its
  * exp, but nothing in the browser holds it any more.
  *
+ * Clear-Site-Data (#4648): expiring the cookies is not enough on a shared
+ * device. The service worker used to cache `/bff/*` responses (authenticated
+ * household data) and logout left them, and the zustand `home-os-auth` profile
+ * stayed in localStorage, so the next person to pick up the tablet could be
+ * served the previous person's data from Cache Storage. The 303 therefore
+ * carries `Clear-Site-Data: "cache", "storage"`, which makes the browser drop
+ * this origin's HTTP cache, Cache Storage, localStorage, sessionStorage,
+ * IndexedDB and service worker registrations — without trusting any script of
+ * ours to still be running. The app also purges from the page before it
+ * submits (lib/session-teardown.ts), because Clear-Site-Data is only honoured
+ * in a secure context: on a plain-http origin the page-side purge is the one
+ * that does the work.
+ *
  * Uses the standard Response (no next/server import) so `node --test` can load
  * this file (route.test.mjs, via lib/auth/node-ts-resolve.mjs for the "@/" import).
  */
 import { isSameOrigin } from "@/lib/auth/same-origin";
+import { CLEAR_SITE_DATA } from "@/lib/auth/clear-site-data";
 
 export const dynamic = "force-dynamic";
 
@@ -52,6 +66,11 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const headers = new Headers({ Location: "/login", "Cache-Control": "no-store" });
+  // "cache" is HTTP cache + Cache Storage + the back/forward entries; "storage"
+  // is localStorage, sessionStorage, IndexedDB and the service worker
+  // registrations. Both are quoted-string directives, exactly as MDN's grammar
+  // requires. See lib/session-teardown.ts for what the page clears as well.
+  headers.set("Clear-Site-Data", CLEAR_SITE_DATA);
   for (const name of SESSION_COOKIES) headers.append("Set-Cookie", expiredCookie(name, "/"));
   headers.append("Set-Cookie", expiredCookie(PKCE_COOKIE, "/api/auth"));
   return new Response(null, { status: 303, headers });

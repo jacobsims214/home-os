@@ -84,6 +84,8 @@ docker-compose.override.yml
 # build hash, so committing them churns the diff and ships a stale precache.
 /apps/ui/public/sw.js
 /apps/ui/public/workbox-*.js
+# next-pwa's compiled custom worker (worker/index.js -> worker-<buildId>.js)
+/apps/ui/public/worker-*.js
 
 # --- AMP ---
 # Isolated per-ticket worktrees created by the AMP harness.
