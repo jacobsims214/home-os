@@ -149,8 +149,11 @@ type billResponse struct {
 	// covers. Next-due computation stays in the MCP/worker BillDue rule.
 	PaidDate       *string `json:"paid_date"`
 	PaidForDueDate *string `json:"paid_for_due_date"`
-	CreatedAt      string  `json:"created_at"`
-	UpdatedAt      string  `json:"updated_at"`
+	// SourceDocumentID is the document the amount came from (#4941); read it
+	// with GET /api/v1/files/{id} to check the amount against its text.
+	SourceDocumentID *string `json:"source_document_id"`
+	CreatedAt        string  `json:"created_at"`
+	UpdatedAt        string  `json:"updated_at"`
 }
 
 // toResponse converts a Bill domain model to a JSON-safe response.
@@ -174,6 +177,7 @@ func toResponse(b *Bill) billResponse {
 		BudgetCategoryID: subject.String(b.BudgetCategoryID),
 		PaidDate:         dateString(b.PaidDate),
 		PaidForDueDate:   dateString(b.PaidForDueDate),
+		SourceDocumentID: subject.String(b.SourceDocumentID),
 		CreatedAt:        b.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:        b.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}

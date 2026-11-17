@@ -373,13 +373,19 @@ func (r *Repo) DeleteFile(ctx context.Context, householdID, id uuid.UUID) error 
 // transitioning to 'processing' before any text has been extracted), and nil
 // for ocrError to clear a previously-recorded error.
 //
+// A document whose body is the caller's own pasted text (text_origin 'raw',
+// #4941) is never overwritten by extraction: the source is what a recorded
+// amount is checked against, so a worker write to it is a no-op for the text
+// even if one is attempted. Only ocr_status and ocr_error may change.
+//
 // Returns pgx.ErrNoRows if the file does not exist or is not owned by the
 // given household.
 func (r *Repo) UpdateOCRStatus(ctx context.Context, householdID, id uuid.UUID, ocrStatus string, extractedText *string, ocrError *string) error {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE files
 		 SET ocr_status = $1,
-		     extracted_text = COALESCE($2, extracted_text),
+		     extracted_text = CASE WHEN text_origin = 'raw' THEN extracted_text
+		                           ELSE COALESCE($2, extracted_text) END,
 		     ocr_error = $3,
 		     updated_at = NOW()
 		 WHERE id = $4 AND household_id = $5`,
@@ -473,13 +479,14 @@ func (r *Repo) UpdateFile(ctx context.Context, householdID, id uuid.UUID, p Patc
 const fileColumns = `f.id, f.household_id, f.blob_id, f.name, f.content_type, f.size, f.entity_type, f.entity_id,
 	f.extracted_text, f.ocr_status, f.ocr_error, f.tags, f.created_at, f.updated_at,
 	f.title, f.category, to_char(f.document_date, 'YYYY-MM-DD'), to_char(f.expires_on, 'YYYY-MM-DD'),
-	f.description, f.person_id`
+	f.description, f.person_id, f.text_origin, f.text_sha256`
 
 // scanTargets returns pointers to f's fields in fileColumns order.
 func (f *File) scanTargets() []any {
 	return []any{&f.ID, &f.HouseholdID, &f.BlobID, &f.Name, &f.ContentType, &f.Size, &f.EntityType, &f.EntityID,
 		&f.ExtractedText, &f.OCRStatus, &f.OCRError, &f.Tags, &f.CreatedAt, &f.UpdatedAt,
-		&f.Title, &f.Category, &f.DocumentDate, &f.ExpiresOn, &f.Description, &f.PersonID}
+		&f.Title, &f.Category, &f.DocumentDate, &f.ExpiresOn, &f.Description, &f.PersonID,
+		&f.TextOrigin, &f.TextSHA256}
 }
 
 // The credential rule for documents (#4478, aligned with the MCP in #4775):

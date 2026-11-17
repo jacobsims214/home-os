@@ -1,10 +1,14 @@
 package activity
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -73,18 +77,22 @@ type agentResponse struct {
 }
 
 type entryResponse struct {
-	ID            int64          `json:"id"`
-	Action        string         `json:"action"`
-	EntityType    string         `json:"entity_type"`
-	EntityID      string         `json:"entity_id"`
-	ParentType    *string        `json:"parent_type"`
-	ParentID      *string        `json:"parent_id"`
-	ChangedFields []string       `json:"changed_fields"`
-	Summary       string         `json:"summary"`
-	CreatedAt     time.Time      `json:"created_at"`
-	Actor         *actorResponse `json:"actor"`
-	ViaAgent      bool           `json:"via_agent"`
-	Agent         *agentResponse `json:"agent"`
+	ID            int64    `json:"id"`
+	Action        string   `json:"action"`
+	EntityType    string   `json:"entity_type"`
+	EntityID      string   `json:"entity_id"`
+	ParentType    *string  `json:"parent_type"`
+	ParentID      *string  `json:"parent_id"`
+	ChangedFields []string `json:"changed_fields"`
+	Summary       string   `json:"summary"`
+	// Changes is the before/after value of the columns the log records values
+	// for (money, dates, a bill's source document), e.g.
+	// {"amount": {"from": 5, "to": 35}}; null for every other change (#4941).
+	Changes   map[string]ValueChange `json:"changes"`
+	CreatedAt time.Time              `json:"created_at"`
+	Actor     *actorResponse         `json:"actor"`
+	ViaAgent  bool                   `json:"via_agent"`
+	Agent     *agentResponse         `json:"agent"`
 	// Description is a ready-to-show line: `Dana updated bill "Netflix"
 	// (amount) via agent "Claude"`.
 	Description string `json:"description"`
@@ -108,6 +116,7 @@ func toResponse(e Entry) entryResponse {
 		ParentID:      uuidPtr(e.ParentID),
 		ChangedFields: e.ChangedFields,
 		Summary:       e.Summary,
+		Changes:       e.Changes,
 		CreatedAt:     e.CreatedAt,
 		ViaAgent:      e.AgentTokenID != nil,
 	}
@@ -123,7 +132,10 @@ func toResponse(e Entry) entryResponse {
 	} else if e.AgentTokenID == nil {
 		who = "System"
 	}
-	out.Description = who + " " + e.Summary
+	// The before/after values (#4941) go inside the summary's field list, so
+	// a correction reads as one: `Dana updated bill "Copay" (amount; amount
+	// $5.00 -> $35.00) via agent "Claude"`.
+	out.Description = who + " " + withChangeValues(e.Summary, changesText(e.Changes))
 	if e.AgentTokenID != nil {
 		out.Agent = &agentResponse{TokenID: e.AgentTokenID.String(), Name: e.AgentName}
 		if e.AgentName != nil && *e.AgentName != "" {
@@ -133,6 +145,78 @@ func toResponse(e Entry) entryResponse {
 		}
 	}
 	return out
+}
+
+// withChangeValues folds the before/after values into a summary's trailing
+// field list: `updated bill "Copay" (amount)` with "amount $5.00 -> $35.00"
+// becomes `updated bill "Copay" (amount; amount $5.00 -> $35.00)`. A summary
+// with no field list is returned as it is (the values would have nothing to
+// attach to) — it only loses them when an older row has values but an
+// unexpected summary shape.
+func withChangeValues(summary, values string) string {
+	if values == "" || !strings.HasSuffix(summary, ")") {
+		return summary
+	}
+	i := strings.LastIndex(summary, " (")
+	if i < 0 {
+		return summary
+	}
+	return summary[:i] + " (" + summary[i+2:len(summary)-1] + "; " + values + ")"
+}
+
+// changesText lists the before/after values as
+// "amount $5.00 -> $35.00", or "" when the entry records none. The columns that reach it are money,
+// dates and a bill's source document (activity_change_values(), migration
+// 072), so the formatting stays narrow.
+func changesText(changes map[string]ValueChange) string {
+	if len(changes) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(changes))
+	for k := range changes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		v := changes[k]
+		parts = append(parts, valueWord(k)+" "+valueText(k, v.From)+" -> "+valueText(k, v.To))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// valueWord is a column's name in a change line.
+func valueWord(column string) string {
+	return strings.ReplaceAll(strings.TrimSuffix(column, "_id"), "_", " ")
+}
+
+// valueText formats one value of a change: money to the cent, a date or id as
+// written, and null as "nothing".
+func valueText(column string, v any) string {
+	if v == nil {
+		return "nothing"
+	}
+	switch column {
+	case "amount", "cost", "monthly_amount", "monthly_payment", "remaining_balance":
+		switch n := v.(type) {
+		case float64:
+			return fmt.Sprintf("$%.2f", n)
+		case string:
+			return "$" + n
+		}
+	case "interest_rate":
+		if n, ok := v.(float64); ok {
+			return strconv.FormatFloat(n, 'f', -1, 64) + "%"
+		}
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "?"
+	}
+	return string(b)
 }
 
 // List handles GET /api/v1/activity.

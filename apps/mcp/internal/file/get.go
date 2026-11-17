@@ -21,6 +21,13 @@ import (
 // file's bytes are never returned. A document of another family, or one
 // attached to a credential when the caller may not see those (viewer), is
 // reported as not found; housesitters and vendors get no documents.
+//
+// A document whose body is the caller's own pasted text (text_origin raw,
+// #4941) also reports text_sha256 and text_verified: the stored text is
+// re-hashed and compared with the fingerprint taken when it was filed, so a
+// reader can tell "this is the text that was pasted" from "this is a copy
+// someone re-typed". Anything a bill's amount is checked against should be a
+// raw document with text_verified true.
 func NewDocumentGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("document_get",
 		mcp.WithDescription("Read a document's details and its extracted text one page (4000 characters) at a time, starting at text_offset; never all at once."),
@@ -66,11 +73,15 @@ func NewDocumentGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 
 		var content string
+		var hash []byte
+		var storedHash string
 		r, err := scanDocument(pool.QueryRow(ctx,
-			`SELECT `+documentColumns+`, COALESCE(substr(f.extracted_text, $3 + 1, $4), '')`+documentFrom+`
+			`SELECT `+documentColumns+`, COALESCE(substr(f.extracted_text, $3 + 1, $4), ''),
+			        f.text_sha256, encode(sha256(convert_to(COALESCE(f.extracted_text, ''), 'UTF8')), 'hex')`+documentFrom+`
 			 WHERE f.id = $1 AND f.household_id = $2 AND `+secretFileWhere(5),
 			id, c.householdID, offset, textPageSize, c.seesSecretFiles(),
-		), &content)
+		), &content, &hash, &storedHash)
+		r.StoredHash = storedHash
 		if errors.Is(err, pgx.ErrNoRows) {
 			return respond.NotFound("document", raw, "Call document_find to find the document_id."), nil
 		}
@@ -87,6 +98,14 @@ func NewDocumentGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		d := r.data()
 		if d.Links, err = loadLinks(ctx, pool, c, r.ID); err != nil {
 			return respond.Failed("get the document", err), nil
+		}
+		// Provenance (#4941): a raw-text body carries the fingerprint it was
+		// filed with, and text_verified says whether the stored text still
+		// matches it. Derived text has neither.
+		if r.isRawText() && len(hash) > 0 {
+			hex := fmt.Sprintf("%x", hash)
+			verified := hex == r.StoredHash
+			d.TextSHA256, d.TextVerified = &hex, &verified
 		}
 		returned := len([]rune(content))
 		page := &textPage{Content: content, Offset: offset, ReturnedChars: returned, TotalChars: r.TextChars}
@@ -111,6 +130,10 @@ func NewDocumentGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		if d.TextStatus == "pending" || d.TextStatus == "retrying" {
 			next = append(next, fmt.Sprintf("Check again later with document_get document_id=%s.", d.ID))
+		}
+		if d.TextVerified != nil && !*d.TextVerified {
+			next = append(next, "The stored text no longer matches the fingerprint taken when it was filed, "+
+				"so it has been changed since; don't treat it as the original.")
 		}
 		if h := r.aboutHint(); h != "" {
 			next = append(next, h)

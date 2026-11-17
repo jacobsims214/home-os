@@ -79,6 +79,9 @@ type createBillInput struct {
 	subject        subject
 	paymentURL     *string
 	notes          *string
+	// sourceDocumentID is the document the bill was taken from (072, #4941),
+	// nil when the bill did not come from one.
+	sourceDocumentID *uuid.UUID
 }
 
 // createExample is a valid bill_create call for error examples.
@@ -143,6 +146,11 @@ func writeOutbox(ctx context.Context, tx pgx.Tx, eventType, householdID string, 
 // The bill may be about
 // one property, vehicle or asset (typed subject columns, domain model v2);
 // the legacy entity_type/entity_id params are mapped onto them.
+//
+// source_document_id (#4941) records the document the bill came from, and the
+// amount is compared with the money amounts in that document's pasted text:
+// on a mismatch the result says so, quotes the source line and points at the
+// document, so a mistyped amount cannot be filed as if it had been checked.
 func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Add a bill (electric, Netflix, property tax). Give due_day for monthly bills, or frequency " +
@@ -160,6 +168,8 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		mcp.WithString("vehicle_id", mcp.Description("Car or other vehicle it is for (UUID from vehicle_find)")),
 		mcp.WithString("asset_id", mcp.Description("Thing it is for (UUID from asset_find)")),
 		mcp.WithString("notes", mcp.Description("Free-text notes, e.g. account number hint")),
+		mcp.WithString("source_document_id",
+			mcp.Description("Document the amount came from (UUID); checked against its text")),
 		respond.Schema[billData](),
 	}
 	tool := mcp.NewTool("bill_create", append(opts, writeAnnotations("Create bill", false, false)...)...)
@@ -199,6 +209,18 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		} else if res != nil {
 			return res, nil
 		}
+
+		hid, herr := uuid.Parse(claims.HouseholdID)
+		if herr != nil {
+			return notSignedIn(), nil
+		}
+		src, res, err := loadSourceDoc(ctx, tx, hid, in.sourceDocumentID, createExample)
+		if err != nil {
+			return respond.Failed("create the bill", err), nil
+		} else if res != nil {
+			return res, nil
+		}
+		check := checkAmount(src, in.amount)
 
 		today, err := householdToday(ctx, tx, claims.HouseholdID)
 		if err != nil {
@@ -242,12 +264,12 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		r, err := scanBill(tx.QueryRow(ctx,
 			`INSERT INTO bills (household_id, name, amount, due_day, category, is_autopay,
 			                    vendor_id, property_id, vehicle_id, asset_id, payment_url, notes, frequency, due_date,
-			                    budget_category_id)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			                    budget_category_id, source_document_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 			 RETURNING `+billColumns,
 			claims.HouseholdID, in.name, in.amount, in.dueDay, in.category, in.autopay,
 			in.contactID, in.subject.propertyID, in.subject.vehicleID, in.subject.assetID, in.paymentURL, in.notes,
-			in.frequency, in.dueDate, categoryID,
+			in.frequency, in.dueDate, categoryID, in.sourceDocumentID,
 		))
 		if err != nil {
 			if res := subjectDBError(err, createExample); res != nil {
@@ -268,11 +290,17 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		}
 
 		b := r.data(today)
+		next := []string{fmt.Sprintf("Mark it paid with bill_pay bill_id=%s.", b.ID)}
+		if check != nil && !check.agreed() && len(check.Doc.Lines) > 0 {
+			next = append(next, fmt.Sprintf("Read the source with document_get document_id=%s, then correct the "+
+				"amount with bill_update bill_id=%s amount=…", check.Doc.ID, b.ID))
+		}
+		next = append(next, "See monthly totals by category with budget_summary.")
 		return respond.OK(
-			fmt.Sprintf("Created bill %s, %s %s.", b.Name, money(in.amount), b.dueText())+budgetText(cat),
+			fmt.Sprintf("Created bill %s, %s %s.", b.Name, money(in.amount), b.dueText())+
+				budgetText(cat)+check.cite()+check.warn()+check.note(),
 			b,
-			fmt.Sprintf("Mark it paid with bill_pay bill_id=%s.", b.ID),
-			"See monthly totals by category with budget_summary.",
+			next...,
 		), nil
 	}
 
@@ -298,6 +326,13 @@ type billUpdate struct {
 	// budgetCategory is then the ref, or nil to clear it.
 	budgetCategorySet bool
 	budgetCategory    *string
+	// sourceDocumentSet is true when source_document_id was given;
+	// sourceDocumentID is then the document, or nil to clear the link.
+	sourceDocumentSet bool
+	sourceDocumentID  *uuid.UUID
+	// amountGiven is the amount the caller passed, when it did: a correction
+	// is compared with the linked document's text before it is stored.
+	amountGiven *float64
 }
 
 // scheduleGiven reports whether frequency, due_day or due_date was given.
@@ -318,6 +353,12 @@ func (u *billUpdate) set(param, column string, value any) {
 // reported as not found. Invalid input changes nothing. Giving any of
 // property_id / vehicle_id / asset_id replaces the bill's subject (the
 // others are cleared); a blank one makes it family-level.
+//
+// Every change to amount is written to the change feed with its before and
+// after values (activity_log.changes, migration 072, #4941), so the pending
+// $5 -> $35 correction is traceable to who made it and when. When the bill
+// has a source document, a new amount is compared with that document's
+// pasted text and a disagreement is reported, quoting the source line.
 func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Change a bill; only the given fields change. An empty string clears category, contact_id or notes. " +
@@ -336,6 +377,8 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		mcp.WithString("vehicle_id", mcp.Description("Move it to this vehicle (UUID); \"\" unties it")),
 		mcp.WithString("asset_id", mcp.Description("Move it to this asset (UUID); \"\" unties it")),
 		mcp.WithString("notes", mcp.Description("Free-text notes; empty string clears them")),
+		mcp.WithString("source_document_id",
+			mcp.Description("Document the bill came from (UUID); \"\" unlinks it")),
 		respond.Schema[billData](),
 	}
 	tool := mcp.NewTool("bill_update", append(opts, writeAnnotations("Update bill", false, true)...)...)
@@ -375,6 +418,38 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return respond.Failed("update the bill", err), nil
 		} else if res != nil {
 			return res, nil
+		}
+
+		// Provenance (#4941): the document the bill came from, and whether a
+		// new amount agrees with it. Checked before the write so a correction
+		// is compared with the person's own text, not with the old value.
+		hid, herr := uuid.Parse(claims.HouseholdID)
+		if herr != nil {
+			return notSignedIn(), nil
+		}
+		var check *amountCheck
+		if in.sourceDocumentSet || in.amountGiven != nil {
+			var srcRef *uuid.UUID
+			if in.sourceDocumentSet {
+				srcRef = in.sourceDocumentID
+			} else {
+				// An amount-only change is checked against the stored link.
+				if srcRef, err = storedSourceDocument(ctx, tx, in.billID, claims.HouseholdID); err != nil {
+					if errors.Is(err, pgx.ErrNoRows) {
+						return respond.NotFound("bill", in.billID.String(), "Call bill_find to get the bill_id."), nil
+					}
+					return respond.Failed("update the bill", err), nil
+				}
+			}
+			src, res, err := loadSourceDoc(ctx, tx, hid, srcRef, example)
+			if err != nil {
+				return respond.Failed("update the bill", err), nil
+			} else if res != nil {
+				return res, nil
+			}
+			if in.amountGiven != nil {
+				check = checkAmount(src, *in.amountGiven)
+			}
 		}
 
 		if in.scheduleGiven() {
@@ -468,9 +543,13 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		if d := b.dueText(); d != "" {
 			summary = fmt.Sprintf("Updated bill %s (%s); next %s.", b.Name, strings.Join(in.params, ", "), d)
 		}
-		summary += budgetText(cat)
-		return respond.OK(summary, b,
-			fmt.Sprintf("Mark it paid with bill_pay bill_id=%s.", b.ID)), nil
+		summary += budgetText(cat) + check.cite() + check.warn() + check.note()
+		next := []string{fmt.Sprintf("Mark it paid with bill_pay bill_id=%s.", b.ID)}
+		if in.amountGiven != nil {
+			next = append(next, fmt.Sprintf("See the change in the family feed with activity_find about_type=bill since=%q.",
+				today.Format(time.DateOnly)))
+		}
+		return respond.OK(summary, b, next...), nil
 	}
 
 	return "bill_update", tool, handler
@@ -895,6 +974,15 @@ func parseUpdateBillInput(args map[string]any) (billUpdate, error) {
 		return u, err
 	} else if ok {
 		u.set("amount", "amount", amount)
+		u.amountGiven = &amount
+	}
+
+	if given(args, "source_document_id") {
+		if u.sourceDocumentID, err = optionalUUID(args, "source_document_id"); err != nil {
+			return u, err
+		}
+		u.sourceDocumentSet = true
+		u.set("source_document_id", "source_document_id", u.sourceDocumentID)
 	}
 
 	if f, err := parseFrequency(args); err != nil {
@@ -977,7 +1065,7 @@ func parseUpdateBillInput(args map[string]any) (billUpdate, error) {
 
 	if len(u.columns) == 0 && !u.scheduleGiven() && !u.budgetCategorySet {
 		return u, badArg("", "No fields to update.",
-			"Pass bill_id plus at least one of name, amount, frequency, due_day, due_date, category, budget_category, autopay, contact_id, property_id, vehicle_id, asset_id, notes.")
+			"Pass bill_id plus at least one of name, amount, frequency, due_day, due_date, category, budget_category, autopay, contact_id, property_id, vehicle_id, asset_id, notes, source_document_id.")
 	}
 	return u, nil
 }
@@ -1033,6 +1121,9 @@ func parseCreateBillInput(args map[string]any) (createBillInput, error) {
 		return in, err
 	}
 	if in.notes, err = optionalString(args, "notes"); err != nil {
+		return in, err
+	}
+	if in.sourceDocumentID, err = optionalUUID(args, "source_document_id"); err != nil {
 		return in, err
 	}
 	return in, nil
@@ -1337,12 +1428,13 @@ func optionalString(args map[string]any, key string) (*string, error) {
 
 // uuidFixes says where to get each id parameter.
 var uuidFixes = map[string]string{
-	"bill_id":     "Pass the bill's id (a UUID) from bill_find, not its name.",
-	"id":          "Pass a bill's id (a UUID) from bill_find, or use query to search by name.",
-	"contact_id":  "Pass a contact's id (a UUID) from contact_find, not its name.",
-	"property_id": "Pass the property's id (a UUID) from property_find, not its name.",
-	"vehicle_id":  "Pass the vehicle's id (a UUID) from vehicle_find, not its name.",
-	"asset_id":    "Pass the asset's id (a UUID) from asset_find, not its name.",
+	"bill_id":            "Pass the bill's id (a UUID) from bill_find, not its name.",
+	"source_document_id": "Pass the document's id (a UUID) from document_find, not its title.",
+	"id":                 "Pass a bill's id (a UUID) from bill_find, or use query to search by name.",
+	"contact_id":         "Pass a contact's id (a UUID) from contact_find, not its name.",
+	"property_id":        "Pass the property's id (a UUID) from property_find, not its name.",
+	"vehicle_id":         "Pass the vehicle's id (a UUID) from vehicle_find, not its name.",
+	"asset_id":           "Pass the asset's id (a UUID) from asset_find, not its name.",
 }
 
 // optionalUUID parses an optional UUID string argument.

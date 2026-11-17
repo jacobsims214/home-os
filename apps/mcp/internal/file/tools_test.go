@@ -43,6 +43,9 @@ type wireDoc struct {
 	RetryMax        *int       `json:"retry_max"`
 	NextRetryAt     *string    `json:"next_retry_at"`
 	TextChars       int        `json:"text_chars"`
+	TextOrigin      string     `json:"text_origin"`
+	TextSHA256      *string    `json:"text_sha256"`
+	TextVerified    *bool      `json:"text_verified"`
 	Text            *struct {
 		Content       string `json:"content"`
 		Offset        int    `json:"offset"`
@@ -237,7 +240,7 @@ func TestToolDefinitions(t *testing.T) {
 		{func() (string, mcp.Tool, handlerFunc) { return NewDocumentGetTool(nil) }, "document_get", "Get document",
 			[]string{"document_id"}, []string{"text_offset"}, classR},
 		{func() (string, mcp.Tool, handlerFunc) { return NewDocumentUploadTool(nil, nil) }, "document_upload", "Upload document",
-			[]string{"name"}, []string{"content_base64", "content_type", "text", "title", "category", "tags", "person_id",
+			[]string{"name"}, []string{"content_base64", "content_type", "content_text", "title", "category", "tags", "person_id",
 				"about_type", "about_id", "doc_date", "expires_on", "description"}, classC},
 		{func() (string, mcp.Tool, handlerFunc) { return NewDocumentUpdateTool(nil, nil) }, "document_update", "Update document",
 			[]string{"document_id"}, []string{"title", "category", "tags", "person_id", "doc_date", "expires_on", "description",
@@ -458,8 +461,8 @@ func TestDocumentUpload(t *testing.T) {
 	runErrCases(t, up, []errCase{
 		{"not signed in", context.Background(), map[string]any{"name": "a.txt", "text": "x"}, "", "not signed in"},
 		{"no name", ctx, map[string]any{"text": "x"}, "name", "name is required"},
-		{"no content", ctx, map[string]any{"name": "a.txt"}, "content_base64", "no content"},
-		{"both contents", ctx, map[string]any{"name": "a.txt", "text": "x", "content_base64": "eA=="}, "text", "both given"},
+		{"no content", ctx, map[string]any{"name": "a.txt"}, "content_text", "no content"},
+		{"both contents", ctx, map[string]any{"name": "a.txt", "text": "x", "content_base64": "eA=="}, "content_text", "both given"},
 		{"bad base64", ctx, map[string]any{"name": "a.bin", "content_base64": "!!!not base64"}, "content_base64", "not valid base64"},
 		{"bad category", ctx, map[string]any{"name": "a.txt", "text": "x", "category": "recipes"}, "category", "not one of"},
 		{"bad date", ctx, map[string]any{"name": "a.txt", "text": "x", "doc_date": "March 1"}, "doc_date", "not a date"},

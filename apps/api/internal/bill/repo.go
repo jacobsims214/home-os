@@ -28,7 +28,7 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 const billColumns = `id, household_id, property_id, name, amount, due_day,
 	category, vendor_id, rrule, notes, created_at, updated_at,
 	vehicle_id, asset_id, paid_date, is_autopay, account_number, payment_url,
-	frequency, due_date, budget_category_id, paid_for_due_date`
+	frequency, due_date, budget_category_id, paid_for_due_date, source_document_id`
 
 // scanBill scans a single Bill from a pgx.Row.
 func scanBill(row pgx.Row) (*Bill, error) {
@@ -56,6 +56,7 @@ func scanBill(row pgx.Row) (*Bill, error) {
 		&b.DueDate,
 		&b.BudgetCategoryID,
 		&b.PaidForDueDate,
+		&b.SourceDocumentID,
 	)
 	if err != nil {
 		return nil, err
