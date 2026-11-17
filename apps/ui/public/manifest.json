@@ -1,21 +1,77 @@
 {
+  "id": "/",
   "name": "Home OS",
   "short_name": "Home OS",
-  "description": "Your household operating system — manage properties, assets, maintenance, and more.",
-  "start_url": "/",
+  "description": "Your family's hub: calendar, lists, meals, documents and the house, in one place.",
+  "lang": "en",
+  "dir": "ltr",
+  "start_url": "/dashboard",
+  "scope": "/",
   "display": "standalone",
-  "theme_color": "#111827",
-  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "background_color": "#f8f9fa",
+  "categories": ["productivity", "lifestyle"],
+  "prefer_related_applications": false,
   "icons": [
     {
       "src": "/icons/icon-192.png",
       "sizes": "192x192",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any"
     },
     {
       "src": "/icons/icon-512.png",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon-monochrome-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "monochrome"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Today",
+      "short_name": "Today",
+      "description": "Today's schedule, dinner and lists",
+      "url": "/dashboard",
+      "icons": [{ "src": "/icons/shortcut-today.png", "sizes": "96x96", "type": "image/png" }]
+    },
+    {
+      "name": "Calendar",
+      "short_name": "Calendar",
+      "description": "The family calendar",
+      "url": "/dashboard/calendar",
+      "icons": [{ "src": "/icons/shortcut-calendar.png", "sizes": "96x96", "type": "image/png" }]
+    },
+    {
+      "name": "Meals",
+      "short_name": "Meals",
+      "description": "This week's dinners and the recipe box",
+      "url": "/dashboard/meals",
+      "icons": [{ "src": "/icons/shortcut-meals.png", "sizes": "96x96", "type": "image/png" }]
+    },
+    {
+      "name": "Groceries",
+      "short_name": "Groceries",
+      "description": "The shopping list",
+      "url": "/dashboard/meals/grocery",
+      "icons": [{ "src": "/icons/shortcut-groceries.png", "sizes": "96x96", "type": "image/png" }]
     }
   ]
 }
