@@ -1,39 +1,55 @@
 "use client";
 
 /**
- * EntityResources — the single entry point for the per-entity resource UI.
+ * EntityResources — the single entry point for an entity's Resources (#4564).
  *
- * Renders three polymorphic resource sections (Files, Notes, Secrets) for any
- * entity detail page. Instead of every detail page wiring FileUpload, FileList,
- * NotesSection, and SecretsSection individually (and duplicating
- * ~200 lines of fetch/mutation/search boilerplate per page), detail pages
- * render a single `<EntityResources entityType="..." entityId={...} />`.
+ * Every entity detail page renders `<EntityResources entityType entityId />`
+ * and gets the same Files / Notes / Secrets sections, role-gated, mobile-first.
+ * No page wires FileUpload, FileList, NotesSection or SecretsSection itself:
+ * that is how the sections drifted apart before, and how a page ends up
+ * showing a control its role cannot use.
  *
- * Layout: a tabbed interface (Files / Notes / Secrets) under a single
- * "Resources" heading. Tabs keep the page compact when an entity has many
- * resources of one kind, and avoid stacking three heavy lists on top of each
- * other. Each child section owns its own data fetching and mutations via
- * TanStack Query, so switching tabs is instant — inactive tab content is
- * unmounted but its query cache is preserved, so returning to a tab restores
- * immediately from cache and revalidates in the background.
+ * ## Role policy (#4689)
+ * The signed-in role comes from `useNavRole()` (GET /me/households). The
+ * access decision is `resourceAccess()` in lib/resource-access.ts, a UI mirror
+ * of apps/api/internal/auth/roles.go. A tab whose access is "none" is not
+ * rendered, and when no tab is usable the whole section renders nothing:
  *
- * Each child section accepts the same prop shape:
- *   { entityType: string; entityId: string }
- * — camelCase on the client, matching FileUpload / FileList / NotesSection /
- * SecretsSection. The API layer translates to snake_case
- * (entity_type / entity_id) at the fetch boundary.
+ *   - housesitter: no files, no secrets; notes only on a pet (may add them).
+ *     On a bill or a vehicle the section is absent entirely.
+ *   - vendor: no files, no notes, no secrets — absent on every entity.
+ *   - viewer: files and notes read-only, no secrets.
+ *   - family roles: everything.
+ *
+ * The API enforces all of this; the UI only avoids drawing dead controls.
+ *
+ * ## Layout
+ * A tab bar (Files / Notes / Secrets) under one "Resources" heading, so three
+ * heavy lists never stack. Only the active tab mounts, so a page does not
+ * fetch three lists to show one; the TanStack Query cache keeps a revisited
+ * tab instant. On a phone the tab bar scrolls horizontally if it must, and
+ * each tab is a 44 px target.
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import FilesSection from "@/components/files/FilesSection";
 import NotesSection from "@/components/notes/NotesSection";
 import SecretsSection from "@/components/secrets/SecretsSection";
+import { useNavRole } from "@/components/shared/use-nav-role";
+import { resourceAccess, type Access } from "@/lib/resource-access";
 
 // ─── Types ────────────────────────────────────────────────────
 
 interface EntityResourcesProps {
   entityType: string;
   entityId: string;
+  /**
+   * Override the role decision (tests, and a page that already knows the
+   * role). Left out, the role comes from the session.
+   */
+  role?: string | null;
+  /** Hide the "Resources" heading when a parent already renders one. */
+  hideHeading?: boolean;
 }
 
 type ResourceTab = "files" | "notes" | "secrets";
@@ -43,71 +59,87 @@ interface TabDef {
   label: string;
 }
 
-const TABS: TabDef[] = [
+const ALL_TABS: readonly TabDef[] = [
   { id: "files", label: "Files" },
   { id: "notes", label: "Notes" },
   { id: "secrets", label: "Secrets" },
 ];
+
+/** The tabs a role may use, in order. */
+export function tabsForAccess(access: { files: Access; notes: Access; secrets: Access }): TabDef[] {
+  return ALL_TABS.filter((t) => access[t.id] !== "none");
+}
 
 // ─── Component ────────────────────────────────────────────────
 
 export default function EntityResources({
   entityType,
   entityId,
+  role,
+  hideHeading = false,
 }: EntityResourcesProps) {
+  const sessionRole = useNavRole();
+  const effectiveRole = role !== undefined ? role : sessionRole;
+
+  const access = useMemo(
+    () => resourceAccess(effectiveRole, entityType),
+    [effectiveRole, entityType],
+  );
+  const tabs = useMemo(() => tabsForAccess(access), [access]);
+
   const [activeTab, setActiveTab] = useState<ResourceTab>("files");
+  // The active tab may not exist for this role (a viewer has no Secrets): fall
+  // back to the first usable one rather than rendering an empty panel.
+  const current = tabs.find((t) => t.id === activeTab) ?? tabs[0];
+
+  // Nothing this role can use: no heading, no empty tab bar, no 403 behind a
+  // control. A housesitter on a bill sees no Resources section at all.
+  if (!access.any || !current) return null;
 
   return (
-    <section className="mt-8">
-      <h2 className="text-lg font-semibold text-gray-900 mb-4">Resources</h2>
+    <section className="mt-8" data-testid="entity-resources">
+      {!hideHeading && (
+        <h2 className="mb-3 text-lg font-semibold text-ink">Resources</h2>
+      )}
 
-      {/* Tab bar */}
-      <div
-        role="tablist"
-        aria-label="Resource types"
-        className="flex gap-1 border-b border-gray-200 mb-4"
-      >
-        {TABS.map((tab) => {
-          const active = tab.id === activeTab;
-          return (
-            <button
-              key={tab.id}
-              role="tab"
-              aria-selected={active}
-              aria-controls={`tabpanel-${tab.id}`}
-              id={`tab-${tab.id}`}
-              onClick={() => setActiveTab(tab.id)}
-              className={
-                "inline-flex items-center px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors " +
-                (active
-                  ? "border-indigo-600 text-indigo-700"
-                  : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300")
-              }
-            >
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
+      {tabs.length > 1 && (
+        <div
+          role="tablist"
+          aria-label="Resource types"
+          className="mb-3 flex gap-1 overflow-x-auto border-b border-line"
+        >
+          {tabs.map((tab) => {
+            const active = tab.id === current.id;
+            return (
+              <button
+                key={tab.id}
+                role="tab"
+                aria-selected={active}
+                aria-controls={`tabpanel-${tab.id}`}
+                id={`tab-${tab.id}`}
+                onClick={() => setActiveTab(tab.id)}
+                className={
+                  "inline-flex min-h-11 shrink-0 items-center border-b-2 px-4 text-sm font-medium transition-colors " +
+                  (active
+                    ? "border-accent text-accent"
+                    : "border-transparent text-ink-3 hover:border-line hover:text-ink")
+                }
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
-      {/* Active tab panel.
-          We render only the active section so inactive sections don't fetch
-          until the user opens them — keeps the initial page load light and
-          avoids hammering the links/files/notes endpoints for every entity
-          view. The TanStack Query cache persists across tab switches, so
-          returning to a previously-opened tab restores from cache instantly. */}
-      <div
-        id={`tabpanel-${activeTab}`}
-        role="tabpanel"
-        aria-labelledby={`tab-${activeTab}`}
-      >
-        {activeTab === "files" && (
-          <FilesSection entityType={entityType} entityId={entityId} />
+      <div id={`tabpanel-${current.id}`} role="tabpanel" aria-labelledby={`tab-${current.id}`}>
+        {current.id === "files" && (
+          <FilesSection entityType={entityType} entityId={entityId} access={access.files} hideHeading />
         )}
-        {activeTab === "notes" && (
-          <NotesSection entityType={entityType} entityId={entityId} />
+        {current.id === "notes" && (
+          <NotesSection entityType={entityType} entityId={entityId} access={access.notes} hideHeading />
         )}
-        {activeTab === "secrets" && (
+        {current.id === "secrets" && (
           <SecretsSection entityType={entityType} entityId={entityId} />
         )}
       </div>

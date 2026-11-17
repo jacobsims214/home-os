@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -178,6 +179,16 @@ func toNoteResponse(n *Note) noteResponse {
 	return resp
 }
 
+// noteWriteResponse is what a note write returns: the note, plus the existing
+// notes its title may be a rewrite of (#4564, the API half of #4945). The
+// note is always written; possible_duplicates is a prompt, never a gate.
+// `data` is the note itself, unchanged, so a client that only reads `data`
+// keeps working.
+type noteWriteResponse struct {
+	Data               noteResponse         `json:"data"`
+	PossibleDuplicates []DuplicateCandidate `json:"possible_duplicates"`
+}
+
 func toNoteResponses(notes []*Note) []noteResponse {
 	out := make([]noteResponse, 0, len(notes))
 	for _, n := range notes {
@@ -347,8 +358,20 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	h.indexNote(r.Context(), created)
 
-	apierr.JSON(w, http.StatusCreated, map[string]any{
-		"data": toNoteResponse(created),
+	// #4564: a note whose title is close to an existing one says so, so the
+	// person writing it can make it an update instead of a contradictory twin
+	// (#4945's war-game failure, now visible in the web UI too). The scan
+	// follows the role policy and never fails the write.
+	// The scan runs after the insert, so the note must exclude itself: it is
+	// already in the table and would otherwise match its own title at 1.0.
+	duplicates := []DuplicateCandidate{}
+	if created.Title != nil && strings.TrimSpace(*created.Title) != "" {
+		duplicates = h.repo.NearDuplicates(r.Context(), hid, role, *created.Title, created.ID)
+	}
+
+	apierr.JSON(w, http.StatusCreated, noteWriteResponse{
+		Data:               toNoteResponse(created),
+		PossibleDuplicates: duplicates,
 	})
 }
 
@@ -406,8 +429,17 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apierr.JSON(w, http.StatusOK, map[string]any{
-		"data": toNoteResponse(updated),
+	// Only a supplied title is checked (#4945): a rename is the only change
+	// that can introduce a new collision, and re-warning on every body edit is
+	// the noise that teaches a reader to skip the prompt.
+	duplicates := []DuplicateCandidate{}
+	if req.Title != nil && updated.Title != nil && strings.TrimSpace(*updated.Title) != "" {
+		duplicates = h.repo.NearDuplicates(r.Context(), hid, middleware.Role(r), *updated.Title, id)
+	}
+
+	apierr.JSON(w, http.StatusOK, noteWriteResponse{
+		Data:               toNoteResponse(updated),
+		PossibleDuplicates: duplicates,
 	})
 }
 

@@ -161,18 +161,22 @@ for (const colorScheme of ["light", "dark"] as const) {
       await gotoBillFiles(page);
       const del = page.getByRole("button", { name: `Delete ${FILE.name}` });
       const style = () => del.evaluate((el) => ({ color: getComputedStyle(el).color, bg: getComputedStyle(el).backgroundColor }));
-      // Light keeps Tailwind's own red-600 / red-50; dark maps them to tokens.
-      const danger = colorScheme === "light" ? "rgb(220, 38, 38)" : await tokenRgb(page, "--danger");
-      const dangerBg = colorScheme === "light" ? "rgb(254, 242, 242)" : "rgba(250, 82, 82, 0.14)";
+      // #4564 rebuilt the file row on the semantic tokens, so the delete
+      // button no longer goes through the legacy bridge: its hover is
+      // --danger on --surface-2 in BOTH schemes, which is what the tokens
+      // promise. (The bridge itself is still covered by SecretsSection, which
+      // keeps the legacy classes.)
+      const danger = await tokenRgb(page, "--danger");
+      const hoverBg = await tokenRgb(page, "--surface-2");
 
       await del.hover();
-      await expect.poll(style).toEqual({ color: danger, bg: dangerBg });
+      await expect.poll(style).toEqual({ color: danger, bg: hoverBg });
       await snap(page, testInfo, `bridge-delete-hover-${colorScheme}`);
 
       await page.mouse.move(0, 0);
       await del.evaluate((el) => ((el as HTMLButtonElement).disabled = true));
       await del.hover({ force: true });
-      const rest = colorScheme === "light" ? "rgb(156, 163, 175)" : await tokenRgb(page, "--ink-3");
+      const rest = await tokenRgb(page, "--ink-3");
       await expect.poll(style).toEqual({ color: rest, bg: "rgba(0, 0, 0, 0)" });
     });
   });

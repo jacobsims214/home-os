@@ -119,6 +119,14 @@ export interface SearchResponse {
 
 export type FileOCRStatus = "pending" | "processing" | "done" | "failed" | "skipped";
 
+/**
+ * Where a file's text came from (migration 072, #4941). `raw` is the caller's
+ * own pasted text stored unaltered — the SOURCE; `extracted` is text the
+ * worker read from the blob — DERIVED, and it may differ from the document.
+ * Existing rows default to `extracted`, which claims nothing.
+ */
+export type FileTextOrigin = "raw" | "extracted";
+
 export interface FileRecord {
   id: string;
   household_id: string;
@@ -134,6 +142,17 @@ export interface FileRecord {
   tags?: string[] | null;
   created_at: string;
   updated_at: string;
+  /** Provenance of extracted_text (#4941). Absent on an old payload: derived. */
+  text_origin?: FileTextOrigin;
+  /**
+   * For a `raw` body: true when the stored text still hashes to the
+   * fingerprint taken at upload. false means the body changed after filing (a
+   * re-typed or edited body). Absent for derived text, which has no
+   * fingerprint and so cannot claim to be verbatim (#4941).
+   */
+  text_verified?: boolean;
+  /** Display name of the member who uploaded the file (files.created_by). */
+  uploaded_by_name?: string | null;
 }
 
 // ─── Secret types ─────────────────────────────────────────────

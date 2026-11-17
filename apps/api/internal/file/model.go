@@ -7,6 +7,8 @@
 package file
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"time"
 
 	"github.com/google/uuid"
@@ -84,6 +86,56 @@ type File struct {
 	// from the blob. TextSHA256 is the SHA-256 of a raw body as filed.
 	TextOrigin string `json:"text_origin"`
 	TextSHA256 []byte `json:"-"`
+
+	// TextVerified is set for a "raw" body whose stored text still hashes to
+	// TextSHA256: the body is byte-for-byte what was filed. False means the
+	// body changed after filing (a re-typed or edited body), which is the
+	// signal the war game's false "verified" lacked. Nil for derived text,
+	// which carries no fingerprint and so can claim nothing (#4941).
+	TextVerified *bool `json:"text_verified,omitempty"`
+
+	// UploadedByName is the display name of the member who uploaded the file
+	// (files.created_by, migration 050). Nil when the uploader's account is
+	// gone or the row predates authorship tracking. Read-only: filled by the
+	// repo's select list, never written.
+	UploadedByName *string `json:"uploaded_by_name,omitempty"`
+}
+
+// TextOrigin values (migration 072's files_text_origin_check).
+const (
+	// TextOriginRaw is the caller's own pasted text, stored unaltered.
+	TextOriginRaw = "raw"
+	// TextOriginExtracted is text the worker read from the blob: derived.
+	TextOriginExtracted = "extracted"
+)
+
+// finalize fills the derived, read-only fields of a file: whether a raw body
+// still matches its fingerprint. Every repo read calls it, so the API never
+// reports a body as filed when it is not (#4941's false "verified").
+func (f *File) finalize() {
+	if f == nil {
+		return
+	}
+	if f.TextOrigin != TextOriginRaw || len(f.TextSHA256) == 0 {
+		// Derived text carries no fingerprint, so it can claim nothing.
+		f.TextVerified = nil
+		return
+	}
+	body := ""
+	if f.ExtractedText != nil {
+		body = *f.ExtractedText
+	}
+	sum := sha256.Sum256([]byte(body))
+	ok := bytes.Equal(sum[:], f.TextSHA256)
+	f.TextVerified = &ok
+}
+
+// finalizeAll is finalize for a list.
+func finalizeAll(files []*File) []*File {
+	for _, f := range files {
+		f.finalize()
+	}
+	return files
 }
 
 // Categories is the allowed set of files.category values (048's
