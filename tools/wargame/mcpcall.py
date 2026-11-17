@@ -11,9 +11,14 @@ Configuration (env vars, never arguments, so nothing lands in shell history or `
   HOMEOS_MCP_URL        MCP base URL, e.g. http://home-os-mcp.home-os:8082 — the script POSTs to
                         <base>/mcp (a URL that already ends in /mcp is used as-is)
   HOMEOS_MCP_TIMEOUT_S  optional, default 60 — per-request timeout in seconds
-  Auth, one of:
-    HOMEOS_AGENT_TOKEN  a bearer token for the member (agent token or Dex id_token)
-    or, to mint a Dex id_token with the password grant (needs Dex `oauth2.passwordConnector`):
+  Auth:
+    HOMEOS_AGENT_TOKEN  the member's `hos_` agent token — the normal path for an agent.
+                        A Dex id_token works here too (the MCP accepts both).
+  LOCAL DEV ONLY (not needed on the deployed stack: the Dex password grant is retired,
+  #4540): with HOMEOS_DEX_PASSWORD_GRANT=1 the script mints a Dex id_token instead of
+  reading one. That needs a Dex with `oauth2.passwordConnector` set, which the deployed
+  instance deliberately does NOT have.
+    HOMEOS_DEX_PASSWORD_GRANT  1 to enable minting through the password grant
     HOMEOS_DEX_TOKEN_URL  e.g. http://home-os-dex.home-os:5556/dex/token
     HOMEOS_USER           the member's login email
     HOMEOS_PASSWORD       the member's password
@@ -59,10 +64,27 @@ def env(name, default=None):
     return v
 
 
+NEEDS_TOKEN = """mcpcall.py: no token to send.
+
+Set HOMEOS_AGENT_TOKEN to the member's `hos_` agent token — that is the normal path
+(one per member, minted by that member; see how-to/agent-tokens.md). A Dex id_token in
+the same variable also works.
+
+The Dex password grant that used to mint a token from a username and password is
+RETIRED (#4540): the deployed Dex has no oauth2.passwordConnector, so /dex/token
+answers 400 unsupported_grant_type. It still works against a LOCAL dev Dex that sets
+dex.passwordConnector (see tools/wargame/README.md); set HOMEOS_DEX_PASSWORD_GRANT=1
+to use that.
+"""
+
+
 def bearer():
     tok = os.environ.get("HOMEOS_AGENT_TOKEN")
     if tok:
         return tok
+    if os.environ.get("HOMEOS_DEX_PASSWORD_GRANT") != "1":
+        sys.exit(NEEDS_TOKEN)
+    # LOCAL DEV ONLY, behind an explicit opt-in: the deployed Dex has the grant off.
     body = urllib.parse.urlencode({
         "grant_type": "password",
         "client_id": os.environ.get("HOMEOS_DEX_CLIENT_ID", "home-os-mcp"),
@@ -70,7 +92,15 @@ def bearer():
         "username": env("HOMEOS_USER"),
         "password": env("HOMEOS_PASSWORD"),
     }).encode()
-    return json.load(urllib.request.urlopen(env("HOMEOS_DEX_TOKEN_URL"), body, timeout=15))["id_token"]
+    try:
+        return json.load(urllib.request.urlopen(env("HOMEOS_DEX_TOKEN_URL"), body, timeout=15))["id_token"]
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:400]
+        sys.exit(
+            f"mcpcall.py: POST {os.environ['HOMEOS_DEX_TOKEN_URL']} -> HTTP {e.code}: {detail}\n"
+            "A 400 unsupported_grant_type here means the Dex password grant is off, which "
+            "is the DEPLOYED state since #4540 retired it. Set HOMEOS_AGENT_TOKEN instead."
+        )
 
 
 def rpc_url(base):

@@ -124,9 +124,16 @@ data:
       - {{ tpl . $ | quote }}
       {{- end }}
     
-    # Registers Dex's built-in "local" connector (id "local") - the one
-    # oauth2.passwordConnector: "local" above names. Without it the password
-    # grant has no connector to resolve and every grant answers 400.
+    # Registers Dex's built-in "local" connector (id "local"), which is what
+    # INTERACTIVE password login uses (the login form POSTs to /dex/auth/local).
+    # It is NOT part of the retired password grant (#4540) and must stay on:
+    # turning it off removes the only way a family member signs in to the UI.
+    #
+    # It is also the connector a local-dev password grant would name
+    # (oauth2.passwordConnector: "local"). With the grant retired (#4540) the
+    # deployed config has no passwordConnector at all; setting one on a
+    # deployed instance would re-open the grant, so it stays a local-dev-only
+    # escape hatch (see dex.passwordConnector in values.yaml).
     enablePasswordDB: true
     {{- if or .Values.dex.idTokenExpiry .Values.dex.refreshTokenReuseInterval }}
 

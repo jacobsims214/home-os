@@ -10,7 +10,13 @@ sending it and printing a 401 that looks like a broken deployment.
 
 Configuration (env vars, never arguments, so nothing lands in shell history or `ps`):
   HOMEOS_API_URL        API base URL, e.g. http://home-os-api.home-os:8080
-  HOMEOS_API_TOKEN      a Dex id_token. Optional if the three Dex vars below are set.
+  HOMEOS_API_TOKEN      a Dex id_token — the normal, only supported path.
+
+LOCAL DEV ONLY, not needed on the deployed stack (the Dex password grant is retired,
+#4540): with HOMEOS_DEX_PASSWORD_GRANT=1 the script mints an id_token instead of
+reading one. That needs a Dex that has oauth2.passwordConnector set, which the
+deployed instance deliberately does NOT.
+  HOMEOS_DEX_PASSWORD_GRANT  1 to enable minting through the password grant
   HOMEOS_DEX_TOKEN_URL  e.g. http://home-os-envoy.home-os:8000/dex/token
                         (through Envoy; /token is an Envoy-only alias and 404s against
                         the Dex pod, so always use /dex/token)
@@ -18,9 +24,10 @@ Configuration (env vars, never arguments, so nothing lands in shell history or `
   HOMEOS_PASSWORD       the member's password
   HOMEOS_DEX_CLIENT_ID  optional, default home-os-mcp
 
-Minting a Dex id_token is INTERIM: the password grant is retired by #4540. See
-tools/wargame/README.md ("Two kinds of token") and project KB
-architecture/dex-password-grant-interim.md.
+How to get a Dex id_token without the grant: sign in to Home OS in a browser and copy
+the httpOnly `home-os-token` cookie (devtools > Application > Cookies). It is the same
+id_token. See tools/wargame/README.md ("Two kinds of token") and project KB
+how-to/wargame-ground-truth-auth.md.
 """
 import json
 import os
@@ -37,6 +44,22 @@ def env(name, default=None):
     return v
 
 
+NEEDS_ID_TOKEN = """api.py: no Dex id_token to send.
+
+The REST API accepts Dex-issued identity tokens only (an agent token 401s by design).
+
+Set HOMEOS_API_TOKEN to a Dex id_token: sign in to Home OS in a browser and copy the
+httpOnly `home-os-token` cookie (devtools > Application > Cookies). Mint one per run
+rather than storing it.
+
+The Dex password grant that used to mint one from a username and password is RETIRED
+(#4540): the deployed Dex has no oauth2.passwordConnector, so /dex/token answers 400
+unsupported_grant_type. The old env-var recipe is not coming back on the deployed
+stack. It still works against a LOCAL dev Dex that sets dex.passwordConnector (see
+tools/wargame/README.md); set HOMEOS_DEX_PASSWORD_GRANT=1 to use that.
+"""
+
+
 def api_token():
     """The bearer for /api/v1/*: a Dex id_token, never an agent token."""
     tok = os.environ.get("HOMEOS_API_TOKEN")
@@ -46,10 +69,12 @@ def api_token():
                 "api.py: HOMEOS_API_TOKEN holds a hos_ agent token. Agent tokens are "
                 "MCP-scoped by design and the REST API answers them 401, so an agent "
                 "token can never mint or revoke credentials. Use a Dex id_token in "
-                "HOMEOS_API_TOKEN (see tools/wargame/README.md, 'Two kinds of token'), "
-                "or unset it and set HOMEOS_DEX_TOKEN_URL + HOMEOS_USER + HOMEOS_PASSWORD."
+                "HOMEOS_API_TOKEN (see tools/wargame/README.md, 'Two kinds of token')."
             )
         return tok
+    if os.environ.get("HOMEOS_DEX_PASSWORD_GRANT") != "1":
+        sys.exit(NEEDS_ID_TOKEN)
+    # LOCAL DEV ONLY, behind an explicit opt-in: the deployed Dex has the grant off.
     body = urllib.parse.urlencode({
         "grant_type": "password",
         "client_id": os.environ.get("HOMEOS_DEX_CLIENT_ID", "home-os-mcp"),
@@ -57,7 +82,16 @@ def api_token():
         "username": env("HOMEOS_USER"),
         "password": env("HOMEOS_PASSWORD"),
     }).encode()
-    return json.load(urllib.request.urlopen(env("HOMEOS_DEX_TOKEN_URL"), body, timeout=15))["id_token"]
+    try:
+        return json.load(urllib.request.urlopen(env("HOMEOS_DEX_TOKEN_URL"), body, timeout=15))["id_token"]
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:400]
+        sys.exit(
+            f"api.py: POST {os.environ['HOMEOS_DEX_TOKEN_URL']} -> HTTP {e.code}: {detail}\n"
+            "A 400 unsupported_grant_type here means the Dex password grant is off, which "
+            "is the DEPLOYED state since #4540 retired it. Set HOMEOS_API_TOKEN to a Dex "
+            "id_token from a signed-in browser instead (see above)."
+        )
 
 
 def main(argv):
