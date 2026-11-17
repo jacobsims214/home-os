@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -185,13 +186,13 @@ type markEnv = envelope[markResult]
 func TestToolDefinitions(t *testing.T) {
 	cases := []struct {
 		name, desc, title string
-		params            []string
+		params, required  []string
 		readOnly          bool
 	}{
 		{"notification_find", "List your notifications (reminders, changes others made). Always includes unread_count.",
-			"Find notifications", []string{"unread_only", "limit", "cursor"}, true},
-		{"notification_mark_read", "Mark notifications read by id, or all at once.",
-			"Mark notifications read", []string{"notification_ids", "all"}, false},
+			"Find notifications", []string{"unread_only", "limit", "cursor"}, nil, true},
+		{"notification_mark_read", "Mark the notifications you just told the user about read, by id. There is no mark-all.",
+			"Mark notifications read", []string{"notification_ids"}, []string{"notification_ids"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -202,8 +203,8 @@ func TestToolDefinitions(t *testing.T) {
 			if tool.Description != tc.desc {
 				t.Errorf("description differs from the catalog: %q", tool.Description)
 			}
-			if len(tool.InputSchema.Required) != 0 {
-				t.Errorf("required = %v, want none", tool.InputSchema.Required)
+			if fmt.Sprint(tool.InputSchema.Required) != fmt.Sprint(tc.required) {
+				t.Errorf("required = %v, want %v", tool.InputSchema.Required, tc.required)
 			}
 			if len(tool.InputSchema.Properties) != len(tc.params) {
 				t.Errorf("got %d params, want %v", len(tool.InputSchema.Properties), tc.params)
@@ -470,36 +471,132 @@ func TestNotificationMarkRead(t *testing.T) {
 		t.Errorf("repeat summary %q / read_at moved", env.Summary)
 	}
 
-	// all=true marks only the caller's visible unread ones, never Amber's alarm.
-	env = call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"all": true, "notification_ids": []any{}})
+	// The rest by id, in one call: the two unread ones the caller can see.
+	env = call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"notification_ids": []any{maintN, mine}})
 	d = env.data(t)
 	if d.Marked != 2 || d.FamilyWide != 1 || d.UnreadCount != 0 || readAt(maintN) == nil || readAt(mine) == nil {
-		t.Fatalf("all = %+v", d)
+		t.Fatalf("mark the rest = %+v", d)
 	}
 	if readAt(amberN) != nil || readAt(foreign) != nil {
-		t.Fatal("all=true touched another member's or family's notification")
+		t.Fatal("marking ids touched another member's or family's notification")
 	}
 	if len(env.Next) != 1 || !strings.Contains(env.Next[0], "agenda_get") {
 		t.Errorf("next = %v", env.Next)
 	}
-	env = call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"all": "true"})
-	if d := env.data(t); d.Marked != 0 || env.Summary != "You had no unread notifications; nothing changed." {
-		t.Errorf("all again = %+v %q", d, env.Summary)
+	// Repeating the same ids changes nothing more.
+	env = call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"notification_ids": []any{maintN, mine}})
+	if d := env.data(t); d.Marked != 0 || d.AlreadyRead != 2 || !strings.Contains(env.Summary, "Those notifications were already read") {
+		t.Errorf("repeat = %+v %q", d, env.Summary)
 	}
 
 	// Validation.
 	wantError(t, call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{}), "notification_ids")
-	wantError(t, call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"all": false}), "notification_ids")
-	wantError(t, call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"all": true, "notification_ids": []any{billN}}), "all")
+	wantError(t, call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"notification_ids": []any{}}), "notification_ids")
 	wantError(t, call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"notification_ids": []any{"nope"}}), "notification_ids")
 	wantError(t, call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"notification_ids": []any{7}}), "notification_ids")
-	wantError(t, call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"all": "sure"}), "all")
 	many := make([]any, maxMarkIDs+1)
 	for i := range many {
 		many[i] = uuid.NewString()
 	}
 	wantError(t, call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"notification_ids": many}), "notification_ids")
-	if e := call[markResult](t, context.Background(), "notification_mark_read", mark, map[string]any{"all": true}); e.OK {
+	if e := call[markResult](t, context.Background(), "notification_mark_read", mark, map[string]any{"notification_ids": []any{billN}}); e.OK {
 		t.Error("want isError without claims")
+	}
+}
+
+// TestMarkReadHasNoMarkAll is #4947: the blanket form is gone, and asking for
+// it does not silently mark anything. all:true was how a war-game agent
+// "tidying up" consumed a whole household's unread state, Amber's bill-change
+// notice included, with no evidence it had seen any of it.
+func TestMarkReadHasNoMarkAll(t *testing.T) {
+	t.Parallel()
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	_, _, mark := NewNotificationMarkReadTool(pool)
+	amberCtx, amber := addMember(t, pool, hh, "Amber")
+
+	// A family-wide bill notice and a personal one: the shapes G6 wiped.
+	billN := notify(t, pool, hh.HouseholdID, "", "bill_due", "Internet due soon", "", nil, 3*time.Hour)
+	mine := notify(t, pool, hh.HouseholdID, hh.UserID.String(), "calendar_alarm", "Dentist", "", nil, time.Hour)
+	amberN := notify(t, pool, hh.HouseholdID, amber, "item_changed", `Jacob paid bill "Internet"`, "", nil, 2*time.Hour)
+	readAt := func(id string) *time.Time {
+		var ts *time.Time
+		if err := pool.QueryRow(context.Background(), `SELECT read_at FROM notifications WHERE id = $1`, id).Scan(&ts); err != nil {
+			t.Fatal(err)
+		}
+		return ts
+	}
+
+	// The exact call from the war game: all:true with a null id list. It used
+	// to succeed silently; now it is an isError that names the field and says
+	// what to do instead, and nothing is marked.
+	env := call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"all": true, "notification_ids": nil})
+	wantError(t, env, "all")
+	for _, w := range []string{"no mark-all", "not allowed"} {
+		if !strings.Contains(env.Error.Message, w) {
+			t.Errorf("error message %q lacks %q", env.Error.Message, w)
+		}
+	}
+	if !strings.Contains(env.Error.Fix, "notification_ids") || !strings.Contains(env.Error.Fix, "notification_find") {
+		t.Errorf("fix does not name the right argument: %q", env.Error.Fix)
+	}
+	if readAt(billN) != nil || readAt(mine) != nil || readAt(amberN) != nil {
+		t.Fatal("all:true marked something read")
+	}
+	// The truthy spellings a small model reaches for are refused the same way.
+	for _, args := range []map[string]any{
+		{"all": true}, {"all": "true"}, {"all": "yes"}, {"all": 1},
+		{"all": true, "notification_ids": []any{billN}},
+		{"mark_all": true}, {"all_unread": true},
+	} {
+		env := call[markResult](t, ctx, "notification_mark_read", mark, args)
+		if env.OK || env.Error == nil || !slices.Contains([]string{"all", "mark_all", "all_unread"}, env.Error.Field) {
+			t.Errorf("%v: want isError on the blanket parameter, got ok=%v error=%+v", args, env.OK, env.Error)
+		}
+		if readAt(billN) != nil || readAt(amberN) != nil {
+			t.Fatalf("%v marked something read", args)
+		}
+	}
+	// all:false alone is not a blanket request; it is simply no ids.
+	wantError(t, call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"all": false}), "notification_ids")
+
+	// The tool advertises ids only, and requires them, so a model that reads
+	// tools/list cannot reach the blanket form by accident.
+	tool := toolDef("notification_mark_read")
+	if _, ok := tool.InputSchema.Properties["all"]; ok {
+		t.Error("the all parameter is still advertised")
+	}
+	if fmt.Sprint(tool.InputSchema.Required) != "[notification_ids]" {
+		t.Errorf("required = %v, want [notification_ids]", tool.InputSchema.Required)
+	}
+
+	// Amber's own row is untouched by Jacob's refusal, and she can still mark
+	// her own notification read, which is the one read state that is hers.
+	for _, id := range []string{billN, mine, amberN} {
+		if readAt(id) != nil {
+			t.Fatalf("%s was marked read", id)
+		}
+	}
+	if d := call[markResult](t, amberCtx, "notification_mark_read", mark, map[string]any{"notification_ids": []any{amberN}}).data(t); d.Marked != 1 {
+		t.Fatalf("amber could not mark her own notification read: %+v", d)
+	}
+
+	// A member cannot mark another member's personal notification read, with
+	// or without a blanket flag: it is not found for them, nothing is marked,
+	// and Amber's notice stays unread for Amber.
+	amberN2 := notify(t, pool, hh.HouseholdID, amber, "item_changed", `Jacob updated bill "Electric"`, "", nil, time.Minute)
+	env = call[markResult](t, ctx, "notification_mark_read", mark, map[string]any{"notification_ids": []any{billN, amberN2}})
+	wantError(t, env, "notification_ids")
+	if !strings.Contains(env.Error.Message, amberN2) {
+		t.Errorf("refusal does not name Amber's id: %q", env.Error.Message)
+	}
+	if readAt(billN) != nil || readAt(amberN2) != nil {
+		t.Fatal("a refused call marked something read")
+	}
+	// Nor can she mark Jacob's.
+	mine2 := notify(t, pool, hh.HouseholdID, hh.UserID.String(), "item_changed", `Amber updated bill "Internet"`, "", nil, time.Minute)
+	wantError(t, call[markResult](t, amberCtx, "notification_mark_read", mark, map[string]any{"notification_ids": []any{mine2}}), "notification_ids")
+	if readAt(mine2) != nil {
+		t.Fatal("amber marked jacob's notification read")
 	}
 }

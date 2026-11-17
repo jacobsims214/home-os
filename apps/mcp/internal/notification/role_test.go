@@ -129,10 +129,14 @@ func TestNotificationReadFollowsCurrentRole(t *testing.T) {
 		env := call[markResult](t, amberCtx, "notification_mark_read", mark, map[string]any{"notification_ids": []any{n["bill"], n[k]}})
 		wantError(t, env, "notification_ids")
 	}
-	// all=true marks only the visible ones.
-	d := call[markResult](t, amberCtx, "notification_mark_read", mark, map[string]any{"all": true}).data(t)
+	// Marking by id reaches only the visible ones; the hidden ids stay unread.
+	ids := make([]any, 0, len(viewerSees))
+	for _, k := range viewerSees {
+		ids = append(ids, n[k])
+	}
+	d := call[markResult](t, amberCtx, "notification_mark_read", mark, map[string]any{"notification_ids": ids}).data(t)
 	if d.Marked != len(viewerSees) || d.UnreadCount != 0 {
-		t.Fatalf("viewer mark all = %+v", d)
+		t.Fatalf("viewer mark visible = %+v", d)
 	}
 	var stillUnread int
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM notifications WHERE id = ANY($1::uuid[]) AND read_at IS NULL`,
