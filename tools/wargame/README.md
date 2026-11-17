@@ -6,10 +6,73 @@ you check what actually landed in Home OS with direct MCP calls.
 
 | File | What it does |
 |---|---|
-| `chat.sh` | Sends one persona turn to a moltis agent, waits for the reply, prints the tool calls it made and its answer. `--history` dumps a whole session. |
+| `chat.sh` | Sends one persona turn to a moltis agent, waits for the reply, prints the tool calls it made and its answer. `--history` dumps a whole session; `--stdin` / `--file` take the message where the shell cannot expand it — **see the quoting section immediately below**; `--selftest` runs the message-guard tests. |
 | `mcpcall.py` | Ground truth: calls one Home OS MCP tool as a household member and prints the result. Still speaks the legacy SSE transport, which Stage 1 no longer serves — see the note under Requirements. |
 | `api.py` | Same idea for the REST API (`/api/v1/...`). **Dex id_token only** — a `hos_` agent token 401s there by design; see [Two kinds of token](#two-kinds-of-token-agent-tokens-are-mcp-scoped). |
 | `personas.md` | The household, the two personas (Jacob, Amber), their scenarios and sample turns, and the agent system-prompt snippet. |
+
+## Never put a `$` through your shell — always single-quote, or better use `--stdin`
+
+**Read this before your first turn that mentions money.** A `chat.sh` message typed in
+**double** quotes is expanded by *your* shell before `chat.sh` starts, and the damage is
+permanent: moltis stores what arrived, and the agent writes that to Home OS.
+
+```bash
+# WRONG — bash eats $2, $1, $7 as positional parameters (usually empty)
+./chat.sh jacob bills "mortgage is $2,340, electric $180, internet is $75"
+#   moltis receives:  mortgage is ,340, electric 80, internet is 5
+
+# RIGHT — single quotes: the shell passes the text through untouched
+./chat.sh jacob bills 'mortgage is $2,340, electric $180, internet is $75'
+#   moltis receives:  mortgage is $2,340, electric $180, internet is $75
+
+# BEST — never let the text near a shell at all
+./chat.sh jacob bills --stdin <<'EOF'
+mortgage is $2,340, electric $180, internet is $75
+EOF
+
+printf '%s' 'Riverside copay was $35, due 12/10' | ./chat.sh jacob bills --stdin
+./chat.sh jacob bills --file msg.txt
+```
+
+Watch the heredoc delimiter: `<<'EOF'` (quoted) is safe, `<<EOF` (unquoted) expands exactly
+like double quotes. `--stdin` fed from a double-quoted `printf "%s" "copay $35"` is just as
+broken as the argv form — quoting discipline applies to whatever builds the text, not only
+to the final command.
+
+**This has already corrupted real data.** In R1, Jacob's `$2,340 / $180 / $75` turn arrived
+as `,340 / 80 / 5` (and the agent rightly refused to guess), and a concurrent Amber turn
+filed the Riverside Pediatrics $35 copay as a bill of **`amount: 5`** with a document body
+`Well visit copay — 5.00` — the `$35` → `5` signature. Both the bill and the document are
+wrong in the war-game household until corrected (KB `discoveries/war-game-r1-jacob.md` G9).
+A `$` gone from the middle of the text is invisible: `electric 80` looks exactly like a
+bill that really is 80.
+
+### What `chat.sh` will and will not catch
+
+It refuses and warns, and it cannot do more than that, because the expansion happened
+before it ran:
+
+| The message `chat.sh` receives | What it does |
+|---|---|
+| `mortgage is ,340 … 80 … 5` — a comma starting a 3-digit group with no digit before it | **refuses** (exit 2), sends nothing; proves a `$2,340` was eaten |
+| `copay was 5` — a money word followed by a bare number and **no `$` anywhere** | warns: this is the shape left by an eaten `$` |
+| `home is $HOME`, `$(date)`, `$[3]` … arriving as an **argument** | warns: this one survived, so it was quoted, but the path is unsafe |
+| anything via `--stdin` / `--file` | silent — the shell never touched it |
+
+`--allow-suspicious` sends a message the guard would refuse; `--allow-dollar` stops the
+`$`-on-argv warning. Use them only when you are certain the text is what you mean.
+
+**The guard is a backstop, not the fix.** A message the shell already flattened to
+`electric 80, internet 5` carries no trace of what it was, so no script can catch it. The
+fix is the quoting above: `--stdin` with `<<'EOF'`, or `--file`. The guard exists because
+this trap cost the household real data once already.
+
+After any turn that mentioned an amount, check what was stored: `./chat.sh jacob bills
+--history` shows the `USER:` line moltis recorded, which is the text the agent actually
+read.
+
+---
 
 Requirements: `bash`, `curl`, `python3` (standard library only), `jq` for the recipes
 below. Run `mcpcall.py`/`api.py` from somewhere that can reach the Home OS services, for
@@ -182,7 +245,12 @@ no header the oldest membership is used, and a malformed value is a 400.
    topic; reuse it for follow-ups, use a new one when the topic changes:
 
    ```bash
-   ./chat.sh jacob cal "Kid B soccer every Tue/Thu 5:30-6:30 through mid Dec, family calendar"
+   ./chat.sh jacob cal 'Kid B soccer every Tue/Thu 5:30-6:30 through mid Dec, family calendar'
+
+   # Anything with a $ in it: --stdin with a QUOTED heredoc (see the top of this file)
+   ./chat.sh jacob bills --stdin <<'EOF'
+   mortgage is $2,340, electric $180, internet is $75
+   EOF
    ```
 
    Output looks like:
@@ -196,6 +264,12 @@ no header the oldest membership is used, and a malformed value is a 400.
 
    `TIMEOUT` means the agent wrote no reply within `WG_TIMEOUT_S`. It may still have
    written data, so check with `./chat.sh jacob cal --history` and with ground truth.
+
+   **Single-quote every message; use `--stdin` with `<<'EOF'` or `--file` for anything with
+   a `$` in it.** A double-quoted message is expanded by your shell before `chat.sh` runs,
+   and the agent files whatever survived — that is how a $35 copay became a $5 bill. If a
+   turn mentioned an amount, read the `USER:` line back with
+   `./chat.sh jacob <session> --history` and confirm it is the text you meant to send.
 
 3. **Check ground truth.** Verify what the agent said it did, as this member and, for
    anything shared, as the other member:
@@ -231,3 +305,7 @@ no header the oldest membership is used, and a malformed value is a 400.
 - Don't use real kids' names in personas or write-ups.
 - Ground truth is read-only unless you are deliberately setting up a scenario. Writes as a
   member show up for the whole household.
+- **Never put a `$` amount through your shell on the argv path.** Single quotes, or
+  `--stdin` / `--file` — see "Never put a `$` through your shell" at the top of this file.
+  `chat.sh` warns, and refuses on the provable case, but the shell expands before it runs, so
+  the guard is a backstop and not a licence to be careless.
