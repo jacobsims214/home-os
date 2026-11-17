@@ -107,7 +107,6 @@ database:
       enabled: false
 
 secrets:
-  jwtSecret: "local-dev-jwt-secret"
   calendarSecret: "local-dev-calendar-secret"
   typesenseApiKey: "local-dev-typesense-key"
   encryptionKey: "local-dev-encryption-key-32-chars"

@@ -434,12 +434,12 @@ database:
     existingSecretPasswordKey: password
 
 secrets:
-  # Name of a pre-created Secret with keys jwtSecret, calendarSecret,
-  # typesenseApiKey, encryptionKey, adminEmail, adminPassword (and smtpPassword
-  # unless smtp.existingSecret is set). When set, home-os-secrets is not
-  # rendered and the plain values below are ignored.
+  # Name of a pre-created Secret with keys calendarSecret, typesenseApiKey,
+  # encryptionKey, adminEmail, adminPassword (and smtpPassword unless
+  # smtp.existingSecret is set). When set, home-os-secrets is not rendered and
+  # the plain values below are ignored. There is deliberately no jwtSecret:
+  # authentication is Dex-issued OIDC only (#531).
   existingSecret: ""
-  jwtSecret: ""
   calendarSecret: ""
   typesenseApiKey: ""
   encryptionKey: ""
