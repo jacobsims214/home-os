@@ -60,8 +60,39 @@ type ListEnvelope[T any] struct {
 	Truncated  bool     `json:"truncated,omitempty" jsonschema_description:"true when more items matched than were returned."`
 	NextCursor string   `json:"next_cursor,omitempty" jsonschema_description:"Pass as cursor, with the same filters, for the next page. Absent on the last page."`
 	Narrow     string   `json:"narrow,omitempty" jsonschema_description:"How to narrow or page the query when truncated."`
+	Searched   *Range   `json:"searched_range,omitempty" jsonschema_description:"The part of the data the search covered. Read may_have_more before concluding that something does not exist."`
 	Next       []string `json:"next,omitempty" jsonschema_description:"Suggested next steps."`
 	Error      *Error   `json:"error,omitempty" jsonschema_description:"What went wrong and how to fix it. Present only when ok is false."`
+}
+
+// Range says what part of the data a list result covers, for a tool whose
+// search is narrower than everything (#4944). The point is that a caller
+// never has to read the summary to know whether an empty result means "it
+// does not exist" or "it is outside what I looked at": when AllDates is true
+// the search was exhaustive, and when MayHaveMore is true an empty or short
+// result proves nothing about records outside it.
+type Range struct {
+	AllDates bool `json:"all_dates,omitempty" jsonschema_description:"true when every date was searched, so an empty result means the record does not exist."`
+	// From and To are the first and last day searched, YYYY-MM-DD in the
+	// family timezone. Both are empty when AllDates is true.
+	From string `json:"from,omitempty" jsonschema_description:"First day searched (YYYY-MM-DD, family timezone). Empty when all dates were searched."`
+	To   string `json:"to,omitempty" jsonschema_description:"Last day searched (YYYY-MM-DD, family timezone, inclusive). Empty when all dates were searched."`
+	// MayHaveMore is true when records matching the filters may exist
+	// outside this range, or when the search stopped at a size cap.
+	MayHaveMore bool   `json:"may_have_more,omitempty" jsonschema_description:"true when matching records may exist outside what was searched. Never say something is absent while this is true."`
+	Note        string `json:"note,omitempty" jsonschema_description:"One line about what was searched, for the model to tell the user."`
+}
+
+// AllDatesRange is the Range of a search that covered every date.
+func AllDatesRange(note string) *Range {
+	return &Range{AllDates: true, Note: note}
+}
+
+// DaysRange is the Range of a search over [from, to]. mayHaveMore is true
+// when a default (not caller-chosen) window was applied, or the search hit a
+// size cap, so the caller is told more may exist outside it.
+func DaysRange(from, to string, mayHaveMore bool, note string) *Range {
+	return &Range{From: from, To: to, MayHaveMore: mayHaveMore, Note: note}
 }
 
 // Error is the corrective payload of a failed call.
@@ -107,6 +138,14 @@ func OK[T any](summary string, data T, next ...string) *mcp.CallToolResult {
 // page.NextCursor is given, the result is marked truncated and carries
 // page.Narrow (or a generic hint) and next_cursor.
 func List[T any](summary string, items []T, page Page, next ...string) *mcp.CallToolResult {
+	return ListIn(summary, items, page, nil, next...)
+}
+
+// ListIn is List for a tool whose search covers less than everything: ranged
+// says what was searched (Range), and is reported as searched_range beside
+// the items so a caller can tell "there is no such record" from "it is
+// outside what I searched" without reading the summary (#4944).
+func ListIn[T any](summary string, items []T, page Page, ranged *Range, next ...string) *mcp.CallToolResult {
 	if items == nil {
 		items = []T{}
 	}
@@ -116,7 +155,7 @@ func List[T any](summary string, items []T, page Page, next ...string) *mcp.Call
 	}
 	env := ListEnvelope[T]{
 		OK: true, Summary: summary, Items: items,
-		Returned: &returned, Total: &total, Next: next,
+		Returned: &returned, Total: &total, Searched: ranged, Next: next,
 	}
 	if total > returned || page.NextCursor != "" {
 		env.Truncated = true
