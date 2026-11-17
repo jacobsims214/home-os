@@ -196,3 +196,99 @@ func TestNoteRoutes_GetAndUpdateByID(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
 }
+
+// #4564: a note whose title is close to an existing note comes back with
+// possible_duplicates, and the note is still written. The pair is the war
+// game's contradictory twins (#4945); the prompt is what stops the second one
+// being created silently.
+func TestNoteRoutes_NearDuplicatePrompt(t *testing.T) {
+	pool := testDB(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	ks := &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{key.Public()}}
+	v := auth.NewVerifierWithKeySet(testIssuer, ks, []string{"home-os-ui"}).
+		WithResolver(auth.NewMemberResolver(pool))
+	h := router(pool, v)
+
+	token, _, hhID := member(t, pool, key)
+
+	var entityID string
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`INSERT INTO properties (household_id, name) VALUES ($1, 'Pickup test property') RETURNING id::text`, hhID).Scan(&entityID))
+
+	first := "Ava's school — teacher & pickup rules"
+	rec, _ := call(t, h, http.MethodPost, "/api/v1/notes", token, map[string]any{
+		"entity_type": "property", "entity_id": entityID, "title": first,
+		"body": "Mrs. Patel. 2:50 car line. Green tag, front office.",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var firstResp struct {
+		PossibleDuplicates []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"possible_duplicates"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &firstResp))
+	assert.Empty(t, firstResp.PossibleDuplicates, "the first note has no twin yet")
+
+	// The second note: the contradictory twin from the war game.
+	second := "Ava's school: teacher & pickup"
+	rec, _ = call(t, h, http.MethodPost, "/api/v1/notes", token, map[string]any{
+		"entity_type": "property", "entity_id": entityID, "title": second,
+		"body": "Ms. Delgado. 3:15 side door. Nut allergy, EpiPen in the office.",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var resp struct {
+		Data struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"data"`
+		PossibleDuplicates []struct {
+			ID               string  `json:"id"`
+			Title            string  `json:"title"`
+			UpdatedLocalDate string  `json:"updated_local_date"`
+			Excerpt          string  `json:"excerpt"`
+			TitleSimilarity  float64 `json:"title_similarity"`
+		} `json:"possible_duplicates"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	// The note was saved (the prompt is never a gate) ...
+	assert.NotEmpty(t, resp.Data.ID)
+	assert.Equal(t, second, resp.Data.Title)
+	// ... and the twin is named, with enough to decide.
+	require.Len(t, resp.PossibleDuplicates, 1, "the twin must be reported")
+	assert.Equal(t, first, resp.PossibleDuplicates[0].Title)
+	assert.NotEmpty(t, resp.PossibleDuplicates[0].ID)
+	assert.NotEmpty(t, resp.PossibleDuplicates[0].UpdatedLocalDate)
+	assert.Contains(t, resp.PossibleDuplicates[0].Excerpt, "Mrs. Patel")
+	assert.GreaterOrEqual(t, resp.PossibleDuplicates[0].TitleSimilarity, 0.6)
+
+	// A distinct title stays quiet.
+	rec, _ = call(t, h, http.MethodPost, "/api/v1/notes", token, map[string]any{
+		"entity_type": "property", "entity_id": entityID, "title": "Water heater",
+		"body": "Flushed in March.",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var quiet struct {
+		PossibleDuplicates []struct{} `json:"possible_duplicates"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &quiet))
+	assert.Empty(t, quiet.PossibleDuplicates)
+
+	// A rename into a collision reports it and still renames.
+	rec, _ = call(t, h, http.MethodPatch, "/api/v1/notes/"+resp.Data.ID, token, map[string]any{"title": first + " (old)"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var renamed struct {
+		PossibleDuplicates []struct {
+			Title string `json:"title"`
+		} `json:"possible_duplicates"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &renamed))
+	assert.NotEmpty(t, renamed.PossibleDuplicates)
+	// A note is never its own candidate.
+	for _, c := range renamed.PossibleDuplicates {
+		assert.NotEqual(t, first+" (old)", c.Title)
+	}
+}

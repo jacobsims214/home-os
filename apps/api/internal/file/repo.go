@@ -104,15 +104,27 @@ func (r *Repo) CreateFile(ctx context.Context, householdID uuid.UUID, f *File, d
 	if err != nil {
 		return nil, fmt.Errorf("create file: insert metadata: %w", err)
 	}
-	created, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[File])
-	if err != nil {
+	// Scanned explicitly rather than positionally into the struct: File has
+	// derived fields (TextVerified, UploadedByName) that RETURNING cannot fill,
+	// so the positional mapping would need a column for each. rows must be
+	// closed before the commit, or the connection stays busy.
+	var created File
+	if err := scanFile(rows, &created); err != nil {
+		rows.Close()
 		return nil, fmt.Errorf("create file: insert metadata: %w", err)
 	}
+	rows.Close()
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("create file: commit: %w", err)
 	}
-	return created, nil
+	created.finalize()
+	// The RETURNING clause cannot join, so the uploader's name is read back.
+	// A failed read is not worth failing an upload over: the row is stored.
+	if full, err := r.GetFile(ctx, householdID, created.ID); err == nil && full != nil {
+		created.UploadedByName = full.UploadedByName
+	}
+	return &created, nil
 }
 
 // GetFile returns the metadata for a single file by ID, scoped to the given
@@ -122,48 +134,50 @@ func (r *Repo) CreateFile(ctx context.Context, householdID uuid.UUID, f *File, d
 // attacker cannot distinguish "no such file" from "file exists but isn't
 // yours" (matching note/repo.go and the CalDAV tenant-isolation pattern).
 func (r *Repo) GetFile(ctx context.Context, householdID, id uuid.UUID) (*File, error) {
+	return r.getFile(ctx, householdID, id, nil)
+}
+
+// getFile is GetFile with the credential rule: unless includeSecretFiles is
+// true, a file attached to or linked from a credential is (nil, nil), exactly
+// like a missing one, so a viewer gets the same 404 for both.
+func (r *Repo) getFile(ctx context.Context, householdID, id uuid.UUID, includeSecretFiles *bool) (*File, error) {
+	args := []any{id, householdID}
+	where := `f.id = $1 AND f.household_id = $2`
+	if includeSecretFiles != nil {
+		args = append(args, *includeSecretFiles)
+		where += ` AND ` + secretFileWhere(3)
+	}
 	rows, err := r.pool.Query(ctx,
-		`SELECT `+fileColumns+`
+		`SELECT `+fileColumnsWithUploader+`
 		 FROM files f
-		 WHERE f.id = $1 AND f.household_id = $2`,
-		id, householdID,
+		 LEFT JOIN users uploader ON uploader.id = f.created_by
+		 WHERE `+where,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get file: %w", err)
 	}
 	defer rows.Close()
 
-	f, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[File])
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("get file: %w", err)
 		}
+		return nil, nil
+	}
+	var f File
+	if err := scanFileWithUploader(rows, &f); err != nil {
 		return nil, fmt.Errorf("get file: collect: %w", err)
 	}
-	return f, nil
+	f.finalize()
+	return &f, nil
 }
 
 // GetVisibleFile is GetFile for a caller: unless includeSecretFiles, a file
 // attached to or linked from a credential is (nil, nil), exactly like a
 // missing one, so a viewer gets the same 404 for both (secretFileWhere).
 func (r *Repo) GetVisibleFile(ctx context.Context, householdID, id uuid.UUID, includeSecretFiles bool) (*File, error) {
-	rows, err := r.pool.Query(ctx,
-		`SELECT `+fileColumns+`
-		 FROM files f
-		 WHERE f.id = $1 AND f.household_id = $2 AND `+secretFileWhere(3),
-		id, householdID, includeSecretFiles,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get file: %w", err)
-	}
-	f, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[File])
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get file: collect: %w", err)
-	}
-	return f, nil
+	return r.getFile(ctx, householdID, id, &includeSecretFiles)
 }
 
 // GetFileContent returns the raw bytes of the blob backing the given file.
@@ -232,7 +246,9 @@ func (r *Repo) ListFiles(ctx context.Context, householdID uuid.UUID, flt ListFil
 		args = append(args, false)
 		where = append(where, secretFileWhere(len(args)))
 	}
-	query := `SELECT ` + fileColumns + ` FROM files f WHERE ` + strings.Join(where, " AND ") +
+	query := `SELECT ` + fileColumnsWithUploader + ` FROM files f
+		LEFT JOIN users uploader ON uploader.id = f.created_by
+		WHERE ` + strings.Join(where, " AND ") +
 		` ORDER BY f.created_at DESC`
 
 	rows, err := r.pool.Query(ctx, query, args...)
@@ -241,12 +257,17 @@ func (r *Repo) ListFiles(ctx context.Context, householdID uuid.UUID, flt ListFil
 	}
 	defer rows.Close()
 
-	files, err := pgx.CollectRows(rows, pgx.RowToAddrOfStructByPos[File])
-	if err != nil {
-		return nil, fmt.Errorf("list files: collect: %w", err)
+	files := []*File{}
+	for rows.Next() {
+		var f File
+		if err := scanFileWithUploader(rows, &f); err != nil {
+			return nil, fmt.Errorf("list files: collect: %w", err)
+		}
+		f.finalize()
+		files = append(files, &f)
 	}
-	if files == nil {
-		files = []*File{}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list files: collect: %w", err)
 	}
 	return files, nil
 }
@@ -463,14 +484,20 @@ func (r *Repo) UpdateFile(ctx context.Context, householdID, id uuid.UUID, p Patc
 	if err != nil {
 		return nil, fmt.Errorf("update file: %w", err)
 	}
-	updated, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[File])
-	if err != nil {
+	var updated File
+	if err := scanFile(rows, &updated); err != nil {
+		rows.Close()
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("update file: %w", err)
 	}
-	return updated, nil
+	rows.Close()
+	updated.finalize()
+	if full, err := r.GetFile(ctx, householdID, updated.ID); err == nil && full != nil {
+		updated.UploadedByName = full.UploadedByName
+	}
+	return &updated, nil
 }
 
 // fileColumns is the select list matching File's field order, for
@@ -480,6 +507,33 @@ const fileColumns = `f.id, f.household_id, f.blob_id, f.name, f.content_type, f.
 	f.extracted_text, f.ocr_status, f.ocr_error, f.tags, f.created_at, f.updated_at,
 	f.title, f.category, to_char(f.document_date, 'YYYY-MM-DD'), to_char(f.expires_on, 'YYYY-MM-DD'),
 	f.description, f.person_id, f.text_origin, f.text_sha256`
+
+// fileColumnsWithUploader adds the uploader's display name (#4564: a file row
+// says who filed it, not only when). It is a separate list rather than one
+// more column in fileColumns so the RETURNING clauses (create, update), which
+// cannot join, keep scanning positionally into File.
+//
+// Queries using it must carry `LEFT JOIN users uploader ON uploader.id = f.created_by`.
+const fileColumnsWithUploader = fileColumns + `, uploader.name`
+
+// scanFileWithUploader scans one row of fileColumnsWithUploader.
+func scanFileWithUploader(rows pgx.Rows, f *File) error {
+	return rows.Scan(append(f.scanTargets(), &f.UploadedByName)...)
+}
+
+// scanFile scans the current row of a fileColumns query into f. It is
+// explicit (not pgx.RowToAddrOfStructByPos) because File also holds fields a
+// RETURNING clause cannot produce: TextVerified and UploadedByName are derived
+// by finalize() and by the uploader join.
+func scanFile(rows pgx.Rows, f *File) error {
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return pgx.ErrNoRows
+	}
+	return rows.Scan(f.scanTargets()...)
+}
 
 // scanTargets returns pointers to f's fields in fileColumns order.
 func (f *File) scanTargets() []any {

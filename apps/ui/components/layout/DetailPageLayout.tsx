@@ -30,6 +30,8 @@ import {
   IconTrash,
 } from "@tabler/icons-react";
 import EntityResources from "@/components/EntityResources";
+import { useNavRole } from "@/components/shared/use-nav-role";
+import { resourceAccess } from "@/lib/resource-access";
 
 interface DetailPageLayoutProps {
   entityType: string;
@@ -75,6 +77,18 @@ export default function DetailPageLayout({
 }: DetailPageLayoutProps) {
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [resourcesOpen, setResourcesOpen] = useState(false);
+  // #4564: a role that cannot use any resource tab gets no Resources section
+  // at all — not an empty heading, not a toggle onto a 403. A housesitter on a
+  // bill and a vendor on anything see only Details.
+  const role = useNavRole();
+  const access = resourceAccess(role, entityType);
+  const resourceHint = [
+    access.files !== "none" ? "files" : null,
+    access.notes !== "none" ? "notes" : null,
+    access.secrets !== "none" ? "secrets" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
   const backHref = `/dashboard/${pluralPath(entityType)}`;
   const backLabel = `Back to ${pluralLabel(entityType)}`;
   const heading = title || "Untitled";
@@ -178,17 +192,21 @@ export default function DetailPageLayout({
 
         {/* EntityResources renders its own "Resources" h2 and top margin. On a
             phone the section toggle is the heading, so that h2 is hidden there;
-            in the desktop column the margin would misalign the two tops. */}
-        <CollapsibleSection
-          title="Resources"
-          hint="Files, notes and secrets"
-          open={resourcesOpen}
-          onToggle={() => setResourcesOpen((o) => !o)}
-          className="max-md:rounded-token-md max-md:border max-md:border-line max-md:bg-surface max-md:px-4 max-md:shadow-token-sm max-md:[&_section>h2]:hidden md:[&_section]:mt-0"
-          panelClassName="max-md:pb-2"
-        >
-          <EntityResources entityType={entityType} entityId={entityId} />
-        </CollapsibleSection>
+            in the desktop column the margin would misalign the two tops.
+            #4564: the whole section is absent when the role can use none of
+            its tabs, and the hint names only the tabs that exist. */}
+        {access.any && (
+          <CollapsibleSection
+            title="Resources"
+            hint={resourceHint}
+            open={resourcesOpen}
+            onToggle={() => setResourcesOpen((o) => !o)}
+            className="max-md:rounded-token-md max-md:border max-md:border-line max-md:bg-surface max-md:px-4 max-md:shadow-token-sm max-md:[&_section>h2]:hidden md:[&_section]:mt-0"
+            panelClassName="max-md:pb-2"
+          >
+            <EntityResources entityType={entityType} entityId={entityId} role={role} hideHeading />
+          </CollapsibleSection>
+        )}
       </div>
     </div>
   );

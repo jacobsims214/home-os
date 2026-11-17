@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Modal from "@/components/ui/Modal";
 import { bffPath } from "@/lib/api";
 import type { FileRecord } from "@/lib/types/api";
+import { describeFileText, textProvenance } from "@/components/files/file-display";
 
 interface FileViewerProps {
   /** The file metadata to preview. Null/undefined while closed is fine. */
@@ -79,6 +80,28 @@ function classifyContentType(contentType: string): PreviewKind {
  * documented pattern (see
  * architecture/file-module.md — "GetFileContent XSS hardening").
  */
+/**
+ * The provenance sentence for the file being viewed. Renders nothing when the
+ * file has no text: there is nothing to claim either way.
+ */
+function FileTextNotice({ file }: { file: FileRecord }) {
+  const provenance = textProvenance(file);
+  if (provenance === "none") return null;
+  const tone =
+    provenance === "altered"
+      ? "border-warn-line bg-warn-bg text-warn-ink"
+      : "border-line bg-surface-2 text-ink-2";
+  return (
+    <p
+      data-testid="file-text-notice"
+      data-provenance={provenance}
+      className={`mb-3 rounded-token-sm border px-3 py-2 text-xs leading-relaxed ${tone}`}
+    >
+      {describeFileText(provenance)}
+    </p>
+  );
+}
+
 export default function FileViewer({ file, open, onClose }: FileViewerProps) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   // Tracks the live object URL outside of React state so that the load effect's
@@ -167,14 +190,19 @@ export default function FileViewer({ file, open, onClose }: FileViewerProps) {
       )}
 
       {file && (
-        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
-          <span className="font-medium text-gray-700">{file.content_type || "unknown type"}</span>
+        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-3">
+          <span className="font-medium text-ink-2">{file.content_type || "unknown type"}</span>
           <span>{formatBytes(file.size)}</span>
           {file.tags && file.tags.length > 0 && (
             <span>tags: {file.tags.join(", ")}</span>
           )}
         </div>
       )}
+
+      {/* What this file's text is (#4941, #4564). A derived or re-typed body
+          must not read as the original document, so the sentence is here in
+          full, not only in the row's tooltip. */}
+      {file && <FileTextNotice file={file} />}
 
       {loading && (
         <div className="flex items-center justify-center py-16 text-sm text-gray-500">
