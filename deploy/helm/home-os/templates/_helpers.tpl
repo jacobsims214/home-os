@@ -37,7 +37,7 @@ rendered into env `value:` fields. Each group has an existingSecret override;
 when it is set the chart does not render its own Secret for that group.
 */}}
 
-{{/* App secrets (jwtSecret, calendarSecret, typesenseApiKey, encryptionKey, adminEmail, adminPassword[, smtpPassword]). */}}
+{{/* App secrets (calendarSecret, typesenseApiKey, encryptionKey, adminEmail, adminPassword[, smtpPassword]). */}}
 {{- define "home-os.secretsName" -}}
 {{- .Values.secrets.existingSecret | default "home-os-secrets" -}}
 {{- end -}}

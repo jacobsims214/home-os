@@ -2,8 +2,9 @@
 #
 # No credentials live in this manifest. The chart reads them from Secrets that
 # are pre-created in namespace home-os (see create-home-os-secrets.sh):
-#   home-os-secrets    Opaque: jwtSecret, calendarSecret, typesenseApiKey,
+#   home-os-secrets    Opaque: calendarSecret, typesenseApiKey,
 #                      encryptionKey, adminEmail, adminPassword
+#                      (no jwtSecret: auth is Dex OIDC only, #531)
 #   home-os-db-secret  kubernetes.io/basic-auth: username=app, password
 #                      (CNPG initdb owner secret; also used by Dex and workloads)
 # Both Secrets are annotated argocd.argoproj.io/sync-options: Prune=false and

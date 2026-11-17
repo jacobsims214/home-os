@@ -5,7 +5,7 @@
 #   KUBECTL="kubectl --context admin@talos-homelab" ./create-home-os-secrets.sh
 #
 # Required env (prompted when unset):
-#   HOMEOS_JWT_SECRET HOMEOS_CALENDAR_SECRET HOMEOS_TYPESENSE_API_KEY
+#   HOMEOS_CALENDAR_SECRET HOMEOS_TYPESENSE_API_KEY
 #   HOMEOS_ENCRYPTION_KEY HOMEOS_ADMIN_EMAIL HOMEOS_ADMIN_PASSWORD
 #   HOMEOS_DB_PASSWORD   (URL-safe; must equal the CNPG app user's password
 #                         on an existing cluster)
@@ -39,7 +39,7 @@ ask() {
   [ -n "${!var}" ] || { echo "$var is empty" >&2; exit 1; }
 }
 
-for v in HOMEOS_JWT_SECRET HOMEOS_CALENDAR_SECRET HOMEOS_TYPESENSE_API_KEY \
+for v in HOMEOS_CALENDAR_SECRET HOMEOS_TYPESENSE_API_KEY \
          HOMEOS_ENCRYPTION_KEY HOMEOS_ADMIN_EMAIL HOMEOS_ADMIN_PASSWORD HOMEOS_DB_PASSWORD; do
   ask "$v"
 done
@@ -50,7 +50,6 @@ $KUBECTL create namespace "$NS" --dry-run=client -o yaml | $KUBECTL apply -f - >
 # --force-conflicts takes over fields owned by the old client-side apply; this
 # script is the only writer of these Secrets.
 $KUBECTL -n "$NS" create secret generic home-os-secrets \
-  --from-literal=jwtSecret="$HOMEOS_JWT_SECRET" \
   --from-literal=calendarSecret="$HOMEOS_CALENDAR_SECRET" \
   --from-literal=typesenseApiKey="$HOMEOS_TYPESENSE_API_KEY" \
   --from-literal=encryptionKey="$HOMEOS_ENCRYPTION_KEY" \

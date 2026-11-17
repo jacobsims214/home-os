@@ -41,7 +41,7 @@ home-os/
 | Layer | Technology |
 |---|---|
 | Frontend | Next.js 14 + React 18 + TypeScript + Mantine v7 + Tailwind CSS |
-| Backend | Go 1.25 (chi router, pgx/v5, golang-jwt) |
+| Backend | Go 1.25 (chi router, pgx/v5, go-oidc/v3 — Dex-issued tokens only) |
 | Calendar | Go CalDAV service (RFC 5545, PROPFIND, REPORT, sync-collection) |
 | Database | PostgreSQL 16 (28 migrations via golang-migrate) |
 | Search | Typesense 27 (outbox-driven indexing) |
@@ -112,7 +112,6 @@ A production Helm chart is available at `deploy/helm/home-os/`:
 helm install home-os ./deploy/helm/home-os \
   --set global.publicUrl="https://homeos.example.com" \
   --set global.imageTag="sha-<short>" \
-  --set secrets.jwtSecret="..." \
   --set secrets.typesenseApiKey="..." \
   --set secrets.encryptionKey="..."
 ```
