@@ -41,6 +41,22 @@
       "matches": true
     },
     {
+      "why": "#4883: 'food' is an allergyFiller word, so 'sea food' used to read as the one-word phrase 'sea' and match nothing. The two-word alias has to survive the filler, exactly as the one-word 'seafood' above does.",
+      "allergy": "sea food",
+      "ingredient": "salmon",
+      "matches": true
+    },
+    {
+      "allergy": "Sea food allergy",
+      "ingredient": "shrimp",
+      "matches": true
+    },
+    {
+      "allergy": "allergic to sea food",
+      "ingredient": "chicken thighs",
+      "matches": false
+    },
+    {
       "allergy": "gluten",
       "ingredient": "cornbread",
       "matches": true
