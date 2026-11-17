@@ -97,8 +97,10 @@ export default function ActivityFeed({
         <h3 id="h-act" className="text-base font-semibold tracking-tight text-ink">
           Family activity
         </h3>
+        {/* The mockup's own wording ("All activity"); it must match the footer
+            link below so the panel has ONE name for the same destination. */}
         <Link href={href} className="py-2 text-[13px] font-semibold text-accent" data-testid="activity-see-all">
-          See all
+          See all activity
         </Link>
       </div>
 
