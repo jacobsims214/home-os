@@ -11,10 +11,10 @@
  * render as empty data).
  */
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { apiFetch } from "@/lib/api";
+import { ApiError, apiFetch } from "@/lib/api";
 import { mealKeys, personKeys } from "@/lib/query-keys";
 import type { AgendaEvent, ActivityRow, BillRow, ListRow, MaintenanceRow, MealRow, PersonRow } from "./agenda";
-import { agendaRange } from "./agenda";
+import { activityProbePath, agendaRange } from "./agenda";
 import type { AllergyWarning } from "@/lib/recipes/allergy";
 
 export interface MyHousehold {
@@ -146,14 +146,77 @@ export function useLists(enabled = true) {
   });
 }
 
-/** GET /api/v1/activity — the family change feed ("who added what"). */
+/**
+ * GET /api/v1/activity — the family change feed ("who added what").
+ *
+ * `limit: 8` and not the endpoint's default 50: Today shows four rows with "see
+ * all", and the R1 war game's lesson was that a bloated default payload both
+ * slows a screen down and gives whoever reads it more to misread. Eight leaves
+ * room to say honestly how many newer changes are not shown without pulling a
+ * page of them.
+ *
+ * `enabled` carries the role gate (#4577): a housesitter and a vendor get 403
+ * from this route, so the section is not drawn and the query never runs.
+ */
+export const ACTIVITY_TODAY_LIMIT = 8;
+
 export function useActivity(enabled = true) {
   return useQuery({
-    queryKey: ["activity", "today"],
-    queryFn: () => apiFetch<{ data: ActivityRow[] }>("/api/v1/activity", { params: { limit: 20 } }),
+    queryKey: ["activity", "today", ACTIVITY_TODAY_LIMIT],
+    queryFn: () =>
+      apiFetch<{ data: ActivityRow[] }>("/api/v1/activity", { params: { limit: ACTIVITY_TODAY_LIMIT } }),
     enabled,
     staleTime: 30_000,
     retry: false,
+  });
+}
+
+/**
+ * Does the record a change is about still exist?
+ *
+ * The activity log outlives the rows it describes: a change to a bill that was
+ * deleted yesterday still reads "Amber updated bill Netflix" today. Opening it
+ * would land on a detail page that says nothing useful (EntityDetail answers
+ * "No bill found with ID …" for an empty body), and the worst version of that is
+ * a link that looks live and goes nowhere — R1's "nothing was deleted that I can
+ * see" is the same failure in words.
+ *
+ * So each row whose record has a detail page is probed once (cheap GET, no
+ * retry). Only a 404 is evidence of deletion: a 500, a network failure or a
+ * timeout leaves the answer `null`, and a `null` is never reported as "deleted"
+ * — an unverifiable claim is exactly what this panel exists to stop.
+ *
+ * Capped at `limit` probes; Today shows at most four rows and a family's feed
+ * does not need more than that resolved per visit.
+ */
+export function useActivityRecordExistence(entries: readonly ActivityRow[], enabled = true) {
+  const probes = entries
+    .slice(0, ACTIVITY_TODAY_LIMIT)
+    .map((entry) => ({ entry, path: activityProbePath(entry) }))
+    .filter((p): p is { entry: ActivityRow; path: string } => p.path !== null);
+
+  return useQueries({
+    queries: probes.map(({ path }) => ({
+      queryKey: ["activity", "exists", path],
+      queryFn: async (): Promise<boolean | null> => {
+        try {
+          await apiFetch<unknown>(path);
+          return true;
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 404) return false;
+          // 403 (the role lost access since), 5xx, offline: unknown, never "gone".
+          return null;
+        }
+      },
+      enabled,
+      staleTime: 60_000,
+      retry: false,
+    })),
+    combine: (results) => {
+      const exists = new Map<number, boolean | null>();
+      results.forEach((r, i) => exists.set(probes[i]?.entry.id ?? -1, r.data ?? null));
+      return { exists, isLoading: results.some((r) => r.isLoading) };
+    },
   });
 }
 

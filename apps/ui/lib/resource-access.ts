@@ -162,6 +162,33 @@ export function canSeeSecrets(role: string | null | undefined): boolean {
   return isRole(role) && FAMILY.includes(role);
 }
 
+/**
+ * Whether a role may read the family activity feed (#4577).
+ *
+ * ResActivity's read grant is rolesReaders — the family roles and a viewer
+ * (roles.go). A housesitter and a vendor get 403 from GET /activity, so Today
+ * must not draw the section for them: a "Family activity" heading with a 403
+ * behind it is a dead panel, and the activity trail names records a sitter or
+ * a vendor may not see (KB decisions/2026-11-15-role-policy.md).
+ *
+ * Unlike the helpers above, an UNKNOWN role (null/"" while GET /me/households
+ * is in flight) is also false here. Those answer "show it and let the API
+ * refuse", which is fine for a read that returns empty data; this one is a
+ * route that answers 403 by role, so drawing it for a role that may not read it
+ * means a refused request on every visit and a panel that appears and is then
+ * taken away from a housesitter. Today asks for the role alongside the
+ * household it already needs, so the section arrives with the page's first real
+ * paint either way — it is never late, and it is never a promise it withdraws.
+ */
+export function canReadActivity(role: string | null | undefined): boolean {
+  return isRole(role) && READERS.includes(role);
+}
+
+/** True once the signed-in role is known, so a panel can wait instead of guess. */
+export function roleKnown(role: string | null | undefined): role is Role {
+  return isRole(role);
+}
+
 /** Whether a role may read notes at all (ResNotes read: family + viewer + sitter). */
 export function canReadNotes(role: string | null | undefined): boolean {
   if (role == null || role === "") return true;

@@ -101,9 +101,14 @@ export interface PersonRow {
 /** GET /api/v1/activity row (entryResponse). */
 export interface ActivityRow {
   id: number;
+  /** create | update | delete (activity_log's CHECK constraint, migration 050). */
   action: string;
   entity_type: string;
   entity_id: string;
+  parent_type?: string | null;
+  parent_id?: string | null;
+  /** Column names an update touched; [] for create and delete. */
+  changed_fields?: string[];
   summary: string;
   description: string;
   created_at: string;
@@ -607,11 +612,165 @@ export function actorLabel(
   return name || "Someone";
 }
 
+// ── opening the record a change is about ─────────────────────
+
 /**
- * Entries from the household's other members and their agents, newest first,
- * capped for the panel. The page's own writes are included on purpose: "Amber
- * added oat milk" next to "You uploaded the insurance card" is the point.
+ * Where a change's record lives, for the kinds that have a page. The plural
+ * rule is EntityDetail's (`/api/v1/${entityType}s/{id}`), which is also how a
+ * notification row links (#4563) — one idea of which pages exist, not two that
+ * drift.
+ *
+ * A kind with no page maps to nothing rather than to a fallback. A row that
+ * opens "somewhere" when it cannot open the record is exactly the dead control
+ * this repo's conventions forbid, so lists, notes, documents, credentials and
+ * guides stay text-only until they have a page.
  */
-export function familyFeed(entries: readonly ActivityRow[], limit = 4): ActivityRow[] {
-  return entries.slice(0, limit);
+const RECORD_ROUTES: Readonly<Record<string, string>> = {
+  bill: "/dashboard/bills",
+  loan: "/dashboard/loans",
+  asset: "/dashboard/assets",
+  vehicle: "/dashboard/vehicles",
+  pet: "/dashboard/pets",
+  vendor: "/dashboard/vendors",
+  property: "/dashboard/properties",
+  recipe: "/dashboard/recipes",
+  // Pages that exist but are not per-record: the row opens the section that
+  // holds the record, which is where a person would look for it.
+  maintenance_task: "/dashboard/maintenance",
+  maintenance_schedule: "/dashboard/maintenance",
+  calendar_event: "/dashboard/calendar",
+  calendar: "/dashboard/calendar",
+  person: "/dashboard/members",
+  meal_plan: "/dashboard/meals",
+  meal_feedback: "/dashboard/meals",
+};
+
+/** The kinds whose page reads ONE record, so its existence can be probed. */
+const PROBEABLE_KINDS = new Set([
+  "bill",
+  "loan",
+  "asset",
+  "vehicle",
+  "pet",
+  "vendor",
+  "property",
+  "recipe",
+]);
+
+/** The href for a change's record, or null when the app has no page for it. */
+export function activityHref(
+  entry: Pick<ActivityRow, "entity_type" | "entity_id">,
+): string | null {
+  const base = RECORD_ROUTES[entry.entity_type];
+  if (!base) return null;
+  if (!PROBEABLE_KINDS.has(entry.entity_type)) return base;
+  return entry.entity_id ? `${base}/${entry.entity_id}` : null;
+}
+
+/** The GET that answers "does this record still exist", or null. */
+export function activityProbePath(
+  entry: Pick<ActivityRow, "entity_type" | "entity_id">,
+): string | null {
+  if (!PROBEABLE_KINDS.has(entry.entity_type) || !entry.entity_id) return null;
+  return `/api/v1/${entry.entity_type}s/${entry.entity_id}`;
+}
+
+/**
+ * What a row can do about the record it is about.
+ *
+ * - `deleted`: the change WAS the deletion, so there is nothing to open, and
+ *   the row says so instead of offering a link that cannot work.
+ * - `gone`: the record answered 404 when checked — it was deleted after the
+ *   change. This is the question R1 could not answer ("nothing was deleted that
+ *   I can see" about a deletion the agent had made itself), so the row states
+ *   it rather than opening a page that silently shows nothing.
+ * - `link`: open it.
+ * - `none`: no page exists for this kind of record yet; the row is text only.
+ *
+ * `exists` is tri-state on purpose: `undefined`/`null` means nobody checked, or
+ * the check failed for a reason other than 404. A failed check is never
+ * reported as a deletion — that would be the same false certainty, inverted.
+ */
+export type ActivityTargetKind = "deleted" | "gone" | "link" | "none";
+
+export interface ActivityTarget {
+  kind: ActivityTargetKind;
+  href: string | null;
+  /** The line the row prints under the change; null for a plain link. */
+  note: string | null;
+}
+
+export function activityTarget(
+  entry: Pick<ActivityRow, "action" | "entity_type" | "entity_id">,
+  exists?: boolean | null,
+): ActivityTarget {
+  if (entry.action === "delete") {
+    return { kind: "deleted", href: null, note: "Deleted — nothing left to open." };
+  }
+  const href = activityHref(entry);
+  if (!href) return { kind: "none", href: null, note: null };
+  if (exists === false) {
+    return { kind: "gone", href: null, note: "No longer there — deleted since." };
+  }
+  return { kind: "link", href, note: null };
+}
+
+/**
+ * The avatar a change's row draws: the actor's initials and, when the family
+ * records a colour for them, that member's colour — the same rule the People
+ * panel and the mockup's `.av.amber` use, so one person looks the same wherever
+ * they appear.
+ *
+ * The label is initials and never the word "You": "You" is what the row SAYS,
+ * not what a two-letter circle can hold (it rendered as "YOU"). A viewer whose
+ * actor record carries no name gets "Y" rather than a stub, and an entirely
+ * unnamed actor ("Someone") gets "?" — never a made-up name.
+ */
+export function activityAvatar(
+  entry: Pick<ActivityRow, "actor">,
+  viewerUserId: string | null | undefined,
+  people: readonly PersonRow[] = [],
+): { label: string; color: string | null } {
+  const name = entry.actor?.name?.trim() ?? "";
+  const isViewer = !!viewerUserId && entry.actor?.user_id === viewerUserId;
+  let label = "";
+  if (name) {
+    label = name
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0] ?? "")
+      .join("");
+  } else {
+    label = isViewer ? "Y" : "?";
+  }
+  // The actor's colour comes from their people record: person_id is the direct
+  // link, user_id the one people rows carry for anyone with a login.
+  const person = people.find(
+    (p) =>
+      (entry.actor?.person_id && p.id === entry.actor.person_id) ||
+      (!!entry.actor?.user_id && p.user_id === entry.actor.user_id),
+  );
+  return { label: label.toUpperCase(), color: person?.color?.trim() || null };
+}
+
+/**
+ * The changes Today shows: the newest few, and how many of THOSE it did not show.
+ *
+ * Today must not render the whole feed — the R1 war game found bloated default
+ * payloads slow screens down and give an agent more to misread — so the panel is
+ * a window onto the feed, with "see all" for the rest.
+ *
+ * `hidden` counts only what the page actually holds: the feed hook asks for a
+ * handful of rows, so a family with a hundred changes has far more than
+ * `hidden` says. It is therefore enough to decide THAT there is more — it is
+ * never printed as a count, because "4 more changes" would be a false claim
+ * about a feed that holds ninety-six. Say "see all" instead.
+ */
+export function activityWindow(
+  entries: readonly ActivityRow[],
+  limit = 4,
+): { rows: ActivityRow[]; hidden: number } {
+  const cap = Math.max(0, limit);
+  return { rows: entries.slice(0, cap), hidden: Math.max(0, entries.length - cap) };
 }

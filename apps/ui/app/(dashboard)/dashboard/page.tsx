@@ -82,13 +82,13 @@ import {
 import { reportAllergies } from "@/lib/recipes/allergy";
 import { useNavRole } from "@/components/shared/use-nav-role";
 import { NAV_ICON_STROKE } from "@/components/shared/nav-config";
+import ActivityFeed from "@/components/today/ActivityFeed";
+import { canReadActivity, roleKnown } from "@/lib/resource-access";
 import {
-  attribution,
   billsAndUpkeepDue,
   buildAgenda,
   buildTomorrow,
   dinnerToday,
-  feedParts,
   formatDayHeading,
   formatDueLabel,
   householdToday,
@@ -100,10 +100,10 @@ import {
   type PersonRow,
 } from "@/lib/today/agenda";
 import type { RecipeRow } from "@/lib/today/api";
-import type { ActivityRow } from "@/lib/today/agenda";
 import {
   currentHousehold,
   useActivity,
+  useActivityRecordExistence,
   useAgenda,
   useBills,
   useListItemsFor,
@@ -118,8 +118,6 @@ import {
 
 /** Roles that may see money (bills, upkeep costs) — mirrors the API's policy. */
 const MONEY_ROLES = new Set(["owner", "family_manager", "family_member", "viewer"]);
-/** Roles that may read the family activity feed (a housesitter may not). */
-const FEED_ROLES = new Set(["owner", "family_manager", "family_member", "viewer"]);
 const FAMILY_ROLES = new Set(["owner", "family_manager", "family_member"]);
 
 // ── page ─────────────────────────────────────────────────────
@@ -159,7 +157,16 @@ export default function TodayPage() {
     : null;
 
   const canSeeMoney = role == null || MONEY_ROLES.has(role);
-  const canSeeFeed = role == null || FEED_ROLES.has(role);
+  // Family activity needs ResActivity read: owner, family_manager,
+  // family_member, viewer. A housesitter and a vendor answer 403, so neither the
+  // section nor its request happens for them — #4577, role policy #4689.
+  //
+  // This waits for the role instead of assuming it: unlike the other gates, a
+  // wrong guess here is a refused request on every visit plus a panel that
+  // appears and is then withdrawn. Today already reads the same
+  // GET /me/households for the timezone under the same query key, so the role
+  // arrives with the data the page cannot render without.
+  const canSeeFeed = roleKnown(role) && canReadActivity(role);
   const isFamily = role == null || FAMILY_ROLES.has(role);
 
   const agenda = useAgenda(today);
@@ -169,6 +176,13 @@ export default function TodayPage() {
   const people = usePeople(!!today);
   const lists = useLists(!!today);
   const activity = useActivity(!!today && canSeeFeed);
+  // Does each change's record still exist? Only the rows Today shows are
+  // probed, and only for kinds with a detail page: a 404 is the "it was
+  // deleted since" answer, never a guess (#4577).
+  const activityExists = useActivityRecordExistence(
+    canSeeFeed ? activity.data?.data ?? [] : [],
+    !!today && canSeeFeed,
+  );
   const me = useMe();
 
   const dinner = useMemo(
@@ -294,12 +308,14 @@ export default function TodayPage() {
           </div>
           {canSeeFeed && (
             <div className="order-6 lg:order-none">
-              <ActivitySection
+              <ActivityFeed
                 entries={activity.data?.data ?? []}
                 viewerUserId={me.data?.id ?? null}
                 isLoading={activity.isLoading}
                 error={activity.error as Error | null}
                 onRetry={() => activity.refetch()}
+                exists={activityExists.exists}
+                people={people.data?.data ?? []}
               />
             </div>
           )}
@@ -1156,72 +1172,6 @@ function NeedsYouRow({
 function parseCivilSafe(d: string): number | null {
   const n = Date.parse(`${d.slice(0, 10)}T00:00:00Z`);
   return Number.isNaN(n) ? null : Math.round(n / 86_400_000);
-}
-
-// ── family activity (attribution) ───────────────────────────
-
-function ActivitySection({
-  entries,
-  viewerUserId,
-  isLoading,
-  error,
-  onRetry,
-}: {
-  entries: ActivityRow[];
-  viewerUserId: string | null;
-  isLoading: boolean;
-  error: Error | null;
-  onRetry: () => void;
-}) {
-  return (
-    <section aria-labelledby="h-act" data-testid="today-activity">
-      <SectionHeading id="h-act" title="Family activity" />
-      {error ? (
-        <ErrorPanel title="The family activity didn't load" message="Who added what is unknown right now, not empty." onRetry={onRetry} />
-      ) : isLoading ? (
-        <SectionSkeleton rows={3} />
-      ) : entries.length === 0 ? (
-        <Card withBorder radius="md" padding={0}>
-          <CalmPanel icon={<IconUsers size={20} stroke={NAV_ICON_STROKE} />} title="No changes yet">
-            When either adult — or their assistant — adds an event, bill or list item, it appears here with their name, so you never
-            have to ask &quot;did you do that?&quot;.
-          </CalmPanel>
-        </Card>
-      ) : (
-        <Card withBorder radius="md" padding={0} className="overflow-hidden">
-          {entries.slice(0, 4).map((entry) => {
-            const parts = feedParts(entry, viewerUserId);
-            return (
-              <div key={entry.id} className="flex gap-3 border-b border-line px-3.5 py-3 last:border-b-0" data-testid="activity-row">
-                <span className="grid h-8 w-8 flex-none place-items-center rounded-full bg-accent-soft text-[12px] font-semibold text-accent" aria-hidden>
-                  {parts.who === "You" ? "You" : initials(parts.who)}
-                </span>
-                <div className="min-w-0 flex-1 text-sm leading-snug text-ink-2">
-                  <p className="m-0 text-[14px] leading-snug text-ink-2">
-                    <b className="font-semibold text-ink">{parts.who}</b> {parts.text}
-                  </p>
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px] text-ink-3">
-                    {parts.viaAgent && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-1.5 py-0.5 font-medium" data-testid="activity-agent">
-                        via {parts.agentName}
-                      </span>
-                    )}
-                    <time dateTime={entry.created_at}>{attribution(entry, viewerUserId).when}</time>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-          <div className="border-t border-line bg-surface-2 px-3.5 py-2.5">
-            <GapNote>
-              Every change carries the person who made it, and the assistant&apos;s own name when it wrote through one — that is what
-              stops &quot;did you book that?&quot;. A full read-only change history is on its way; this list is the newest four.
-            </GapNote>
-          </div>
-        </Card>
-      )}
-    </section>
-  );
 }
 
 // ── the first paint ─────────────────────────────────────────
