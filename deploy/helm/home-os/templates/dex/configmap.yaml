@@ -3,6 +3,23 @@
 {{- fail "dex.dbPassword was removed: Dex reads its DB password from a Secret. Put it in a Secret and set dex.existingSecret (and dex.existingSecretPasswordKey), or leave both unset to use home-os-db-secret." }}
 {{- end }}
 {{- /*
+Refuse to name a password connector that will not exist at runtime. Dex starts
+happily with oauth2.passwordConnector set to an unknown id and only fails the
+grant later, per request, with a 400 "Requested connector does not exist" -
+indistinguishable at the caller from a dozen other misconfigurations. Valid ids
+here are the id of each dex.connectors entry plus "local", which Dex registers
+itself when enablePasswordDB is true (rendered further down).
+*/}}
+{{- $connectorIDs := list "local" }}
+{{- range .Values.dex.connectors }}
+{{- $connectorIDs = append $connectorIDs (required "each dex.connectors entry needs an id" .id) }}
+{{- end }}
+{{- with .Values.dex.passwordConnector }}
+{{- if not (has . $connectorIDs) }}
+{{- fail (printf "dex.passwordConnector=%q is not a connector this chart provides (have: %s). Use \"local\" for the Dex password DB, or declare one under dex.connectors." . (join ", " $connectorIDs)) }}
+{{- end }}
+{{- end }}
+{{- /*
 Dex storage uses the same server, port, user and SSL mode as the API
 (home-os.dbHost/dbPort/dbUser/dbSslMode). Managed mode creates the `dex`
 database at CNPG initdb (postgres/cnpg-cluster.yaml); with database.mode=external
@@ -68,7 +85,31 @@ data:
       pkce:
         enforce: true
         codeChallengeMethodsSupported: ["S256"]
+      {{- with .Values.dex.passwordConnector }}
+      # INTERIM (#4886) - RETIRED BY #4540. Turns on the OAuth2 password grant
+      # (grant_type=password) at /dex/token and its root /token alias, so a
+      # headless caller can exchange a member's Dex password for an id_token.
+      # It exists only because the moltis family agents and tools/wargame need a
+      # headless auth path before per-member agent tokens (#4535) are issued;
+      # agent tokens are the designed path and this setting goes away with #4540.
+      #
+      # It is a CHART VALUE and must stay one: the war game originally added it
+      # by hand to the live ConfigMap, and the next sync from this chart erased
+      # it, silently leaving every agent with no headless auth (#4357).
+      #
+      # Security: this is NOT rate limited at Envoy (which cannot tell a password
+      # grant from a refresh without reading the body), and a password grant
+      # carries no scope and no per-agent revocation. Do not outlive #4540.
+      passwordConnector: {{ . | quote }}
+      {{- end }}
     
+    {{- with .Values.dex.connectors }}
+    # Connectors besides the password DB. Each entry is Dex's own connector
+    # config verbatim: {id, type, name, config}.
+    connectors:
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+
     staticClients:
     - id: home-os-ui
       name: Home OS UI
@@ -83,6 +124,9 @@ data:
       - {{ tpl . $ | quote }}
       {{- end }}
     
+    # Registers Dex's built-in "local" connector (id "local") - the one
+    # oauth2.passwordConnector: "local" above names. Without it the password
+    # grant has no connector to resolve and every grant answers 400.
     enablePasswordDB: true
     {{- if or .Values.dex.idTokenExpiry .Values.dex.refreshTokenReuseInterval }}
 

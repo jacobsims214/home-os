@@ -217,8 +217,9 @@ func TestVehicleFind(t *testing.T) {
 			t.Fatalf("order/related: %+v", got)
 		}
 		o := got[1]
-		if o.Name != "2022 Honda Odyssey" || o.LoanCount != 1 || o.BillCount != 2 || o.OpenUpkeepCount != 1 ||
-			o.PurchaseDate == nil || *o.PurchaseDate != "2022-03-15" || o.CurrentValue == nil || *o.CurrentValue != 31000 {
+		if o.Name != "2022 Honda Odyssey" || o.OpenUpkeepCount != 1 ||
+			o.PurchaseDate == nil || *o.PurchaseDate != "2022-03-15" || o.CurrentValue == nil || *o.CurrentValue != 31000 ||
+			o.LoanCount == nil || *o.LoanCount != 1 || o.BillCount == nil || *o.BillCount != 2 {
 			t.Fatalf("odyssey: %+v", o)
 		}
 		// Money comes from the typed loan and bills (loan_count, bill_count),

@@ -165,10 +165,14 @@ var routeRules = map[string]RouteRule{
 	"DELETE /api/v1/links/{id}": rr(auth.ResLinks, auth.ActWrite),
 
 	// People: the handler hides all but names/allergies without people read.
+	// PATCH names the colour action (#4821), the narrowest one that can
+	// succeed there; the handler then narrows it to the person themselves or
+	// a manager from memberships.
 	"GET /api/v1/people":                              rr(auth.ResPeople, auth.ActReadBasic),
 	"POST /api/v1/people":                             rr(auth.ResPeople, auth.ActWrite),
 	"GET /api/v1/people/{id}":                         rr(auth.ResPeople, auth.ActReadBasic),
 	"PUT /api/v1/people/{id}":                         rr(auth.ResPeople, auth.ActWrite),
+	"PATCH /api/v1/people/{id}":                       rr(auth.ResPeople, auth.ActSetColor),
 	"DELETE /api/v1/people/{id}":                      rr(auth.ResPeople, auth.ActWrite),
 	"GET /api/v1/people/{id}/preferences":             rr(auth.ResPreferences, auth.ActRead),
 	"POST /api/v1/people/{id}/preferences":            rr(auth.ResPreferences, auth.ActWrite),
@@ -194,6 +198,7 @@ var routeRules = map[string]RouteRule{
 	"POST /api/v1/lists/{id}/unarchive":           rr(auth.ResLists, auth.ActManage),
 	"GET /api/v1/lists/{id}/items":                rr(auth.ResLists, auth.ActRead),
 	"POST /api/v1/lists/{id}/items":               rr(auth.ResLists, auth.ActAddItems),
+	"POST /api/v1/lists/{id}/items/merge":          rr(auth.ResLists, auth.ActAddItems),
 	"POST /api/v1/lists/{id}/items/check":         rr(auth.ResLists, auth.ActCheckItems),
 	"POST /api/v1/lists/{id}/items/uncheck":       rr(auth.ResLists, auth.ActCheckItems),
 	"POST /api/v1/lists/{id}/items/remove":        rr(auth.ResLists, auth.ActEditItems),
@@ -208,6 +213,8 @@ var routeRules = map[string]RouteRule{
 	"PUT /api/v1/recipes/{id}":                      rr(auth.ResMeals, auth.ActWrite),
 	"DELETE /api/v1/recipes/{id}":                   rr(auth.ResMeals, auth.ActWrite),
 	"GET /api/v1/meal-plans":                        rr(auth.ResMeals, auth.ActRead),
+	"GET /api/v1/meal-plans/grocery":                rr(auth.ResMeals, auth.ActRead),
+	"POST /api/v1/meal-plans/grocery":               rr(auth.ResMeals, auth.ActWrite),
 	"PUT /api/v1/meal-plans/{date}/{slot}":          rr(auth.ResMeals, auth.ActWrite),
 	"DELETE /api/v1/meal-plans/{date}/{slot}":       rr(auth.ResMeals, auth.ActWrite),
 	"GET /api/v1/meals/{id}":                        rr(auth.ResMeals, auth.ActRead),

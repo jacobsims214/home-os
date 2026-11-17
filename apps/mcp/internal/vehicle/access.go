@@ -419,13 +419,16 @@ func lockVehicle(ctx context.Context, tx pgx.Tx, hid, id uuid.UUID) (storedVehic
 	return r, err
 }
 
-// loadVehicle reads one vehicle as vehicle_find lists it.
-func loadVehicle(ctx context.Context, q querier, hid, id uuid.UUID) (vehicleData, error) {
-	r, err := scanVehicle(q.QueryRow(ctx, vehicleSelect+` WHERE v.id = $1 AND v.household_id = $2`, id, hid))
+// loadVehicle reads one vehicle as vehicle_find lists it, with money only when
+// withMoney (the caller's auth.CanSeeMoney). The write tools are family only, so
+// every current caller passes true, but a widened write cannot leak by default
+// (#4808).
+func loadVehicle(ctx context.Context, q querier, hid, id uuid.UUID, withMoney bool) (vehicleData, error) {
+	r, err := scanVehicle(q.QueryRow(ctx, vehicleSelect+` WHERE v.id = $2 AND v.household_id = $3`, withMoney, id, hid))
 	if err != nil {
 		return vehicleData{}, err
 	}
-	return r.data(), nil
+	return r.data(withMoney), nil
 }
 
 func samePtr(a, b *string) bool {

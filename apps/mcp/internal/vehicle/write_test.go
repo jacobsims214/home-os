@@ -245,7 +245,7 @@ func TestVehicleCreate(t *testing.T) {
 
 	env := w.create.run(t, ctx, map[string]any{"make": "Honda", "model": "Odyssey", "year": 2019})
 	v := env.vehicle(t)
-	if v.Name != "2019 Honda Odyssey" || v.Year == nil || *v.Year != 2019 || v.Duplicate || v.LoanCount != 0 {
+	if v.Name != "2019 Honda Odyssey" || v.Year == nil || *v.Year != 2019 || v.Duplicate || v.LoanCount == nil || *v.LoanCount != 0 {
 		t.Fatalf("created = %+v", v)
 	}
 	if env.Summary != "Added 2019 Honda Odyssey." {

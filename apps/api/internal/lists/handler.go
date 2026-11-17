@@ -86,6 +86,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 	r.Get("/api/v1/lists/{id}/items", h.Items)
 	r.Post("/api/v1/lists/{id}/items", h.AddItems)
+	r.Post("/api/v1/lists/{id}/items/merge", h.MergeItems)
 	r.Post("/api/v1/lists/{id}/items/check", h.CheckItems)
 	r.Post("/api/v1/lists/{id}/items/uncheck", h.UncheckItems)
 	r.Post("/api/v1/lists/{id}/items/remove", h.RemoveItems)
@@ -708,6 +709,63 @@ func (h *Handler) AddItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apierr.JSON(w, http.StatusCreated, map[string]any{"data": toItemResponses(its)})
+}
+
+// MergeItems adds items without duplicating what is already on the list, and
+// reports per item what happened (added / reopened / already_on_list /
+// check_amount). "?dry_run=true" reports without writing, for a preview.
+// POST /api/v1/lists/{id}/items/merge  {"items": [{text, quantity, unit, section}]}
+func (h *Handler) MergeItems(w http.ResponseWriter, r *http.Request) {
+	hid, ok := h.authorize(w, r, ActionAddItems)
+	if !ok {
+		return
+	}
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Items []itemRequest `json:"items"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if len(req.Items) == 0 {
+		apierr.BadRequest(w, "items is required")
+		return
+	}
+	if len(req.Items) > maxBatch {
+		apierr.BadRequest(w, "too many items in one request")
+		return
+	}
+	items := make([]MergeItem, 0, len(req.Items))
+	for _, it := range req.Items {
+		text := strings.TrimSpace(it.Text)
+		if text == "" {
+			apierr.BadRequest(w, "every item needs text")
+			return
+		}
+		if utf8.RuneCountInString(text) > maxTextLen {
+			apierr.BadRequest(w, "item text is too long")
+			return
+		}
+		if !checkLen(it.Unit, maxUnitLen) || !checkLen(it.Section, maxSectionLen) {
+			apierr.BadRequest(w, "unit or section is too long")
+			return
+		}
+		items = append(items, MergeItem{Text: text, Quantity: it.Quantity, Unit: it.Unit, Section: it.Section})
+	}
+	dryRun := r.URL.Query().Get("dry_run") == "true"
+	res, err := h.repo.MergeItems(r.Context(), hid, id, items, dryRun)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if dryRun {
+		status = http.StatusOK
+	}
+	apierr.JSON(w, status, map[string]any{"data": res})
 }
 
 func (h *Handler) setChecked(w http.ResponseWriter, r *http.Request, checked bool) {

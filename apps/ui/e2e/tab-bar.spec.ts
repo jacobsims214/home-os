@@ -64,15 +64,14 @@ for (const width of [375, 390]) {
       await expect(nav.getByRole("link", { name: "Calendar" })).not.toHaveAttribute("aria-current", "page");
       await expect(nav.getByRole("button", { name: "More" })).toBeVisible();
 
-      // Sections with no page yet aren't links (no 404).
-      for (const name of ["Lists", "Meals"]) {
-        const tab = nav.getByRole("button", { name: new RegExp(`^${name}`) });
-        await expect(tab).toHaveAttribute("aria-disabled", "true");
-        await expect(nav.getByRole("link", { name })).toHaveCount(0);
-      }
+      // Sections with no page yet aren't links (no 404). Meals left this list
+      // in #4567: /dashboard/recipes is a real page, so the tab links to it.
+      const soon = nav.getByRole("button", { name: /^Lists/ });
+      await expect(soon).toHaveAttribute("aria-disabled", "true");
+      await expect(nav.getByRole("link", { name: "Lists" })).toHaveCount(0);
       // aria-disabled (not disabled) so it still explains itself when tapped;
       // Playwright treats aria-disabled as not actionable, hence force.
-      await nav.getByRole("button", { name: /^Lists/ }).click({ force: true });
+      await soon.click({ force: true });
       await expect(page.getByText("Lists is coming soon.")).toBeVisible();
       await expect(page).toHaveURL(/\/dashboard$/);
 

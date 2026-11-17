@@ -295,14 +295,12 @@ func NewNoteFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return notSignedIn(), nil
+		// The caller's current role, re-read from memberships (#4881).
+		who, bad := readerOf(ctx, pool)
+		if bad != nil {
+			return bad, nil
 		}
-		householdID, err := uuid.Parse(claims.HouseholdID)
-		if err != nil {
-			return notSignedIn(), nil
-		}
+		householdID := who.householdID
 
 		args := req.GetArguments()
 		example := map[string]any{"query": "wifi", "about_type": "property"}
@@ -342,16 +340,23 @@ func NewNoteFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 
 		// entity_type is compared as text: a kind the DB does not know yet
 		// (e.g. guide) simply matches nothing instead of failing the cast.
+		//
+		// The role filter (#4881) sits in the WHERE clause, not in a loop
+		// over the rows: a note whose parent the role may not see is not
+		// among the household's visible notes at all (visibleNotesSQL), so
+		// it can be neither listed nor counted. COUNT(*) OVER () therefore
+		// counts only what the caller may see and total/paging agree.
 		rows, err := pool.Query(ctx,
 			`SELECT `+noteColumns+`, COUNT(*) OVER ()
 			 FROM notes n`+noteJoins+`
 			 WHERE n.household_id = $1
+			   AND `+visibleNotesSQL("$7::text", "$8::boolean")+`
 			   AND ($2::text IS NULL OR n.entity_type::text = $2::text)
 			   AND ($3::uuid IS NULL OR n.entity_id = $3::uuid)
 			   AND ($4::text = '' OR position(lower($4::text) IN lower(coalesce(n.title, '') || ' ' || n.body)) > 0)
 			 ORDER BY n.updated_at DESC, n.id
 			 LIMIT $5 OFFSET $6`,
-			householdID, kind, aboutID, query, limit, offset,
+			householdID, kind, aboutID, query, limit, offset, who.role, who.seesSecrets(),
 		)
 		if err != nil {
 			return respond.Failed("list notes", err), nil
@@ -612,9 +617,9 @@ func NewNoteGetTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return notSignedIn(), nil
+		who, bad := readerOf(ctx, pool)
+		if bad != nil {
+			return bad, nil
 		}
 
 		noteID, raw, bad := parseNoteID(req.GetArguments(), map[string]any{"note_id": exampleNoteID})
@@ -622,11 +627,15 @@ func NewNoteGetTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 			return bad, nil
 		}
 
+		// A note whose parent the caller's role may not see is not found
+		// (#4881): the same answer as a note that does not exist, so the id
+		// reveals nothing and the note's fields are never returned at all.
 		n, err := scanNote(pool.QueryRow(ctx,
 			`SELECT `+noteColumns+`
 			 FROM notes n`+noteJoins+`
-			 WHERE n.id = $1 AND n.household_id = $2`,
-			noteID, claims.HouseholdID,
+			 WHERE n.id = $1 AND n.household_id = $2
+			   AND `+visibleNotesSQL("$3::text", "$4::boolean"),
+			noteID, who.householdID, who.role, who.seesSecrets(),
 		))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return respond.NotFound("note", raw, "Call note_find to find the note_id."), nil

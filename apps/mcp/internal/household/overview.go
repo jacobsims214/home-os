@@ -369,7 +369,10 @@ func loadNextDays(ctx context.Context, pool *pgxpool.Pool, hh string, loc *time.
 				nd.Events = eventsSection{Items: []eventBrief{}}
 				return
 			}
-			nd.Events = eventsPreview(ctx, pool, hh, loc, first, end, nd.From, nd.To, warn)
+			// The caller's role goes through to the event read: a bill mirror
+			// whose title is the bill's name is not shown to a role that may not
+			// see money (#4808, same rule as event_find).
+			nd.Events = eventsPreview(ctx, pool, view.role, hh, loc, first, end, nd.From, nd.To, warn)
 		},
 		func() {
 			if !view.billsDue {
@@ -401,10 +404,10 @@ func parallel(fns ...func()) {
 	wg.Wait()
 }
 
-func eventsPreview(ctx context.Context, pool *pgxpool.Pool, hh string, loc *time.Location, first, end time.Time,
+func eventsPreview(ctx context.Context, pool *pgxpool.Pool, role, hh string, loc *time.Location, first, end time.Time,
 	from, to string, warn func(string, error)) eventsSection {
 	sec := eventsSection{Items: []eventBrief{}}
-	if events, err := calendar.EventsBetween(ctx, pool, hh, loc, first, end); err != nil {
+	if events, err := calendar.EventsBetween(ctx, pool, role, hh, loc, first, end); err != nil {
 		warn("next_days.events", err)
 	} else {
 		sec.Total = len(events)

@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/respond"
 )
 
@@ -69,19 +70,28 @@ func NewAssetFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 			return respond.Failed("find assets", err), nil
 		}
 
+		// The role is re-read from memberships on every call (assetRole), so a
+		// demotion hides money at once. auth.CanSeeMoney decides the money
+		// columns: the query yields them only for a role that may see money.
+		role, err := assetRole(ctx, pool, *household)
+		if err != nil {
+			return respond.Failed("check your access", err), nil
+		}
+		money := auth.CanSeeMoney(role)
+
 		rows, err := pool.Query(ctx, assetSelect+`
-			WHERE a.household_id = $1
-			  AND ($2::uuid IS NULL OR a.id = $2)
-			  AND ($3 = '' OR a.name ILIKE '%' || $3 || '%' OR a.manufacturer ILIKE '%' || $3 || '%'
-			       OR a.model ILIKE '%' || $3 || '%' OR a.serial_number ILIKE '%' || $3 || '%'
-			       OR a.category ILIKE '%' || $3 || '%' OR r.name ILIKE '%' || $3 || '%'
-			       OR p.name ILIKE '%' || $3 || '%'
-			       OR concat_ws(' ', a.manufacturer, a.model) ILIKE '%' || $3 || '%')
-			  AND ($4 = '' OR lower(a.category) = lower($4))
-			  AND ($5::uuid IS NULL OR a.property_id = $5)
-			  AND ($6::uuid IS NULL OR a.room_id = $6)
+			WHERE a.household_id = $2
+			  AND ($3::uuid IS NULL OR a.id = $3)
+			  AND ($4 = '' OR a.name ILIKE '%' || $4 || '%' OR a.manufacturer ILIKE '%' || $4 || '%'
+			       OR a.model ILIKE '%' || $4 || '%' OR a.serial_number ILIKE '%' || $4 || '%'
+			       OR a.category ILIKE '%' || $4 || '%' OR r.name ILIKE '%' || $4 || '%'
+			       OR p.name ILIKE '%' || $4 || '%'
+			       OR concat_ws(' ', a.manufacturer, a.model) ILIKE '%' || $4 || '%')
+			  AND ($5 = '' OR lower(a.category) = lower($5))
+			  AND ($6::uuid IS NULL OR a.property_id = $6)
+			  AND ($7::uuid IS NULL OR a.room_id = $7)
 			ORDER BY lower(a.name), a.created_at, a.id`,
-			*household, in.id, escapeLike(in.query), in.category, in.propertyID, in.roomID,
+			money, *household, in.id, escapeLike(in.query), in.category, in.propertyID, in.roomID,
 		)
 		if err != nil {
 			return respond.Failed("find assets", err), nil
@@ -101,7 +111,7 @@ func NewAssetFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		end := min(in.offset+in.limit, total)
 		page := make([]assetData, 0, end-in.offset)
 		for _, r := range loaded[in.offset:end] {
-			page = append(page, r.data(today))
+			page = append(page, r.data(today, money))
 		}
 		next := findNext(in, page)
 		if len(page) == 1 && total == 1 {
@@ -138,7 +148,9 @@ func findSummary(in findInput, page []assetData, total int) string {
 	}
 }
 
-// findNext is asset_find's next-step hints.
+// findNext is asset_find's next-step hints. None of them carries money, so no
+// role gate is needed here: #4771's middleware already drops the write hints
+// (asset_update, asset_create) for a role that cannot write.
 func findNext(in findInput, page []assetData) []string {
 	if len(page) == 0 {
 		if !in.filtered() {

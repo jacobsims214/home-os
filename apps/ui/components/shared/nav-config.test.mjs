@@ -76,3 +76,19 @@ test("sectionsForRole: unknown role yet shows everything; an unrecognised role f
   assert.equal(canSeeSection(money, "viewer"), true);
   assert.equal(canSeeSection(money, "housesitter"), false);
 });
+
+// #4568: the week plan landed, so the Meals tab points at it (#4567 pointed it
+// at the recipe box only because /dashboard/meals did not exist yet). The recipe
+// box stays under Meals through `matches`, and keeps its own page title.
+test("Meals links to the week plan and still owns the recipe box (#4568)", () => {
+  const meals = NAV_SECTIONS.find((s) => s.id === "meals");
+  assert.equal(meals.comingSoon, undefined, "Meals is built");
+  assert.equal(meals.href, "/dashboard/meals", "the tab links to the week plan");
+  assert.equal(activeSection("/dashboard/meals")?.id, "meals");
+  assert.equal(activeSection("/dashboard/meals/grocery")?.id, "meals", "the grocery preview belongs to Meals");
+  assert.equal(activeSection("/dashboard/recipes")?.id, "meals", "the recipe box is one tap away, still under Meals");
+  assert.equal(activeSection("/dashboard/recipes/abc-123")?.id, "meals");
+  assert.equal(pageTitle("/dashboard/meals"), "Meals");
+  assert.equal(pageTitle("/dashboard/meals/grocery"), "Meals");
+  assert.equal(pageTitle("/dashboard/recipes"), "Recipes");
+});

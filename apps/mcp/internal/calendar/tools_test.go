@@ -1122,7 +1122,9 @@ func TestAllDayEvents(t *testing.T) {
 	}
 
 	t.Run("agenda shows the all-day bill on its day only", func(t *testing.T) {
-		text, _ := callTool(t, agenda, ctx, map[string]any{"from": "2026-11-18"})
+		// detail=full: one entry per occurrence with its instant, which is what
+		// this test is about (the default summarizes and uses a local day).
+		text, _ := callTool(t, agenda, ctx, map[string]any{"from": "2026-11-18", "to": "2026-11-18", "detail": "full"})
 		var a agendaResult
 		if err := json.Unmarshal(data(t, text), &a); err != nil {
 			t.Fatalf("decode %q: %v", text, err)
@@ -1131,7 +1133,7 @@ func TestAllDayEvents(t *testing.T) {
 			a.Events[0].LocalDate != "2026-11-18" || a.Events[0].Weekday != "Wednesday" {
 			t.Errorf("11/18 agenda events = %+v", a.Events)
 		}
-		text, _ = callTool(t, agenda, ctx, map[string]any{"from": "2026-11-17"})
+		text, _ = callTool(t, agenda, ctx, map[string]any{"from": "2026-11-17", "to": "2026-11-17", "detail": "full"})
 		if strings.Contains(text, "Electric bill") {
 			t.Errorf("11/17 agenda shows bill:\n%s", text)
 		}
@@ -1459,7 +1461,7 @@ func TestEventLocalDay(t *testing.T) {
 
 	t.Run("agenda_get", func(t *testing.T) {
 		agenda := bind(t, NewAgendaGetTool, pool)
-		text, isErr := callTool(t, agenda, ctx, map[string]any{"from": "2026-11-18"})
+		text, isErr := callTool(t, agenda, ctx, map[string]any{"from": "2026-11-18", "to": "2026-11-18", "detail": "full"})
 		if isErr {
 			t.Fatalf("agenda_get: %s", text)
 		}
@@ -1472,6 +1474,8 @@ func TestEventLocalDay(t *testing.T) {
 		}
 		var got []string
 		for _, ev := range a.Events {
+			// start is empty for an all-day entry at summary detail; this test
+			// runs detail=full, so every occurrence carries its instant.
 			got = append(got, ev.Title+" "+ev.Start+" "+ev.Weekday)
 		}
 		want := []string{
@@ -1518,7 +1522,9 @@ func TestAgendaBills(t *testing.T) {
 
 	billsSection := func(t *testing.T, date string) string {
 		t.Helper()
-		text, isErr := callTool(t, agenda, ctx, map[string]any{"from": date, "areas": []any{"bills"}})
+		// One day: the default is a week, so to=date is what "what is due then"
+		// means.
+		text, isErr := callTool(t, agenda, ctx, map[string]any{"from": date, "to": date, "areas": []any{"bills"}})
 		if isErr {
 			t.Fatalf("agenda_get %s: %s", date, text)
 		}
@@ -1526,8 +1532,8 @@ func TestAgendaBills(t *testing.T) {
 		if err := json.Unmarshal(data(t, text), &a); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if strings.Join(a.Areas, ",") != "bills" || len(a.Events) != 0 {
-			t.Errorf("areas=[bills] returned %v and %d events", a.Areas, len(a.Events))
+		if strings.Join(a.Coverage.Areas, ",") != "bills" || len(a.Events) != 0 {
+			t.Errorf("areas=[bills] returned %v and %d events", a.Coverage.Areas, len(a.Events))
 		}
 		var lines []string
 		for _, b := range a.Bills {
@@ -1634,8 +1640,8 @@ func TestAgendaLists(t *testing.T) {
 
 	t.Run("due open items in range and open lists, one family only", func(t *testing.T) {
 		res, text := call(t, ctxA, map[string]any{"from": day(0), "to": day(6), "areas": []any{"lists"}})
-		if strings.Join(res.Areas, ",") != "lists" || len(res.Unavailable) != 0 || res.Lists == nil {
-			t.Fatalf("areas = %v unavailable = %v lists = %v", res.Areas, res.Unavailable, res.Lists)
+		if strings.Join(res.Coverage.Areas, ",") != "lists" || res.Lists == nil {
+			t.Fatalf("areas = %v lists = %v", res.Coverage.Areas, res.Lists)
 		}
 		var got []string
 		for _, it := range res.Lists.Due {
@@ -1685,9 +1691,9 @@ func TestAgendaLists(t *testing.T) {
 	})
 
 	t.Run("lists is a default area", func(t *testing.T) {
-		res, text := call(t, ctxA, map[string]any{"from": day(1)})
-		if strings.Join(res.Areas, ",") != "events,bills,maintenance,meals,lists" || strings.Contains(text, "Not available yet") {
-			t.Errorf("areas = %v: %s", res.Areas, text)
+		res, text := call(t, ctxA, map[string]any{"from": day(1), "to": day(1)})
+		if strings.Join(res.Coverage.Areas, ",") != "events,bills,meals,lists" {
+			t.Errorf("areas = %v: %s", res.Coverage.Areas, text)
 		}
 		if res.Lists == nil || len(res.Lists.Due) != 1 || res.Lists.Due[0].Text != "Mow lawn" {
 			t.Errorf("lists = %+v", res.Lists)
@@ -1700,7 +1706,7 @@ func TestAgendaLists(t *testing.T) {
 			item(t, b.HouseholdID, big, fmt.Sprintf("Chore %02d", i), ptr(day(3)), false, nil)
 		}
 		res, text := call(t, ctxB, map[string]any{"from": day(0), "to": day(6), "areas": []any{"lists"}})
-		if res.Lists.DueTotal != 26 || len(res.Lists.Due) != agendaMaxListItems || res.Lists.Due[0].ItemID != secretB {
+		if res.Lists.DueTotal != 26 || len(res.Lists.Due) != agendaSummaryListItems || res.Lists.Due[0].ItemID != secretB {
 			t.Errorf("due total %d, %d returned, first %+v", res.Lists.DueTotal, len(res.Lists.Due), res.Lists.Due[0])
 		}
 		for _, leak := range []string{"Mow lawn", "Milk", "Nora", chores, grocery} {

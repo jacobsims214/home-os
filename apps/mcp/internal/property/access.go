@@ -418,9 +418,12 @@ func lockProperty(ctx context.Context, tx pgx.Tx, hid, id uuid.UUID) (propertyRo
 	return r, err
 }
 
-// loadProperty reads one property as property_find returns it.
-func loadProperty(ctx context.Context, q querier, hid, id uuid.UUID) (propertyData, error) {
-	page, _, err := findProperties(ctx, q, hid.String(), findInput{id: &id, limit: 1})
+// loadProperty reads one property as property_find returns it, with money only
+// when withMoney (the caller's auth.CanSeeMoney). The write tools are family
+// only, so every current caller passes true, but a widened write cannot leak by
+// default (#4808).
+func loadProperty(ctx context.Context, q querier, hid, id uuid.UUID, withMoney bool) (propertyData, error) {
+	page, _, err := findProperties(ctx, q, hid.String(), withMoney, findInput{id: &id, limit: 1})
 	if err != nil {
 		return propertyData{}, err
 	}

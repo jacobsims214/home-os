@@ -1,5 +1,5 @@
 # Build context is the repository root (see release.yml): the mcp server
-# imports home-os/icalx and home-os/billcal via replace directives pointing
+# imports home-os/allergen, home-os/icalx and home-os/billcal via replace directives pointing
 # at ../../packages/*, which must be inside the context. GOWORK=off builds
 # with go.mod's replace instead of the workspace, so only the modules the
 # binary needs are copied. The root .dockerignore keeps local artefacts out of
@@ -7,10 +7,12 @@
 FROM golang:1.25-alpine AS builder
 ENV GOWORK=off
 WORKDIR /src/apps/mcp
+COPY packages/allergen/go.mod packages/allergen/go.sum /src/packages/allergen/
 COPY packages/icalx/go.mod packages/icalx/go.sum /src/packages/icalx/
 COPY packages/billcal/go.mod packages/billcal/go.sum /src/packages/billcal/
 COPY apps/mcp/go.mod apps/mcp/go.sum ./
 RUN go mod download
+COPY packages/allergen/ /src/packages/allergen/
 COPY packages/icalx/ /src/packages/icalx/
 COPY packages/billcal/ /src/packages/billcal/
 COPY apps/mcp/ ./

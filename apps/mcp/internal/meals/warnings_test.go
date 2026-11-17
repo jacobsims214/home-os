@@ -267,3 +267,81 @@ func TestNoIngredientsFailsClosed(t *testing.T) {
 		t.Errorf("mystery cautions = %v", last.Cautions)
 	}
 }
+
+// TestProbedWordingsWarnEverywhere is #4874's warning-path acceptance test. The
+// suggester is one place an allergy is honoured; the recipe tools and the plan
+// are the others, and #4803's rule is that they cannot disagree. The probed
+// wordings must therefore exclude in meal_suggest AND warn in recipe_get,
+// recipe_find, meal_set and agenda_get — before #4874 they did none of it,
+// because the junk phrase compiled to a regex that matched nothing and reported
+// ok, so the checks list that is supposed to cover that case stayed empty too.
+func TestProbedWordingsWarnEverywhere(t *testing.T) {
+	t.Parallel()
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	bg := context.Background()
+	ts := newTools(pool)
+	pt := newPlanTools(pool)
+
+	if _, err := pool.Exec(bg, `INSERT INTO people (household_id, display_name, allergies)
+		VALUES ($1, 'Eve', ARRAY['Deathly allergic to peanuts']), ($1, 'Ari', ARRAY['red dye 40'])`,
+		hh.HouseholdID); err != nil {
+		t.Fatal(err)
+	}
+	satay := ts.create.run(t, ctx, map[string]any{"name": "Satay Bowl",
+		"ingredients": []any{"200 g rice noodles", "3 tbsp peanuts", "1 lime"}, "steps": []any{"Toss."}}).recipe(t)
+	tacos := ts.create.run(t, ctx, map[string]any{"name": "Chicken Tacos",
+		"ingredients": []any{"chicken thighs", "corn tortillas"}, "steps": []any{"Cook."}}).recipe(t)
+
+	// recipe_get: the peanut hit is there, and Ari's unreadable allergy is
+	// visible rather than silently checked.
+	g := ts.get.run(t, ctx, map[string]any{"recipe_id": satay.ID}).recipe(t)
+	if !warningsMatch(g.AllergyWarnings, "Eve (peanuts): peanuts") {
+		t.Errorf("recipe_get %s warnings = %+v, want Eve (peanuts): peanuts", satay.Name, g.AllergyWarnings)
+	}
+	if !slices.ContainsFunc(g.Checks, func(c string) bool {
+		return strings.Contains(c, `Ari has an allergy saved as "red dye 40" that could not be checked`)
+	}) {
+		t.Errorf("recipe_get checks = %v", g.Checks)
+	}
+
+	// recipe_find: the same rows, so a list never hides what get warns about.
+	var found int
+	for _, it := range ts.find.run(t, ctx, map[string]any{}).items(t) {
+		switch it.Name {
+		case satay.Name:
+			found++
+			if !slices.Contains(it.AllergyWarnings, "Eve (peanuts): peanuts") {
+				t.Errorf("recipe_find %s warnings = %v", satay.Name, it.AllergyWarnings)
+			}
+		case tacos.Name:
+			found++
+			if len(it.AllergyWarnings) != 0 {
+				t.Errorf("recipe_find %s warnings = %v, want none", tacos.Name, it.AllergyWarnings)
+			}
+		}
+	}
+	if found != 2 {
+		t.Fatalf("recipe_find returned %d of the 2 recipes", found)
+	}
+
+	// meal_set plans it with the warning, and agenda_get reads it back.
+	today := familyToday("UTC")
+	date := today.Format(time.DateOnly)
+	res := pt.set.run(t, ctx, map[string]any{"date": date, "slot": "dinner", "recipe_id": satay.ID}).set(t)
+	if len(res.Meals) != 1 || res.Meals[0].Meal == nil ||
+		!slices.Contains(res.Meals[0].Meal.AllergyWarnings, "Eve (peanuts): peanuts") {
+		t.Fatalf("meal_set = %+v", res.Meals)
+	}
+	if !slices.ContainsFunc(res.Checks, func(c string) bool { return strings.Contains(c, "red dye 40") }) {
+		t.Errorf("meal_set checks = %v", res.Checks)
+	}
+	plan, checks, allowed, err := AgendaMeals(ctx, pool, today, today)
+	if err != nil || !allowed || len(plan) != 1 {
+		t.Fatalf("agenda = %+v %v %v %v", plan, checks, allowed, err)
+	}
+	if !slices.Contains(plan[0].AllergyWarnings, "Eve (peanuts): peanuts") ||
+		!slices.ContainsFunc(checks, func(c string) bool { return strings.Contains(c, "red dye 40") }) {
+		t.Errorf("agenda meal = %+v / checks %v", plan[0], checks)
+	}
+}

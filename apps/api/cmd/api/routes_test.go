@@ -198,6 +198,7 @@ var expectedAccess = map[string][]string{
 	"POST /api/v1/people":                             family,
 	"GET /api/v1/people/{id}":                         sitters,
 	"PUT /api/v1/people/{id}":                         family,
+	"PATCH /api/v1/people/{id}":                       family, // handler: self or manager only
 	"DELETE /api/v1/people/{id}":                      family,
 	"GET /api/v1/people/{id}/preferences":             readers,
 	"POST /api/v1/people/{id}/preferences":            family,
@@ -220,6 +221,7 @@ var expectedAccess = map[string][]string{
 	"POST /api/v1/lists/{id}/unarchive":           family,
 	"GET /api/v1/lists/{id}/items":                sitters,
 	"POST /api/v1/lists/{id}/items":               sitterEdit,
+	"POST /api/v1/lists/{id}/items/merge":         sitterEdit, // same rule as adding: family + housesitter
 	"POST /api/v1/lists/{id}/items/check":         sitterEdit,
 	"POST /api/v1/lists/{id}/items/uncheck":       sitterEdit,
 	"POST /api/v1/lists/{id}/items/remove":        family,
@@ -233,6 +235,8 @@ var expectedAccess = map[string][]string{
 	"PUT /api/v1/recipes/{id}":                      family,
 	"DELETE /api/v1/recipes/{id}":                   family,
 	"GET /api/v1/meal-plans":                        sitters,
+	"GET /api/v1/meal-plans/grocery":                sitters, // the preview is read-only
+	"POST /api/v1/meal-plans/grocery":               family,  // the write is the plan's write
 	"PUT /api/v1/meal-plans/{date}/{slot}":          family,
 	"DELETE /api/v1/meal-plans/{date}/{slot}":       family,
 	"GET /api/v1/meals/{id}":                        sitters,
