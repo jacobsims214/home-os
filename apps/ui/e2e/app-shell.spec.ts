@@ -292,15 +292,26 @@ for (const width of [390, 1440]) {
       await expect.poll(() => dialog.evaluate((el) => getComputedStyle(el).opacity)).toBe("1");
       await expectNoSeriousAxeViolations(page);
 
-      // Esc closes it and focus returns to the bell; clicking toggles it again.
+      // Esc closes it and focus returns to the bell.
       await page.keyboard.press("Escape");
       await expect(dialog).toBeHidden();
       await expect(bell).toBeFocused();
       await expect(bell).toHaveAttribute("aria-expanded", "false");
+
+      // #4563: the bell opens a POPOVER from 768 px up, where clicking it again
+      // toggles the panel closed. On phones it opens a bottom SHEET with a
+      // scrim, and that scrim covers the header, so the panel is closed by the
+      // scrim, Esc or its own close button — not by a second bell click.
       await bell.click();
       await expect(dialog).toBeVisible();
-      await bell.click();
-      await expect(dialog).toBeHidden();
+      if (width >= 768) {
+        await bell.click();
+        await expect(dialog).toBeHidden();
+      } else {
+        await page.mouse.click(8, 8); // the scrim, above the sheet
+        await expect(dialog).toBeHidden();
+        await expect(bell).toHaveAttribute("aria-expanded", "false");
+      }
     });
   });
 }
