@@ -175,9 +175,13 @@ const eventColumns = `co.id, co.calendar_id, co.uid, co.ical_data, co.event_type
 // rangeFilter appends the calendar_objects.starts_at / ends_at (035)
 // prefilter for a listing window. The bounds are widened by 48h because
 // all-day events are stored at midnight UTC and placed in the household's
-// zone in Go; recurring series (rrule set, or an RDATE list in the raw) are
-// kept whenever they start before the window ends, since their stored end
-// is only the first occurrence's. Exact filtering happens in Go.
+// zone in Go; recurring series are kept whenever they start before the
+// window ends, since their stored end is only the first occurrence's. A
+// series recurs either through the rrule column or through an RDATE list,
+// which lives in ical_raw and nowhere else (an RDATE-only series has rrule
+// NULL), so the raw is tested too. Property names are case-insensitive in
+// RFC 5545 and clients write the property however they like, hence ILIKE.
+// Exact filtering happens in Go.
 func rangeFilter(query string, args []any, rg EventRange) (string, []any) {
 	if rg.End != nil {
 		args = append(args, rg.End.Add(allDayPrefilterSlop))
@@ -185,7 +189,7 @@ func rangeFilter(query string, args []any, rg EventRange) (string, []any) {
 	}
 	if rg.Start != nil {
 		args = append(args, rg.Start.Add(-allDayPrefilterSlop))
-		query += fmt.Sprintf(" AND (co.ends_at >= $%d OR co.rrule IS NOT NULL OR co.ical_raw LIKE '%%RDATE%%')", len(args))
+		query += fmt.Sprintf(" AND (co.ends_at >= $%d OR co.rrule IS NOT NULL OR co.ical_raw ILIKE '%%RDATE%%')", len(args))
 	}
 	return query, args
 }

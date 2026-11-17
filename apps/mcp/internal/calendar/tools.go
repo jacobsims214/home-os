@@ -596,14 +596,18 @@ func queryOccurrencesAs(ctx context.Context, pool querier, view eventView, house
 	// This narrows the result set in SQL; callers keep Go-side filtering as
 	// the exact check. The window is widened by allDaySlack because all-day
 	// events are stored as UTC midnights but compared as local days. A
-	// recurring series (rrule set) is kept whenever it starts before the
-	// range end: starts_at is the series start, and its later occurrences can
-	// fall in the range even though the first one ended long ago.
+	// recurring series is kept whenever it starts before the range end:
+	// starts_at is the series start, and its later occurrences can fall in
+	// the range even though the first one ended long ago. A series recurs
+	// either through the rrule column or through an RDATE list, which lives
+	// in ical_raw and nowhere else -- an RDATE-only series has rrule NULL --
+	// so the raw is tested too (#4871). Property names are case-insensitive
+	// in RFC 5545, hence ILIKE.
 	if !startDate.IsZero() && !endDate.IsZero() {
 		query += fmt.Sprintf(" AND co.starts_at < $%d", argIdx)
 		args = append(args, endDate.Add(allDaySlack))
 		argIdx++
-		query += fmt.Sprintf(" AND (co.ends_at > $%d OR co.rrule IS NOT NULL)", argIdx)
+		query += fmt.Sprintf(" AND (co.ends_at > $%d OR co.rrule IS NOT NULL OR co.ical_raw ILIKE '%%RDATE%%')", argIdx)
 		args = append(args, startDate.Add(-allDaySlack))
 		argIdx++
 	}
