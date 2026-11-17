@@ -13,12 +13,12 @@ const HOME = "/dashboard";
 
 async function gotoHome(page: Page) {
   await page.goto(HOME);
-  await expect(page.getByRole("heading", { name: "Dashboard", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^(Good morning|Good afternoon|Good evening|Today)/, level: 2 })).toBeVisible();
 }
 
 /** The topmost element at the centre of the page heading is inside <main>. */
 async function expectHeadingUncovered(page: Page) {
-  const covered = await page.getByRole("heading", { name: "Dashboard", level: 2 }).evaluate((el) => {
+  const covered = await page.getByRole("heading", { name: /^(Good morning|Good afternoon|Good evening|Today)/, level: 2 }).evaluate((el) => {
     const r = el.getBoundingClientRect();
     const top = document.elementFromPoint(r.left + Math.min(20, r.width / 2), r.top + r.height / 2);
     return !top || !top.closest("main");

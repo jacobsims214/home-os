@@ -12,7 +12,7 @@ const HOME = "/dashboard";
 
 async function gotoHome(page: Page) {
   await page.goto(HOME);
-  await expect(page.getByRole("heading", { name: "Dashboard", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^(Good morning|Good afternoon|Good evening|Today)/, level: 2 })).toBeVisible();
 }
 
 const scheme = (page: Page) => page.locator("html").getAttribute("data-mantine-color-scheme");
@@ -87,7 +87,7 @@ test.describe("manual override", () => {
     await pick("Dark");
     await expect.poll(() => scheme(page)).toBe("dark");
     await page.reload();
-    await expect(page.getByRole("heading", { name: "Dashboard", level: 2 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^(Good morning|Good afternoon|Good evening|Today)/, level: 2 })).toBeVisible();
     expect(await scheme(page)).toBe("dark");
 
     await pick("System");
