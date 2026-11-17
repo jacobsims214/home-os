@@ -127,6 +127,7 @@ func TestPersonColor071(t *testing.T) {
 			t.Skip("chosen colour equals the derived one; pick another palette name")
 		}
 
+		applyMigration(t, pool, "073_legacy_bill_events.down.sql") // newest first: 073 sits on top of everything below
 		applyMigration(t, pool, "071_person_color.down.sql")
 		applyMigration(t, pool, "071_person_color.down.sql") // safe twice
 		if n := countRows(t, pool, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'people' AND column_name = 'color'`); n != 0 {
@@ -137,7 +138,8 @@ func TestPersonColor071(t *testing.T) {
 		}
 
 		applyMigration(t, pool, "071_person_color.up.sql")
-		applyMigration(t, pool, "071_person_color.up.sql") // safe twice
+		applyMigration(t, pool, "071_person_color.up.sql")       // safe twice
+		applyMigration(t, pool, "073_legacy_bill_events.up.sql") // back to the head
 		if got := colorOf(chosen); got != derived {
 			t.Errorf("after down/up: color = %q, want the derived %q", got, derived)
 		}

@@ -75,6 +75,17 @@ type Event struct {
 	// mirrors (#4807), because a bill-linked event on the Family calendar still
 	// carries the bill's name.
 	EntityType string `json:"-"`
+
+	// billLike marks an entry that MAKES A CLAIM ABOUT MONEY and is not the
+	// bills module's record of that money (#4943): no entity link, not a
+	// bill's mirror, and either a stated amount or a place on a Bills calendar.
+	// Such an entry is what a briefing read as "the bill is due"; the
+	// briefings leave it out of the events list and report it as a bill-like
+	// entry instead (see billlook.go). A title that only says the word "bill"
+	// ("Electric bill" as a person's own note) stays an ordinary event: it
+	// claims no amount and no due date, and bill_like_entries names it anyway.
+	// Never serialized.
+	billLike bool
 }
 
 // eventJSON is the JSON structure stored in ical_data column.
@@ -228,6 +239,14 @@ type eventRow struct {
 	// with EntityType (the record the event mirrors, #4807) says what kind of
 	// record the event is for the role view (#4808).
 	CalendarType string
+	// SupersededAt is when Home OS retired this entry in place because a bill
+	// with the same name and amount is the record for it (#4943, migration
+	// 073). A superseded entry is not deleted — its text, notes and people
+	// survive — but every live read skips it, so the Bills calendar shows the
+	// bill's own projection once and no briefing can read a stale "due".
+	SupersededAt     *time.Time
+	SupersededReason *string
+	SupersededBy     *string
 }
 
 // parseEventFromRow decodes a calendar_objects row. All-day events come back
@@ -263,6 +282,12 @@ func parseRow(row eventRow, loc *time.Location) (*Event, storedSeries, error) {
 	if row.EntityType != nil {
 		ev.EntityType = *row.EntityType
 	}
+	// A money claim nobody keeps up to date (#4943): nothing is the record for
+	// it, it is not a bill's own mirror, and it states an amount or sits on a
+	// Bills calendar. See billlook.go.
+	ev.billLike = row.SupersededAt == nil && row.EntityType == nil &&
+		row.EventType != bill.CalendarEventType &&
+		claimsMoney(ej.Title, row.CalendarType)
 	if row.Rrule != nil || row.IcalRaw != nil {
 		series = loadSeries(ej, row.ID, row.Rrule, row.IcalRaw)
 		ev.Recurring = series.recurring() || (series.locked && isRecurringEvent(row.Rrule, row.IcalRaw))
@@ -530,12 +555,12 @@ func loadHouseholdLocation(ctx context.Context, pool *pgxpool.Pool, householdID 
 // 'properties', 'custom'), which the role view needs to decide whether the
 // caller may see this event at all (#4808); co.entity_type is the record the
 // event mirrors (#4807).
-const eventColumns = `co.id::text, co.calendar_id::text, co.ical_data, co.event_type, co.entity_type::text, c.name, co.created_at, co.updated_at, co.rrule, co.ical_raw, c.type::text`
+const eventColumns = `co.id::text, co.calendar_id::text, co.ical_data, co.event_type, co.entity_type::text, c.name, co.created_at, co.updated_at, co.rrule, co.ical_raw, c.type::text, co.superseded_at, co.superseded_reason, co.superseded_by::text`
 
 func scanEventRow(row pgx.Row) (eventRow, error) {
 	var r eventRow
 	err := row.Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.EntityType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt,
-		&r.Rrule, &r.IcalRaw, &r.CalendarType)
+		&r.Rrule, &r.IcalRaw, &r.CalendarType, &r.SupersededAt, &r.SupersededReason, &r.SupersededBy)
 	return r, err
 }
 
@@ -627,6 +652,14 @@ func queryOccurrencesAs(ctx context.Context, pool querier, view eventView, house
 			slog.Warn("calendar: query events: scan error", "error", err)
 			continue
 		}
+		// A superseded entry is retired: a bill with the same name and amount
+		// is the record for it (#4943, migration 073). It is not deleted, so
+		// its notes, people and text survive and an undo is one UPDATE, but no
+		// live read shows it — that is what keeps a stale "Electric bill due —
+		// $180" out of a briefing after the bill was paid.
+		if row.SupersededAt != nil {
+			continue
+		}
 		// The role view drops the row before it is parsed: a bill mirror's
 		// amount, category, autopay flag and payment URL never enter the
 		// process for a role that may not see money (#4808).
@@ -678,7 +711,7 @@ func findConflictsAs(ctx context.Context, pool querier, view eventView, househol
 
 	conflicts := make([]ConflictEvent, 0)
 	for _, ev := range events {
-		if ev.ID == excludeID || isBillEvent(ev) || !eventOverlapsRange(ev, start, end) {
+		if ev.ID == excludeID || isBillEvent(ev) || ev.billLike || !eventOverlapsRange(ev, start, end) {
 			continue
 		}
 		conflicts = append(conflicts, ConflictEvent{
@@ -881,7 +914,11 @@ func EventsBetween(ctx context.Context, pool *pgxpool.Pool, role, householdID st
 	}
 	out := make([]Event, 0, len(events))
 	for _, ev := range events {
-		if !isBillEvent(ev) && eventOverlapsRange(ev, start, end) {
+		// A bill-like entry (#4943) is not an appointment: it claims a bill,
+		// and family_overview reports it under the bills guard instead
+		// (BillLikeEntriesBetween). Leaving it here is exactly how a briefing
+		// came to say a paid bill was "still unpaid" (war game R1 G2).
+		if !isBillEvent(ev) && !ev.billLike && eventOverlapsRange(ev, start, end) {
 			out = append(out, ev)
 		}
 	}
@@ -1007,6 +1044,12 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			}
 			if err != nil {
 				return respond.Failed("read the event", err), nil
+			}
+			// A retired entry (#4943) is absent here too, with the same fix a
+			// deleted one gets: it is not bill state and not an appointment.
+			if r.SupersededAt != nil {
+				return respond.NotFound("event", id,
+					"That calendar entry was retired because a bill is the record for it; use bill_find for the bill."), nil
 			}
 			// A record the role may not see is treated as absent, like a
 			// calendar of another household (#4807's denial semantics).

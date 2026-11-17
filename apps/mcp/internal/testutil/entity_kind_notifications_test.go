@@ -222,7 +222,8 @@ func TestEntityKind070_Reversible(t *testing.T) {
 	note := insertID(t, pool, `INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'calendar_event', $2, 'n', 'x') RETURNING id`, f.household, ev)
 	file := insertID(t, pool, `INSERT INTO files (household_id, blob_id, name, size, entity_type, entity_id) VALUES ($1, $2, 'a.pdf', 1, 'calendar', $3) RETURNING id`, f.household, blob, cal)
 
-	applyMigration(t, pool, "071_person_color.down.sql") // newest first: drops people.color and its palette CHECK
+	applyMigration(t, pool, "073_legacy_bill_events.down.sql") // newest first: 073 sits on top of everything below
+	applyMigration(t, pool, "071_person_color.down.sql")       // newest first: drops people.color and its palette CHECK
 	applyMigration(t, pool, "070_entity_kind_notifications.down.sql")
 
 	if countRows(t, pool, `SELECT count(*) FROM notes WHERE id = $1`, note) != 0 {
@@ -249,6 +250,7 @@ func TestEntityKind070_Reversible(t *testing.T) {
 
 	applyMigration(t, pool, "070_entity_kind_notifications.up.sql")
 	applyMigration(t, pool, "071_person_color.up.sql")
+	applyMigration(t, pool, "073_legacy_bill_events.up.sql") // back to the head
 
 	ref := func(table string, id uuid.UUID) string {
 		var s string

@@ -373,17 +373,20 @@ type storedEvent struct {
 	calendarID, icalData, uid, eventType string
 	rrule, icalRaw                       *string
 	ej                                   eventJSON
+	// supersededAt is set when a bill is the record for this entry (#4943):
+	// it is retired in place, and an edit would bring a stale duplicate back.
+	supersededAt *time.Time
 }
 
 func loadForWrite(ctx context.Context, tx pgx.Tx, eventID, householdID string) (storedEvent, error) {
 	var s storedEvent
 	err := tx.QueryRow(ctx,
-		`SELECT co.calendar_id::text, co.ical_data, co.uid, co.event_type, co.rrule, co.ical_raw
+		`SELECT co.calendar_id::text, co.ical_data, co.uid, co.event_type, co.rrule, co.ical_raw, co.superseded_at
 		   FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
 		  WHERE co.id = $1 AND c.household_id = $2
 		  FOR UPDATE OF co`,
 		eventID, householdID,
-	).Scan(&s.calendarID, &s.icalData, &s.uid, &s.eventType, &s.rrule, &s.icalRaw)
+	).Scan(&s.calendarID, &s.icalData, &s.uid, &s.eventType, &s.rrule, &s.icalRaw, &s.supersededAt)
 	if err != nil {
 		return s, err
 	}
@@ -503,6 +506,14 @@ func NewEventUpdateTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		}
 		if err != nil {
 			return respond.Failed("read the event", err), nil
+		}
+		// A retired entry (#4943) is not an event any more: a bill is the
+		// record for it, and editing the entry would put a second, stale amount
+		// back on the Bills calendar. Say where the record is instead.
+		if st.supersededAt != nil {
+			return respond.Fail(respond.Error{
+				Message: "That calendar entry was retired: a bill with the same name and amount is the record for it.",
+				Fix:     "Change the bill with bill_update, or add one with bill_create; bill_find lists them."}), nil
 		}
 		series := loadSeries(st.ej, st.uid, st.rrule, st.icalRaw)
 		if series.locked {
@@ -1239,7 +1250,7 @@ func NewEventDeleteTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			RETURNING `+eventColumns,
 			eventID, claims.HouseholdID,
 		).Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.EntityType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt,
-			&r.Rrule, &r.IcalRaw, &r.CalendarType)
+			&r.Rrule, &r.IcalRaw, &r.CalendarType, &r.SupersededAt, &r.SupersededReason, &r.SupersededBy)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return respond.NotFound("event", eventID, "Call event_find to find the event_id; it may already be deleted."), nil
 		}

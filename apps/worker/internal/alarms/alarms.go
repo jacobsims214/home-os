@@ -168,7 +168,9 @@ type Firing struct {
 // candidatesSQL selects objects with stored iCalendar text that mention a
 // VALARM. Rows without ical_raw predate migration 036 and carry no alarms.
 // Bill mirror events (event_type 'bill') are skipped: bill_due owns those
-// reminders (see the package doc).
+// reminders (see the package doc). Retired entries (superseded_at set, #4943:
+// a bill is the record for them) are skipped too, or a phone alarm would still
+// fire for the stale duplicate a briefing must not read.
 const candidatesSQL = `
 	SELECT co.id, c.household_id, h.timezone, co.ical_raw
 	FROM calendar_objects co
@@ -177,6 +179,7 @@ const candidatesSQL = `
 	WHERE co.ical_raw IS NOT NULL
 	  AND co.ical_raw ILIKE '%BEGIN:VALARM%'
 	  AND co.event_type IS DISTINCT FROM 'bill'
+	  AND co.superseded_at IS NULL
 `
 
 // insertSQL writes one notification per household member for a firing,
