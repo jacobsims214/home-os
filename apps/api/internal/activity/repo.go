@@ -41,7 +41,12 @@ type Entry struct {
 	ParentID      *uuid.UUID
 	ChangedFields []string
 	Summary       string
-	CreatedAt     time.Time
+	// Changes is activity_log.changes (migration 071, #4941): the before and
+	// after VALUE of the columns the log records values for (money, dates and
+	// a bill's source document), as {"amount": {"from": 5, "to": 35}}. Nil for
+	// every other change.
+	Changes   map[string]ValueChange
+	CreatedAt time.Time
 
 	// ActorUserID is NULL for writes by the system or an unknown caller, and
 	// after the acting user was deleted.
@@ -54,6 +59,12 @@ type Entry struct {
 	// AgentTokenID is set when an agent token acted on the user's behalf.
 	AgentTokenID *uuid.UUID
 	AgentName    *string
+}
+
+// ValueChange is one column's before and after value.
+type ValueChange struct {
+	From any `json:"from"`
+	To   any `json:"to"`
 }
 
 // Filter narrows the feed. Zero values mean "no filter".
@@ -224,7 +235,7 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID, f Filter) (Page,
 
 	q := `
 SELECT a.id, a.household_id, a.action, a.entity_type, a.entity_id,
-       a.parent_type, a.parent_id, a.changed_fields, a.summary, a.created_at,
+       a.parent_type, a.parent_id, a.changed_fields, a.summary, a.changes, a.created_at,
        a.actor_user_id, p.id, COALESCE(p.display_name, u.name),
        a.actor_agent_token_id, t.name,
        ev.ical_data, ev.ical_raw
@@ -255,14 +266,21 @@ LIMIT $%d`, order, len(args))
 	for rows.Next() {
 		var e Entry
 		var icalData, icalRaw *string
+		var changes []byte
 		if err := rows.Scan(&e.ID, &e.HouseholdID, &e.Action, &e.EntityType, &e.EntityID,
-			&e.ParentType, &e.ParentID, &e.ChangedFields, &e.Summary, &e.CreatedAt,
+			&e.ParentType, &e.ParentID, &e.ChangedFields, &e.Summary, &changes, &e.CreatedAt,
 			&e.ActorUserID, &e.ActorPersonID, &e.ActorName,
 			&e.AgentTokenID, &e.AgentName, &icalData, &icalRaw); err != nil {
 			return Page{}, fmt.Errorf("scan activity: %w", err)
 		}
 		if icalData != nil {
 			e.Summary = withLabel(e.Summary, "calendar event", eventName(*icalData, icalRaw))
+		}
+		if len(changes) > 0 {
+			var decoded map[string]ValueChange
+			if err := json.Unmarshal(changes, &decoded); err == nil {
+				e.Changes = decoded
+			}
 		}
 		entries = append(entries, e)
 	}

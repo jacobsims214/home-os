@@ -77,6 +77,13 @@ type File struct {
 	ExpiresOn    *string    `json:"expires_on"`
 	Description  *string    `json:"description"`
 	PersonID     *uuid.UUID `json:"person_id"`
+
+	// Provenance of ExtractedText (migration 071, #4941): "raw" when the body
+	// is the text that was pasted, stored unaltered (the source a recorded
+	// amount can be checked against), "extracted" when the worker read it
+	// from the blob. TextSHA256 is the SHA-256 of a raw body as filed.
+	TextOrigin string `json:"text_origin"`
+	TextSHA256 []byte `json:"-"`
 }
 
 // Categories is the allowed set of files.category values (048's

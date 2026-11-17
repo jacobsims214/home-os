@@ -266,11 +266,36 @@ func TestActivityFind_WhatDidAmberAdd(t *testing.T) {
 		t.Errorf("summary = %q", env.Summary)
 	}
 
-	// Without action, her update shows with its changed field; the owner's
-	// note and the 10-day-old row stay out.
+	// Without action, her update shows with its changed field AND the value it
+	// recorded (migration 071, #4941): the amount went from 15 to 18.
 	env = findOK(t, f.ctx, f.pool, map[string]any{"person_id": f.amber.String()})
-	if env.Data.Total != 6 || !hasLine(env, `Amber updated bill "Netflix" (amount)`) {
+	if env.Data.Total != 6 || !hasLine(env, `Amber updated bill "Netflix" (amount; amount $15.00 -> $18.00)`) {
 		t.Errorf("all of Amber's changes: total %d, %v", env.Data.Total, lines(env))
+	}
+	// And the value itself is in the structured payload, for a client that
+	// shows it as a before/after pair.
+	var amountChange *struct {
+		From *float64 `json:"from"`
+		To   *float64 `json:"to"`
+	}
+	for _, c := range env.Data.Changes {
+		if c.Action == "updated" && c.Changes != nil {
+			if v, ok := c.Changes["amount"]; ok {
+				amountChange = &struct {
+					From *float64 `json:"from"`
+					To   *float64 `json:"to"`
+				}{}
+				if f, ok := v.From.(float64); ok {
+					amountChange.From = &f
+				}
+				if t, ok := v.To.(float64); ok {
+					amountChange.To = &t
+				}
+			}
+		}
+	}
+	if amountChange == nil || amountChange.From == nil || *amountChange.From != 15 || amountChange.To == nil || *amountChange.To != 18 {
+		t.Errorf("the change payload should carry amount 15 -> 18: %+v", amountChange)
 	}
 
 	// about_type=event narrows to calendar records.

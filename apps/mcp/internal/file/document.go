@@ -127,7 +127,7 @@ const documentColumns = `f.id, f.household_id, f.name, f.title, f.category, f.co
 	COALESCE(f.tags, '{}'::text[]), f.description,
 	to_char(f.document_date, 'YYYY-MM-DD'), to_char(f.document_date, 'Dy'),
 	to_char(f.expires_on, 'YYYY-MM-DD'), to_char(f.expires_on, 'Dy'),
-	f.ocr_status, f.ocr_error, char_length(COALESCE(f.extracted_text, '')),
+	f.ocr_status, f.ocr_error, char_length(COALESCE(f.extracted_text, '')), f.text_origin,
 	f.created_at, f.updated_at,
 	to_char(f.created_at AT TIME ZONE h.timezone, 'YYYY-MM-DD'),
 	to_char(f.created_at AT TIME ZONE h.timezone, 'Dy'),
@@ -176,12 +176,19 @@ type docRow struct {
 	OCRStatus       string
 	OCRError        *string
 	TextChars       int
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	CreatedLocal    string
-	CreatedWeekday  string
-	Timezone        string
-	AboutName       *string
+	// TextOrigin is files.text_origin (migration 071): raw when the body is
+	// the caller's own pasted text stored unaltered, extracted when the
+	// worker read it from the file's bytes.
+	TextOrigin string
+	// StoredHash is the hex SHA-256 of the stored text as the query computes
+	// it (document_get only), compared with files.text_sha256.
+	StoredHash     string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	CreatedLocal   string
+	CreatedWeekday string
+	Timezone       string
+	AboutName      *string
 }
 
 // scanDocument reads documentColumns from row, then any extra columns.
@@ -191,7 +198,7 @@ func scanDocument(row pgx.Row, extra ...any) (docRow, error) {
 		&r.EntityType, &r.EntityID, &r.PersonID, &r.PersonName,
 		&r.Tags, &r.Description,
 		&r.DocumentDate, &r.DocumentWeekday, &r.ExpiresOn, &r.ExpiresWeekday,
-		&r.OCRStatus, &r.OCRError, &r.TextChars,
+		&r.OCRStatus, &r.OCRError, &r.TextChars, &r.TextOrigin,
 		&r.CreatedAt, &r.UpdatedAt, &r.CreatedLocal, &r.CreatedWeekday, &r.Timezone,
 		&r.AboutName}, extra...)
 	err := row.Scan(dest...)
@@ -322,6 +329,18 @@ type textState struct {
 // "[retry <k>/<n> next=<RFC3339 UTC>] <error>".
 var retryMarker = regexp.MustCompile(`^\[retry (\d+)/(\d+) next=([^\]]+)\]\s*`)
 
+// textOrigin is files.text_origin with a safe default: rows written before
+// migration 071 (and any row a client left unset) are derived text.
+func (r docRow) textOrigin() string {
+	if r.TextOrigin == textOriginRaw {
+		return textOriginRaw
+	}
+	return textOriginExtracted
+}
+
+// isRawText reports whether the body is the caller's own pasted text.
+func (r docRow) isRawText() bool { return r.textOrigin() == textOriginRaw }
+
 // text maps ocr_status and ocr_error to a textState.
 func (r docRow) text() textState {
 	errText := ""
@@ -332,6 +351,10 @@ func (r docRow) text() textState {
 	case "done":
 		if r.TextChars == 0 {
 			return textState{Status: "done", Note: "Extraction finished but found no text."}
+		}
+		if r.isRawText() {
+			return textState{Status: "done",
+				Note: fmt.Sprintf("The pasted text is stored verbatim (%d characters).", r.TextChars)}
 		}
 		return textState{Status: "done", Note: fmt.Sprintf("Text extracted (%d characters).", r.TextChars)}
 	case "skipped":
@@ -408,30 +431,37 @@ type textPage struct {
 // documentData is one document in full, as document_get and document_upload
 // return it. Text is only included one page at a time (document_get).
 type documentData struct {
-	ID               string    `json:"id" jsonschema_description:"The document_id to pass to document_get."`
-	Title            string    `json:"title" jsonschema_description:"The document's title, or its file name when it has none."`
-	FileName         string    `json:"file_name"`
-	Category         string    `json:"category"`
-	ContentType      *string   `json:"content_type"`
-	SizeBytes        int64     `json:"size_bytes"`
-	Description      *string   `json:"description"`
-	DocumentDate     *string   `json:"document_date" jsonschema_description:"The date on the document, YYYY-MM-DD."`
-	DocumentWeekday  *string   `json:"document_weekday" jsonschema_description:"Weekday of document_date, e.g. Thu."`
-	ExpiresOn        *string   `json:"expires_on" jsonschema_description:"When it lapses, YYYY-MM-DD."`
-	ExpiresWeekday   *string   `json:"expires_weekday" jsonschema_description:"Weekday of expires_on, e.g. Thu."`
-	PersonID         *string   `json:"person_id" jsonschema_description:"The family member it is for."`
-	PersonName       *string   `json:"person_name"`
-	AboutType        string    `json:"about_type" jsonschema_description:"What it is about: family, vehicle, property, ..."`
-	AboutID          *string   `json:"about_id" jsonschema_description:"Id of the row it is about; null for family documents."`
-	AboutName        *string   `json:"about_name"`
-	Tags             []string  `json:"tags"`
-	TextStatus       string    `json:"text_status" jsonschema_description:"Text extraction: pending, retrying, done, failed or skipped."`
-	TextNote         string    `json:"text_note" jsonschema_description:"The extraction status in one plain sentence."`
-	TextError        *string   `json:"text_error" jsonschema_description:"Why extraction failed (failed or retrying only)."`
-	RetryAttempt     *int      `json:"retry_attempt" jsonschema_description:"Failed attempts so far (retrying only)."`
-	RetryMax         *int      `json:"retry_max" jsonschema_description:"Retries allowed in total (retrying only)."`
-	NextRetryAt      *string   `json:"next_retry_at" jsonschema_description:"Earliest next attempt, family time (retrying only)."`
-	TextChars        int       `json:"text_chars" jsonschema_description:"Length of the whole extracted text in characters."`
+	ID              string   `json:"id" jsonschema_description:"The document_id to pass to document_get."`
+	Title           string   `json:"title" jsonschema_description:"The document's title, or its file name when it has none."`
+	FileName        string   `json:"file_name"`
+	Category        string   `json:"category"`
+	ContentType     *string  `json:"content_type"`
+	SizeBytes       int64    `json:"size_bytes"`
+	Description     *string  `json:"description"`
+	DocumentDate    *string  `json:"document_date" jsonschema_description:"The date on the document, YYYY-MM-DD."`
+	DocumentWeekday *string  `json:"document_weekday" jsonschema_description:"Weekday of document_date, e.g. Thu."`
+	ExpiresOn       *string  `json:"expires_on" jsonschema_description:"When it lapses, YYYY-MM-DD."`
+	ExpiresWeekday  *string  `json:"expires_weekday" jsonschema_description:"Weekday of expires_on, e.g. Thu."`
+	PersonID        *string  `json:"person_id" jsonschema_description:"The family member it is for."`
+	PersonName      *string  `json:"person_name"`
+	AboutType       string   `json:"about_type" jsonschema_description:"What it is about: family, vehicle, property, ..."`
+	AboutID         *string  `json:"about_id" jsonschema_description:"Id of the row it is about; null for family documents."`
+	AboutName       *string  `json:"about_name"`
+	Tags            []string `json:"tags"`
+	TextStatus      string   `json:"text_status" jsonschema_description:"Text extraction: pending, retrying, done, failed or skipped."`
+	TextNote        string   `json:"text_note" jsonschema_description:"The extraction status in one plain sentence."`
+	TextError       *string  `json:"text_error" jsonschema_description:"Why extraction failed (failed or retrying only)."`
+	RetryAttempt    *int     `json:"retry_attempt" jsonschema_description:"Failed attempts so far (retrying only)."`
+	RetryMax        *int     `json:"retry_max" jsonschema_description:"Retries allowed in total (retrying only)."`
+	NextRetryAt     *string  `json:"next_retry_at" jsonschema_description:"Earliest next attempt, family time (retrying only)."`
+	TextChars       int      `json:"text_chars" jsonschema_description:"Length of the whole extracted text in characters."`
+	// TextOrigin, TextSHA256 and TextVerified are the provenance of the body
+	// (#4941): whether it is the caller's own pasted text, its fingerprint,
+	// and whether the stored text still hashes to it. An amount recorded from
+	// this document can only be trusted while text_verified is true.
+	TextOrigin       string    `json:"text_origin" jsonschema_description:"raw = the pasted text stored verbatim (the source); extracted = read from the file's bytes."`
+	TextSHA256       *string   `json:"text_sha256" jsonschema_description:"document_get, raw text only: SHA-256 (hex) of the body as it was pasted."`
+	TextVerified     *bool     `json:"text_verified" jsonschema_description:"document_get, raw text only: true when the stored body still hashes to text_sha256, so it is unchanged."`
 	Text             *textPage `json:"text,omitempty" jsonschema_description:"document_get only: one page of the extracted text."`
 	Links            []docLink `json:"links" jsonschema_description:"Other things this document is also linked to (document_update add_links)."`
 	CreatedAt        time.Time `json:"created_at" jsonschema_description:"When it was uploaded."`
@@ -473,7 +503,8 @@ func (r docRow) data() documentData {
 		TextStatus: ts.Status, TextNote: ts.Note, TextError: ts.Error,
 		RetryAttempt: ts.RetryAttempt, RetryMax: ts.RetryMax, NextRetryAt: ts.NextRetryAt,
 		TextChars: r.TextChars, Links: []docLink{},
-		CreatedAt: r.CreatedAt, CreatedLocalDate: r.CreatedLocal, CreatedWeekday: r.CreatedWeekday,
+		TextOrigin: r.textOrigin(),
+		CreatedAt:  r.CreatedAt, CreatedLocalDate: r.CreatedLocal, CreatedWeekday: r.CreatedWeekday,
 		UpdatedAt: r.UpdatedAt,
 	}
 	if aboutID == nil {

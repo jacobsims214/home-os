@@ -214,9 +214,13 @@ func (r *Repo) GetBlob(ctx context.Context, fileID uuid.UUID) ([]byte, error) {
 // logs and drops such files rather than treating them as failures.
 func (r *Repo) UpdateOCRStatus(ctx context.Context, fileID uuid.UUID, ocrStatus string, extractedText *string, ocrError *string) error {
 	tag, err := r.pool.Exec(ctx,
+		// A raw body (text_origin 'raw', migration 071, #4941) is the caller's
+		// own pasted text, and the source a recorded amount is checked
+		// against: extraction never overwrites it.
 		`UPDATE files
 		 SET ocr_status = $1,
-		     extracted_text = COALESCE($2, extracted_text),
+		     extracted_text = CASE WHEN text_origin = 'raw' THEN extracted_text
+		                           ELSE COALESCE($2, extracted_text) END,
 		     ocr_error = $3,
 		     updated_at = NOW()
 		 WHERE id = $4`,

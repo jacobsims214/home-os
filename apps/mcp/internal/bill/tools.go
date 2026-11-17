@@ -59,7 +59,9 @@ const billColumns = `id, name, amount, due_day, category, COALESCE(is_autopay, f
 	COALESCE((SELECT a.name FROM assets a WHERE a.id = bills.asset_id),
 	         (SELECT NULLIF(concat_ws(' ', v.year, v.make, v.model), '') FROM vehicles v WHERE v.id = bills.vehicle_id),
 	         (SELECT p.name FROM properties p WHERE p.id = bills.property_id)),
-	budget_category_id, (SELECT bc.name FROM budget_categories bc WHERE bc.id = bills.budget_category_id)`
+	budget_category_id, (SELECT bc.name FROM budget_categories bc WHERE bc.id = bills.budget_category_id),
+	source_document_id,
+	(SELECT COALESCE(NULLIF(btrim(x.title), ''), x.name) FROM files x WHERE x.id = bills.source_document_id)`
 
 // billRow is a bills row as the tools load it. amount and due_day are
 // pointers because API-created rows can leave them NULL.
@@ -94,6 +96,12 @@ type billRow struct {
 	// bill is filed under and its name.
 	BudgetCategoryID *uuid.UUID
 	BudgetCategory   *string
+	// SourceDocumentID is the document the bill was taken from (071, #4941),
+	// so its amount can be diffed against that document's text.
+	SourceDocumentID *uuid.UUID
+	// SourceDocumentTitle is that document's title (its name when it has
+	// none), for the output.
+	SourceDocumentTitle *string
 }
 
 // scanBill reads one row of billColumns.
@@ -102,7 +110,7 @@ func scanBill(row pgx.Row) (billRow, error) {
 	err := row.Scan(&r.ID, &r.Name, &r.Amount, &r.DueDay, &r.Category, &r.AutoPay,
 		&r.VendorID, &r.PropertyID, &r.VehicleID, &r.AssetID, &r.PaymentURL, &r.Notes,
 		&r.CreatedAt, &r.UpdatedAt, &r.PaidDate, &r.PaidFor, &r.Frequency, &r.DueDate, &r.SubjectName,
-		&r.BudgetCategoryID, &r.BudgetCategory)
+		&r.BudgetCategoryID, &r.BudgetCategory, &r.SourceDocumentID, &r.SourceDocumentTitle)
 	return r, err
 }
 
@@ -126,36 +134,38 @@ func (r billRow) hasSchedule() bool {
 // due_date). A paid once bill has status paid and no next_due_date. amount_paid and already_paid are set only by
 // bill_pay, duplicate only by bill_create's loop guard.
 type billData struct {
-	ID               string    `json:"id" jsonschema_description:"The bill_id to pass to bill_update, bill_pay or bill_delete."`
-	Name             string    `json:"name"`
-	Amount           *float64  `json:"amount" jsonschema_description:"Amount due each time, in the family's currency."`
-	Frequency        string    `json:"frequency" jsonschema_description:"monthly, quarterly, semiannual, annual or once."`
-	DueDay           *int      `json:"due_day" jsonschema_description:"Monthly bills: day of the month it is due (1-31); a short month uses its last day."`
-	DueDate          *string   `json:"due_date" jsonschema_description:"Other bills: a due date, YYYY-MM-DD; it repeats on that day every 3, 6 or 12 months."`
-	MonthlyAmount    *float64  `json:"monthly_amount" jsonschema_description:"amount spread per month: quarterly /3, semiannual /6, annual /12; null for once."`
-	Category         *string   `json:"category" jsonschema_description:"The bill's own label, e.g. Utilities (not the budget category)."`
-	BudgetCategoryID *string   `json:"budget_category_id" jsonschema_description:"Budget category budget_summary files it under; null is uncategorized."`
-	BudgetCategory   *string   `json:"budget_category" jsonschema_description:"Name of that budget category, e.g. Housing."`
-	Autopay          bool      `json:"autopay"`
-	ContactID        *string   `json:"contact_id" jsonschema_description:"The contact (vendor) the bill is paid to."`
-	PropertyID       *string   `json:"property_id" jsonschema_description:"The house or other property the bill is for (an asset's property for an asset bill)."`
-	VehicleID        *string   `json:"vehicle_id" jsonschema_description:"The car or other vehicle the bill is for."`
-	AssetID          *string   `json:"asset_id" jsonschema_description:"The thing the bill is for."`
-	SubjectType      *string   `json:"subject_type" jsonschema_description:"property, vehicle or asset; null for a family-level bill."`
-	SubjectName      *string   `json:"subject_name" jsonschema_description:"Name of the property, vehicle or asset."`
-	PaymentURL       *string   `json:"payment_url"`
-	Notes            *string   `json:"notes"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
-	NextDueDate      *string   `json:"next_due_date" jsonschema_description:"Next unpaid due date, YYYY-MM-DD in the family's timezone."`
-	NextDueWeekday   *string   `json:"next_due_weekday" jsonschema_description:"Weekday of next_due_date, e.g. Thu."`
-	DaysUntilDue     *int      `json:"days_until_due" jsonschema_description:"Whole days from today (family timezone) to next_due_date."`
-	Status           string    `json:"status,omitempty" jsonschema_description:"due, or paid when the current due date is already paid."`
-	PaidDate         *string   `json:"paid_date" jsonschema_description:"Date of the last recorded payment, YYYY-MM-DD."`
-	PaidForDueDate   *string   `json:"paid_for_due_date" jsonschema_description:"The due date the last payment covered, YYYY-MM-DD."`
-	AmountPaid       *float64  `json:"amount_paid,omitempty" jsonschema_description:"bill_pay only: the amount paid."`
-	AlreadyPaid      *bool     `json:"already_paid,omitempty" jsonschema_description:"bill_pay only: true when that due date was already paid and nothing changed."`
-	Duplicate        bool      `json:"duplicate,omitempty" jsonschema_description:"bill_create only: true when the same bill was created minutes ago and was returned instead."`
+	ID                  string    `json:"id" jsonschema_description:"The bill_id to pass to bill_update, bill_pay or bill_delete."`
+	Name                string    `json:"name"`
+	Amount              *float64  `json:"amount" jsonschema_description:"Amount due each time, in the family's currency."`
+	Frequency           string    `json:"frequency" jsonschema_description:"monthly, quarterly, semiannual, annual or once."`
+	DueDay              *int      `json:"due_day" jsonschema_description:"Monthly bills: day of the month it is due (1-31); a short month uses its last day."`
+	DueDate             *string   `json:"due_date" jsonschema_description:"Other bills: a due date, YYYY-MM-DD; it repeats on that day every 3, 6 or 12 months."`
+	MonthlyAmount       *float64  `json:"monthly_amount" jsonschema_description:"amount spread per month: quarterly /3, semiannual /6, annual /12; null for once."`
+	Category            *string   `json:"category" jsonschema_description:"The bill's own label, e.g. Utilities (not the budget category)."`
+	BudgetCategoryID    *string   `json:"budget_category_id" jsonschema_description:"Budget category budget_summary files it under; null is uncategorized."`
+	BudgetCategory      *string   `json:"budget_category" jsonschema_description:"Name of that budget category, e.g. Housing."`
+	SourceDocumentID    *string   `json:"source_document_id" jsonschema_description:"The document the bill was taken from; read it with document_get to check the amount."`
+	SourceDocumentTitle *string   `json:"source_document_title" jsonschema_description:"Title of that document."`
+	Autopay             bool      `json:"autopay"`
+	ContactID           *string   `json:"contact_id" jsonschema_description:"The contact (vendor) the bill is paid to."`
+	PropertyID          *string   `json:"property_id" jsonschema_description:"The house or other property the bill is for (an asset's property for an asset bill)."`
+	VehicleID           *string   `json:"vehicle_id" jsonschema_description:"The car or other vehicle the bill is for."`
+	AssetID             *string   `json:"asset_id" jsonschema_description:"The thing the bill is for."`
+	SubjectType         *string   `json:"subject_type" jsonschema_description:"property, vehicle or asset; null for a family-level bill."`
+	SubjectName         *string   `json:"subject_name" jsonschema_description:"Name of the property, vehicle or asset."`
+	PaymentURL          *string   `json:"payment_url"`
+	Notes               *string   `json:"notes"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+	NextDueDate         *string   `json:"next_due_date" jsonschema_description:"Next unpaid due date, YYYY-MM-DD in the family's timezone."`
+	NextDueWeekday      *string   `json:"next_due_weekday" jsonschema_description:"Weekday of next_due_date, e.g. Thu."`
+	DaysUntilDue        *int      `json:"days_until_due" jsonschema_description:"Whole days from today (family timezone) to next_due_date."`
+	Status              string    `json:"status,omitempty" jsonschema_description:"due, or paid when the current due date is already paid."`
+	PaidDate            *string   `json:"paid_date" jsonschema_description:"Date of the last recorded payment, YYYY-MM-DD."`
+	PaidForDueDate      *string   `json:"paid_for_due_date" jsonschema_description:"The due date the last payment covered, YYYY-MM-DD."`
+	AmountPaid          *float64  `json:"amount_paid,omitempty" jsonschema_description:"bill_pay only: the amount paid."`
+	AlreadyPaid         *bool     `json:"already_paid,omitempty" jsonschema_description:"bill_pay only: true when that due date was already paid and nothing changed."`
+	Duplicate           bool      `json:"duplicate,omitempty" jsonschema_description:"bill_create only: true when the same bill was created minutes ago and was returned instead."`
 }
 
 // dateOnly formats t as YYYY-MM-DD.
@@ -185,6 +195,7 @@ func (r billRow) data(today time.Time) billData {
 		ID: r.ID.String(), Name: r.Name, Amount: r.Amount, Frequency: r.Frequency, DueDay: r.DueDay,
 		Category: r.Category, Autopay: r.AutoPay, ContactID: uuidString(r.VendorID),
 		BudgetCategoryID: uuidString(r.BudgetCategoryID), BudgetCategory: r.BudgetCategory,
+		SourceDocumentID: uuidString(r.SourceDocumentID), SourceDocumentTitle: r.SourceDocumentTitle,
 		PropertyID: uuidString(r.PropertyID), VehicleID: uuidString(r.VehicleID), AssetID: uuidString(r.AssetID),
 		SubjectType: subjectType(r.PropertyID, r.VehicleID, r.AssetID),
 		PaymentURL:  r.PaymentURL, Notes: r.Notes,

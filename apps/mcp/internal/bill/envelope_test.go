@@ -166,8 +166,8 @@ func TestToolDefinitions(t *testing.T) {
 		class    hints
 	}{
 		"bill_find":   {"Find bills", nil, []string{"id", "query", "category", "due_within_days", "autopay", "frequency", "property_id", "vehicle_id", "limit", "cursor"}, classR},
-		"bill_create": {"Create bill", []string{"name", "amount"}, []string{"name", "amount", "frequency", "due_day", "due_date", "category", "budget_category", "autopay", "contact_id", "property_id", "vehicle_id", "asset_id", "notes"}, classC},
-		"bill_update": {"Update bill", []string{"bill_id"}, []string{"bill_id", "name", "amount", "frequency", "due_day", "due_date", "category", "budget_category", "autopay", "contact_id", "property_id", "vehicle_id", "asset_id", "notes"}, classU},
+		"bill_create": {"Create bill", []string{"name", "amount"}, []string{"name", "amount", "frequency", "due_day", "due_date", "category", "budget_category", "autopay", "contact_id", "property_id", "vehicle_id", "asset_id", "notes", "source_document_id"}, classC},
+		"bill_update": {"Update bill", []string{"bill_id"}, []string{"bill_id", "name", "amount", "frequency", "due_day", "due_date", "category", "budget_category", "autopay", "contact_id", "property_id", "vehicle_id", "asset_id", "notes", "source_document_id"}, classU},
 		"bill_delete": {"Delete bill", []string{"bill_id"}, []string{"bill_id"}, classX},
 		"bill_pay":    {"Pay bill", []string{"bill_id"}, []string{"bill_id", "paid_date", "for_due_date", "amount"}, classU},
 	}

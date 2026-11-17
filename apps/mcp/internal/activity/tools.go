@@ -23,6 +23,7 @@ package activity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -156,7 +157,18 @@ type change struct {
 	Action string `json:"action" jsonschema_description:"created, updated, deleted or revealed (a credential read by an agent)."`
 	What   string `json:"what" jsonschema_description:"The kind of record, e.g. event, list item, bill."`
 	Line   string `json:"line" jsonschema_description:"Ready-to-say line, e.g. Amber created event \"Dentist\" via agent \"Claude\"."`
-	Open   string `json:"open,omitempty" jsonschema_description:"The tool call that reads the record; absent when it is deleted or has no tool."`
+	// Changes is the before/after VALUE of the columns migration 071 records
+	// them for (money, dates and a bill's source document): {"amount":
+	// {"from": 5, "to": 35}}. Absent for every other change, so most updates
+	// still carry no record values.
+	Changes map[string]valueChange `json:"changes,omitempty" jsonschema_description:"Before/after values of an update, for money and date fields only, e.g. amount: {from: 5, to: 35}."`
+	Open    string                 `json:"open,omitempty" jsonschema_description:"The tool call that reads the record; absent when it is deleted or has no tool."`
+}
+
+// valueChange is one column's before and after value.
+type valueChange struct {
+	From any `json:"from" jsonschema_description:"The value before the change; null when it was unset."`
+	To   any `json:"to" jsonschema_description:"The value after the change; null when it was cleared."`
 }
 
 // personChanges is one person's changes in the whole match, not only this page.
@@ -471,7 +483,7 @@ func pageRows(ctx context.Context, tx pgx.Tx, f *filter, in findInput, loc *time
 	}
 	pf.args = append(pf.args, in.limit+1)
 	q := `SELECT a.id, a.created_at, a.action, a.entity_type, a.entity_id, a.parent_type, a.parent_id,
-	             a.changed_fields, a.summary, ` + whoSQL + `, t.name, ev.label
+	             a.changed_fields, a.summary, a.changes, ` + whoSQL + `, t.name, ev.label
 	      FROM activity_log a` + actorJoins + `
 	      LEFT JOIN agent_tokens t ON t.id = a.actor_agent_token_id
 	      LEFT JOIN LATERAL (
@@ -490,7 +502,7 @@ func pageRows(ctx context.Context, tx pgx.Tx, f *filter, in findInput, loc *time
 	page, err := pgx.CollectRows(rows, func(cr pgx.CollectableRow) (pageEntry, error) {
 		var r logRow
 		err := cr.Scan(&r.id, &r.createdAt, &r.action, &r.entityType, &r.entityID, &r.parentType, &r.parentID,
-			&r.changedFields, &r.summary, &r.who, &r.agent, &r.eventLabel)
+			&r.changedFields, &r.summary, &r.changes, &r.who, &r.agent, &r.eventLabel)
 		if err != nil {
 			return pageEntry{}, err
 		}
@@ -516,9 +528,12 @@ type logRow struct {
 	parentID      *uuid.UUID
 	changedFields []string
 	summary       string
-	who           string
-	agent         *string
-	eventLabel    *string
+	// changes is activity_log.changes as JSON (migration 071), raw until the
+	// row is rendered.
+	changes    []byte
+	who        string
+	agent      *string
+	eventLabel *string
 }
 
 // change builds the output line: `Amber updated bill "Netflix" (amount) via
@@ -534,25 +549,110 @@ func (r logRow) change(loc *time.Location) change {
 	if label != "" {
 		b.WriteString(` "` + label + `"`)
 	}
+	changes := r.values()
 	if r.action == "update" {
+		// One parenthetical, the field names with the values recorded for
+		// them: `(amount $5.00 -> $35.00)` rather than `(amount) (amount ...)`.
 		if fields := humanFields(r.changedFields); fields != "" {
-			b.WriteString(" (" + fields + ")")
+			b.WriteString(" (" + fields)
+			if s := changesText(changes); s != "" {
+				b.WriteString("; " + s)
+			}
+			b.WriteString(")")
 		}
 	}
 	if r.agent != nil && strings.TrimSpace(*r.agent) != "" {
 		b.WriteString(` via agent "` + strings.TrimSpace(*r.agent) + `"`)
 	}
 	c := change{
-		When:   r.createdAt.In(loc).Format("Mon 2006-01-02 15:04"),
-		Who:    r.who,
-		Action: verbFor(r.action),
-		What:   what,
-		Line:   b.String(),
+		When:    r.createdAt.In(loc).Format("Mon 2006-01-02 15:04"),
+		Who:     r.who,
+		Action:  verbFor(r.action),
+		What:    what,
+		Changes: changes,
+		Line:    b.String(),
 	}
 	if r.action != "delete" {
 		c.Open = openCall(r.entityType, r.entityID, r.parentType, r.parentID)
 	}
 	return c
+}
+
+// values decodes activity_log.changes (migration 071) into the before/after
+// map the output carries, or nil when the row has none. The JSON is small and
+// written by the allowlist in activity_change_values(), so a row that does not
+// decode is treated as having none rather than failing the feed.
+func (r logRow) values() map[string]valueChange {
+	if len(r.changes) == 0 {
+		return nil
+	}
+	var raw map[string]struct {
+		From any `json:"from"`
+		To   any `json:"to"`
+	}
+	if err := json.Unmarshal(r.changes, &raw); err != nil || len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]valueChange, len(raw))
+	for k, v := range raw {
+		out[k] = valueChange{From: v.From, To: v.To}
+	}
+	return out
+}
+
+// changesText lists the before/after values an update recorded, as
+// "amount $5.00 -> $35.00, due date 2026-11-10 -> 2026-12-10", or "" when the
+// row records none. Money, dates and a bill's source document are the only
+// columns that reach it, so the formatting is narrow on purpose.
+func changesText(changes map[string]valueChange) string {
+	if len(changes) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(changes))
+	for k := range changes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		v := changes[k]
+		parts = append(parts, valueWord(k)+" "+valueText(k, v.From)+" -> "+valueText(k, v.To))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// valueWord is a column's name in a change line: amount, due date, ...
+func valueWord(column string) string {
+	return strings.ReplaceAll(strings.TrimSuffix(column, "_id"), "_", " ")
+}
+
+// valueText formats one value of a change: money to the cent for the money
+// columns, a date as written, and an id as the id it is.
+func valueText(column string, v any) string {
+	if v == nil {
+		return "nothing"
+	}
+	switch column {
+	case "amount", "cost", "monthly_amount", "monthly_payment", "remaining_balance":
+		switch n := v.(type) {
+		case float64:
+			return fmt.Sprintf("$%.2f", n)
+		case string:
+			return "$" + n
+		}
+	case "interest_rate":
+		if n, ok := v.(float64); ok {
+			return strconv.FormatFloat(n, 'f', -1, 64) + "%"
+		}
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "?"
+	}
+	return string(b)
 }
 
 // openCall is the tool call that reads a record, or "" when no registered

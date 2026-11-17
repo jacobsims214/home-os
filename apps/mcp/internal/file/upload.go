@@ -2,6 +2,7 @@ package file
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -32,16 +33,28 @@ var dataURL = regexp.MustCompile(`^data:([^;,]*)(;[^,]*)?;base64,`)
 var billWords = []string{"invoice", "bill", "statement", "amount due", "balance due", "payment due"}
 
 // NewDocumentUploadTool creates document_upload (catalog v2, class C;
-// replaces upload_file). It files a document from base64 bytes
-// (content_base64, hidden alias content) or from plain text (text), with
-// optional title, category, tags, person, about link, document date, expiry
-// and description. Text uploads are searchable at once (extracted_text is
-// the text itself); byte uploads are queued for the worker's text
-// extraction (the worker indexes the text of both kinds into the files
-// collection once ocr_status is done). The metadata document is upserted
-// into household_search right after the commit, so the new document is found
-// by meaning at once. The result echoes the metadata, never the bytes or the
-// text. Only the family roles may upload (access.go).
+// replaces upload_file). It files a document from a person's own text
+// (content_text, hidden aliases text/body/raw_text) or from base64 bytes
+// (content_base64, hidden alias content), with optional title, category,
+// tags, person, about link, document date, expiry and description.
+//
+// The text path is the one that matters for provenance (#4941, war game R1
+// G1): a pasted bill or statement is stored VERBATIM, byte for byte, as the
+// document's body (extracted_text, text_origin 'raw'), and text_sha256 is
+// the SHA-256 of those exact bytes. The caller must pass the text as it was
+// pasted and must not retype, reformat or tidy it: a re-typed body is a
+// second copy of the caller's mistake, and R1's "$35.00 became $5.00, then
+// verified" happened exactly that way. Text the worker extracts from a
+// file's bytes is text_origin 'extracted' and has no fingerprint: it is
+// derived, never the source.
+//
+// Text uploads are searchable at once; byte uploads are queued for the
+// worker's text extraction (the worker indexes the text of both kinds into
+// the files collection once ocr_status is done). The metadata document is
+// upserted into household_search right after the commit, so the new document
+// is found by meaning at once. The result echoes the metadata and the
+// fingerprint, never the bytes or the text itself. Only the family roles may
+// upload (access.go).
 //
 // Loop guard: the same bytes under the same name about the same thing, filed
 // in the last 10 minutes, come back with duplicate:true instead of a second
@@ -51,7 +64,7 @@ var billWords = []string{"invoice", "bill", "statement", "amount due", "balance 
 // issuer and amount (catalog) have no DB columns yet and are not params.
 func NewDocumentUploadTool(pool *pgxpool.Pool, ts *Typesense) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("document_upload",
-		mcp.WithDescription("File a document from base64 bytes or plain text (e.g. a pasted receipt), with title, category and what it's about. Text is extracted for search."),
+		mcp.WithDescription("File a document: the pasted text verbatim as content_text (never retyped or tidied), or a file's bytes as content_base64. Stored exactly as sent."),
 		mcp.WithString("name",
 			mcp.Description("File name with extension, e.g. home-policy-2026.pdf"),
 			mcp.Required(),
@@ -62,8 +75,8 @@ func NewDocumentUploadTool(pool *pgxpool.Pool, ts *Typesense) (string, mcp.Tool,
 		mcp.WithString("content_type",
 			mcp.Description("MIME type of content_base64, e.g. application/pdf; guessed if left out"),
 		),
-		mcp.WithString("text",
-			mcp.Description("Plain text to file instead of bytes, e.g. a pasted receipt"),
+		mcp.WithString("content_text",
+			mcp.Description("The pasted text, exactly as given: stored verbatim, not reformatted"),
 		),
 		mcp.WithString("title",
 			mcp.Description("Human title, e.g. 2026 homeowners policy (default: the file name)"),
@@ -110,7 +123,7 @@ func NewDocumentUploadTool(pool *pgxpool.Pool, ts *Typesense) (string, mcp.Tool,
 		}
 		householdID := c.householdID
 		args := req.GetArguments()
-		example := map[string]any{"name": "costco-receipt.txt", "text": "Costco 2026-03-01 Total $142.50", "category": "receipt"}
+		example := map[string]any{"name": "copay.txt", "content_text": "Well visit copay — $35.00", "category": "medical"}
 
 		// --- name and content ---------------------------------------------
 		name := str(args, "name")
@@ -127,25 +140,33 @@ func NewDocumentUploadTool(pool *pgxpool.Pool, ts *Typesense) (string, mcp.Tool,
 			b64, _ = args["content"].(string) // hidden alias (upload_file)
 		}
 		b64 = strings.TrimSpace(b64)
-		text, _ := args["text"].(string)
-		hasText := strings.TrimSpace(text) != ""
+		// The raw text is read from the first of content_text and its hidden
+		// aliases and is NEVER trimmed or otherwise touched: the whole point
+		// of this path is that the stored body is the caller's exact text.
+		text, hasText := rawTextArg(args)
 		switch {
 		case b64 != "" && hasText:
-			return respond.Invalid("text", "content_base64 and text were both given.",
-				"Pass either content_base64 (a file's bytes) or text (plain text), not both.", example), nil
+			return respond.Invalid("content_text", "content_base64 and content_text were both given.",
+				"Pass either content_text (the pasted text) or content_base64 (a file's bytes), not both.", example), nil
 		case b64 == "" && !hasText:
-			return respond.Invalid("content_base64", "The document has no content.",
-				"Pass the file's bytes as content_base64, or plain text as text.", example), nil
+			return respond.Invalid("content_text", "The document has no content.",
+				"Pass the pasted text as content_text, or a file's bytes as content_base64.", example), nil
 		}
 
 		contentType := str(args, "content_type")
 		var data []byte
 		var extracted *string
+		// textOrigin and textHash record where the body came from (#4941):
+		// the caller's own text is the source and carries its fingerprint;
+		// bytes are derived text the worker fills in later.
+		textOrigin, textHash := textOriginExtracted, []byte(nil)
 		ocrStatus := "pending"
 		if hasText {
-			text = strings.ReplaceAll(text, "\x00", "")
 			data = []byte(text)
 			extracted = &text
+			textOrigin = textOriginRaw
+			sum := sha256.Sum256(data)
+			textHash = sum[:]
 			ocrStatus = "done"
 			if contentType == "" {
 				contentType = "text/plain; charset=utf-8"
@@ -173,6 +194,13 @@ func NewDocumentUploadTool(pool *pgxpool.Pool, ts *Typesense) (string, mcp.Tool,
 			if contentType == "" {
 				contentType = http.DetectContentType(data)
 			}
+		}
+		// A text body must be storable as-is. Postgres TEXT cannot hold a NUL
+		// byte, and silently dropping it would be exactly the quiet rewrite
+		// this path exists to prevent, so the upload is refused instead.
+		if hasText && strings.ContainsRune(text, '\x00') {
+			return respond.Invalid("content_text", "content_text contains a NUL character, which cannot be stored.",
+				"Remove the NUL byte from the pasted text and send it again.", example), nil
 		}
 		if len(data) > maxUploadBytes {
 			return respond.Invalid("content_base64",
@@ -292,11 +320,12 @@ func NewDocumentUploadTool(pool *pgxpool.Pool, ts *Typesense) (string, mcp.Tool,
 		err = tx.QueryRow(ctx,
 			`INSERT INTO files (household_id, blob_id, name, content_type, size, entity_type, entity_id,
 			                    extracted_text, ocr_status, tags, title, category, document_date, expires_on,
-			                    description, person_id)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			                    description, person_id, text_origin, text_sha256)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 			 RETURNING id`,
 			householdID, blobID, name, contentType, len(data), a.Kind, a.ID,
 			extracted, ocrStatus, tags, title, category, docDate, expires, description, personID,
+			textOrigin, textHash,
 		).Scan(&fileID)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
@@ -330,12 +359,15 @@ func NewDocumentUploadTool(pool *pgxpool.Pool, ts *Typesense) (string, mcp.Tool,
 		ts.indexDocument(ctx, r)
 		summary := fmt.Sprintf("Filed %s, %s.", r.describe(), humanSize(r.Size))
 		if hasText {
-			summary += " Its text is searchable now."
+			summary += " Its text is stored verbatim and is searchable now."
 		} else {
 			summary += " Text extraction runs in the background; document_find matches its text once done."
 		}
 		next := []string{fmt.Sprintf("Read it back with document_get document_id=%s.", r.ID)}
-		if looksLikeBill(name, r.Title, text, category) {
+		if looksLikeBill(name, r.Title, text, category) && hasText {
+			next = append(next, fmt.Sprintf("If this is a bill to pay, add it with bill_create source_document_id=%s "+
+				"and quote its amount from this text.", r.ID))
+		} else if looksLikeBill(name, r.Title, text, category) {
 			next = append(next, "If this is a bill to pay, add it with bill_create.")
 		}
 		if h := r.aboutHint(); h != "" {
@@ -345,6 +377,32 @@ func NewDocumentUploadTool(pool *pgxpool.Pool, ts *Typesense) (string, mcp.Tool,
 	}
 
 	return "document_upload", tool, handler
+}
+
+// textOrigins are files.text_origin's values (migration 071, #4941).
+const (
+	// textOriginRaw means the body is the caller's own text, stored unaltered:
+	// it is the source a recorded amount can be checked against.
+	textOriginRaw = "raw"
+	// textOriginExtracted means the body was read from a file's bytes by the
+	// worker: derived text, never the source.
+	textOriginExtracted = "extracted"
+)
+
+// rawTextAliases are content_text and the names small models (and the old
+// v1 upload_file) reach for. First one present and non-blank wins.
+var rawTextAliases = []string{"content_text", "text", "raw_text", "body"}
+
+// rawTextArg returns the caller's raw text EXACTLY as sent (never trimmed)
+// and whether one was given. A blank string is "not given", not an empty
+// document: an empty body is not a source for anything.
+func rawTextArg(args map[string]any) (string, bool) {
+	for _, k := range rawTextAliases {
+		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // decodeBase64 decodes standard or URL-safe base64, padded or not, ignoring
