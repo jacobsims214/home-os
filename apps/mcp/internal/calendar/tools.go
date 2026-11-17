@@ -645,7 +645,63 @@ func queryOccurrencesAs(ctx context.Context, pool querier, view eventView, house
 	}
 	defer rows.Close()
 
-	expand := !startDate.IsZero() && !endDate.IsZero()
+	return scanEventRows(rows, view, loc, startDate, endDate)
+}
+
+// maxSearchRows bounds how many stored calendar objects one text search reads,
+// the same order as search_all's eventScanLimit. A family's calendar holds
+// thousands of entries at most; the cap is only there so a pathological
+// household cannot pull an unbounded result into memory, and a search that
+// hits it says so (may_have_more) instead of passing for a complete one.
+const maxSearchRows = 5000
+
+// queryEveryEventAs returns every event the role may see, on any date, one
+// Event per stored row: a repeating series comes back as its master row with
+// its repeat rule rather than expanded, because there is no window to expand
+// over. It is event_find's read for a bare text query, where the caller is
+// looking an entry up rather than scanning a range (#4944). cut is true when
+// the household holds more rows than maxSearchRows, so the search is not
+// exhaustive and the caller has to be told.
+func queryEveryEventAs(ctx context.Context, pool querier, view eventView, householdID string, loc *time.Location, calendarIDs []string) (events []Event, cut bool, err error) {
+	query := `SELECT ` + eventColumns + `
+		FROM calendar_objects co
+		JOIN calendars c ON c.id = co.calendar_id
+		WHERE c.household_id = $1`
+	args := []any{householdID}
+	argIdx := 2
+	if len(calendarIDs) > 0 {
+		placeholders := make([]string, len(calendarIDs))
+		for i, calID := range calendarIDs {
+			placeholders[i] = fmt.Sprintf("$%d", argIdx)
+			args = append(args, calID)
+			argIdx++
+		}
+		query += fmt.Sprintf(" AND co.calendar_id IN (%s)", strings.Join(placeholders, ","))
+	}
+	// One row past the cap tells a cut search from a complete one.
+	query += fmt.Sprintf(" ORDER BY co.created_at LIMIT %d", maxSearchRows+1)
+
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("query events: %w", err)
+	}
+	defer rows.Close()
+
+	events, _, err = scanEventRows(rows, view, loc, time.Time{}, time.Time{})
+	if err != nil {
+		return nil, false, err
+	}
+	if len(events) > maxSearchRows {
+		return events[:maxSearchRows], true, nil
+	}
+	return events, false, nil
+}
+
+// scanEventRows turns calendar_objects rows into Events, dropping retired and
+// role-hidden rows before anything is parsed and expanding repeating series
+// over [expandFrom, expandTo). A zero window leaves a series unexpanded.
+func scanEventRows(rows pgx.Rows, view eventView, loc *time.Location, expandFrom, expandTo time.Time) (events []Event, truncated []string, err error) {
+	expand := !expandFrom.IsZero() && !expandTo.IsZero()
 	for rows.Next() {
 		row, err := scanEventRow(rows)
 		if err != nil {
@@ -675,7 +731,7 @@ func queryOccurrencesAs(ctx context.Context, pool querier, view eventView, house
 			events = append(events, *ev)
 			continue
 		}
-		occs, cut := expandSeries(*ev, series, startDate, endDate, loc)
+		occs, cut := expandSeries(*ev, series, expandFrom, expandTo, loc)
 		events = append(events, occs...)
 		if cut {
 			truncated = append(truncated, ev.Title)
@@ -685,7 +741,6 @@ func queryOccurrencesAs(ctx context.Context, pool querier, view eventView, house
 	if err := rows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("iterate events: %w", err)
 	}
-
 	return events, truncated, nil
 }
 
@@ -1006,11 +1061,11 @@ const maxFindRangeDays = 366
 // check_conflicts: from/to = a proposed time lists what it overlaps).
 func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 	tool := mcp.NewTool("event_find", toolOptions(classR, "Find events",
-		mcp.WithDescription("Find events overlapping a range, by text or calendar. Use from/to = a proposed time to check conflicts. Pass id for one event. Times are in the family timezone."),
+		mcp.WithDescription("Find events by text or calendar on any date, or overlapping a range with from/to. Pass id for one event. Times are in the family timezone."),
 		mcp.WithString("id", mcp.Description("One event's id; the other filters are ignored")),
-		mcp.WithString("from", mcp.Description("Range start: date or time with offset, e.g. 2026-11-18. Default today")),
-		mcp.WithString("to", mcp.Description("Range end: a date is inclusive, a time exclusive. Default from + 7 days")),
-		mcp.WithString("query", mcp.Description("Words to match in title, description or location, e.g. dentist")),
+		mcp.WithString("from", mcp.Description("Range start: a date or a time with offset. Default today; every date with query")),
+		mcp.WithString("to", mcp.Description("Range end: a date is inclusive, a time exclusive. With query: every date")),
+		mcp.WithString("query", mcp.Description("Words to match in title, description, location or calendar, on every date")),
 		mcp.WithString("calendar_id", mcp.Description("Calendar name or id, e.g. Family")),
 		mcp.WithNumber("limit", mcp.Description("Max events to return (default 25, max 100)"), mcp.Min(1), mcp.Max(maxLimit)),
 		mcp.WithString("cursor", mcp.Description("Cursor from the previous result for the next page")),
@@ -1068,24 +1123,35 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		if bad != nil {
 			return bad, nil
 		}
+		// A text query is a lookup, not a range scan (#4944). Defaulting it to
+		// the next 7 days made "is the Christmas thing on the calendar?"
+		// answer "no" for a December event while the event existed: a
+		// confident wrong absence, the worst answer a read tool can give. So
+		// a bare query searches every date; from/to still narrow it when the
+		// caller gives them.
+		query := strings.TrimSpace(getStringArg(args, "query"))
+		fromArg, toArg := strings.TrimSpace(getStringArg(args, "from")), strings.TrimSpace(getStringArg(args, "to"))
+		openEnded := query != "" && fromArg == "" && toArg == ""
 		from := todayIn(loc)
-		if s := getStringArg(args, "from"); strings.TrimSpace(s) != "" {
-			if from, bad = parseBound("from", s, false, loc); bad != nil {
+		if fromArg != "" {
+			if from, bad = parseBound("from", fromArg, false, loc); bad != nil {
 				return bad, nil
 			}
 		}
 		to := from.AddDate(0, 0, 7)
-		if s := getStringArg(args, "to"); strings.TrimSpace(s) != "" {
-			if to, bad = parseBound("to", s, true, loc); bad != nil {
+		if toArg != "" {
+			if to, bad = parseBound("to", toArg, true, loc); bad != nil {
 				return bad, nil
 			}
 		}
 		if !to.After(from) {
 			return respond.Invalid("to", "to must be after from.",
-				"Pass a later to. A date-only to includes that whole day, so from=to=2026-11-18 is one day.",
+				"Pass a later to. A date-only to includes the whole day, so from=to=2026-11-18 is one day.",
 				map[string]any{"from": from.In(loc).Format(dateLayout), "to": from.In(loc).Format(dateLayout)}), nil
 		}
-		if to.Sub(from) > maxFindRangeDays*24*time.Hour {
+		// An open-ended query reads every date, so the range cap does not
+		// apply to it; an explicit range stays bounded as before.
+		if !openEnded && to.Sub(from) > maxFindRangeDays*24*time.Hour {
 			return respond.Invalid("to", fmt.Sprintf("The range is longer than %d days.", maxFindRangeDays),
 				"Search a shorter range, or use query to find a specific event.",
 				map[string]any{"from": from.In(loc).Format(dateLayout), "to": from.AddDate(0, 1, 0).In(loc).Format(dateLayout)}), nil
@@ -1101,15 +1167,54 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			calendarIDs = []string{cal.ID}
 		}
 
-		events, truncated, err := queryOccurrencesAs(ctx, pool, view, claims.HouseholdID, loc, calendarIDs, from, to)
-		if err != nil {
-			slog.Error("event_find: query error", "error", err)
-			return respond.Failed("find events", err), nil
+		// defaulted: the tool chose part of the window, because the caller
+		// gave neither end or only one. That is the case that can make a
+		// caller believe an event does not exist, so it is reported loudly
+		// and in the structured range alike (#4944). A window the caller
+		// spelled out in full is theirs: an empty result in it is an answer,
+		// not a secret.
+		defaulted := !openEnded && (fromArg == "" || toArg == "")
+
+		var events []Event
+		var truncated []string
+		var searched *respond.Range
+		if openEnded {
+			all, cut, err := queryEveryEventAs(ctx, pool, view, claims.HouseholdID, loc, calendarIDs)
+			if err != nil {
+				slog.Error("event_find: query error", "error", err)
+				return respond.Failed("find events", err), nil
+			}
+			events = all
+			searched = respond.AllDatesRange("Searched every date, so an empty result means no event matches.")
+			if cut {
+				searched = respond.DaysRange("", "", true, fmt.Sprintf(
+					"Searched every date, but the household holds more than %d calendar entries and only %d were read; more may match.",
+					maxSearchRows, maxSearchRows))
+			}
+		} else {
+			all, cut, err := queryOccurrencesAs(ctx, pool, view, claims.HouseholdID, loc, calendarIDs, from, to)
+			if err != nil {
+				slog.Error("event_find: query error", "error", err)
+				return respond.Failed("find events", err), nil
+			}
+			events, truncated = all, cut
+			first, last := from.In(loc).Format(dateLayout), to.Add(-time.Nanosecond).In(loc).Format(dateLayout)
+			switch {
+			case defaulted:
+				searched = respond.DaysRange(first, last, true, fmt.Sprintf(
+					"Searched %s only; more may match outside it. Leave from/to off, or widen them, to search other dates.", describeRange(from, to, loc)))
+			case len(truncated) > 0:
+				searched = respond.DaysRange(first, last, true,
+					"Searched this range only, and long series were cut at this size; ask for a shorter range to see the rest.")
+			default:
+				searched = respond.DaysRange(first, last, false, "Searched exactly this range.")
+			}
 		}
-		query := getStringArg(args, "query")
 		matched := make([]Event, 0, len(events))
 		for _, ev := range events {
-			if eventOverlapsRange(ev, from, to) && matchesQuery(ev, query) {
+			// An open-ended search has no window to test against: every row
+			// that came back matches the text query.
+			if (openEnded || eventOverlapsRange(ev, from, to)) && matchesQuery(ev, query) {
 				matched = append(matched, ev)
 			}
 		}
@@ -1128,19 +1233,17 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		hi := min(lo+limit, total)
 		page := matched[lo:hi]
 
+		// The summary has to answer "did you look everywhere?" before it
+		// answers "what did you find?", because a caller reads the first line
+		// and stops (#4944).
 		where := describeRange(from, to, loc)
-		if strings.TrimSpace(query) != "" {
-			where += fmt.Sprintf(" matching %q", strings.TrimSpace(query))
+		if openEnded {
+			where = "on any date"
 		}
-		var summary string
-		switch {
-		case total == 0:
-			summary = fmt.Sprintf("No events %s.", where)
-		case len(page) == total:
-			summary = fmt.Sprintf("Found %d %s %s.", total, plural(total, "event", "events"), where)
-		default:
-			summary = fmt.Sprintf("Showing events %d–%d of %d %s.", lo+1, hi, total, where)
+		if query != "" {
+			where += fmt.Sprintf(" matching %q", query)
 		}
+		summary := foundSummary(where, total, lo, hi, defaulted, searched)
 		// Page.Total counts this page plus what is left after it, so the
 		// last page is not marked truncated.
 		p := respond.Page{Total: total - lo}
@@ -1154,12 +1257,40 @@ func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		}
 		if len(page) > 0 {
 			next = append(next, eventHints(page[0])...)
+		} else if searched.AllDates {
+			next = append(next, "No match on any date. Add one with event_create, or try search_all to look in notes and other areas too.")
 		} else {
-			next = append(next, "Add one with event_create, or widen from/to.")
+			next = append(next, "Nothing in this range. Call event_find without from/to to search every date, or add one with event_create.")
 		}
-		return respond.List(summary, page, p, next...), nil
+		if searched.MayHaveMore && total > 0 {
+			next = append(next, "More matches may exist outside the range searched; leave from/to off to search every date.")
+		}
+		return respond.ListIn(summary, page, p, searched, next...), nil
 	}
 	return tool, handler
+}
+
+// foundSummary words an event_find result. Its one hard rule is that a zero
+// result never reads as "it does not exist" when the truth is "it is outside
+// what I searched" (#4944): every empty answer names which of the two it is,
+// before a caller can act on it. An exhaustive search says so; a window the
+// tool chose itself shouts that nothing outside it was checked; a search cut
+// short by a size cap refuses to be read as proof of absence.
+func foundSummary(where string, total, lo, hi int, defaulted bool, searched *respond.Range) string {
+	switch {
+	case total == 0 && searched.AllDates:
+		return fmt.Sprintf("No events %s — every date was searched, so no event matches.", where)
+	case total == 0 && defaulted:
+		return fmt.Sprintf("No events %s — SEARCHED THAT RANGE ONLY, so nothing outside it was checked; pass from/to, or leave them off, to search other dates.", where)
+	case total == 0 && searched.MayHaveMore:
+		return fmt.Sprintf("No events %s — the search stopped short (%s), so this is not proof the event does not exist.", where, searched.Note)
+	case total == 0:
+		return fmt.Sprintf("No events %s.", where)
+	case hi == total:
+		return fmt.Sprintf("Found %d %s %s.", total, plural(total, "event", "events"), where)
+	default:
+		return fmt.Sprintf("Showing events %d–%d of %d %s.", lo+1, hi, total, where)
+	}
 }
 
 // truncatedNote tells the caller which series were cut at
