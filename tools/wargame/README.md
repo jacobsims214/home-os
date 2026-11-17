@@ -7,7 +7,7 @@ you check what actually landed in Home OS with direct MCP calls.
 | File | What it does |
 |---|---|
 | `chat.sh` | Sends one persona turn to a moltis agent, waits for the reply, prints the tool calls it made and its answer. `--history` dumps a whole session; `--stdin` / `--file` take the message where the shell cannot expand it — **see the quoting section immediately below**; `--selftest` runs the message-guard tests. |
-| `mcpcall.py` | Ground truth: calls one Home OS MCP tool as a household member and prints the result. Still speaks the legacy SSE transport, which Stage 1 no longer serves — see the note under Requirements. |
+| `mcpcall.py` | Ground truth: calls one Home OS MCP tool as a household member and prints the result, over Streamable HTTP at `POST <HOMEOS_MCP_URL>/mcp` — the only MCP transport Home OS serves. `--selftest` runs its transport tests with no network. |
 | `api.py` | Same idea for the REST API (`/api/v1/...`). **Dex id_token only** — a `hos_` agent token 401s there by design; see [Two kinds of token](#two-kinds-of-token-agent-tokens-are-mcp-scoped). |
 | `personas.md` | The household, the two personas (Jacob, Amber), their scenarios and sample turns, and the agent system-prompt snippet. |
 
@@ -78,19 +78,33 @@ Requirements: `bash`, `curl`, `python3` (standard library only), `jq` for the re
 below. Run `mcpcall.py`/`api.py` from somewhere that can reach the Home OS services, for
 example a throwaway pod in the `home-os` namespace, or through a port-forward.
 
-> **`mcpcall.py` is not yet usable against Stage 1 (#4949).** It opens `/mcp/sse`, the
-> legacy SSE transport, and the deployed MCP serves Streamable HTTP only at `/mcp`: a
-> `GET /mcp/sse` is a **404**, and `./mcpcall.py -list` dies in `queue.Empty` rather than
-> saying so. Until #4949 ports it, call the MCP directly:
+> **The MCP transport is Streamable HTTP at `POST <HOMEOS_MCP_URL>/mcp` — and nothing
+> else.** Since #4361 the legacy HTTP+SSE transport (`GET /mcp/sse`, `POST /mcp/message`)
+> is gone from Home OS: both are **404s**. Don't count on SSE anywhere: it was what the
+> pre-#4361 build served, and the old line here — "the legacy SSE transport … which every
+> MCP build serves" — stopped being true the moment this build dropped it (it cost two R1
+> players an hour each, G8/G10). `mcpcall.py` now posts to `/mcp` with the `initialize`
+> handshake and needs no session, because the server is stateless.
+>
+> Run it from somewhere that can reach the service — a throwaway pod in the `home-os`
+> namespace, or a port-forward. Off-cluster:
 >
 > ```bash
-> curl -sS -X POST "${HOMEOS_MCP_URL%/}/mcp" \
->   -H "Authorization: Bearer $HOMEOS_AGENT_TOKEN" \
->   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
->   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools | length'
+> kubectl -n home-os port-forward svc/home-os-mcp 8082:8082 &
+> export HOMEOS_MCP_URL=http://127.0.0.1:8082     # a BASE url: the script appends /mcp
+> ./mcpcall.py -list                              # 90 tools on Stage 1
 > ```
 >
-> `api.py` has no such problem: it is plain REST and works as documented below.
+> `HOMEOS_MCP_URL` is a **base** URL (`http://host:8082`), not the endpoint: the script
+> appends `/mcp`. A value that already ends in `/mcp` is used as-is; anything else —
+> notably `.../mcp/sse`, the old shape — becomes `<base>/mcp` and 404s. Every failure
+> names the URL it posted to and what the status means: a 404 says the endpoint does not
+> exist and the SSE paths were removed, a 401 points at `HOMEOS_AGENT_TOKEN`, and an
+> unreachable host says to start the port-forward. Exit status is `0` ok, `1` the server
+> refused the call (a JSON-RPC error, or the tool's own `isError`), `2` transport or
+> usage — so a failed ground-truth read never looks like a pass.
+>
+> `api.py` is plain REST and unaffected by any of this; it works as documented below.
 
 ## Configuration
 
@@ -112,8 +126,9 @@ export WG_AMBER_PASSWORD=...
 agent token is the normal one: one per member, minted by that member.
 
 ```bash
-export HOMEOS_MCP_URL=http://home-os-mcp.home-os:8082
+export HOMEOS_MCP_URL=http://home-os-mcp.home-os:8082   # base; the script POSTs to /mcp
 export HOMEOS_AGENT_TOKEN=...        # the member's hos_ agent token
+# optional: HOMEOS_MCP_TIMEOUT_S (default 60)
 
 # Instead of a token, mint a Dex id_token with the password grant
 # (needs `dex.passwordConnector: local` in the chart values):
