@@ -145,9 +145,19 @@ func sameMoney(a, b float64) bool {
 func moneyText(v float64) string { return fmt.Sprintf("$%.2f", v) }
 
 // billLikeRowsSQL selects a household's live entries that may read as a bill
-// statement and are not a bill's own mirror: the predicate migration 073's
-// reconcile uses, so what it could not supersede is exactly what this reports.
-// The ical_data test is a cheap superset — the title decides (entryIsBillLike).
+// statement and are not a bill's own mirror: the predicate migrations 073 and
+// 074's reconcile use, so what it could not supersede is exactly what this
+// reports. The ical_data test is a cheap superset — the title decides
+// (titleReadsAsBill, then claimsMoney).
+//
+// A bill's mirror is told apart by entity_type = 'bill' with entity_id set
+// (packages/billcal), never by event_type: the round-1 legacy entries this
+// guard exists for were typed event_type 'bill' with entity_type NULL, and a
+// test on event_type excluded exactly those from being superseded (#5140).
+// The SQL function that replaces rows for this predicate is
+// calendar_absorb_bill_events(), corrected in migration 074 — keep the two in
+// step (testutil/legacy_bill_events_test.go and this package's billlook_test.go
+// compare them).
 const billLikeRowsSQL = `
 	SELECT co.id::text, c.name, c.type::text, co.ical_data
 	  FROM calendar_objects co
@@ -155,7 +165,6 @@ const billLikeRowsSQL = `
 	 WHERE c.household_id = $1
 	   AND co.superseded_at IS NULL
 	   AND co.entity_type IS NULL
-	   AND co.event_type IS DISTINCT FROM 'bill'
 	 ORDER BY co.starts_at NULLS LAST, co.id
 `
 

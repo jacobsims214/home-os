@@ -360,11 +360,12 @@ func TestAuthorship050_Reversible(t *testing.T) {
 	})
 
 	for cycle := 0; cycle < 2; cycle++ {
-		applyMigration(t, pool, "073_legacy_bill_events.down.sql")        // newest first: 073 sits on top of everything below
-		applyMigration(t, pool, "071_person_color.down.sql")              // newest first: drops people.color and its palette CHECK
-		applyMigration(t, pool, "070_entity_kind_notifications.down.sql") // newest first: notifications/calendar_objects entity_type back to VARCHAR
-		applyMigration(t, pool, "055_activity_event_titles.down.sql")     // restores 050's log_activity
-		applyMigration(t, pool, "054_change_notifications.down.sql")      // its trigger is on 050's activity_log
+		applyMigration(t, pool, "074_legacy_bill_events_reconcile.down.sql") // newest first: 074 sits on top of 073
+		applyMigration(t, pool, "073_legacy_bill_events.down.sql")           // newest first: 073 sits on top of everything below
+		applyMigration(t, pool, "071_person_color.down.sql")                 // newest first: drops people.color and its palette CHECK
+		applyMigration(t, pool, "070_entity_kind_notifications.down.sql")    // newest first: notifications/calendar_objects entity_type back to VARCHAR
+		applyMigration(t, pool, "055_activity_event_titles.down.sql")        // restores 050's log_activity
+		applyMigration(t, pool, "054_change_notifications.down.sql")         // its trigger is on 050's activity_log
 		applyMigration(t, pool, "050_authorship.down.sql")
 		if n := countRows(t, pool, `SELECT count(*) FROM pg_tables WHERE tablename = 'activity_log'`); n != 0 {
 			t.Fatalf("cycle %d: activity_log left", cycle)
@@ -389,7 +390,8 @@ func TestAuthorship050_Reversible(t *testing.T) {
 		applyMigration(t, pool, "055_activity_event_titles.up.sql")
 		applyMigration(t, pool, "070_entity_kind_notifications.up.sql")
 		applyMigration(t, pool, "071_person_color.up.sql")
-		applyMigration(t, pool, "073_legacy_bill_events.up.sql") // back to the head
+		applyMigration(t, pool, "073_legacy_bill_events.up.sql")           // back to the head
+		applyMigration(t, pool, "074_legacy_bill_events_reconcile.up.sql") // back to the head
 		var createdBy *uuid.UUID
 		mustScan(t, pool.QueryRow(ctx, `SELECT created_by FROM notes WHERE id = $1`, note), &createdBy)
 		if !eqID(createdBy, alex) {
