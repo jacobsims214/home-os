@@ -44,11 +44,12 @@ const noteJoins = ` LEFT JOIN users u ON u.id = n.author_id JOIN households h ON
 // exampleNoteID is the note_id used in error examples.
 const exampleNoteID = "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"
 
-// noteResult is one note in full, as returned by note_get, note_create,
-// note_update and note_delete. IDs are strings, not uuid.UUID: the
-// outputSchema is inferred with jsonschema-go, which sees uuid.UUID as a
-// [16]byte array and would reject the string UUIDs that are on the wire.
-type noteResult struct {
+// noteFields is one note in full, as returned by every note tool. It is a
+// separate type so noteWriteResult can embed it and add the near-duplicate
+// prompt (#4945) without repeating fifteen fields: jsonschema-go promotes an
+// embedded struct's fields into the object schema, and encoding/json inlines
+// them, so the wire shape of the fields themselves is unchanged.
+type noteFields struct {
 	ID               string    `json:"id" jsonschema_description:"The note's id; pass it as note_id."`
 	AboutType        string    `json:"about_type" jsonschema_description:"What the note is about: family, person, property, vehicle, ..."`
 	AboutID          *string   `json:"about_id" jsonschema_description:"Id of the row it is about; null for family notes."`
@@ -64,6 +65,12 @@ type noteResult struct {
 	UpdatedWeekday   string    `json:"updated_weekday" jsonschema_description:"Weekday of updated_local_date, e.g. Thu."`
 	Duplicate        bool      `json:"duplicate,omitempty" jsonschema_description:"true when note_create returned an identical note saved minutes ago instead of a copy."`
 }
+
+// noteResult is one note in full, as returned by note_get and note_delete.
+// IDs are strings, not uuid.UUID: the outputSchema is inferred with
+// jsonschema-go, which sees uuid.UUID as a [16]byte array and would reject the
+// string UUIDs that are on the wire.
+type noteResult struct{ noteFields }
 
 // noteSummary is one note_find item: a preview, not the whole body.
 type noteSummary struct {
@@ -110,7 +117,7 @@ func (n noteResult) summary() noteSummary {
 }
 
 // displayTitle is the title for summaries; NULL or empty is "(untitled)".
-func (n noteResult) displayTitle() string {
+func (n noteFields) displayTitle() string {
 	if n.Title != nil && *n.Title != "" {
 		return *n.Title
 	}
@@ -393,7 +400,7 @@ func NewNoteFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 			summary = fmt.Sprintf("Found %d notes; showing %d–%d.", total, offset+1, offset+len(items))
 		}
 		if total == 1 {
-			summary = fmt.Sprintf("Found 1 note: %q.", noteResult{Title: items[0].Title}.displayTitle())
+			summary = fmt.Sprintf("Found 1 note: %q.", noteFields{Title: items[0].Title}.displayTitle())
 		}
 		page := respond.Page{}
 		if remaining > 0 {
@@ -470,7 +477,7 @@ func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(false),
 		mcp.WithOpenWorldHintAnnotation(false),
-		respond.Schema[noteResult](),
+		respond.Schema[noteWriteResult](),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -478,10 +485,15 @@ func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		if claims == nil {
 			return notSignedIn(), nil
 		}
-		householdID, err := uuid.Parse(claims.HouseholdID)
-		if err != nil {
-			return notSignedIn(), nil
+		// The caller's household and current role, resolved the way the read
+		// tools resolve them: the near-duplicate scan below only names notes
+		// this role may see (#4881), so the role must be the same one
+		// note_find uses.
+		who, bad := readerOf(ctx, pool)
+		if bad != nil {
+			return bad, nil
 		}
+		householdID := who.householdID
 
 		args := req.GetArguments()
 		title := strings.TrimSpace(str(args, "title"))
@@ -531,9 +543,12 @@ func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		}
 
 		// Loop guard: the same member saving the same note again within the
-		// window gets the existing row back.
+		// window gets the existing row back. The extra column is the row's id
+		// as a uuid.UUID, so the near-duplicate scan below can exclude it
+		// without parsing noteResult's string id back.
+		var self uuid.UUID
 		n, err := scanNote(pool.QueryRow(ctx,
-			`SELECT `+noteColumns+`
+			`SELECT `+noteColumns+`, n.id
 			 FROM notes n`+noteJoins+`
 			 WHERE n.household_id = $1 AND n.entity_type::text = $2 AND n.entity_id = $3
 			   AND n.title = $4 AND n.body = $5
@@ -542,16 +557,31 @@ func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			 ORDER BY n.created_at DESC
 			 LIMIT 1`,
 			householdID, a.Kind, a.ID, title, content, authorID, createDedupeWindow,
-		))
+		), &self)
 		switch {
 		case err == nil:
+			// The identical note is returned instead of a copy, so its own
+			// title is not compared with itself (exclude) and the twins the
+			// first create already reported are reported again.
+			dups := nearDuplicates(ctx, pool, who, title, self)
 			n.Duplicate = true
-			return respond.OK(fmt.Sprintf("You already saved note %q in the last 10 minutes; returned it instead of saving a copy.",
-				n.displayTitle()), n,
-				fmt.Sprintf("To change it use note_update note_id=%s.", n.ID)), nil
+			summary := fmt.Sprintf("You already saved note %q in the last 10 minutes; returned it instead of saving a copy.",
+				n.displayTitle())
+			next := []string{fmt.Sprintf("To change it use note_update note_id=%s.", n.ID)}
+			if line := duplicateHeadsUp(dups); line != "" {
+				summary += " " + line
+				next = append(next, duplicateNext(dups)...)
+			}
+			return respond.OK(summary, noteWriteResult{noteResult: n, PossibleDuplicates: dups}, next...), nil
 		case !errors.Is(err, pgx.ErrNoRows):
 			return respond.Failed("save the note", err), nil
 		}
+
+		// Near-duplicate titles (#4945): before the write, so the response can
+		// name the existing notes the caller may be rewriting. It is a prompt,
+		// never a gate: nearDuplicates logs a failed check and returns nothing,
+		// and the note is saved either way.
+		dups := nearDuplicates(ctx, pool, who, title, uuid.Nil)
 
 		n, err = scanNote(pool.QueryRow(ctx,
 			`WITH inserted AS (
@@ -587,10 +617,14 @@ func NewNoteCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			summary = fmt.Sprintf("Saved note %q about %s %s.", n.displayTitle(), a.Type, a.ID)
 		}
 		next := []string{fmt.Sprintf("Add to it later with note_update note_id=%s append_text=….", n.ID)}
+		if line := duplicateHeadsUp(dups); line != "" {
+			summary += " " + line
+			next = append(next, duplicateNext(dups)...)
+		}
 		if looksLikeChecklist(content) {
 			next = append(next, "This looks like a checklist; consider list_create so items can be checked off.")
 		}
-		return respond.OK(summary, n, next...), nil
+		return respond.OK(summary, noteWriteResult{noteResult: n, PossibleDuplicates: dups}, next...), nil
 	}
 
 	return "note_create", tool, handler
@@ -688,6 +722,12 @@ const appendDedupeWindow = "60 seconds"
 // newline) and the note changed in the last 60 seconds, nothing is written
 // and the unchanged note is returned, so a looping agent cannot stack the
 // same line. A text that only matches the end of the last line is appended.
+//
+// Near-duplicate titles (#4945): a supplied title is compared with the
+// household's other note titles, and the close ones come back in
+// possible_duplicates. Only a supplied title is checked — a rename is the
+// only change that can introduce a new collision — and the rename happens
+// whether or not anything matched: the prompt is not a gate.
 func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	tool := mcp.NewTool("note_update",
 		mcp.WithDescription("Change a note. Use append_text to add lines without overwriting what others wrote."),
@@ -709,7 +749,7 @@ func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(false),
-		respond.Schema[noteResult](),
+		respond.Schema[noteWriteResult](),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -752,6 +792,28 @@ func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		}
 		guard := mode == 2 && title == ""
 
+		// Near-duplicate titles (#4945): only a supplied title can introduce a
+		// new collision, so an append or a body replacement checks nothing. A
+		// rename to the same words in a different shape ("Groceries!" for
+		// "Groceries") is not a new title either, and the note is not worth a
+		// warning about its own current title.
+		var dups []duplicateCandidate
+		if title != "" {
+			who, bad := readerOf(ctx, pool)
+			if bad != nil {
+				return bad, nil
+			}
+			current, err := currentTitle(ctx, pool, who.householdID, noteID)
+			// Same words in a new shape: nothing new to collide with. A note
+			// that is not this household's has no current title here, and the
+			// update itself reports it as not found.
+			if err == nil && sameTitleWords(current, title) {
+				dups = nil
+			} else {
+				dups = nearDuplicates(ctx, pool, who, title, noteID)
+			}
+		}
+
 		n, err := scanNote(pool.QueryRow(ctx,
 			`WITH updated AS (
 				UPDATE notes SET
@@ -793,8 +855,8 @@ func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		name := n.displayTitle()
 		readHint := fmt.Sprintf("Read it in full with note_get note_id=%s.", n.ID)
 		if duplicate {
-			return respond.OK(fmt.Sprintf("Note %q already ends with that text; nothing was added.", name), n,
-				readHint), nil
+			return respond.OK(fmt.Sprintf("Note %q already ends with that text; nothing was added.", name),
+				noteWriteResult{noteResult: n}, readHint), nil
 		}
 		var changed []string
 		if title != "" {
@@ -807,8 +869,12 @@ func NewNoteUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			changed = append(changed, "added text to the end")
 		}
 		summary := fmt.Sprintf("Updated note %q: %s.", name, joinAnd(changed))
-		return respond.OK(summary, n, readHint,
-			fmt.Sprintf("Add more with note_update note_id=%s append_text=….", n.ID)), nil
+		next := []string{readHint, fmt.Sprintf("Add more with note_update note_id=%s append_text=….", n.ID)}
+		if line := duplicateHeadsUp(dups); line != "" {
+			summary += " " + line
+			next = append(next, duplicateNext(dups)...)
+		}
+		return respond.OK(summary, noteWriteResult{noteResult: n, PossibleDuplicates: dups}, next...), nil
 	}
 
 	return "note_update", tool, handler
