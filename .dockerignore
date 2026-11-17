@@ -13,6 +13,7 @@
 
 *
 
+!packages/allergen/
 !packages/icalx/
 !packages/billcal/
 !apps/api/
