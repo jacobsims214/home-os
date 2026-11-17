@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { DEX_UI_CLIENT_ID, dexConfig } from "@/lib/auth/dex-config";
 import { PKCE_COOKIE, PKCE_COOKIE_PATH, decodePkceCookie } from "@/lib/auth/pkce-cookie";
 import { returnUrl } from "@/lib/auth/return-path";
+import { HOUSEHOLD_COOKIE } from "@/lib/household-cookie";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -133,6 +134,10 @@ export async function GET(request: NextRequest) {
       response.cookies.set(REFRESH_COOKIE, "", { ...baseCookie(), maxAge: 0 });
     }
     response.cookies.set(LEGACY_CLIENT_COOKIE, "", { ...baseCookie(), maxAge: 0 });
+    // The active household (#4574) belongs to the session: a sign-in on a
+    // browser a previous person used must not start scoped to their family. It
+    // is not httpOnly (the UI reads it), so expire it the same way.
+    response.cookies.set(HOUSEHOLD_COOKIE, "", { path: "/", sameSite: "lax", maxAge: 0 });
 
     return response;
   } catch (error) {

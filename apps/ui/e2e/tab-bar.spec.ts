@@ -102,7 +102,9 @@ for (const width of [375, 390]) {
         await expect(sheet.getByText(name, { exact: true })).toBeVisible();
       }
       await expect(sheet.getByRole("button", { name: /^Notifications/ })).toBeVisible();
-      await expect(sheet.getByRole("link", { name: /^Switch family/ })).toBeVisible();
+      // One family in the stub: the row names it and goes to Members, rather
+      // than offering a switch there is nothing to switch to (#4574).
+      await expect(sheet.getByRole("link", { name: /^Family members/ })).toBeVisible();
       await expect(sheet.getByRole("link", { name: "Settings" })).toBeVisible();
       await expect(sheet.getByRole("button", { name: /Account & log out/ })).toBeVisible();
 

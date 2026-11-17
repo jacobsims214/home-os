@@ -19,7 +19,18 @@
  *                          and a code_verifier: the OIDC callback's exchange
  *                          (#4617). The redirect_uri it sent is recorded.
  *   GET  /e2e/stats        {dexRefreshes, apiRequests, apiUnauthorized,
- *                          codeExchanges, lastRedirectUri, apiWrites}
+ *                          codeExchanges, lastRedirectUri, apiWrites,
+ *                          householdHeaders}
+ *   POST /e2e/households   {sid, households: [{id, name, role, timezone?, bills?}]}
+ *                          Multi-household sign-in (#4574), per session like
+ *                          the secrets vault: /me/households lists exactly these
+ *                          (current = the X-Household-ID the UI sent, else the
+ *                          first), /households/me answers the active one and
+ *                          /bills returns the active household's rows. Without
+ *                          it, every session keeps the single seed household.
+ *                          householdHeaders in /e2e/stats is what the API saw:
+ *                          one {sid, path, household} per API request, so a spec
+ *                          can prove the BFF scoped a request to a family.
  *   *    /api/v1/*         401 unless the Bearer is a JWT minted here; fixed
  *                          seed data for the dashboard lists, [] otherwise.
  *                          An authorized POST/PUT/PATCH/DELETE is recorded in
@@ -63,7 +74,9 @@ const key = randomBytes(32);
 const refreshTokens = new Map();
 // sid -> { key_salt, key_version, verifier?, key_hash?, upgraded, requests[] }
 const secretKeys = new Map();
-const stats = { dexRefreshes: 0, apiRequests: 0, apiUnauthorized: 0, codeExchanges: 0, lastRedirectUri: null, apiWrites: [] };
+const stats = { dexRefreshes: 0, apiRequests: 0, apiUnauthorized: 0, codeExchanges: 0, lastRedirectUri: null, apiWrites: [], householdHeaders: [] };
+// sid -> [{ id, name, role, timezone, bills }]. Empty: the single seed family.
+const sessionHouseholds = new Map();
 // The only authorization code the stub redeems (tests hand it to the callback).
 const E2E_CODE = "e2e-code";
 
@@ -111,7 +124,9 @@ function jwtClaims(jwt) {
 function issueTokens(sid = `s-${randomBytes(8).toString("hex")}`) {
   const refresh = `e2e-r-${randomBytes(12).toString("hex")}`;
   refreshTokens.set(refresh, sid);
-  return { access_token: "unused", token_type: "bearer", id_token: mintJwt(sid), refresh_token: refresh, expires_in: TOKEN_TTL_S };
+  // sid is not part of the real Dex response: it is here so a spec can seed a
+  // per-session household list (#4574) with POST /e2e/households.
+  return { access_token: "unused", token_type: "bearer", id_token: mintJwt(sid), refresh_token: refresh, expires_in: TOKEN_TTL_S, sid };
 }
 
 /** Byte length of a base64 string, or 0 if it isn't one. */
@@ -209,6 +224,7 @@ const server = createServer(async (req, res) => {
     }
     if (email !== SEED_USER.email) return send(res, 401, { error: "access_denied" });
     return send(res, 200, issueTokens());
+
   }
 
   if (path === "/dex/token" && req.method === "POST") {
@@ -231,6 +247,15 @@ const server = createServer(async (req, res) => {
     return send(res, 200, issueTokens(sid));
   }
 
+  if (path === "/e2e/households" && req.method === "POST") {
+    const { sid, households } = JSON.parse((await readBody(req)) || "{}");
+    if (!sid || !Array.isArray(households) || households.length === 0) {
+      return send(res, 400, { error: "sid and a non-empty households list are required" });
+    }
+    sessionHouseholds.set(sid, households);
+    return send(res, 201, { ok: true });
+  }
+
   if (path.startsWith("/api/v1/")) {
     stats.apiRequests += 1;
     const auth = req.headers.authorization ?? "";
@@ -239,6 +264,16 @@ const server = createServer(async (req, res) => {
       return send(res, 401, { error: { code: "UNAUTHORIZED", message: "invalid token" } });
     }
     const resource = path.slice("/api/v1/".length).replace(/\/+$/, "");
+    const claims = jwtClaims(auth.slice(7));
+    // #4574: what the Go API would resolve the request to. The BFF sets this
+    // from the home-os-household cookie; a browser-supplied header never
+    // reaches here, which is the point of the assertion. Keyed by the session's
+    // sid so parallel specs (one stub process) can read only their own.
+    const headerHousehold = req.headers["x-household-id"] ?? null;
+    stats.householdHeaders.push({ sid: claims.sid ?? null, path: resource, household: headerHousehold });
+    const households = sessionHouseholds.get(claims.sid ?? "");
+    const activeHousehold =
+      households?.find((h) => h.id === headerHousehold) ?? households?.[0] ?? null;
     let body = {};
     if (req.method !== "GET" && req.method !== "HEAD") {
       try {
@@ -256,6 +291,39 @@ const server = createServer(async (req, res) => {
       if (req.method === "POST") return send(res, 201, { data: { id: `e2e-${stats.apiWrites.length}`, ...body } });
     }
     if (resource === "auth/me" || resource === "users/me") return send(res, 200, { data: SEED_USER });
+    if (households) {
+      // Mirrors GET /api/v1/me/households: role per household, is_default on
+      // the first, current on the one X-Household-ID resolved to.
+      if (resource === "me/households") {
+        return send(res, 200, {
+          data: households.map((h, i) => ({
+            id: h.id,
+            name: h.name,
+            timezone: h.timezone ?? "UTC",
+            role: h.role,
+            joined_at: "2026-01-01T00:00:00Z",
+            is_default: i === 0,
+            current: h.id === activeHousehold?.id,
+          })),
+        });
+      }
+      if (resource === "households/me" && activeHousehold) {
+        return send(res, 200, {
+          data: { id: activeHousehold.id, name: activeHousehold.name, timezone: activeHousehold.timezone ?? "UTC" },
+        });
+      }
+      // Lists and records the spec seeds per household: only the active
+      // family's rows exist here. Another family's bill id is a 404, exactly as
+      // the Go API answers for a row that is not in the request's household.
+      if (activeHousehold && (resource === "bills" || resource.startsWith("bills/"))) {
+        const bills = activeHousehold.bills ?? [];
+        if (resource === "bills") return send(res, 200, { data: bills });
+        const id = resource.slice("bills/".length);
+        const bill = bills.find((b) => b.id === id);
+        if (!bill) return send(res, 404, { error: { code: "NOT_FOUND", message: "bill not found" } });
+        return send(res, 200, { data: bill });
+      }
+    }
     const property = SEED.properties.find((p) => resource === `properties/${p.id}`);
     if (property) return send(res, 200, { data: property });
     return send(res, 200, { data: SEED[resource] ?? [] });

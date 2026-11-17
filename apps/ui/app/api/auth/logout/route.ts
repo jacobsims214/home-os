@@ -33,11 +33,16 @@
  */
 import { isSameOrigin } from "@/lib/auth/same-origin";
 import { CLEAR_SITE_DATA } from "@/lib/auth/clear-site-data";
+import { HOUSEHOLD_COOKIE } from "@/lib/household-cookie";
 
 export const dynamic = "force-dynamic";
 
 // Path=/ cookies from the callback (see KB architecture/ui-session-cookies.md).
 const SESSION_COOKIES = ["home-os-token", "home-os-refresh", "home-os-token-client"];
+// The active household (#4574). Not a credential — an id the BFF forwards as
+// X-Household-ID — but it belongs to the session, so signing out of one account
+// must not leave the next one scoped to the previous account's family.
+const HOUSEHOLD_COOKIES = [HOUSEHOLD_COOKIE];
 // The one-time PKCE cookie lives on /api/auth; drop it too in case a login was
 // abandoned half-way.
 const PKCE_COOKIE = "home-os-pkce";
@@ -71,7 +76,9 @@ export async function POST(request: Request): Promise<Response> {
   // registrations. Both are quoted-string directives, exactly as MDN's grammar
   // requires. See lib/session-teardown.ts for what the page clears as well.
   headers.set("Clear-Site-Data", CLEAR_SITE_DATA);
-  for (const name of SESSION_COOKIES) headers.append("Set-Cookie", expiredCookie(name, "/"));
+  for (const name of [...SESSION_COOKIES, ...HOUSEHOLD_COOKIES]) {
+    headers.append("Set-Cookie", expiredCookie(name, "/"));
+  }
   headers.append("Set-Cookie", expiredCookie(PKCE_COOKIE, "/api/auth"));
   return new Response(null, { status: 303, headers });
 }

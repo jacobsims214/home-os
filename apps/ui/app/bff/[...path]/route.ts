@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { DEX_UI_CLIENT_ID, dexTokenUrl } from "@/lib/auth/dex-config";
 import { isSameOrigin } from "@/lib/auth/same-origin";
+import { HOUSEHOLD_COOKIE, isHouseholdId } from "@/lib/household-cookie";
 
 /**
  * BFF proxy: /bff/<path> → ${API_INTERNAL_URL}/api/v1/<path>
@@ -37,6 +38,24 @@ import { isSameOrigin } from "@/lib/auth/same-origin";
  * browser), gets 403 before any refresh or upstream call. The session cookies
  * alone authenticate, so without this a sibling host on the same parent
  * domain could write through the BFF.
+ *
+ * Active household (#4574): a Home OS account can belong to several households,
+ * and the Go API scopes a request to one of them with the `X-Household-ID`
+ * header (auth/resolve.go: it must be one of the caller's memberships, else
+ * 403; with no header the oldest membership is used). The UI keeps the choice
+ * in the script-readable `home-os-household` cookie (lib/household-cookie.ts)
+ * and this handler is the ONE place that turns it into the header:
+ *
+ *   - any `x-household-id` the browser sent is dropped (STRIP_REQUEST), so a
+ *     page, a bug or an injected script cannot read another family's data by
+ *     setting a header;
+ *   - a well-formed id in the cookie is sent upstream, and nothing is sent when
+ *     the cookie is missing or malformed (the API then uses the default).
+ *
+ * Session cookies are httpOnly and belong to the browser; this one is an id,
+ * not a credential, and the API still refuses a household the member is not in,
+ * so a tampered value answers 403 rather than another family's rows. Logout
+ * expires it (app/api/auth/logout/route.ts).
  *
  * Env: API_INTERNAL_URL — base URL of the Go API reachable from the UI pod
  * (default http://home-os-api:8080). DEX_TOKEN_URL — Dex token endpoint
@@ -92,6 +111,10 @@ const STRIP_REQUEST = new Set([
   "expect", // undici rejects Expect: 100-continue (curl sends it for large uploads)
   "origin",
   "referer",
+  // #4574: the household is chosen by the UI's own cookie below, never by the
+  // caller. Leaving this in would let any script with the page read another
+  // family's data through the BFF.
+  "x-household-id",
 ]);
 
 // Response headers we never return: cookie management belongs to the UI.
@@ -331,6 +354,11 @@ async function proxy(
   // Ask for an uncompressed body: fetch would decode it but keep the
   // Content-Encoding header, which would corrupt the response.
   headers.set("accept-encoding", "identity");
+  // #4574: the active household, from the UI's cookie only (see the file note).
+  // A value that is not a household UUID is treated as "not set" rather than
+  // forwarded, so the API's 400 never reaches the page over a corrupted cookie.
+  const householdId = request.cookies.get(HOUSEHOLD_COOKIE)?.value;
+  if (isHouseholdId(householdId)) headers.set("X-Household-ID", householdId!.trim());
   const fwdHost = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
   if (fwdHost) headers.set("x-forwarded-host", fwdHost);
 

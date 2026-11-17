@@ -37,7 +37,10 @@ for (const width of [375, 390]) {
       await expect(header.getByRole("heading", { level: 1, name: "Today" })).toBeVisible();
       await expect(header.getByRole("button", { name: /^Notifications/ })).toBeVisible();
       await expect(header.getByRole("button", { name: /^Account menu/ })).toBeVisible();
-      await expect(header.getByRole("link", { name: /^Family:/ })).toBeVisible();
+      // The family chip (#4574): this account has one family in the stub, so it
+      // is a plain label naming it, not a switcher button.
+      await expect(header.getByText("Your family", { exact: true })).toBeVisible();
+      await expect(header.getByRole("button", { name: /^Family:/ })).toHaveCount(0);
 
       // The bug from the audit: the navbar rendered open over every page.
       // (The phone's "Main navigation" is the bottom tab bar, tab-bar.spec.ts.)
