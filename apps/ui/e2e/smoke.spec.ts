@@ -74,9 +74,11 @@ test("signed in: home renders through the BFF with no horizontal scroll", async 
 
   await page.goto(HOME);
   await expect(page).toHaveURL(new RegExp(`${HOME}$`));
-  await expect(page.getByRole("heading", { name: "Dashboard", level: 2 })).toBeVisible();
-  // Data has arrived (skeletons are gone) once a summary section renders.
-  await expect(page.getByRole("heading", { name: "Financial Summary" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^(Good morning|Good afternoon|Good evening|Today)/, level: 2 })).toBeVisible();
+  // Data has arrived (the day's own section rendered) — Today is the home
+  // screen since #4549; the old financial-summary cards are gone.
+  await expect(page.getByTestId("today-agenda")).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^Today/, level: 3 })).toBeVisible();
 
   if (!process.env.E2E_BASE_URL) {
     // Seeded stub content proves the BFF forwarded an accepted Bearer token.
@@ -116,7 +118,7 @@ test("refresh-only session renews silently on the home screen", async ({ page, b
   await signInWithStub(page, baseURL!, { idToken: false });
   const before = (await stubStats()).dexRefreshes;
   await page.goto(HOME);
-  await expect(page.getByRole("heading", { name: "Financial Summary" })).toBeVisible();
+  await expect(page.getByTestId("today-agenda")).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`${HOME}$`));
   expect((await stubStats()).dexRefreshes).toBeGreaterThan(before);
   const names = (await page.context().cookies()).map((c) => c.name);

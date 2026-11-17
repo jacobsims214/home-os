@@ -10,7 +10,7 @@ import { test, expect, expectNoHorizontalOverflow, onlyOn, pressOpener } from ".
 
 async function gotoHome(page: Page) {
   await page.goto("/dashboard");
-  await expect(page.getByRole("heading", { name: "Dashboard", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^(Good morning|Good afternoon|Good evening|Today)/, level: 2 })).toBeVisible();
 }
 
 const tabBar = (page: Page) => page.getByRole("navigation", { name: "Main navigation" });
