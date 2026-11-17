@@ -41,7 +41,7 @@ type Entry struct {
 	ParentID      *uuid.UUID
 	ChangedFields []string
 	Summary       string
-	// Changes is activity_log.changes (migration 071, #4941): the before and
+	// Changes is activity_log.changes (migration 072, #4941): the before and
 	// after VALUE of the columns the log records values for (money, dates and
 	// a bill's source document), as {"amount": {"from": 5, "to": 35}}. Nil for
 	// every other change.

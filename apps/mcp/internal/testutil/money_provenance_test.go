@@ -1,6 +1,6 @@
 package testutil
 
-// Tests for migration 071 (#4941): a bill's source document (same-family FK),
+// Tests for migration 072 (#4941): a bill's source document (same-family FK),
 // the provenance columns on files, and the before/after values the change
 // feed keeps for money and dates.
 
@@ -36,7 +36,7 @@ func rawDocument(t *testing.T, pool interface {
 	return id
 }
 
-func TestMoneyProvenance071_SourceDocumentLink(t *testing.T) {
+func TestMoneyProvenance072_SourceDocumentLink(t *testing.T) {
 	pool := NewPool(t)
 	f := seedV2Family(t, pool)
 	ctx := context.Background()
@@ -77,7 +77,7 @@ func TestMoneyProvenance071_SourceDocumentLink(t *testing.T) {
 	}
 }
 
-func TestMoneyProvenance071_AmountBeforeAndAfter(t *testing.T) {
+func TestMoneyProvenance072_AmountBeforeAndAfter(t *testing.T) {
 	pool := NewPool(t)
 	f := seedV2Family(t, pool)
 	amber := newMember(t, pool, f.household, "Amber")
@@ -132,9 +132,9 @@ func TestMoneyProvenance071_AmountBeforeAndAfter(t *testing.T) {
 	}
 }
 
-// TestMoneyProvenance071_Reversible pins down/up: the columns, the function
+// TestMoneyProvenance072_Reversible pins down/up: the columns, the function
 // and the trigger survive a round trip, and text_origin defaults to derived.
-func TestMoneyProvenance071_Reversible(t *testing.T) {
+func TestMoneyProvenance072_Reversible(t *testing.T) {
 	pool := NewPool(t)
 	ctx := context.Background()
 
@@ -145,7 +145,7 @@ func TestMoneyProvenance071_Reversible(t *testing.T) {
 		t.Fatal("up did not add bills.source_document_id")
 	}
 
-	applyMigration(t, pool, "071_money_provenance.down.sql")
+	applyMigration(t, pool, "072_money_provenance.down.sql")
 	for _, q := range []string{
 		`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'bills' AND column_name = 'source_document_id')`,
 	} {
@@ -163,7 +163,7 @@ func TestMoneyProvenance071_Reversible(t *testing.T) {
 	}
 	// 055's body is back: it must not name the dropped column.
 	if n := countRows(t, pool, `SELECT count(*) FROM pg_proc WHERE proname = 'log_activity' AND prosrc LIKE '%v_changes%'`); n != 0 {
-		t.Error("down left the 071 log_activity body")
+		t.Error("down left the 072 log_activity body")
 	}
 	// The trigger still logs an update, so down is not a broken state.
 	f := seedV2Family(t, pool)
@@ -174,7 +174,7 @@ func TestMoneyProvenance071_Reversible(t *testing.T) {
 		t.Errorf("down left %d update rows, want 1", n)
 	}
 
-	applyMigration(t, pool, "071_money_provenance.up.sql")
+	applyMigration(t, pool, "072_money_provenance.up.sql")
 	mustScan(t, pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
 		WHERE table_name = 'bills' AND column_name = 'source_document_id')`), &hasColumn)
 	if !hasColumn {

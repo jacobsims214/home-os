@@ -157,7 +157,7 @@ type change struct {
 	Action string `json:"action" jsonschema_description:"created, updated, deleted or revealed (a credential read by an agent)."`
 	What   string `json:"what" jsonschema_description:"The kind of record, e.g. event, list item, bill."`
 	Line   string `json:"line" jsonschema_description:"Ready-to-say line, e.g. Amber created event \"Dentist\" via agent \"Claude\"."`
-	// Changes is the before/after VALUE of the columns migration 071 records
+	// Changes is the before/after VALUE of the columns migration 072 records
 	// them for (money, dates and a bill's source document): {"amount":
 	// {"from": 5, "to": 35}}. Absent for every other change, so most updates
 	// still carry no record values.
@@ -528,7 +528,7 @@ type logRow struct {
 	parentID      *uuid.UUID
 	changedFields []string
 	summary       string
-	// changes is activity_log.changes as JSON (migration 071), raw until the
+	// changes is activity_log.changes as JSON (migration 072), raw until the
 	// row is rendered.
 	changes    []byte
 	who        string
@@ -578,7 +578,7 @@ func (r logRow) change(loc *time.Location) change {
 	return c
 }
 
-// values decodes activity_log.changes (migration 071) into the before/after
+// values decodes activity_log.changes (migration 072) into the before/after
 // map the output carries, or nil when the row has none. The JSON is small and
 // written by the allowlist in activity_change_values(), so a row that does not
 // decode is treated as having none rather than failing the feed.

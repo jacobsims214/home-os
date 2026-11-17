@@ -23,7 +23,7 @@ import (
 // reported the record verified. The pair could only agree because both were
 // written from the same mistake.
 //
-// bills.source_document_id (migration 071) records the document a bill came
+// bills.source_document_id (migration 072) records the document a bill came
 // from. bill_create and bill_update then read that document's stored text,
 // pull the money amounts out of it, and compare them with the amount being
 // recorded: on a mismatch the result says so in as many words and quotes the

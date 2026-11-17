@@ -167,7 +167,7 @@ func withChangeValues(summary, values string) string {
 // changesText lists the before/after values as
 // "amount $5.00 -> $35.00", or "" when the entry records none. The columns that reach it are money,
 // dates and a bill's source document (activity_change_values(), migration
-// 071), so the formatting stays narrow.
+// 072), so the formatting stays narrow.
 func changesText(changes map[string]ValueChange) string {
 	if len(changes) == 0 {
 		return ""

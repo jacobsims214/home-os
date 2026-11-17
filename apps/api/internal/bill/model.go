@@ -43,7 +43,7 @@ type Bill struct {
 	// (migration 052, written by the MCP bill_pay). Read-only in the API.
 	PaidForDueDate *time.Time
 	// SourceDocumentID is the document the bill's amount came from
-	// (migration 071, #4941): read it with the documents API to check the
+	// (migration 072, #4941): read it with the documents API to check the
 	// amount against the text it was taken from. Read-only in the API.
 	SourceDocumentID *uuid.UUID
 }

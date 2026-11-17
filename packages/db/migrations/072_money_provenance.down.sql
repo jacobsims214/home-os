@@ -1,6 +1,6 @@
--- 071_money_provenance.down.sql (#4941)
+-- 072_money_provenance.down.sql (#4941)
 --
--- Undoes 071: activity_log.changes and activity_change_values(),
+-- Undoes 072: activity_log.changes and activity_change_values(),
 -- bills.source_document_id and files.text_origin/text_sha256 (with the
 -- (id, household_id) key the composite FK targeted).
 --

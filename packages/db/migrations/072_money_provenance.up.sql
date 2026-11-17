@@ -1,4 +1,4 @@
--- 071_money_provenance.up.sql (#4941)
+-- 072_money_provenance.up.sql (#4941)
 --
 -- Make money recorded from a person's own text able to prove what happened.
 --

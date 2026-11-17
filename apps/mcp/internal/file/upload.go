@@ -379,7 +379,7 @@ func NewDocumentUploadTool(pool *pgxpool.Pool, ts *Typesense) (string, mcp.Tool,
 	return "document_upload", tool, handler
 }
 
-// textOrigins are files.text_origin's values (migration 071, #4941).
+// textOrigins are files.text_origin's values (migration 072, #4941).
 const (
 	// textOriginRaw means the body is the caller's own text, stored unaltered:
 	// it is the source a recorded amount can be checked against.

@@ -79,7 +79,7 @@ type createBillInput struct {
 	subject        subject
 	paymentURL     *string
 	notes          *string
-	// sourceDocumentID is the document the bill was taken from (071, #4941),
+	// sourceDocumentID is the document the bill was taken from (072, #4941),
 	// nil when the bill did not come from one.
 	sourceDocumentID *uuid.UUID
 }
@@ -355,7 +355,7 @@ func (u *billUpdate) set(param, column string, value any) {
 // others are cleared); a blank one makes it family-level.
 //
 // Every change to amount is written to the change feed with its before and
-// after values (activity_log.changes, migration 071, #4941), so the pending
+// after values (activity_log.changes, migration 072, #4941), so the pending
 // $5 -> $35 correction is traceable to who made it and when. When the bill
 // has a source document, a new amount is compared with that document's
 // pasted text and a disagreement is reported, quoting the source line.

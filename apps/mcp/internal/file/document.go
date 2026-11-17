@@ -176,7 +176,7 @@ type docRow struct {
 	OCRStatus       string
 	OCRError        *string
 	TextChars       int
-	// TextOrigin is files.text_origin (migration 071): raw when the body is
+	// TextOrigin is files.text_origin (migration 072): raw when the body is
 	// the caller's own pasted text stored unaltered, extracted when the
 	// worker read it from the file's bytes.
 	TextOrigin string
@@ -330,7 +330,7 @@ type textState struct {
 var retryMarker = regexp.MustCompile(`^\[retry (\d+)/(\d+) next=([^\]]+)\]\s*`)
 
 // textOrigin is files.text_origin with a safe default: rows written before
-// migration 071 (and any row a client left unset) are derived text.
+// migration 072 (and any row a client left unset) are derived text.
 func (r docRow) textOrigin() string {
 	if r.TextOrigin == textOriginRaw {
 		return textOriginRaw

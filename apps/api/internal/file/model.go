@@ -78,7 +78,7 @@ type File struct {
 	Description  *string    `json:"description"`
 	PersonID     *uuid.UUID `json:"person_id"`
 
-	// Provenance of ExtractedText (migration 071, #4941): "raw" when the body
+	// Provenance of ExtractedText (migration 072, #4941): "raw" when the body
 	// is the text that was pasted, stored unaltered (the source a recorded
 	// amount can be checked against), "extracted" when the worker read it
 	// from the blob. TextSHA256 is the SHA-256 of a raw body as filed.

@@ -96,7 +96,7 @@ type billRow struct {
 	// bill is filed under and its name.
 	BudgetCategoryID *uuid.UUID
 	BudgetCategory   *string
-	// SourceDocumentID is the document the bill was taken from (071, #4941),
+	// SourceDocumentID is the document the bill was taken from (072, #4941),
 	// so its amount can be diffed against that document's text.
 	SourceDocumentID *uuid.UUID
 	// SourceDocumentTitle is that document's title (its name when it has
