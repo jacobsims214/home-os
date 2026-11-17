@@ -90,28 +90,42 @@ spec:
               schedule: "0 2 * * *"
         dex:
           existingSecret: home-os-db-secret
-          # INTERIM (#4886), RETIRED BY #4540. Enables the Dex OAuth2 password
-          # grant (grant_type=password at /dex/token and /token) so a headless
-          # caller can mint an id_token before per-member agent tokens exist
-          # (#4535). Agent tokens are the designed path; this goes away with
-          # #4540 and nothing new should depend on it.
+          # RETIRED (#4540, 2026-11-17): the Dex OAuth2 password grant
+          # (grant_type=password at /dex/token and its root /token alias) is OFF.
           #
-          # It MUST be set here rather than on the live ConfigMap: the war game
-          # hand-patched the live ConfigMap, this Argo app rendered over it on
-          # the next sync, and every family agent lost its headless auth (#4357).
-          # A setting that has to survive a sync belongs in the rendered values.
+          # It was an INTERIM stopgap (#4886) so a headless caller could mint an
+          # id_token before per-member agent tokens existed. #4535 issued those
+          # tokens to every family agent (each its own read+write token in a
+          # per-instance Secret, wired through moltis householdHub.tokenSecret),
+          # so the grant has no remaining consumer and this removes it.
           #
-          # "local" = Dex's built-in password DB (enablePasswordDB), which is
-          # where the members' Dex passwords live. The chart fails the render if
-          # this names a connector that does not exist.
-          passwordConnector: "local"
+          # Security: a password grant turns any valid Dex password into an
+          # unscoped 24h bearer token for the MCP audience, with no per-agent
+          # revocation and no rate limit at Envoy (Envoy cannot tell a password
+          # grant from a refresh without reading the body). A scoped, revocable
+          # agent token is strictly narrower. Nothing new may depend on it.
+          #
+          # Why the key is written as "" rather than deleted: the absence has to
+          # be legible. The war game had turned the grant on by hand in the LIVE
+          # ConfigMap, and the next sync from a chart that did not carry the key
+          # erased the hand patch and silently left every family agent with no
+          # headless auth (#4357). Keeping the key here makes "off" a value in
+          # the rendered chart, so a future hand-add shows up in the diff.
+          #
+          # LOCAL DEV ONLY, never in production: putting a connector id here
+          # turns the grant back on, typically "local" (Dex's built-in password
+          # DB, enablePasswordDB). The chart FAILS THE RENDER if the id names a
+          # connector that does not exist — Dex accepts a bad id at startup and
+          # only 400s per request afterwards, which reads like any other
+          # misconfiguration. That guard must stay, retired grant or not.
+          passwordConnector: ""
           # expiry.idTokens, pinned explicitly so it cannot drift back to a Dex
-          # default unnoticed (#4886). It stayed 24h through the stopgap restore
-          # on purpose: the war game's 720h came from the same hand patch as the
-          # password connector, and a 30-day id_token sitting in an agent's
-          # environment is the long-lived-unscoped-credential problem the war
-          # game flagged. Every headless caller (tools/wargame/*.py, curl) mints
-          # a fresh token per run, so 24h costs nothing.
+          # default unnoticed (#4886). 24h is the normal UI token lifetime and is
+          # NOT part of the retired stopgap: the war game's 720h came from the
+          # same hand patch as the password connector, and #4886 deliberately
+          # kept 24h. Now that the grant is gone this pin matters more, not less
+          # — it is what stops a later "make logins last longer" change from
+          # leaving a 30-day unscoped bearer token in an agent's environment.
           idTokenExpiry: "24h"
         secrets:
           existingSecret: home-os-secrets

@@ -45,8 +45,10 @@ else
   pass "default render has no passwordConnector (grant off)"
 fi
 
+# enablePasswordDB stays on with the grant retired: it is the local connector
+# INTERACTIVE login uses. Removing it locks every family member out of the UI.
 grep -qx 'enablePasswordDB: true' <<<"$cfg" \
-  || fail "enablePasswordDB is not true; the local connector and 'local' passwordConnector need it"
+  || fail "enablePasswordDB is not true; interactive password login needs the local connector"
 if [ "$(yaml_val "$cfg" expiry idTokens)" = '"24h"' ]; then
   pass "expiry.idTokens is explicit: $(yaml_val "$cfg" expiry idTokens)"
 else
@@ -99,6 +101,46 @@ if printf '%s\n' "$cfg" | grep -qx 'connectors:'; then
   fail "connectors: rendered although dex.connectors is empty"
 else
   pass "no connectors: block when dex.connectors is empty"
+fi
+
+# --- 6. The DEPLOYED values render the grant off (#4540) --------------------
+# Checks 1-5 test the chart's defaults. This one tests what Argo actually
+# deploys: anyone putting a connector id back into the Application's
+# valuesObject re-opens a password grant (any valid Dex password becomes an
+# unscoped bearer token) and should fail the build, not ship.
+APPLICATION="$CHART/../../argocd/home-os-application.yaml"
+if [ -f "$APPLICATION" ]; then
+  # The valuesObject block, de-indented from its 8-space indent into a plain
+  # values file. Dependency-free on purpose (no yq on the CI image).
+  argo_values="$(mktemp)"
+  awk '
+    /^      valuesObject: *$/ {inv=1; next}
+    inv && /^ {0,6}[^ ]/      {inv=0}
+    inv                       {sub(/^        /,""); print}
+  ' "$APPLICATION" >"$argo_values"
+  if [ ! -s "$argo_values" ]; then
+    fail "could not extract spec.source.helm.valuesObject from $APPLICATION"
+  else
+    argo_cfg="$(dex_config -f "$argo_values" \
+      --set global.publicUrl=https://homeos.example.com \
+      --set global.imageTag=sha-0000000)"
+    if [ -n "$(yaml_val "$argo_cfg" oauth2 passwordConnector)" ]; then
+      fail "the DEPLOYED values render a password grant (oauth2.passwordConnector: $(yaml_val "$argo_cfg" oauth2 passwordConnector)); it was retired by #4540"
+    else
+      pass "deployed Argo values render no passwordConnector (grant off in production)"
+    fi
+    # ...and it says so explicitly, so a re-add is visible in the diff instead
+    # of hiding behind an omitted default (the #4357 shape of failure).
+    argo_dex="$(yaml_val "$(cat "$argo_values")" dex passwordConnector)"
+    if [ "$argo_dex" = '""' ]; then
+      pass 'deployed Argo values state dex.passwordConnector: "" explicitly'
+    else
+      fail "deployed Argo values should state dex.passwordConnector: \"\" explicitly (got: '${argo_dex:-<absent>}')"
+    fi
+  fi
+  rm -f "$argo_values"
+else
+  fail "deploy/argocd/home-os-application.yaml not found at $APPLICATION"
 fi
 
 echo

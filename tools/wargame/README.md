@@ -130,11 +130,8 @@ export HOMEOS_MCP_URL=http://home-os-mcp.home-os:8082   # base; the script POSTs
 export HOMEOS_AGENT_TOKEN=...        # the member's hos_ agent token
 # optional: HOMEOS_MCP_TIMEOUT_S (default 60)
 
-# Instead of a token, mint a Dex id_token with the password grant
-# (needs `dex.passwordConnector: local` in the chart values):
-export HOMEOS_DEX_TOKEN_URL=http://home-os-dex.home-os:5556/dex/token
-export HOMEOS_USER=<member login email>
-export HOMEOS_PASSWORD=...
+# A Dex id_token also works here (the MCP accepts both).
+# There is no unattended way to mint one any more — see "Getting a Dex id_token".
 ```
 
 **Home OS REST API — `api.py`.** A Dex identity token **only**:
@@ -152,7 +149,8 @@ use `http://127.0.0.1:<local port>` for each.
 `api.py` reads `HOMEOS_API_TOKEN` and nothing else, so an agent token exported for the MCP
 can never leak into a REST call. If `HOMEOS_API_TOKEN` holds a `hos_` token it refuses to
 run and says why, instead of 401ing every call and looking like a broken API. With no
-`HOMEOS_API_TOKEN` it mints one from the Dex variables above.
+`HOMEOS_API_TOKEN` it stops and tells you to take one from a signed-in browser — the
+password grant that used to mint one is retired (#4540).
 
 To check as the other member, change the token for that one command:
 
@@ -187,56 +185,70 @@ a `hos_` token is that ceiling working as intended. Decided in R1 triage
 
 Background: project KB `how-to/agent-tokens.md` and `architecture/agent-tokens.md`.
 
-### Minting a Dex id_token (interim — #4540 retires this)
+### Getting a Dex id_token (the password grant is RETIRED — #4540)
 
-The password goes in from a prompt into an environment variable, and the token likewise;
-never inline either on a command line (it lands in shell history and in `ps`).
+**Do not mint one with the OAuth2 password grant: it is off.** #4886 restored
+`oauth2.passwordConnector` as an interim chart value so a headless caller had some way in
+before per-member agent tokens existed; #4535 then issued those tokens to every family
+agent, and #4540 removed the grant. `POST /dex/token` with `grant_type=password` now
+answers **`400 unsupported_grant_type`** on the deployed stack, on purpose. That is a
+security improvement: a password grant turns any valid Dex password into an unscoped 24h
+bearer token for the MCP audience, with no per-agent revocation and no rate limit at
+Envoy (Envoy cannot tell a password grant from a refresh without reading the body).
+
+**An agent token is the normal credential, and it covers the MCP** — which is where
+almost all ground truth comes from (`mcpcall.py`). One per member, scoped
+`["read","write"]`, revocable: see project KB `how-to/agent-tokens.md`.
+
+**REST ground truth (`api.py`) needs a Dex id_token**, because the API is where credentials
+are minted and revoked and it accepts Dex-issued tokens only (an agent token 401s there by
+design — that is the blast-radius ceiling, see the section above). Get one from a browser
+you are already signed in as that member:
+
+1. Sign in to `https://homeos.simstech.cloud` as the member.
+2. DevTools → Application → Cookies → copy the value of the httpOnly `home-os-token`
+   cookie. It **is** the Dex id_token (24h, refreshed by the UI while you stay signed in).
+3. `read -rs HOMEOS_API_TOKEN` and paste it — not on a command line, which lands in shell
+   history and in `ps`.
 
 ```bash
-read -rs HOMEOS_PASSWORD             # the member's Dex password; nothing echoed or saved
-export HOMEOS_USER=<member login email>
-DEX_JWT=$(curl -fsS -X POST http://home-os-envoy.home-os:8000/dex/token \
-  --data-urlencode 'grant_type=password' \
-  --data-urlencode 'client_id=home-os-mcp' \
-  --data-urlencode 'scope=openid email profile' \
-  --data-urlencode "username=$HOMEOS_USER" \
-  --data-urlencode "password=$HOMEOS_PASSWORD" \
-  | jq -r .id_token)
-unset HOMEOS_PASSWORD
-curl -fsS -H "Authorization: Bearer $DEX_JWT" \
-  http://home-os-envoy.home-os:8000/api/v1/auth/me
+read -rs HOMEOS_API_TOKEN
+export HOMEOS_API_URL=https://homeos.simstech.cloud
+./api.py GET /api/v1/auth/me
 ```
 
-`client_id` may be `home-os-mcp` or `home-os-ui`; the API accepts either as `aud`. The
-response carries `id_token` and **no `refresh_token`** (correct for this grant), valid 24h
-— mint one per run rather than storing it.
+There is no unattended substitute on the deployed stack and none is planned: a headless
+REST client would need a scoped Dex client, which is a different design change, not a
+rewording of this one. If a round genuinely cannot use a browser, say so on the ticket
+rather than re-enabling the grant.
 
-**`/dex/token`, never `/token`.** Dex mounts the token endpoint at `<issuer>/token`, which
-here is `/dex/token`. The bare root `/token` exists only as an Envoy `prefix_rewrite` alias
+**LOCAL DEV ONLY.** A developer Dex may still set `dex.passwordConnector` (the chart
+value is empty in the deployed values, and stays a value so a re-add is visible in a
+diff). Against such a Dex, and only there, `api.py` and `mcpcall.py` will mint a token if
+you opt in explicitly with `HOMEOS_DEX_PASSWORD_GRANT=1` plus `HOMEOS_DEX_TOKEN_URL`,
+`HOMEOS_USER` and `HOMEOS_PASSWORD`. Without the opt-in both scripts stop and say what to
+set; they never silently try the grant, so a retired grant cannot show up as a mysterious
+failure mid-round.
+
+**`/dex/token`, never `/token`.** If you are debugging a local Dex, note that Dex mounts
+the token endpoint at `<issuer>/token`, which here is `/dex/token`. The bare root `/token`
+exists only as an Envoy `prefix_rewrite` alias
 (`deploy/helm/home-os/templates/envoy/configmap.yaml`), so
 `POST http://home-os-dex.home-os:5556/token` against the Dex pod is a **404** — not a
-broken deployment and not a bad credential, just the wrong path. Use `/dex/token`
-everywhere: it is right both through Envoy and against the Dex pod.
+broken deployment and not a bad credential, just the wrong path.
 
-What a failure means: `400 unsupported_grant_type` — the grant is off
-(`dex.passwordConnector` unset, or Dex not restarted since it was set); `401 access_denied`
-— wrong password (the connector ran, which is the cheapest positive signal); `404` — you
-used `/token` against the Dex pod.
+Two Dex facts that still matter with the grant off: `400 unsupported_grant_type` means
+the grant is off (now the expected answer, so treat it as "use a browser token");
+`enablePasswordDB: true` stays on because **interactive login** uses the local connector —
+removing it locks every family member out of the UI.
 
-**INTERIM: #4540 retires this grant.** Per-member agent tokens (#4535) are the path meant to
-last; a member's password turned into an unscoped 24h bearer token with no per-agent
-revocation is strictly worse as a permanent design. The war game needs the password grant
-only because REST ground truth requires a Dex identity and an agent token cannot be one.
-Nothing durable should depend on it. After #4540, REST ground truth is `/api/v1/auth/me`
-with a token taken from the browser you are already signed into (the httpOnly
-`home-os-token` cookie), and the block above goes away. See project KB
-`architecture/dex-password-grant-interim.md`.
-
-Checked 2026-11-17 (#4946) against the deployed Stage 1 stack: a minted id_token returns
-**200** on `/api/v1/auth/me` and `/api/v1/bills` for two members (jacob and amber); a `hos_`
-agent token on the same paths returns **401**; that same agent token on MCP `POST /mcp`
-`tools/list` returns **200** with 90 tools; and against the Dex pod directly, `/token`
-returns **404** while `/dex/token` returns **401** (the connector ran).
+Checked 2026-11-17 (#4946, before the retirement) against the deployed Stage 1 stack: a
+minted id_token returned **200** on `/api/v1/auth/me` and `/api/v1/bills` for two members
+(jacob and amber); a `hos_` agent token on the same paths returned **401**; that same agent
+token on MCP `POST /mcp` `tools/list` returned **200** with 90 tools; and against the Dex
+pod directly, `/token` returned **404** while `/dex/token` returned **401** (the connector
+ran). After #4540 the last of those becomes **400 unsupported_grant_type**; the agent-token
+half is unchanged and is what agents actually use.
 
 **Several households.** A caller in more than one picks one per request with
 `X-Household-ID: <household uuid>`. It must be one of their own memberships (else 403); with
