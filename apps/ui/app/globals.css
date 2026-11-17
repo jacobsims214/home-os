@@ -88,6 +88,19 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/*
+ * Installed-app touch behaviour (#4533).
+ *
+ * iOS Safari and Chrome treat a double tap on a control as "zoom in", which
+ * makes a tap-heavy app feel slow. The usual fix — maximum-scale=1 or
+ * user-scalable=no in the viewport meta — also kills pinch zoom and fails
+ * WCAG 1.4.4, so it is not used (see app/layout.tsx). `manipulation` turns off
+ * only the double-tap gesture: single taps, scrolling and pinch zoom still work.
+ */
+html {
+  touch-action: manipulation;
+}
+
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
