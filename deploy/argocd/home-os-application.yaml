@@ -54,7 +54,7 @@ spec:
           # PLACEHOLDER: #4357 sets this to the sha-<short> tag of the
           # release.yml run on feat/family-hub, one tag for ALL images
           # (migrations included). See the header for the procedure.
-          imageTag: sha-0a31798
+          imageTag: sha-76de68e
           # The tag is immutable, so the node cache is safe.
           imagePullPolicy: IfNotPresent
           # PLACEHOLDER: #4357 must replace this with the private hostname
