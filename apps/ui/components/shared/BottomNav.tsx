@@ -36,6 +36,7 @@ import {
 } from "@tabler/icons-react";
 import { apiFetch } from "@/lib/api";
 import { useNavSections } from "@/components/shared/use-nav-role";
+import { useUnreadCount } from "@/components/notifications/use-notifications";
 import { useAuthStore } from "@/stores/auth";
 import {
   NAV_ICON_STROKE,
@@ -158,10 +159,6 @@ function Tab({ section, active }: { section: NavSection; active: boolean }) {
 
 // ─── More sheet ───────────────────────────────────────────────
 
-interface ShellNotification {
-  is_read: boolean;
-}
-
 interface HouseholdResponse {
   data?: { name?: string } | null;
 }
@@ -184,19 +181,15 @@ function MoreSheet({
   const [query, setQuery] = useState("");
   const user = useAuthStore((s) => s.user);
 
-  // Same query keys as the header bell and family chip, so they share a cache.
-  const notificationsQ = useQuery({
-    queryKey: ["notifications"],
-    queryFn: () => apiFetch<{ data: ShellNotification[] }>("/api/v1/notifications"),
-  });
+  // The notifications query is the header bell's (#4563), so the pill here and
+  // the bell's badge can never disagree.
+  const unread = useUnreadCount();
   const household = useQuery({
     queryKey: ["household", "me"],
     queryFn: () => apiFetch<HouseholdResponse>("/api/v1/households/me"),
     staleTime: 5 * 60_000,
     retry: false,
   });
-  const items = Array.isArray(notificationsQ.data?.data) ? notificationsQ.data!.data : [];
-  const unread = items.filter((n) => !n.is_read).length;
   const familyName = household.data?.data?.name?.trim() || "Your family";
   const name = user?.name || "Account";
   const initials =

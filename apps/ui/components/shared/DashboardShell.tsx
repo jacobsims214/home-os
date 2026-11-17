@@ -24,7 +24,9 @@
  *
  * Hooks for the follow-up tickets:
  * - #4574 replaces the family chip's target with the family switcher.
- * - #4563 replaces the header bell's popover with the notifications sheet.
+ *
+ * The header bell is #4563's notifications opener: the bottom sheet on phones,
+ * the popover from 768 px up (components/notifications/NotificationsSurface).
  */
 
 import { useEffect, useState } from "react";
@@ -37,20 +39,16 @@ import {
   Avatar,
   Box,
   Drawer,
-  Indicator,
   Menu,
-  Popover,
   ScrollArea,
-  Stack,
-  Text,
   UnstyledButton,
   VisuallyHidden,
 } from "@mantine/core";
 import { useDisclosure, useMediaQuery, useReducedMotion } from "@mantine/hooks";
-import { IconBell, IconChevronDown, IconMenu2 } from "@tabler/icons-react";
+import { IconChevronDown, IconMenu2 } from "@tabler/icons-react";
 import dayjs from "dayjs";
-import relativeTime from "dayjs/plugin/relativeTime";
 import BottomNav from "@/components/shared/BottomNav";
+import NotificationsSurface from "@/components/notifications/NotificationsSurface";
 import Sidebar, { AccountMenuItems, Brand } from "@/components/shared/Sidebar";
 import { useNavSections } from "@/components/shared/use-nav-role";
 import { apiFetch } from "@/lib/api";
@@ -58,8 +56,6 @@ import { useAuthStore } from "@/stores/auth";
 import { NAV_ICON_STROKE, activeSection, pageTitle, type NavSection } from "@/components/shared/nav-config";
 import classes from "./DashboardShell.module.css";
 import bottomNavClasses from "./BottomNav.module.css";
-
-dayjs.extend(relativeTime);
 
 /** Mantine breakpoints the shell switches at (sm = 48em, md = 62em). */
 const DESKTOP_QUERY = "(min-width: 62em)";
@@ -69,8 +65,8 @@ export default function DashboardShell({ children }: { children: React.ReactNode
   const [drawerOpened, drawer] = useDisclosure(false);
   const isDesktop = useMediaQuery(DESKTOP_QUERY);
   const reduceMotion = useReducedMotion();
-  // The bell's panel and the account menu are opened from the header and
-  // from the More sheet's rows, so their state lives here.
+  // The bell's panel and the account menu are opened from the header and from
+  // the More sheet's rows, so their state lives here.
   const [bellOpened, setBellOpened] = useState(false);
   const [accountOpened, setAccountOpened] = useState(false);
 
@@ -240,93 +236,16 @@ function FamilyChip() {
   );
 }
 
-interface ShellNotification {
-  id: string;
-  title: string;
-  body: string;
-  is_read: boolean;
-  created_at: string;
-}
-
 /**
- * Header bell with the unread count, at every breakpoint. Shares the
- * ["notifications"] query (and so its cache) with NotificationBell.
- * #4563 turns the popover into a bottom sheet on phones.
+ * Header bell with the unread count, at every breakpoint. It is one of the two
+ * notifications openers: on phones it opens the bottom sheet, from 768 px the
+ * popover (#4563, NotificationsSurface). Both surfaces render the same panel,
+ * so the bell, the More sheet's row and the panel share one ["notifications"]
+ * query and never disagree about the count.
  */
 function HeaderBell({ opened, onChange: setOpened }: { opened: boolean; onChange: (opened: boolean) => void }) {
-  const notificationsQ = useQuery({
-    queryKey: ["notifications"],
-    queryFn: () => apiFetch<{ data: ShellNotification[] }>("/api/v1/notifications"),
-  });
-  const items = Array.isArray(notificationsQ.data?.data) ? notificationsQ.data!.data : [];
-  const unread = items.filter((n) => !n.is_read).length;
-  const label = unread > 0 ? `Notifications, ${unread} unread` : "Notifications";
-
   return (
-    // The ActionIcon is the Popover target, so Mantine puts aria-haspopup="dialog",
-    // aria-expanded, aria-controls and the id on the <button>. The Indicator stays
-    // outside the target: as the target, its <div> carried those attributes
-    // (axe critical aria-allowed-attr, #4752).
-    <Indicator
-      disabled={unread === 0}
-      label={unread > 99 ? "99+" : unread}
-      size={18}
-      offset={11}
-      color="red.8"
-      withBorder
-      styles={{ indicator: { fontSize: 11, fontWeight: 600 } }}
-    >
-      <Popover
-        opened={opened}
-        onChange={setOpened}
-        position="bottom-end"
-        width={380}
-        shadow="lg"
-        radius="md"
-        trapFocus
-        returnFocus
-      >
-        <Popover.Target>
-          <ActionIcon
-            variant="subtle"
-            color="gray"
-            className={classes.iconButton}
-            onClick={() => setOpened(!opened)}
-            aria-label={label}
-          >
-            <IconBell size={24} stroke={NAV_ICON_STROKE} />
-          </ActionIcon>
-        </Popover.Target>
-        <Popover.Dropdown
-          role="dialog"
-          aria-label="Notifications"
-          style={{ maxWidth: "calc(100vw - 16px)", maxHeight: "70vh", overflowY: "auto" }}
-        >
-          <Text fw={600} size="md" mb="xs">
-            Notifications
-          </Text>
-          {items.length === 0 ? (
-            <Text size="sm" py="md" ta="center" c="var(--shell-ink-3)">
-              You&apos;re all caught up.
-            </Text>
-          ) : (
-            <Stack gap="sm">
-              {items.map((n) => (
-                <div key={n.id}>
-                  <Text size="sm" fw={n.is_read ? 500 : 600} lineClamp={2}>
-                    {!n.is_read && <VisuallyHidden>Unread: </VisuallyHidden>}
-                    {n.title}
-                  </Text>
-                  <Text size="xs" c="var(--shell-ink-3)">
-                    {dayjs(n.created_at).fromNow()}
-                  </Text>
-                </div>
-              ))}
-            </Stack>
-          )}
-        </Popover.Dropdown>
-      </Popover>
-    </Indicator>
+    <NotificationsSurface opened={opened} onChange={setOpened} />
   );
 }
 
