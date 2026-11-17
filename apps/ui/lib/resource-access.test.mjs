@@ -8,6 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   canAnnotateEntity,
+  canReadActivity,
   canReadNotes,
   canSeeEntity,
   canSeeFiles,
@@ -126,4 +127,29 @@ test("an unknown role fails closed; a null role (still loading) shows everything
   assert.equal(unknown.any, false);
   const loading = resourceAccess(null, "bill");
   assert.deepEqual(loading, { files: "write", notes: "write", secrets: "write", any: true });
+});
+
+
+// ── the activity feed's read grant (#4577) ───────────────────
+
+test("canReadActivity: the family roles and a viewer, never a housesitter or vendor", () => {
+  // ResActivity read is rolesReaders (apps/api/internal/auth/roles.go). A
+  // housesitter and a vendor get 403 from GET /activity with a reason naming
+  // the role, action and resource, so Today must not draw the panel for them
+  // (KB decisions/2026-11-15-role-policy.md).
+  for (const role of FAMILY) assert.equal(canReadActivity(role), true, role);
+  assert.equal(canReadActivity("viewer"), true, "a viewer reads the feed read-only");
+  assert.equal(canReadActivity("housesitter"), false, "no activity feed for a sitter");
+  assert.equal(canReadActivity("vendor"), false, "no activity feed for a vendor");
+});
+
+test("canReadActivity: an unknown role fails closed, and an UNKNOWN role does not draw the panel", () => {
+  // The other helpers above show everything for a null role and let the API
+  // refuse. This one does not: GET /activity is a role-refused ROUTE (403), so
+  // drawing it before the role is known would fire a request that is certain to
+  // fail and show a housesitter a panel that is then taken away.
+  assert.equal(canReadActivity("intruder"), false, "a role this build does not know");
+  assert.equal(canReadActivity(""), false, "still loading");
+  assert.equal(canReadActivity(null), false, "still loading");
+  assert.equal(canReadActivity(undefined), false, "still loading");
 });

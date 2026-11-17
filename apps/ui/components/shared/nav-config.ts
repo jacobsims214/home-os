@@ -95,7 +95,17 @@ export const NAV_GROUP_LABELS: Record<NavGroup, string | null> = {
 export const NAV_ICON_STROKE = 1.75;
 
 export const NAV_SECTIONS: readonly NavSection[] = [
-  { id: "today", label: "Today", href: "/dashboard", icon: IconSun, group: "main", tab: true },
+  {
+    id: "today",
+    label: "Today",
+    href: "/dashboard",
+    icon: IconSun,
+    group: "main",
+    tab: true,
+    // The full activity history ("see all" behind Today's Family activity
+    // panel, #4577) is reached from Today and keeps the Today tab current.
+    matches: ["/dashboard/activity"],
+  },
   { id: "calendar", label: "Calendar", href: "/dashboard/calendar", icon: IconCalendar, group: "main", tab: true, roles: SITTERS },
   { id: "lists", label: "Lists", href: "/dashboard/lists", icon: IconListCheck, group: "main", tab: true, comingSoon: true, roles: SITTERS },
   // Meals is the WEEK PLAN and the dinner suggestions (#4568), with the recipe
@@ -160,6 +170,10 @@ const ROUTE_TITLES: ReadonlyArray<[prefix: string, title: string]> = [
   ["/dashboard/meals", "Meals"],
   ["/dashboard/recipes", "Recipes"],
   ["/dashboard/search", "Search"],
+  // "See all" behind Today's Family activity panel (#4577). It is not a nav
+  // section of its own — the header still reads "Family activity", and the tab
+  // bar keeps Today current (activeSection falls back to Today for it).
+  ["/dashboard/activity", "Family activity"],
 ];
 
 function underPrefix(pathname: string, prefix: string): boolean {

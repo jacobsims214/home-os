@@ -2,6 +2,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  activityAvatar,
+  activityHref,
+  activityProbePath,
+  activityTarget,
+  activityWindow,
   attribution,
   billsAndUpkeepDue,
   buildAgenda,
@@ -183,4 +188,137 @@ test("an unnamed actor is never invented, and an unnamed agent says so", () => {
   const when = attribution({ actor: null, via_agent: false, agent: null, created_at: "2026-11-17T12:00:00Z" }, "u1", new Date("2026-11-17T12:12:00Z"));
   assert.equal(when.when, "12 min ago");
   assert.equal(when.who, "Someone");
+});
+
+
+// ── the window onto the feed (#4577) ─────────────────────────
+
+const feedRow = (i, over = {}) => ({
+  id: i,
+  action: "create",
+  entity_type: "list_item",
+  entity_id: `i${i}`,
+  summary: `created list item "thing ${i}"`,
+  description: `Amber created list item "thing ${i}"`,
+  created_at: "2026-11-17T12:00:00Z",
+  actor: AMBER,
+  via_agent: false,
+  agent: null,
+  ...over,
+});
+
+test("Today shows a few changes and says how many it did not show", () => {
+  const many = Array.from({ length: 8 }, (_, i) => feedRow(i + 1));
+  const w = activityWindow(many, 4);
+  assert.equal(w.rows.length, 4, "four rows, not the whole feed");
+  assert.equal(w.rows[0].id, 1, "newest first, as the API sends them");
+  assert.equal(w.hidden, 4);
+
+  const exactly = activityWindow(many.slice(0, 4), 4);
+  assert.equal(exactly.hidden, 0, "nothing hidden means no 'more' row");
+
+  const fewer = activityWindow(many.slice(0, 2), 4);
+  assert.equal(fewer.rows.length, 2);
+  assert.equal(fewer.hidden, 0, "a short feed never reports a negative count");
+
+  assert.deepEqual(activityWindow([], 4), { rows: [], hidden: 0 });
+  // A zero/negative limit cannot produce a negative "hidden".
+  assert.deepEqual(activityWindow(many, 0), { rows: [], hidden: 8 });
+});
+
+// ── where a change opens (#4577) ─────────────────────────────
+
+test("a change opens the record's own page where one exists", () => {
+  assert.equal(activityHref({ entity_type: "bill", entity_id: "b1" }), "/dashboard/bills/b1");
+  assert.equal(activityHref({ entity_type: "pet", entity_id: "pet1" }), "/dashboard/pets/pet1");
+  assert.equal(activityHref({ entity_type: "recipe", entity_id: "r1" }), "/dashboard/recipes/r1");
+});
+
+test("a kind whose page is not per-record opens that section, not a fake id", () => {
+  assert.equal(activityHref({ entity_type: "calendar_event", entity_id: "e1" }), "/dashboard/calendar");
+  assert.equal(activityHref({ entity_type: "maintenance_task", entity_id: "m1" }), "/dashboard/maintenance");
+  assert.equal(activityHref({ entity_type: "person", entity_id: "p1" }), "/dashboard/members");
+});
+
+test("a kind with no page yet returns no link rather than a dead one", () => {
+  for (const kind of ["list", "list_item", "note", "secret", "file", "guide", "budget", "unknown_kind"]) {
+    assert.equal(activityHref({ entity_type: kind, entity_id: "x1" }), null, `${kind} must not link`);
+  }
+  assert.equal(activityHref({ entity_type: "bill", entity_id: "" }), null, "no id, no per-record link");
+});
+
+test("only a per-record page is probed, and only with an id", () => {
+  assert.equal(activityProbePath({ entity_type: "bill", entity_id: "b1" }), "/api/v1/bills/b1");
+  assert.equal(activityProbePath({ entity_type: "assET".toLowerCase(), entity_id: "a1" }), "/api/v1/assets/a1");
+  // A section page cannot answer "does this record exist", so it is not probed.
+  assert.equal(activityProbePath({ entity_type: "calendar_event", entity_id: "e1" }), null);
+  assert.equal(activityProbePath({ entity_type: "list_item", entity_id: "i1" }), null);
+  assert.equal(activityProbePath({ entity_type: "bill", entity_id: "" }), null);
+});
+
+test("a deletion says so: there is nothing left to open", () => {
+  const t = activityTarget({ action: "delete", entity_type: "bill", entity_id: "b1" });
+  assert.equal(t.kind, "deleted");
+  assert.equal(t.href, null);
+  assert.match(t.note, /Deleted/);
+});
+
+test("a record that answers 404 is reported gone, not linked to an empty page", () => {
+  const t = activityTarget({ action: "update", entity_type: "bill", entity_id: "b1" }, false);
+  assert.equal(t.kind, "gone");
+  assert.equal(t.href, null);
+  assert.match(t.note, /deleted since/);
+});
+
+test("an unchecked or failed probe is NEVER called deleted", () => {
+  // undefined: nobody asked. null: the check failed for a reason other than 404.
+  for (const exists of [undefined, null, true]) {
+    const t = activityTarget({ action: "update", entity_type: "bill", entity_id: "b1" }, exists);
+    assert.equal(t.kind, "link", `exists=${String(exists)} must still link`);
+    assert.equal(t.href, "/dashboard/bills/b1");
+    assert.equal(t.note, null);
+  }
+});
+
+test("a kind with no page is text only, and a deletion of it still says deleted", () => {
+  const none = activityTarget({ action: "create", entity_type: "list_item", entity_id: "i1" }, true);
+  assert.equal(none.kind, "none");
+  assert.equal(none.href, null);
+  assert.equal(none.note, null, "no page is not the same claim as deletion");
+  const del = activityTarget({ action: "delete", entity_type: "list_item", entity_id: "i1" });
+  assert.equal(del.kind, "deleted");
+});
+
+// ── the actor's avatar (#4577) ───────────────────────────────
+
+const NORA = { id: "p3", household_id: "h1", display_name: "Nora Sims", allergies: [], color: "red" };
+const AMBER_PERSON = { id: "p2", household_id: "h1", display_name: "Amber Sims", allergies: [], color: "violet", user_id: "u2" };
+
+test("an avatar is initials, never the word You — two letters is all a circle holds", () => {
+  const mine = activityAvatar({ actor: JACOB }, "u1");
+  assert.equal(mine.label, "JS", "the viewer's own write shows their initials, not 'You'");
+  assert.equal(mine.color, null, "no people record passed: no colour invented");
+
+  const amber = activityAvatar({ actor: AMBER }, "u1");
+  assert.equal(amber.label, "AS");
+});
+
+test("the avatar takes the member's own colour from their people record", () => {
+  // By person_id.
+  assert.equal(activityAvatar({ actor: AMBER }, "u1", [AMBER_PERSON]).color, "violet");
+  // By user_id, for a people row that carries the login.
+  assert.equal(activityAvatar({ actor: { user_id: "u1", person_id: null, name: "Jacob Sims" } }, "u1", [{ ...NORA, id: "p1", user_id: "u1", color: "cyan" }]).color, "cyan");
+  // Somebody not in the family list: no colour, and the fallback style.
+  assert.equal(activityAvatar({ actor: { user_id: "u9", name: "Dana Kim" } }, "u1", [AMBER_PERSON]).color, null);
+});
+
+test("an actor the API did not name gets no invented initials", () => {
+  assert.equal(activityAvatar({ actor: null }, "u1").label, "?", "an unnamed actor is never given a name");
+  // A viewer write whose actor row carries no name still reads as theirs.
+  assert.equal(activityAvatar({ actor: { user_id: "u1", name: null } }, "u1").label, "Y");
+});
+
+test("a single-word name yields one letter, and non-ASCII is kept upper-cased", () => {
+  assert.equal(activityAvatar({ actor: { user_id: "u2", name: "Amber" } }, "u1").label, "A");
+  assert.equal(activityAvatar({ actor: { user_id: "u2", name: "élise moreau" } }, "u1").label, "ÉM");
 });
