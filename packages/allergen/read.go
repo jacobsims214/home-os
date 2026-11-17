@@ -25,7 +25,21 @@ var (
 	// nothing. Every word here has to be one that is never a food. "and" and
 	// "or" are deliberately absent: ListSeparator splits on them after this runs, so
 	// "peanuts and tree nuts" stays two allergens.
+	//
+	// A word here can still be part of a food's NAME in the vocabulary:
+	// "food" is in the alias "sea food", "intolerance"/"intolerant" are in
+	// "lactose intolerance"/"lactose intolerant". aliasPhrases protects those
+	// names from this regex (#4883), so a filler word can no longer silently
+	// make an alias unreachable — TestEveryAliasIsReachableFromStoredText is
+	// what proves it, and a new alias containing a filler word needs no
+	// special case.
 	allergyFiller = regexp.MustCompile(`(?i)\b(severe(ly)?|mild|moderate|major|minor|serious|terrible|awful|horrible|horribly|life[- ]threatening|anaphylactic|anaphylaxis|food|foods|allergic|allergy|allergies|allergen|allergens|intolerant|intolerance|intolerances|sensitivity|sensitive|sensitised|sensitized|reaction|reactions|reacts|reacting|reacted|gets|gives|causes|cause|caused|to|of|for|a|an|the|has|have|is|no|avoid|avoids|carries|carry|wears|wear|epi-?pens?|medicalert|medic[- ]?alert|medic[- ]?id|medical([- ]id)?|medication|medicines?|meds?|prescribed|prescription|antihistamines?|epinephrine|adrenaline|inhaler|bracelet|alert|must|strictly|strict|very|really|extremely|highly|strongly|slightly|badly|possibly|all|deathly|deadly|super|totally|absolutely|incredibly|insanely|ridiculously)\b`)
+
+	// aliasPhrases finds the alias names allergyFiller would otherwise take a
+	// word out of ("sea food"), so the reading keeps them whole (#4883).
+	// Built from Aliases, so an alias added later is covered without a code
+	// change.
+	aliasPhrases = buildAliasPhrases()
 
 	ListSeparator = regexp.MustCompile(`(?i)\s*(?:,|;|/|&|\band\b|\bor\b|\+)\s*`)
 
@@ -41,11 +55,19 @@ var (
 // AllergensIn reads the allergens out of allergy text: "Severe peanut
 // allergy" -> [peanut], "allergic to shrimp and crab" -> [shrimp, crab],
 // "nut-free (allergy)" -> [nut]. Empty when nothing is left to match.
+//
+// Filler words are stripped, but never out of a multi-word name the
+// vocabulary defines. Without that, "sea food" lost "food" (a filler word) and
+// became the one-word phrase "sea", which keys to no alias: the
+// "sea food" -> fish + shellfish alias was unreachable from any stored text,
+// so a parent who wrote "sea food" got an allergy phrase that matched no
+// ingredient (#4883). It is the fail-closed rule's blind spot — a one-word
+// phrase is always "known" — so the guard has to be here, in the reading.
 func AllergensIn(text string) []string {
 	text = noteStart.ReplaceAllString(strings.ToLower(text), " ")
 	text = strings.ReplaceAll(text, "coeliac", "celiac")
 	text = freeSuffix.ReplaceAllString(text, " ")
-	text = allergyFiller.ReplaceAllString(text, " ")
+	text = stripFiller(text, aliasPhrases.FindAllStringIndex(text, -1))
 	var out []string
 	for _, p := range ListSeparator.Split(text, -1) {
 		p = strings.Join(strings.Fields(p), " ")
@@ -54,6 +76,109 @@ func AllergensIn(text string) []string {
 		}
 	}
 	return out
+}
+
+// buildAliasPhrases compiles the alias names that allergyFiller would
+// otherwise destroy into one alternation (#4883). Two kinds need no
+// protection, and both are left out so the list stays exactly as small as the
+// problem:
+//
+//   - single-word keys: the filler matches whole words, so it cannot reach
+//     inside "seafood";
+//   - multi-word keys that survive stripping with their meaning intact
+//     ("lactose intolerant" -> "lactose", which is itself the group key the
+//     alias points at), so the reading is unchanged and so are the labels
+//     warnings have always shown.
+//
+// "sea food" is the one that fails both: "food" is filler, and what is left
+// ("sea") is a one-word phrase that keys to no group at all.
+func buildAliasPhrases() *regexp.Regexp {
+	var keys []string
+	for key := range Aliases {
+		if !strings.Contains(key, " ") {
+			continue
+		}
+		if strippedAliasStillMeans(key) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	// Longest first, so a whole-alias match wins over a shorter alias that
+	// happens to be its prefix.
+	slices.SortFunc(keys, func(a, b string) int {
+		if len(a) != len(b) {
+			return len(b) - len(a)
+		}
+		return strings.Compare(a, b)
+	})
+	parts := make([]string, len(keys))
+	for i, key := range keys {
+		ws := Words(key)
+		for j, w := range ws {
+			ws[j] = WordForm(w) // the plural of the name still names it
+		}
+		parts[i] = strings.Join(ws, `[^\w]+`)
+	}
+	// The body is PhrasePatterns' own, so "sea-food" and "sea  food" match as
+	// "sea food" does. (?i) is belt and braces: AllergensIn lowercases first,
+	// but the expression is exported behaviour through AllergensIn only, and
+	// keeping it case-insensitive costs nothing.
+	return regexp.MustCompile(`(?i)\b(?:` + strings.Join(parts, "|") + `)\b`)
+}
+
+// strippedAliasStillMeans reports whether the filler can take words out of an
+// alias without losing what it means: the stripped phrase has to resolve to
+// every group the alias points at. "lactose intolerant" does, because it
+// strips to "lactose", the group key it maps to; "sea food" does not, because
+// it strips to "sea".
+func strippedAliasStillMeans(key string) bool {
+	stripped := strings.Join(strings.Fields(allergyFiller.ReplaceAllString(key, " ")), " ")
+	if stripped == key {
+		return true // no filler word in it: nothing can be stripped
+	}
+	got := GroupKeys(stripped)
+	for _, want := range Aliases[key] {
+		if !slices.Contains(got, want) {
+			return false
+		}
+	}
+	return true
+}
+
+// stripFiller replaces every allergyFiller word in text with a space, except
+// the ones that fall inside a keep span (a multi-word alias name), which are
+// left exactly as written. Spans are byte offsets into the text passed in, and
+// everything outside a match is copied through untouched, so the offsets stay
+// valid as the builder advances.
+func stripFiller(text string, keep [][]int) string {
+	matches := allergyFiller.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	last := 0
+	for _, m := range matches {
+		if insideSpan(m, keep) {
+			continue
+		}
+		b.WriteString(text[last:m[0]])
+		b.WriteByte(' ')
+		last = m[1]
+	}
+	b.WriteString(text[last:])
+	return b.String()
+}
+
+// insideSpan reports whether the filler match m lies wholly inside one of the
+// protected spans.
+func insideSpan(m []int, spans [][]int) bool {
+	for _, s := range spans {
+		if m[0] >= s[0] && m[1] <= s[1] {
+			return true
+		}
+	}
+	return false
 }
 
 // CompilePhrases compiles each phrase's Go regex (PhrasePatterns): whole

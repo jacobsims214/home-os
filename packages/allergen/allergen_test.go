@@ -586,6 +586,211 @@ func TestAllergenGroupVocabulary(t *testing.T) {
 	}
 }
 
+// TestAliasPhraseSurvivesFiller is #4883's narrow fix: a stored allergy whose
+// words include an allergyFiller word still resolves to the alias it names.
+//
+// "sea food" used to fail because "food" is filler, so the text normalised to
+// the one-word phrase "sea", which keys to no group: the parent got an allergy
+// phrase that matched no ingredient, silently. #4874's fail-closed guard does
+// not catch that shape — a one-word phrase is always "known" — so the reading
+// itself has to keep the alias's words together.
+func TestAliasPhraseSurvivesFiller(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    []string // what allergensIn must give (labels warnings show)
+		matches []string // ingredients an eater with this allergy must be refused
+		clears  []string // ingredients it must leave alone
+	}{
+		{
+			in:      "sea food",
+			want:    []string{"sea food"},
+			matches: []string{"salmon", "shrimp", "mussels", "sea bass", "catfish fillets", "oyster sauce"},
+			clears:  []string{"chicken thighs", "cheddar", "peanuts", "corn", "tofu"},
+		},
+		{
+			in:      "Sea food allergy",
+			want:    []string{"sea food"},
+			matches: []string{"salmon", "prawns"},
+			clears:  []string{"chicken thighs"},
+		},
+		{
+			in:      "allergic to sea food",
+			want:    []string{"sea food"},
+			matches: []string{"tuna", "lobster"},
+			clears:  []string{"beef"},
+		},
+		{
+			// The vocabulary's own punctuation rule: phrasePatterns joins the
+			// words with [^\w]+, so the hyphenated wording names it too.
+			in:      "sea-food allergy",
+			want:    []string{"sea-food"},
+			matches: []string{"salmon", "shrimp"},
+			clears:  []string{"chicken thighs"},
+		},
+		{
+			in:      "shell fish",
+			want:    []string{"shell fish"},
+			matches: []string{"shrimp", "calamari"},
+			clears:  []string{"salmon"}, // shellfish, not fish
+		},
+		// The plural, the padding and the note all still name the alias.
+		{in: "sea foods", want: []string{"sea foods"}, matches: []string{"salmon", "prawns"}, clears: []string{"beef"}},
+		{in: "severe sea food allergy", want: []string{"sea food"}, matches: []string{"cod"}, clears: []string{"lamb"}},
+		{in: "sea food (carries an EpiPen)", want: []string{"sea food"}, matches: []string{"mussels"}, clears: []string{"pork"}},
+		// It is a phrase among others, so the list separator still splits it
+		// out and the peanut half keeps its own matcher.
+		{in: "sea food and peanuts", want: []string{"sea food", "peanuts"}, matches: []string{"salmon", "peanuts"}, clears: []string{"chicken thighs"}},
+		{in: "peanuts and sea food", want: []string{"peanuts", "sea food"}, matches: []string{"shrimp", "peanut butter"}, clears: []string{"chicken thighs"}},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := allergen.AllergensIn(tc.in); !slices.Equal(got, tc.want) {
+				t.Errorf("allergen.AllergensIn(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			ms, unchecked := allergen.Matchers("p", "Nora", tc.in)
+			if len(unchecked) != 0 {
+				t.Errorf("%q: unchecked = %q, want a usable matcher", tc.in, unchecked)
+			}
+			for _, item := range tc.matches {
+				if !slices.ContainsFunc(ms, func(m allergen.Matcher) bool { return m.Matches(item) }) {
+					t.Errorf("%q did not match %q: an allergen phrase that matches no ingredient is the bug", tc.in, item)
+				}
+			}
+			for _, item := range tc.clears {
+				if slices.ContainsFunc(ms, func(m allergen.Matcher) bool { return m.Matches(item) }) {
+					t.Errorf("%q matched %q, want it left alone", tc.in, item)
+				}
+			}
+		})
+	}
+
+	// The filler words themselves still go: "food" is not an allergen, and a
+	// stored "food allergy" that names no food must still read as nothing (so
+	// the loader reports it instead of matching nothing quietly, #4802).
+	for _, nothing := range []string{"food allergy", "food", "allergic to food", "foods"} {
+		if got := allergen.AllergensIn(nothing); len(got) != 0 {
+			t.Errorf("allergen.AllergensIn(%q) = %q, want none", nothing, got)
+		}
+	}
+}
+
+// TestEveryAliasIsReachableFromStoredText is #4883's audit, and the reason the
+// fix is one rule instead of a patch for "sea food".
+//
+// An alias only does anything if allergy text a person actually saves reaches
+// what it maps to. A filler word inside the alias's name can eat exactly that
+// word — "sea food" -> "sea" — and the alias then matches no ingredient while
+// still looking fine in the map. So every key is checked the way a stored
+// allergy is used, not by reading the table:
+//
+//	stored wording -> AllergensIn -> matchers -> a food from every group
+//
+// A wording passes when every group its alias maps to actually matches a food
+// from that group and nothing is reported unchecked. The route does not
+// matter: "lactose intolerance" strips to "lactose", which is itself the group
+// key it maps to, so the diary list is delivered even though the alias's own
+// key never appears. What must not happen is the "sea food" shape, where the
+// stripped phrase resolves to nothing and the eater is silently unprotected.
+//
+// Every alias that is only reachable that indirect way is checked against
+// knownRedundant below, so an alias cannot quietly become dead data: a new one
+// (or a filler word added to an existing name) fails here by name and someone
+// has to decide whether the alias should reach through the filler or be
+// deleted as redundant.
+func TestEveryAliasIsReachableFromStoredText(t *testing.T) {
+	// The wordings a parent writes, per alias key. A key not listed falls back
+	// to the bare key, which is what a person would type for most of them.
+	storedAs := map[string][]string{
+		"crustacean":          {"crustaceans", "crustacean allergy"},
+		"seafood":             {"seafood", "Seafood allergy"},
+		"sea food":            {"sea food", "Sea food allergy", "allergic to sea food"},
+		"shell fish":          {"shell fish", "Shell fish allergy"},
+		"dairy product":       {"dairy products", "Dairy product allergy"},
+		"cow milk":            {"cow's milk", "cows milk", "cow\u2019s milk"},
+		"celiac disease":      {"celiac disease", "coeliac disease"},
+		"mollusk":             {"mollusk", "mollusks", "mollusk allergy"},
+		"soya":                {"soya", "soya allergy"},
+		"soya bean":           {"soya beans", "soya bean allergy"},
+		"sesame seed":         {"sesame seeds", "sesame seed allergy"},
+		"lactose intolerance": {"lactose intolerance", "Lactose intolerance allergy"},
+		"lactose intolerant":  {"lactose intolerant", "Lactose intolerant"},
+	}
+
+	// Aliases whose name a filler word eats, and whose stripped form is itself
+	// the group key they map to, so the groups are still delivered (#4883
+	// audit finding). They are redundant, not broken: deleting them would not
+	// change an answer, keeping them costs nothing. Anything else reaching its
+	// groups only indirectly is a bug and fails below.
+	knownRedundant := []string{"lactose intolerance", "lactose intolerant"}
+
+	keys := make([]string, 0, len(allergen.Aliases))
+	for key := range allergen.Aliases {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys) // stable failures, and it makes the audit readable
+	if len(keys) == 0 {
+		t.Fatal("allergen.Aliases is empty: nothing to audit")
+	}
+
+	var redundant []string
+	for _, key := range keys {
+		groups := allergen.Aliases[key]
+		if len(groups) == 0 {
+			t.Errorf("alias %q maps to no group, so it can never match anything", key)
+			continue
+		}
+		texts, ok := storedAs[key]
+		if !ok {
+			texts = []string{key}
+		}
+		t.Run(key, func(t *testing.T) {
+			checked := false
+			for _, text := range texts {
+				ms, unchecked := allergen.Matchers("p", "Nora", text)
+				if len(unchecked) != 0 {
+					t.Errorf("stored %q: unchecked = %q, want a readable matcher", text, unchecked)
+					continue
+				}
+				if len(ms) == 0 {
+					t.Errorf("stored %q: no matcher at all", text)
+					continue
+				}
+				// Every group the alias means has to be delivered by the
+				// matcher this stored wording builds.
+				for _, g := range groups {
+					foods := allergen.Groups[g]
+					if len(foods) == 0 {
+						t.Fatalf("alias %q points at group %q, which has no food to test with", key, g)
+					}
+					food := foods[0] // the group's own first word: the plainest case
+					if !slices.ContainsFunc(ms, func(m allergen.Matcher) bool { return m.Matches(food) }) {
+						t.Errorf("stored %q did not match %q from group %q: alias %q is unreachable from stored text, "+
+							"so this allergy matches no ingredient", text, food, g, key)
+					}
+				}
+				// Which route did it take? Its own key ("sea food" after the
+				// #4883 fix) or a stripped form that means the same thing
+				// ("lactose intolerant" -> "lactose").
+				for _, a := range allergen.AllergensIn(text) {
+					if allergen.AllergyKey(a) == key {
+						checked = true
+					}
+				}
+			}
+			if !checked {
+				redundant = append(redundant, key)
+			}
+		})
+	}
+
+	// The accounting: redundant has to be exactly the known-benign set, so a
+	// second alias cannot join it unnoticed.
+	slices.Sort(redundant)
+	if !slices.Equal(redundant, knownRedundant) {
+		t.Errorf("aliases reachable only through their stripped form = %v, want %v; "+
+			"a new one is either a bug or needs adding to knownRedundant with a reason", redundant, knownRedundant)
+	}
+}
+
 // TestAllergenAliasGroups pins the mapping itself, so a future edit that
 // drops a group from an alias is visible even if the ingredient lists happen
 // to overlap. It also keeps the groups honest: an alias must point at a real

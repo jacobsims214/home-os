@@ -772,6 +772,12 @@ func TestMealSuggestProbedWordings(t *testing.T) {
 		{"highly allergic to eggs", "eggs", "eggs", "Veggie Omelette"},
 		{"epi-pen for peanuts", "peanuts", "peanuts", "Satay Bowl"},
 		{"allergic to peanuts, wears medicalert", "peanuts", "peanuts", "Satay Bowl"},
+		// #4883: "food" is an allergyFiller word, so this wording used to read
+		// as the one-word phrase "sea" and exclude nothing at all. The recipe
+		// is excluded for the shellfish group AND the fish group; either hit
+		// proves the alias was reached.
+		{"sea food", "sea food", "shrimp", "Garlic Shrimp"},
+		{"Sea food allergy", "sea food", "salmon", "Salmon Traybake"},
 	} {
 		t.Run(tc.wording, func(t *testing.T) {
 			t.Parallel()
@@ -781,6 +787,8 @@ func TestMealSuggestProbedWordings(t *testing.T) {
 			k.recipe("Mac and Cheese", 20, nil, "macaroni", "cheddar", "butter")
 			k.recipe("Veggie Omelette", 10, nil, "eggs", "spinach")
 			k.recipe("Chicken Tacos", 30, nil, "chicken thighs", "corn tortillas")
+			k.recipe("Garlic Shrimp", 20, nil, "shrimp", "garlic", "butter")
+			k.recipe("Salmon Traybake", 30, nil, "salmon fillets", "lemon", "potatoes")
 
 			r := suggestTool(k.pool).run(t, k.ctx, map[string]any{"count": 10}).suggest(t)
 

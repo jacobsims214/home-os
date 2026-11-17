@@ -345,3 +345,102 @@ func TestProbedWordingsWarnEverywhere(t *testing.T) {
 		t.Errorf("agenda meal = %+v / checks %v", plan[0], checks)
 	}
 }
+
+// TestSeaFoodAliasWarnsEverywhere is #4883's end-to-end case. "food" is an
+// allergyFiller word, so a parent who wrote "sea food" got the one-word phrase
+// "sea", which keys to no group: meal_suggest excluded nothing, the recipe and
+// meal warnings said nothing, and the checks list stayed empty — the silent
+// clear #4802/#4874 are about, reached through the normaliser rather than the
+// matcher. #4874's fail-closed guard cannot see it, because after stripping
+// "sea" is a single word and single words are always accepted as known.
+//
+// Every surface has to name the ingredient, and the recipe is excluded by both
+// groups the alias means: shellfish (shrimp) and fish (salmon).
+func TestSeaFoodAliasWarnsEverywhere(t *testing.T) {
+	t.Parallel()
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	bg := context.Background()
+	ts := newTools(pool)
+	pt := newPlanTools(pool)
+
+	if _, err := pool.Exec(bg, `INSERT INTO people (household_id, display_name, allergies)
+		VALUES ($1, 'Eve', ARRAY['sea food'])`, hh.HouseholdID); err != nil {
+		t.Fatal(err)
+	}
+	shrimp := ts.create.run(t, ctx, map[string]any{"name": "Garlic Shrimp",
+		"ingredients": []any{"400 g shrimp", "3 cloves garlic"}, "steps": []any{"Fry."}}).recipe(t)
+	salmon := ts.create.run(t, ctx, map[string]any{"name": "Salmon Traybake",
+		"ingredients": []any{"2 salmon fillets", "1 lemon"}, "steps": []any{"Roast."}}).recipe(t)
+	tacos := ts.create.run(t, ctx, map[string]any{"name": "Chicken Tacos",
+		"ingredients": []any{"chicken thighs", "corn tortillas"}, "steps": []any{"Cook."}}).recipe(t)
+
+	// The write response carries it too: an empty warnings list on a response
+	// that did not look reads as "safe for everyone" (KB
+	// architecture/shared-allergen-engine.md).
+	if !warningsMatch(shrimp.AllergyWarnings, "Eve (sea food): shrimp") {
+		t.Errorf("recipe_create %s warnings = %+v, want Eve (sea food): shrimp", shrimp.Name, shrimp.AllergyWarnings)
+	}
+	if !warningsMatch(salmon.AllergyWarnings, "Eve (sea food): salmon fillets") {
+		t.Errorf("recipe_create %s warnings = %+v, want Eve (sea food): salmon fillets", salmon.Name, salmon.AllergyWarnings)
+	}
+	if len(tacos.AllergyWarnings) != 0 {
+		t.Errorf("recipe_create %s warnings = %+v, want none", tacos.Name, tacos.AllergyWarnings)
+	}
+
+	// recipe_get and recipe_find agree with the write.
+	g := ts.get.run(t, ctx, map[string]any{"recipe_id": shrimp.ID}).recipe(t)
+	if !warningsMatch(g.AllergyWarnings, "Eve (sea food): shrimp") || len(g.Checks) != 0 {
+		t.Errorf("recipe_get = %+v / checks %v, want the shrimp warning and no checks", g.AllergyWarnings, g.Checks)
+	}
+	var found int
+	for _, it := range ts.find.run(t, ctx, map[string]any{}).items(t) {
+		switch it.Name {
+		case shrimp.Name:
+			found++
+			if !slices.Contains(it.AllergyWarnings, "Eve (sea food): shrimp") {
+				t.Errorf("recipe_find %s warnings = %v", it.Name, it.AllergyWarnings)
+			}
+		case salmon.Name:
+			found++
+			if !slices.Contains(it.AllergyWarnings, "Eve (sea food): salmon fillets") {
+				t.Errorf("recipe_find %s warnings = %v", it.Name, it.AllergyWarnings)
+			}
+		case tacos.Name:
+			found++
+			if len(it.AllergyWarnings) != 0 {
+				t.Errorf("recipe_find %s warnings = %v, want none", it.Name, it.AllergyWarnings)
+			}
+		}
+	}
+	if found != 3 {
+		t.Fatalf("recipe_find returned %d of the 3 recipes", found)
+	}
+
+	// meal_suggest excludes both, each naming the group it matched through.
+	sg := suggestTool(pool).run(t, ctx, map[string]any{"count": 10}).suggest(t)
+	for _, name := range []string{shrimp.Name, salmon.Name} {
+		if slices.Contains(suggested(sg), name) {
+			t.Errorf("meal_suggest SUGGESTED %s: excluded=%+v checks=%v", name, sg.Excluded, sg.Checks)
+		}
+	}
+	if !slices.Contains(suggested(sg), tacos.Name) {
+		t.Errorf("meal_suggest did not suggest %s: %v", tacos.Name, suggested(sg))
+	}
+
+	// meal_set plans it with the warning, and agenda_get reads it back.
+	today := familyToday("UTC")
+	date := today.Format(time.DateOnly)
+	res := pt.set.run(t, ctx, map[string]any{"date": date, "slot": "dinner", "recipe_id": shrimp.ID}).set(t)
+	if len(res.Meals) != 1 || res.Meals[0].Meal == nil ||
+		!slices.Contains(res.Meals[0].Meal.AllergyWarnings, "Eve (sea food): shrimp") {
+		t.Fatalf("meal_set = %+v", res.Meals)
+	}
+	plan, checks, allowed, err := AgendaMeals(ctx, pool, today, today)
+	if err != nil || !allowed || len(plan) != 1 {
+		t.Fatalf("agenda = %+v %v %v %v", plan, checks, allowed, err)
+	}
+	if !slices.Contains(plan[0].AllergyWarnings, "Eve (sea food): shrimp") || len(checks) != 0 {
+		t.Errorf("agenda meal = %+v / checks %v", plan[0], checks)
+	}
+}
