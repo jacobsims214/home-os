@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -491,4 +492,55 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 			t.Errorf("after 24h got %+v, want one new bill_due", later)
 		}
 	})
+}
+
+// TestHouseholdMembers_SkipsDeactivated is the regression test for #4873 (code
+// review #4499, Significant #3) on the email path: sendNotificationEmails
+// joined users but never filtered users.active, so a deactivated member of a
+// bill or maintenance notification's household still received the email.
+func TestHouseholdMembers_SkipsDeactivated(t *testing.T) {
+	pool := newMigratedPool(t)
+	ctx := context.Background()
+	hh := seedHousehold(t, pool)
+
+	seedUser := func(email string, active bool) string {
+		t.Helper()
+		var id string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO users (email, name, password_hash, active) VALUES ($1, $2, 'x', $3) RETURNING id::text`,
+			email, email, active).Scan(&id); err != nil {
+			t.Fatalf("insert user %s: %v", email, err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO memberships (household_id, user_id) VALUES ($1, $2)`, hh, id); err != nil {
+			t.Fatalf("membership %s: %v", email, err)
+		}
+		return id
+	}
+	seedUser("active1@example.com", true)
+	inactive := seedUser("gone@example.com", false)
+	seedUser("active2@example.com", true)
+
+	// A second household whose members must not leak into the first.
+	other := seedHousehold(t, pool)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO users (email, name, password_hash) VALUES ('elsewhere@example.com', 'e', 'x')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO memberships (household_id, user_id) SELECT $1, id FROM users WHERE email = 'elsewhere@example.com'`, other); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := householdMembers(ctx, pool, hh)
+	if err != nil {
+		t.Fatalf("householdMembers: %v", err)
+	}
+	emails := make([]string, 0, len(got))
+	for _, m := range got {
+		emails = append(emails, m.Email)
+	}
+	sort.Strings(emails)
+	if want := []string{"active1@example.com", "active2@example.com"}; strings.Join(emails, ",") != strings.Join(want, ",") {
+		t.Fatalf("recipients = %v, want %v (deactivated %s excluded)", emails, want, inactive)
+	}
 }
