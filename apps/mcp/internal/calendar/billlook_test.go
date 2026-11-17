@@ -549,3 +549,153 @@ func decodeAgenda(t *testing.T, text string) agendaResult {
 	}
 	return res
 }
+
+// TestBillLikeRowsSQLMatchesReconcile is #5140's core regression: the rows the
+// guard reads (billLikeRowsSQL, this package) and the rows the reconcile
+// supersedes (calendar_absorb_bill_events, migration 074) must be the SAME set.
+//
+// The live failure was exactly a disagreement here: 073's reconcile required
+// `event_type IS DISTINCT FROM 'bill'`, so a legacy entry typed event_type
+// 'bill' with entity_type NULL was reported by the guard and never retired —
+// the Bills calendar kept one of them beside the module's mirror forever. The
+// fixture writes the real round-1 shape, and the bills' own mirrors, and
+// asserts both sides see the legacy rows and neither touches a mirror.
+func TestBillLikeRowsSQLMatchesReconcile(t *testing.T) {
+	pool := testutil.NewPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+
+	var cal string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO calendars (household_id, name, type, caldav_uid) VALUES ($1, 'Bills', 'bills', $2) RETURNING id::text`,
+		hh.HouseholdID, uuid.NewString()).Scan(&cal); err != nil {
+		t.Fatal(err)
+	}
+
+	// insert writes one calendar object with the columns the predicate reads:
+	// event_type is the column, entity_type/entity_id are the mirror marks.
+	insert := func(uid, title, eventType string, entity *string) string {
+		t.Helper()
+		data := fmt.Sprintf(`{"title":%q,"description":"","start":"2026-11-18T00:00:00Z","end":"2026-11-19T00:00:00Z","all_day":true}`, title)
+		var id string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, event_type, entity_type, entity_id)
+			 VALUES ($1, $2, $3, 'e', $4, CASE WHEN $5::text IS NULL THEN NULL ELSE 'bill' END, $5::uuid) RETURNING id::text`,
+			cal, uid, data, eventType, entity).Scan(&id); err != nil {
+			t.Fatalf("insert %s: %v", uid, err)
+		}
+		return id
+	}
+
+	// The bill, and its mirror as billcal writes it (event_type 'bill',
+	// entity_type 'bill').
+	var billID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO bills (household_id, name, amount, due_day) VALUES ($1, 'Electric', 180, 18) RETURNING id::text`,
+		hh.HouseholdID).Scan(&billID); err != nil {
+		t.Fatal(err)
+	}
+	mirror := insert("mirror-electric", "Electric due", "bill", &billID)
+	// The live round-1 shape: typed 'bill' but mirroring nothing. This is the
+	// row 073 could not see.
+	legacyBillTyped := insert("legacy-electric", "Electric bill due — $180", "bill", nil)
+	// An ordinary-looking legacy entry, the shape #5140's fixture used to
+	// write. It must be superseded too — the old predicate accepted it, and
+	// changing the predicate must not lose what already worked.
+	legacyEventTyped := insert("legacy-electric-2", "Electric bill — $180", "event", nil)
+	// Unrelated events on a Bills calendar are still not bill-like by name, but
+	// the Bills calendar makes them candidates; the name rule keeps them out.
+	unrelated := insert("unrelated", "Dentist", "event", nil)
+
+	// What the guard reads.
+	rows, err := pool.Query(ctx, billLikeRowsSQL, hh.HouseholdID)
+	if err != nil {
+		t.Fatalf("billLikeRowsSQL: %v", err)
+	}
+	guard := map[string]bool{}
+	for rows.Next() {
+		var id, calName, calType, data string
+		if err := rows.Scan(&id, &calName, &calType, &data); err != nil {
+			t.Fatal(err)
+		}
+		guard[id] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The guard's row set: every live entity_type-NULL entry, mirror excluded.
+	for _, c := range []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"the round-1 entry typed event_type='bill'", legacyBillTyped, true},
+		{"the round-1 entry typed event_type='event'", legacyEventTyped, true},
+		{"an unrelated event on the Bills calendar", unrelated, true},
+		{"the bill's mirror (entity_type='bill')", mirror, false},
+	} {
+		if guard[c.id] != c.want {
+			t.Errorf("%s: guard reads it = %v, want %v", c.name, guard[c.id], c.want)
+		}
+	}
+
+	// What the reconcile supersedes: one call per bill, as the migration and
+	// the INSERT trigger do.
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT calendar_absorb_bill_events($1)`, billID).Scan(&n); err != nil {
+		t.Fatalf("absorb: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("the reconcile superseded %d entries, want 2 (both legacy Electric entries)", n)
+	}
+	superseded := func(id string) bool {
+		t.Helper()
+		var ok bool
+		if err := pool.QueryRow(ctx,
+			`SELECT superseded_at IS NOT NULL FROM calendar_objects WHERE id = $1`, id).Scan(&ok); err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	for _, c := range []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"the round-1 entry typed event_type='bill' (#5140's failure)", legacyBillTyped, true},
+		{"the round-1 entry typed event_type='event'", legacyEventTyped, true},
+		{"the bill's mirror (entity_type='bill')", mirror, false},
+		{"an unrelated event on the Bills calendar", unrelated, false},
+	} {
+		if got := superseded(c.id); got != c.want {
+			t.Errorf("%s: superseded = %v, want %v", c.name, got, c.want)
+		}
+	}
+
+	// And the two sides now agree on the rows that are still to be reported:
+	// what the guard read before the reconcile, minus what it superseded, is
+	// exactly what it reads after it.
+	rows, err = pool.Query(ctx, billLikeRowsSQL, hh.HouseholdID)
+	if err != nil {
+		t.Fatalf("billLikeRowsSQL after: %v", err)
+	}
+	after := map[string]bool{}
+	for rows.Next() {
+		var id, calName, calType, data string
+		if err := rows.Scan(&id, &calName, &calType, &data); err != nil {
+			t.Fatal(err)
+		}
+		after[id] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for id := range guard {
+		wantLive := id != legacyBillTyped && id != legacyEventTyped
+		if after[id] != wantLive {
+			t.Errorf("after the reconcile, guard reads %s = %v, want %v", id, after[id], wantLive)
+		}
+	}
+}

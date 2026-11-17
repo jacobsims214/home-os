@@ -156,9 +156,10 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	pet := insertID(t, pool, `INSERT INTO pets (household_id, name) VALUES ($1, 'Rex') RETURNING id`, f.household)
 	asset := insertID(t, pool, `INSERT INTO assets (household_id, room_id, name) VALUES ($1, $2, 'Fridge') RETURNING id`, f.household, f.room)
 
-	applyMigration(t, pool, "073_legacy_bill_events.down.sql")        // newest first: 073 sits on top of everything below
-	applyMigration(t, pool, "071_person_color.down.sql")              // newest first: drops people.color and its palette CHECK
-	applyMigration(t, pool, "070_entity_kind_notifications.down.sql") // newest first: notifications/calendar_objects entity_type back to VARCHAR
+	applyMigration(t, pool, "074_legacy_bill_events_reconcile.down.sql") // newest first: 074 sits on top of 073
+	applyMigration(t, pool, "073_legacy_bill_events.down.sql")           // newest first: 073 sits on top of everything below
+	applyMigration(t, pool, "071_person_color.down.sql")                 // newest first: drops people.color and its palette CHECK
+	applyMigration(t, pool, "070_entity_kind_notifications.down.sql")    // newest first: notifications/calendar_objects entity_type back to VARCHAR
 
 	applyMigration(t, pool, "069_drop_finance_columns.down.sql")       // newest first: restores the property/vehicle finance columns
 	applyMigration(t, pool, "068_guide_revision_change_note.down.sql") // newest first: drops guide_revisions.change_note
@@ -204,7 +205,8 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	applyMigration(t, pool, "069_drop_finance_columns.up.sql")
 	applyMigration(t, pool, "070_entity_kind_notifications.up.sql")
 	applyMigration(t, pool, "071_person_color.up.sql")
-	applyMigration(t, pool, "073_legacy_bill_events.up.sql") // back to the head
+	applyMigration(t, pool, "073_legacy_bill_events.up.sql")
+	applyMigration(t, pool, "074_legacy_bill_events_reconcile.up.sql") // back to the head
 
 	type subject struct{ property, vehicle, asset *uuid.UUID }
 	subjectOf := func(table string, id uuid.UUID) subject {
@@ -263,18 +265,19 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	before := countAll()
 
 	// Down: the legacy columns come back, filled from the typed FKs.
-	applyMigration(t, pool, "073_legacy_bill_events.down.sql")         // newest first: 073 sits on top of everything 071 and below
-	applyMigration(t, pool, "071_person_color.down.sql")               // newest first: drops people.color and its palette CHECK
-	applyMigration(t, pool, "070_entity_kind_notifications.down.sql")  // newest first: notifications/calendar_objects entity_type back to VARCHAR
-	applyMigration(t, pool, "069_drop_finance_columns.down.sql")       // newest first: restores the property/vehicle finance columns
-	applyMigration(t, pool, "068_guide_revision_change_note.down.sql") // newest first: drops guide_revisions.change_note
-	applyMigration(t, pool, "067_invitation_vendor_link.down.sql")     // newest first: 067's invitations FK needs 043's vendors key
-	applyMigration(t, pool, "066_list_item_checked_by.down.sql")       // newest first: drops list_items.checked_by
-	applyMigration(t, pool, "065_vendor_address.down.sql")             // newest first: moves vendors.address back into notes
-	applyMigration(t, pool, "064_membership_vendor_link.down.sql")     // newest first: 064's memberships FK needs 043's vendors key
-	applyMigration(t, pool, "061_notify_creator_role.down.sql")        // newest first: restores 054's notify_entity_creator
-	applyMigration(t, pool, "060_drop_pet_vet_columns.down.sql")       // newest first: restores pets.vet_name / vet_phone
-	applyMigration(t, pool, "058_same_family_fks.down.sql")            // newest first: 058's FKs need 043's vendors key
+	applyMigration(t, pool, "074_legacy_bill_events_reconcile.down.sql") // newest first: 074 sits on top of 073
+	applyMigration(t, pool, "073_legacy_bill_events.down.sql")           // newest first: 073 sits on top of everything 071 and below
+	applyMigration(t, pool, "071_person_color.down.sql")                 // newest first: drops people.color and its palette CHECK
+	applyMigration(t, pool, "070_entity_kind_notifications.down.sql")    // newest first: notifications/calendar_objects entity_type back to VARCHAR
+	applyMigration(t, pool, "069_drop_finance_columns.down.sql")         // newest first: restores the property/vehicle finance columns
+	applyMigration(t, pool, "068_guide_revision_change_note.down.sql")   // newest first: drops guide_revisions.change_note
+	applyMigration(t, pool, "067_invitation_vendor_link.down.sql")       // newest first: 067's invitations FK needs 043's vendors key
+	applyMigration(t, pool, "066_list_item_checked_by.down.sql")         // newest first: drops list_items.checked_by
+	applyMigration(t, pool, "065_vendor_address.down.sql")               // newest first: moves vendors.address back into notes
+	applyMigration(t, pool, "064_membership_vendor_link.down.sql")       // newest first: 064's memberships FK needs 043's vendors key
+	applyMigration(t, pool, "061_notify_creator_role.down.sql")          // newest first: restores 054's notify_entity_creator
+	applyMigration(t, pool, "060_drop_pet_vet_columns.down.sql")         // newest first: restores pets.vet_name / vet_phone
+	applyMigration(t, pool, "058_same_family_fks.down.sql")              // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "057_secret_agent_share.down.sql")
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql")
 	legacy := func(table string, id uuid.UUID) (kind *string, entity *uuid.UUID) {

@@ -273,8 +273,9 @@ func TestChangeNotifications054_Reversible(t *testing.T) {
 	// Newest first: 054 up's notify_entity_creator links a deleted pet to
 	// itself, which 070's owner check on notifications refuses. Done before
 	// any query, so no cached plan sees entity_type change type.
-	applyMigration(t, pool, "073_legacy_bill_events.down.sql") // newest first: 073 sits on top of everything below
-	applyMigration(t, pool, "071_person_color.down.sql")       // newest first: drops people.color and its palette CHECK
+	applyMigration(t, pool, "074_legacy_bill_events_reconcile.down.sql") // newest first: 074 sits on top of 073
+	applyMigration(t, pool, "073_legacy_bill_events.down.sql")           // newest first: 073 sits on top of everything below
+	applyMigration(t, pool, "071_person_color.down.sql")                 // newest first: drops people.color and its palette CHECK
 	applyMigration(t, pool, "070_entity_kind_notifications.down.sql")
 	f := seedV2Family(t, pool)
 	bob := newMember(t, pool, f.household, "Bob")

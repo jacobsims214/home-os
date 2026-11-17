@@ -15,16 +15,39 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// legacyBillEntry inserts a calendar entry on a Bills calendar of the family,
-// the way round-1 code and a phone both do: an ordinary event, no entity link.
+// legacyBillEntry inserts a calendar entry on a Bills calendar of the family
+// with the REAL round-1 shape (#5140): column event_type 'bill' and
+// entity_type NULL ("Electric bill due — $180" on the live household is
+// exactly this). It mirrors no record — entity_type is what says so — but it
+// is typed like the bills module's mirror rows, which is what migration 073's
+// `event_type IS DISTINCT FROM 'bill'` clause mistook for a mirror and
+// therefore refused to supersede.
+//
+// The ical_data JSON keeps event_type empty, as the round-1 writer left it:
+// the column is the typed fact, and this fixture exists to pin that difference.
 func legacyBillEntry(t *testing.T, pool *pgxpool.Pool, household uuid.UUID, calendar uuid.UUID, title string) uuid.UUID {
 	t.Helper()
-	data := `{"title":"` + title + `","description":"","start":"2026-11-18T00:00:00Z","end":"2026-11-19T00:00:00Z","all_day":true,"event_type":"event"}`
+	data := `{"title":"` + title + `","description":"","start":"2026-11-18T00:00:00Z","end":"2026-11-19T00:00:00Z","all_day":true,"event_type":""}`
 	var id uuid.UUID
 	mustScan(t, pool.QueryRow(context.Background(),
 		`INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, event_type)
-		 VALUES ($1, $2, $3, 'e', 'event') RETURNING id`,
+		 VALUES ($1, $2, $3, 'e', 'bill') RETURNING id`,
 		calendar, uuid.NewString(), data), &id)
+	return id
+}
+
+// billMirrorRow inserts a bill's own mirror, exactly as packages/billcal writes
+// it: entity_type 'bill' with entity_id the bill, and event_type 'bill'. It is
+// the row that must survive every reconcile — the test tells a mirror from a
+// legacy entry by entity_type and nothing else (#5140).
+func billMirrorRow(t *testing.T, pool *pgxpool.Pool, calendar, bill uuid.UUID, title string) uuid.UUID {
+	t.Helper()
+	data := `{"title":"` + title + `","description":"","start":"2026-11-18T00:00:00Z","end":"2026-11-19T00:00:00Z","all_day":true,"event_type":"bill"}`
+	var id uuid.UUID
+	mustScan(t, pool.QueryRow(context.Background(),
+		`INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, event_type, entity_type, entity_id)
+		 VALUES ($1, $2, $3, 'e', 'bill', 'bill', $4) RETURNING id`,
+		calendar, uuid.NewString(), data, bill), &id)
 	return id
 }
 
@@ -96,6 +119,16 @@ func TestLegacyBillEvents073_Reconcile(t *testing.T) {
 	mustExec(t, pool, `INSERT INTO bills (household_id, name, amount, due_day) VALUES ($1, 'Water', 90, 20)`, f.household)
 	elecBill := insertID(t, pool, `INSERT INTO bills (household_id, name, amount, due_day, paid_date, paid_for_due_date)
 		VALUES ($1, 'Electric', 180, 18, CURRENT_DATE, CURRENT_DATE) RETURNING id`, f.household)
+	mortgageBill := insertID(t, pool, `SELECT id FROM bills WHERE household_id = $1 AND name = 'Mortgage'`, f.household)
+	internetBill := insertID(t, pool, `SELECT id FROM bills WHERE household_id = $1 AND name = 'Internet'`, f.household)
+
+	// The bills' own mirrors, as billcal writes them: entity_type 'bill' with
+	// entity_id set. These are the rows that must survive every reconcile — the
+	// live household has one per bill, and they are why the Bills calendar
+	// showed each bill twice (#5140).
+	elecMirror := billMirrorRow(t, pool, cal, elecBill, "Electric due")
+	mortgageMirror := billMirrorRow(t, pool, cal, mortgageBill, "Mortgage due")
+	internetMirror := billMirrorRow(t, pool, cal, internetBill, "Internet due")
 
 	// The round-1 entries, exactly as the war game left them.
 	electric := legacyBillEntry(t, pool, f.household, cal, "Electric bill due — $180")
@@ -151,6 +184,12 @@ func TestLegacyBillEvents073_Reconcile(t *testing.T) {
 		{"Electric bill due — $180", electric, true},
 		{"Mortgage due — $2,340", mortgage, true},
 		{"Internet bill", internet, true},
+		// The mirrors: entity_type='bill', so never touched, even though their
+		// titles normalise to the same names as the legacy entries above and
+		// their event_type is the same 'bill' (#5140).
+		{"the Electric mirror (entity_type='bill')", elecMirror, false},
+		{"the Mortgage mirror (entity_type='bill')", mortgageMirror, false},
+		{"the Internet mirror (entity_type='bill')", internetMirror, false},
 		{"Gas bill due — $95 (amount disagrees)", gas, false},
 		{"Sewer bill due — $40 (no such bill)", sewer, false},
 		{"Water bill due — $60 (two bills named Water)", water, false},
@@ -267,6 +306,7 @@ func TestLegacyBillEvents073_Reversible(t *testing.T) {
 	}
 	uid := uidOf(t, pool, entry)
 
+	applyMigration(t, pool, "074_legacy_bill_events_reconcile.down.sql") // newest first: 074 sits on top of 073
 	applyMigration(t, pool, "073_legacy_bill_events.down.sql")
 	if n := countRows(t, pool, `SELECT count(*) FROM information_schema.columns
 		WHERE table_name = 'calendar_objects' AND column_name LIKE 'superseded%'`); n != 0 {
@@ -291,6 +331,7 @@ func TestLegacyBillEvents073_Reversible(t *testing.T) {
 	// Up again: the entry is retired again by the reconcile, and the schema and
 	// the guard are back.
 	applyMigration(t, pool, "073_legacy_bill_events.up.sql")
+	applyMigration(t, pool, "074_legacy_bill_events_reconcile.up.sql") // back to the head
 	if n := countRows(t, pool, `SELECT count(*) FROM calendar_objects WHERE id = $1 AND superseded_at IS NOT NULL`, entry); n != 1 {
 		t.Error("up again did not retire the entry")
 	}
