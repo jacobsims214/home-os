@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"home-os/api/internal/auth"
+	"home-os/api/internal/lists"
 	"home-os/api/internal/meals"
 	"home-os/api/internal/middleware"
 )
@@ -58,6 +59,10 @@ func setup(t *testing.T) *fixture {
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(v))
 		meals.NewHandler(meals.NewRepo(pool)).RegisterRoutes(r)
+		// The grocery merge (#4568) writes through the lists package, so the
+		// tests check the row it produced with the lists API rather than raw
+		// SQL: that is the contract the Meals page relies on.
+		lists.NewHandler(lists.NewRepo(pool)).RegisterRoutes(r)
 	})
 	return &fixture{pool: pool, h: r, key: key}
 }

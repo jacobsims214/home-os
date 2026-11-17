@@ -100,6 +100,10 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Put("/api/v1/meal-plans/{date}/{slot}", h.SetMeal)
 	r.Delete("/api/v1/meal-plans/{date}/{slot}", h.ClearMeal)
 
+	// "Put this week's dinners on the grocery list" (#4568): a preview and an
+	// idempotent write. The routes live in grocery.go.
+	h.registerGrocery(r)
+
 	// One planned meal by id (and its feedback). A separate prefix, because
 	// chi can't route /meal-plans/{id}/... next to /meal-plans/{date}/{slot}.
 	r.Get("/api/v1/meals/{id}", h.GetMeal)
