@@ -318,8 +318,12 @@ func TestCalDAVRolePolicyIntegration(t *testing.T) {
 						t.Errorf("PROPFIND %s lists %s = %v, want %v", p, c.name, listed, wantCals[c.name])
 					}
 				}
-				if strings.Contains(w.Body.String(), "403") {
-					t.Errorf("PROPFIND %s mentions 403:\n%s", p, w.Body)
+				// A status, not the three digits anywhere: a household UUID in
+				// the body contains them about one run in a few hundred, which
+				// made this flaky. No 403 element and no status line 403.
+				if body := w.Body.String(); strings.Contains(body, "403 Forbidden") ||
+					strings.Contains(body, "<D:status>HTTP/1.1 403") {
+					t.Errorf("PROPFIND %s answers 403 for something it lists:\n%s", p, w.Body)
 				}
 			}
 
