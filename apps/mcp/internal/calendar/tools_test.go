@@ -1134,8 +1134,18 @@ func TestAllDayEvents(t *testing.T) {
 			t.Errorf("11/18 agenda events = %+v", a.Events)
 		}
 		text, _ = callTool(t, agenda, ctx, map[string]any{"from": "2026-11-17", "to": "2026-11-17", "detail": "full"})
-		if strings.Contains(text, "Electric bill") {
-			t.Errorf("11/17 agenda shows bill:\n%s", text)
+		if err := json.Unmarshal(data(t, text), &a); err != nil {
+			t.Fatalf("decode %q: %v", text, err)
+		}
+		// The events section, not the whole result: since #4943 a bill-like
+		// entry is *reported* (bill_like_entries, with the reason it is not
+		// bill state) on every day of the range, which is the guard against a
+		// briefing reading it as a bill. What must not happen is the event
+		// itself appearing on the wrong day.
+		for _, e := range a.Events {
+			if e.Title == "Electric bill" {
+				t.Errorf("11/17 agenda lists the 11/18 bill as an event: %+v", a.Events)
+			}
 		}
 	})
 

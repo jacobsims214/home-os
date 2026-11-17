@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"home-os/api/internal/calendar"
 	"home-os/api/internal/legacyfinance"
 	"home-os/billcal"
 	"home-os/icalx"
@@ -354,3 +355,87 @@ func TestBillCalendarMirror_LegacyFinance(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// TestSupersededEntriesAreInvisibleToTheAPIBillViews is the API half of #4943:
+// once a legacy "bill due" entry is superseded, GET /api/v1/calendars/events
+// and the CalDAV listings must not hand it back beside the bill's own mirror.
+// The reads go through calendar.Repo, which is what those endpoints and CalDAV
+// use; a phone and a browser must agree that the bill has one entry.
+func TestSupersededEntriesAreInvisibleToTheAPIBillViews(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	household, billsCal := newHousehold(t, pool, true)
+
+	// A round-1 entry on the Bills calendar, and the bill that is the record
+	// for it. The bill's INSERT absorbs the entry (migration 073's guard).
+	legacy := mustID(t, pool,
+		`INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, event_type)
+		 VALUES ($1, 'legacy-electric', '{"title":"Electric bill due — $180","description":"","start":"2026-11-18T00:00:00Z","end":"2026-11-19T00:00:00Z","all_day":true}', 'e', 'event')
+		 RETURNING id`, billsCal)
+	bill := mustID(t, pool,
+		`INSERT INTO bills (household_id, name, amount, due_day) VALUES ($1, 'Electric', 180, 18) RETURNING id`, household)
+
+	var superseded *time.Time
+	if err := pool.QueryRow(ctx, `SELECT superseded_at FROM calendar_objects WHERE id = $1`, legacy).Scan(&superseded); err != nil {
+		t.Fatal(err)
+	}
+	if superseded == nil {
+		t.Fatal("the guard did not retire the entry on the bill's insert")
+	}
+
+	repo := calendar.NewRepo(pool)
+	loc := repo.HouseholdLocation(ctx, household)
+	// The listing endpoints: every event of the household, and the Bills
+	// calendar's own listing.
+	for _, c := range []struct {
+		name string
+		read func() ([]calendar.Event, error)
+	}{
+		{"ListAllEvents", func() ([]calendar.Event, error) {
+			return repo.ListAllEvents(ctx, household, calendar.EventRange{}, nil, loc, "owner")
+		}},
+		{"ListEvents", func() ([]calendar.Event, error) {
+			return repo.ListEvents(ctx, billsCal, calendar.EventRange{}, loc, "owner")
+		}},
+	} {
+		events, err := c.read()
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		for _, ev := range events {
+			if ev.ID == legacy.String() {
+				t.Errorf("%s still returns the superseded entry %q", c.name, ev.Title)
+			}
+		}
+	}
+
+	// The retired row is still there, with its text — nothing was deleted, so
+	// the family's note survives and the undo is one UPDATE.
+	var title string
+	if err := pool.QueryRow(ctx,
+		`SELECT ical_data::jsonb->>'title' FROM calendar_objects WHERE id = $1`, legacy).Scan(&title); err != nil {
+		t.Fatalf("the retired entry was deleted: %v", err)
+	}
+	if !strings.Contains(title, "Electric") {
+		t.Errorf("the retired entry lost its text: %q", title)
+	}
+	// And CalDAV clients were told to drop it, so a phone converges without a
+	// full resync.
+	var uid string
+	if err := pool.QueryRow(ctx, `SELECT uid FROM calendar_objects WHERE id = $1`, legacy).Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	if n := countOf(t, pool, `SELECT count(*) FROM calendar_changes WHERE event_uid = $1 AND action = 'delete'`, uid); n != 1 {
+		t.Errorf("calendar_changes delete rows for the retired entry = %d, want 1", n)
+	}
+
+	// The bill itself is untouched: one record, still the family's.
+	var name string
+	var amount float64
+	if err := pool.QueryRow(ctx, `SELECT name, amount::float8 FROM bills WHERE id = $1`, bill).Scan(&name, &amount); err != nil {
+		t.Fatalf("the bill did not survive: %v", err)
+	}
+	if name != "Electric" || amount != 180 {
+		t.Errorf("bill = %q %v", name, amount)
+	}
+}

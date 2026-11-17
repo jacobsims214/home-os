@@ -330,6 +330,7 @@ func (r *Repo) ListCalendarObjects(ctx context.Context, householdID string, cale
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND c.household_id = $2
+		  AND o.superseded_at IS NULL
 		  AND `+calendarVisibleSQL("$3")+` AND `+objectVisibleSQL("$3", "$4")+`
 		ORDER BY o.created_at ASC
 	`, calendarID, householdID, acc.Role, acc.vendorArg())
@@ -363,6 +364,7 @@ func (r *Repo) GetCalendarObjectByUID(ctx context.Context, householdID string, c
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND o.uid = $2 AND c.household_id = $3
+		  AND o.superseded_at IS NULL
 		  AND `+calendarVisibleSQL("$4")+` AND `+objectVisibleSQL("$4", "$5")+`
 	`, calendarID, uid, householdID, acc.Role, acc.vendorArg())
 
@@ -933,6 +935,7 @@ func (r *Repo) ListCalendarObjectsInRange(ctx context.Context, householdID strin
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND c.household_id = $2
+		  AND o.superseded_at IS NULL
 		  AND `+calendarVisibleSQL("$3")+` AND `+objectVisibleSQL("$3", "$4")+`
 		ORDER BY o.created_at ASC
 	`, calendarID, householdID, acc.Role, acc.vendorArg())

@@ -172,6 +172,15 @@ func (rg EventRange) expands() bool { return rg.Start != nil && rg.End != nil }
 
 const eventColumns = `co.id, co.calendar_id, co.uid, co.ical_data, co.event_type, co.entity_type, co.entity_id, co.created_at, co.updated_at, co.ical_raw`
 
+// liveOnly keeps retired entries out of the listing reads (#4943): migration
+// 073 supersedes a calendar entry in place when a bill with the same name and
+// amount is the record for it, so the entry is not deleted (its text, notes and
+// people survive) but no listing shows it. Without this a phone's Bills
+// calendar, or GET /api/v1/calendars/events, still showed "Electric bill due —
+// $180" beside the bill's own projection, which is what made a briefing call a
+// paid bill unpaid.
+const liveOnly = ` AND co.superseded_at IS NULL`
+
 // rangeFilter appends the calendar_objects.starts_at / ends_at (035)
 // prefilter for a listing window. The bounds are widened by 48h because
 // all-day events are stored at midnight UTC and placed in the household's
@@ -267,7 +276,7 @@ func (r *Repo) ListEvents(ctx context.Context, calendarID uuid.UUID, rg EventRan
 	// calendar's kind and its own.
 	query, args := rangeFilter(`SELECT `+eventColumns+`
 		FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
-		WHERE co.calendar_id = $1`, []any{calendarID}, rg)
+		WHERE co.calendar_id = $1`+liveOnly, []any{calendarID}, rg)
 	query = visibleToRole(query, fmt.Sprintf("$%d", len(args)+1))
 	args = append(args, role)
 	rows, err := r.pool.Query(ctx, query+` ORDER BY co.created_at`, args...)
@@ -281,7 +290,7 @@ func (r *Repo) ListEvents(ctx context.Context, calendarID uuid.UUID, rg EventRan
 // the same range and expansion rules as ListEvents. If propertyID is
 // provided, only calendars scoped to that property are read.
 func (r *Repo) ListAllEvents(ctx context.Context, householdID uuid.UUID, rg EventRange, propertyID *uuid.UUID, loc *time.Location, role string) ([]Event, error) {
-	query := `SELECT ` + eventColumns + ` FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id WHERE c.household_id = $1`
+	query := `SELECT ` + eventColumns + ` FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id WHERE c.household_id = $1` + liveOnly
 	args := []any{householdID}
 	if propertyID != nil {
 		args = append(args, *propertyID)

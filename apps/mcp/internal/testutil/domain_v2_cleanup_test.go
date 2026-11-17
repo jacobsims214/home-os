@@ -156,7 +156,8 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	pet := insertID(t, pool, `INSERT INTO pets (household_id, name) VALUES ($1, 'Rex') RETURNING id`, f.household)
 	asset := insertID(t, pool, `INSERT INTO assets (household_id, room_id, name) VALUES ($1, $2, 'Fridge') RETURNING id`, f.household, f.room)
 
-	applyMigration(t, pool, "071_person_color.down.sql") // newest first: drops people.color and its palette CHECK
+	applyMigration(t, pool, "073_legacy_bill_events.down.sql")        // newest first: 073 sits on top of everything below
+	applyMigration(t, pool, "071_person_color.down.sql")              // newest first: drops people.color and its palette CHECK
 	applyMigration(t, pool, "070_entity_kind_notifications.down.sql") // newest first: notifications/calendar_objects entity_type back to VARCHAR
 
 	applyMigration(t, pool, "069_drop_finance_columns.down.sql")       // newest first: restores the property/vehicle finance columns
@@ -203,6 +204,7 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	applyMigration(t, pool, "069_drop_finance_columns.up.sql")
 	applyMigration(t, pool, "070_entity_kind_notifications.up.sql")
 	applyMigration(t, pool, "071_person_color.up.sql")
+	applyMigration(t, pool, "073_legacy_bill_events.up.sql") // back to the head
 
 	type subject struct{ property, vehicle, asset *uuid.UUID }
 	subjectOf := func(table string, id uuid.UUID) subject {
@@ -261,7 +263,8 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	before := countAll()
 
 	// Down: the legacy columns come back, filled from the typed FKs.
-	applyMigration(t, pool, "071_person_color.down.sql")  // newest first: drops people.color and its palette CHECK
+	applyMigration(t, pool, "073_legacy_bill_events.down.sql")         // newest first: 073 sits on top of everything 071 and below
+	applyMigration(t, pool, "071_person_color.down.sql")               // newest first: drops people.color and its palette CHECK
 	applyMigration(t, pool, "070_entity_kind_notifications.down.sql")  // newest first: notifications/calendar_objects entity_type back to VARCHAR
 	applyMigration(t, pool, "069_drop_finance_columns.down.sql")       // newest first: restores the property/vehicle finance columns
 	applyMigration(t, pool, "068_guide_revision_change_note.down.sql") // newest first: drops guide_revisions.change_note

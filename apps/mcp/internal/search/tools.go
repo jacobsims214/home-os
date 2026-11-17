@@ -437,7 +437,7 @@ func searchEvents(ctx context.Context, pool *pgxpool.Pool, householdID, query st
 		SELECT co.id::text, co.ical_data, c.name
 		FROM calendar_objects co
 		JOIN calendars c ON c.id = co.calendar_id
-		WHERE c.household_id = $1`
+		WHERE c.household_id = $1 AND co.superseded_at IS NULL`
 	args := []any{householdID}
 	if !needsJSONEscape(query) {
 		sql += ` AND co.ical_data ILIKE $2 ESCAPE '\'`

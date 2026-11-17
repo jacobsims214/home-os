@@ -251,14 +251,22 @@ type agendaCoverage struct {
 
 // agendaResult is agenda_get's data. Coverage is first, on purpose (#4809).
 type agendaResult struct {
-	Coverage    agendaCoverage `json:"coverage" jsonschema_description:"What this result covers and left out: range, timezone, calendars, areas, and how many items are not listed. Read it before concluding anything is missing."`
-	Events      []AgendaEvent  `json:"events"`
-	Bills       []AgendaBill   `json:"bills,omitempty" jsonschema_description:"Bills due in the range, by date then name; present when the bills area is included"`
-	Maintenance []AgendaTask   `json:"maintenance,omitempty" jsonschema_description:"Upkeep due in the range, by date then name; present when the maintenance area is included"`
-	Meals       []AgendaMeal   `json:"meals,omitempty" jsonschema_description:"Planned meals by date then slot, with allergy warnings; change one with meal_set date and slot."`
-	MealChecks  []string       `json:"meal_checks,omitempty" jsonschema_description:"Saved allergies that could not be checked; tell the user."`
-	Lists       *AgendaLists   `json:"lists,omitempty" jsonschema_description:"Present when the lists area is included."`
-	Warnings    []string       `json:"warnings,omitempty" jsonschema_description:"Sections that failed to load; don't assume they are empty."`
+	Coverage agendaCoverage `json:"coverage" jsonschema_description:"What this result covers and left out: range, timezone, calendars, areas, and how many items are not listed. Read it before concluding anything is missing."`
+	Events   []AgendaEvent  `json:"events"`
+	Bills    []AgendaBill   `json:"bills,omitempty" jsonschema_description:"Bills due in the range, by date then name; present when the bills area is included"`
+	// BillLikeEntries is the guard against the war game's worst failure
+	// (#4943): calendar entries that read as bill statements but are not a
+	// bill's record. They are listed here, apart from `bills`, so no model
+	// can read one as bill state. A bill that migration 073 could supersede
+	// is already gone from the calendar; these are the ones it could not
+	// judge, and the family's answer (bill_create, bill_pay, or delete the
+	// entry) is what clears them.
+	BillLikeEntries []billLikeEntry `json:"bill_like_entries,omitempty" jsonschema_description:"Calendar entries that READ as a bill but are NOT bill state (no bill matches them, or the amount disagrees). Never report one as a bill due or unpaid; tell the user and use bill_find."`
+	Maintenance     []AgendaTask    `json:"maintenance,omitempty" jsonschema_description:"Upkeep due in the range, by date then name; present when the maintenance area is included"`
+	Meals           []AgendaMeal    `json:"meals,omitempty" jsonschema_description:"Planned meals by date then slot, with allergy warnings; change one with meal_set date and slot."`
+	MealChecks      []string        `json:"meal_checks,omitempty" jsonschema_description:"Saved allergies that could not be checked; tell the user."`
+	Lists           *AgendaLists    `json:"lists,omitempty" jsonschema_description:"Present when the lists area is included."`
+	Warnings        []string        `json:"warnings,omitempty" jsonschema_description:"Sections that failed to load; don't assume they are empty."`
 }
 
 // agendaInput is the validated agenda_get arguments.
@@ -621,7 +629,7 @@ func (b *agendaBuilder) loadEvents(ctx context.Context, pool *pgxpool.Pool, hous
 		// A bill's mirror belongs to the bills section (#4485); an event whose
 		// kind or calendar the role may not see is dropped whole (#4807), so an
 		// upkeep job's mirror is never an appointment a housesitter can read.
-		if isBillEvent(ev) || !b.eventVisible(ev, visible) || !eventOverlapsRange(ev, dayStart, dayEnd) {
+		if isBillEvent(ev) || ev.billLike || !b.eventVisible(ev, visible) || !eventOverlapsRange(ev, dayStart, dayEnd) {
 			continue
 		}
 		kept = append(kept, ev)
@@ -844,6 +852,12 @@ func agendaMealLine(m AgendaMeal) string {
 // loadBills fills the bills section, capped per day at summary detail. Every
 // bill is counted and summed whether or not it is listed, so the totals are
 // never a sample (#4809).
+//
+// Bill state comes from the bills module and nowhere else (#4943): the section
+// reads billsDueBetween (bill.BillDueFor, the rule bill_find uses), and a
+// calendar entry is never derived from it. A live entry that reads as a bill
+// but is not one of these records goes to bill_like_entries instead, with the
+// reason, so a model cannot mistake it for a due date (#4943).
 func (b *agendaBuilder) loadBills(ctx context.Context, pool *pgxpool.Pool, householdID string) {
 	bills, err := billsDueBetween(ctx, pool, householdID, b.days)
 	if err != nil {
@@ -861,6 +875,46 @@ func (b *agendaBuilder) loadBills(ctx context.Context, pool *pgxpool.Pool, house
 	}
 	b.billsListed = len(list)
 	b.res.Bills = list
+
+	// The guard: the family's bills (every one, not just those due in the
+	// range) are what a bill-like entry is judged against.
+	all, err := allBills(ctx, pool, householdID)
+	if err != nil {
+		slog.Error("agenda_get: query bills for the bill-like entry guard error", "error", err)
+		b.res.Warnings = append(b.res.Warnings, "Could not check the calendar for bill-like entries; a calendar entry that looks like a bill is not bill state.")
+		return
+	}
+	lookalikes, err := billLikeEntries(ctx, pool, householdID, all, b.loc)
+	if err != nil {
+		slog.Error("agenda_get: bill-like calendar entries error", "error", err)
+		b.res.Warnings = append(b.res.Warnings, "Could not check the calendar for bill-like entries; a calendar entry that looks like a bill is not bill state.")
+		return
+	}
+	b.res.BillLikeEntries = lookalikes
+}
+
+// allBills lists the household's bills so a bill-like calendar entry can be
+// matched to (or told apart from) the records. It reads the same columns
+// billsDueBetween does, without the due-date filter.
+func allBills(ctx context.Context, pool querier, householdID string) ([]AgendaBill, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT id::text, name, COALESCE(amount, 0)::float8, COALESCE(category, '')
+		   FROM bills WHERE household_id = $1 ORDER BY name, id`,
+		householdID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AgendaBill{}
+	for rows.Next() {
+		var b AgendaBill
+		if err := rows.Scan(&b.BillID, &b.Name, &b.Amount, &b.Category); err != nil {
+			return nil, fmt.Errorf("scan bill: %w", err)
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 func (b *agendaBuilder) loadMaintenance(ctx context.Context, pool *pgxpool.Pool, householdID string) {

@@ -79,6 +79,23 @@ type nextDays struct {
 	Events         eventsSection      `json:"events"`
 	BillsDue       billsSection       `json:"bills_due"`
 	MaintenanceDue maintenanceSection `json:"maintenance_due" jsonschema_description:"Open upkeep tasks due by to, overdue ones included"`
+	// BillLikeEntries is the guard against the war game's worst briefing
+	// failure (#4943): calendar entries that READ as bill statements but are
+	// not a bill's record. They are kept out of `events` on purpose — an entry
+	// like "Electric bill due — $180" is a claim about money that nothing
+	// keeps up to date — and listed here with the reason instead. Never report
+	// one as a bill due or unpaid; bill_find is the record.
+	BillLikeEntries []billLikeBrief `json:"bill_like_entries,omitempty" jsonschema_description:"Calendar entries that read as a bill but are NOT bill state. Never report one as a bill due or unpaid; use bill_find."`
+}
+
+// billLikeBrief is one calendar entry that looks like a bill but is not one.
+type billLikeBrief struct {
+	EventID   string  `json:"event_id"`
+	Title     string  `json:"title"`
+	LocalDate string  `json:"local_date,omitempty"`
+	Calendar  string  `json:"calendar"`
+	Reason    string  `json:"reason" jsonschema_description:"Why it is a calendar entry and not bill state. Tell the user this."`
+	BillID    *string `json:"bill_id,omitempty" jsonschema_description:"The bill it appears to be about, when one matches by name."`
 }
 
 type eventsSection struct {
@@ -359,6 +376,7 @@ func loadNextDays(ctx context.Context, pool *pgxpool.Pool, hh string, loc *time.
 	last := time.Date(y, m, d+days-1, 0, 0, 0, 0, loc)
 	nd := nextDays{
 		From: first.Format(time.DateOnly), To: last.Format(time.DateOnly), Days: days,
+		BillLikeEntries: []billLikeBrief{},
 	}
 	within := days - 1                                // due_within_days for the same window
 	today := time.Date(y, m, d, 0, 0, 0, 0, time.UTC) // bill dates are midnight UTC
@@ -387,6 +405,29 @@ func loadNextDays(ctx context.Context, pool *pgxpool.Pool, hh string, loc *time.
 				return
 			}
 			nd.MaintenanceDue = maintenancePreview(ctx, pool, hh, today, within, view.ownJobs, warn)
+		},
+		func() {
+			// The guard (#4943): a calendar entry that reads as a bill is
+			// reported, never trusted as bill state. A role that may not see
+			// money gets none of them (BillLikeEntriesBetween drops them), so a
+			// housesitter's briefing cannot leak a bill's name or amount.
+			if !view.billsDue {
+				nd.BillLikeEntries = []billLikeBrief{}
+				return
+			}
+			entries, err := calendar.BillLikeEntriesBetween(ctx, pool, view.role, hh, loc, first, end)
+			if err != nil {
+				warn("next_days.bill_like_entries", err)
+				nd.BillLikeEntries = []billLikeBrief{}
+				return
+			}
+			nd.BillLikeEntries = make([]billLikeBrief, 0, len(entries))
+			for _, e := range entries {
+				nd.BillLikeEntries = append(nd.BillLikeEntries, billLikeBrief{
+					EventID: e.EventID, Title: e.Title, LocalDate: e.LocalDate,
+					Calendar: e.Calendar, Reason: e.Reason, BillID: e.BillID,
+				})
+			}
 		})
 	return nd
 }
