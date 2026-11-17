@@ -1,0 +1,484 @@
+/*
+ * Notifications surface (#4563). Theme tokens only (app/globals.css, #4529);
+ * layout and sizes from KB design/app-shell.md (artifact #75 v1): the phone
+ * sheet sits above the tab bar with a drag handle and safe-area padding, from
+ * 768 px the same content is a 380 px popover.
+ *
+ * Rendered in a portal, outside the shell's .root, so it composes the shell
+ * variables itself (same as the More sheet in BottomNav.module.css).
+ */
+
+/* ---------- panel (shared by sheet and popover) ---------- */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  max-height: 100%;
+  background: var(--shell-raised);
+  color: var(--shell-ink);
+}
+
+.head {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 4px 10px;
+}
+
+.title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: var(--shell-ink);
+}
+
+/* In the sheet the dialog's h2 is in the Drawer header, so the count sits alone
+   on its line. */
+.head[data-compact] {
+  justify-content: flex-end;
+  padding-bottom: 6px;
+}
+
+.summary {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--shell-ink-3);
+  white-space: nowrap;
+}
+
+.list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Room for the last row's 44 px buttons above the sheet's bottom padding. */
+  padding: 0 0 4px;
+}
+
+.rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.groupHead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0;
+  padding: 8px 4px 6px;
+  background: var(--shell-raised);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--shell-ink-3);
+}
+
+/* ---------- one notification ---------- */
+
+.item {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  padding: 12px 4px 12px 10px;
+  border-bottom: 1px solid var(--shell-line);
+}
+
+.rows > .item:last-child {
+  border-bottom: 0;
+}
+
+/* Unread: an accent rule down the left edge, plus the dot by the time. */
+.item[data-unread]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--shell-accent);
+}
+
+.icon {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--shell-surface-2);
+  color: var(--shell-ink-2);
+}
+
+.item[data-unread] .icon {
+  background: var(--shell-accent-soft);
+  color: var(--shell-accent);
+}
+
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The actor, or the reminder's own subject. Never clipped: a name that reads
+   "Amb…" is the failure #4563 exists to fix, so it wraps instead. */
+.subject {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--shell-ink);
+  overflow-wrap: anywhere;
+}
+
+.via {
+  font-weight: 500;
+  color: var(--shell-ink-2);
+}
+
+/* The action and what changed, in full. */
+.what {
+  margin: 2px 0 0;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--shell-ink);
+  overflow-wrap: anywhere;
+}
+
+.detail {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--shell-ink-2);
+  overflow-wrap: anywhere;
+}
+
+.verb {
+  font-weight: 600;
+}
+
+/* The family-wide warning under a row's buttons: a second line of plain text,
+   not a colour alone. */
+.hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--shell-ink-3);
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--shell-ink-3);
+}
+
+.meta time {
+  font-variant-numeric: tabular-nums;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--shell-accent);
+}
+
+/* "Family-wide" / "Only you". Text, not colour alone. */
+.scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 20px;
+  padding: 0 7px;
+  border-radius: 10px;
+  background: var(--shell-surface-2);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--shell-ink-2);
+}
+
+.scope[data-scope="family"] {
+  background: var(--shell-accent-soft);
+  color: var(--shell-accent);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--shell-line);
+  border-radius: var(--r-sm);
+  background: var(--shell-surface);
+  color: var(--shell-ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.action:hover {
+  background: var(--shell-surface-2);
+}
+
+.action[aria-busy="true"] {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+.actionLink {
+  color: var(--shell-accent);
+  border-color: transparent;
+  background: none;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.actionLink:hover {
+  background: var(--shell-accent-soft);
+}
+
+/* ---------- none / loading / error ---------- */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 16px 4px 20px;
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--shell-ink);
+}
+
+.emptyText {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--shell-ink-2);
+}
+
+.emptyList {
+  margin: 4px 0 0;
+  padding: 0 0 0 20px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--shell-ink-2);
+}
+
+.emptyList li {
+  margin-top: 4px;
+}
+
+.emptyIcon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--shell-accent-soft);
+  color: var(--shell-accent);
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--shell-line);
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--skeleton-shine), transparent);
+  animation: shimmer 1.4s infinite;
+}
+
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* An error never renders as an empty list (audit #74 root cause). */
+.error {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px;
+  border: 1px solid var(--shell-line);
+  border-left: 4px solid var(--danger);
+  border-radius: var(--r-md);
+  background: var(--shell-surface);
+}
+
+.errorIcon {
+  flex: none;
+  color: var(--danger);
+}
+
+.errorTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--shell-ink);
+}
+
+.errorText {
+  margin: 2px 0 10px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--shell-ink-2);
+}
+
+/* A failed per-row mark-read, above the list. */
+.rowError {
+  flex: none;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: var(--warn-bg);
+  box-shadow: inset 0 0 0 1px var(--warn-line);
+  color: var(--warn-ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* ---------- phone: bottom sheet above the tab bar ---------- */
+
+/*
+ * Full width, bottom = the tab bar (57 px) + the safe-area inset, so the bar
+ * stays visible and the sheet's rows stay inside thumb reach. KB
+ * design/app-shell.md: "On phones these open as bottom sheets (full width,
+ * radius 16 at the top, drag handle, padding-bottom 16px + safe-area)".
+ */
+.sheetInner {
+  padding: 0 0 calc(57px + env(safe-area-inset-bottom, 0px));
+}
+
+/* composes the shell variables itself: the Drawer renders its own header and
+   body, which sit outside .panel, and --shell-ink/--shell-raised must resolve
+   there too (the More sheet does the same in BottomNav.module.css). */
+.sheet {
+  composes: shellVars from "../shared/DashboardShell.module.css";
+  display: flex;
+  flex-direction: column;
+  height: auto !important;
+  /* Never taller than the space above the tab bar: the sheet keeps the bar
+     visible, and the list inside it scrolls. */
+  max-height: calc(
+    100dvh - 57px - env(safe-area-inset-bottom, 0px) - env(safe-area-inset-top, 0px) - 12px
+  ) !important;
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  background: var(--shell-raised);
+  color: var(--shell-ink);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.sheet:focus,
+.sheet:focus-visible {
+  outline: none;
+}
+
+.sheetHeader {
+  position: relative;
+  flex: none;
+  min-height: 0;
+  padding: 22px 8px 2px 16px;
+  background: inherit;
+}
+
+/* The dialog's accessible name, from the Drawer's title prop. */
+.sheetTitle {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--shell-ink);
+}
+
+/* flex 1 with min-height 0 in the .sheet column: the header stays put and the
+   list scrolls inside whatever height is left. */
+.sheetBody {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding: 2px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+
+/* The panel inside the sheet: passes the bounded height down so the list, not
+   the sheet, scrolls. */
+.sheetPanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.handle {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  width: 36px;
+  height: 4px;
+  margin-left: -18px;
+  border-radius: 2px;
+  background: var(--shell-line);
+}
+
+/* ---------- 768 px and up: popover ---------- */
+
+.popover {
+  composes: shellVars from "../shared/DashboardShell.module.css";
+  width: 380px;
+  max-width: calc(100vw - 16px);
+  max-height: 70vh;
+  overflow: hidden;
+  border: 1px solid var(--shell-line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+}
+
+.popoverBody {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: calc(70vh - 24px);
+  padding: 12px 12px 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
+}
