@@ -68,8 +68,13 @@ import {
   IconUsers,
 } from "@tabler/icons-react";
 import ResponsiveModal, { ResponsiveModalActions } from "@/components/ui/ResponsiveModal";
-import { useMyHouseholds, useNavRole } from "@/components/shared/use-nav-role";
+import { useCurrentHousehold, useMyHouseholds, useNavRole } from "@/components/shared/use-nav-role";
 import { householdRoleLabel } from "@/lib/household-roles";
+import {
+  householdCardInitial,
+  householdCardMeta,
+  householdCardName,
+} from "@/lib/members/household-card";
 import {
   canManageMembers,
   canSeeMembers,
@@ -91,7 +96,6 @@ import {
   ownerCount,
   useChangeRole,
   useCreateInvite,
-  useHousehold,
   useInvites,
   useRemoveMember,
   useRoster,
@@ -154,7 +158,15 @@ export default function MembersPage() {
   const allowed = roleSettled && canSeeMembers(role);
   const manager = allowed && canManageMembers(role);
 
-  const { data: hh } = useHousehold(allowed);
+  // The household this page is in, from the SAME source the rest of the app
+  // reads (#5300): GET /me/households via useCurrentHousehold. The card used to
+  // fetch GET /households/me, whose payload is the Go Household struct with no
+  // json tags — `data.Timezone`, not `data.timezone` — so the zone was always
+  // `undefined` and a family with a zone was told "Time zone not set". Reading
+  // the family list here instead is not a second source of truth: it is the one
+  // source, already used by Today, Calendar, Pets, People, Bills and search, and
+  // it also saves a request that only this page ever made.
+  const household = useCurrentHousehold();
   const { data: me } = useViewerId(allowed);
   const viewer = me?.id ?? null;
   // The roster shows skeleton rows only AFTER the role says yes: before that
@@ -234,20 +246,25 @@ export default function MembersPage() {
   return (
     <div className={classes.page} data-testid="members-page">
       <p className={classes.lede}>
-        Who can sign in to {hh?.data?.name ?? "this family"} and what each person can do. Kids and
-        anyone without a login live in People &amp; House.
+        Who can sign in to {household?.name?.trim() || "this family"} and what each person can do.
+        Kids and anyone without a login live in People &amp; House.
       </p>
 
       {/* ── The household itself ─────────────────────────────── */}
       <section className={classes.houseCard} aria-label="Household">
         <span className={classes.houseMark} aria-hidden>
-          {(hh?.data?.name ?? "H").charAt(0).toUpperCase()}
+          {householdCardInitial(household)}
         </span>
         <div className={classes.houseBody}>
-          <h2 className={classes.houseName}>{hh?.data?.name ?? "This family"}</h2>
-          <p className={classes.houseMeta}>
-            {hh?.data?.timezone ?? "Time zone not set"}
-            {role ? ` · you're a ${householdRoleLabel(role).toLowerCase()}` : ""}
+          <h2 className={classes.houseName} data-testid="household-name">
+            {householdCardName(household)}
+          </h2>
+          {/* The zone comes from the household record (#5300) — see
+              lib/members/household-card.ts for the read this replaced. While
+              the household is unknown the line carries the role only, rather
+              than claiming the family has no zone. */}
+          <p className={classes.houseMeta} data-testid="household-meta">
+            {householdCardMeta(household, role)}
           </p>
           <p className={classes.houseNote}>
             The time zone sets when reminders, bills and &ldquo;today&rdquo; roll over for everyone.

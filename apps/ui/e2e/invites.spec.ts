@@ -310,7 +310,18 @@ test("members: a fresh invite offers Copy link, Share where available, and says 
   await page.route("**/bff/me/households", (route) => route.fulfill({ json: { data: [HOUSEHOLD] } }));
   await page.route("**/bff/auth/me", (route) => route.fulfill({ json: { data: { id: "u1", email: "jacob@sims.family" } } }));
   await page.route("**/bff/households/me", (route) =>
-    route.fulfill({ json: { data: { id: HOUSEHOLD.id, name: HOUSEHOLD.name, timezone: HOUSEHOLD.timezone } } }),
+    route.fulfill({
+      json: {
+        data: {
+          ID: HOUSEHOLD.id,
+          Name: HOUSEHOLD.name,
+          Timezone: HOUSEHOLD.timezone,
+          Settings: null,
+          CreatedAt: "2026-01-01T00:00:00Z",
+          UpdatedAt: "2026-01-01T00:00:00Z",
+        },
+      },
+    }),
   );
   await page.route("**/bff/households/me/members", (route) =>
     route.fulfill({

@@ -439,8 +439,21 @@ const server = createServer(async (req, res) => {
         });
       }
       if (resource === "households/me" && activeHousehold) {
+        // The API's REAL wire shape (#5300): GetMe serialises the Go Household
+        // struct, which has no json tags, so the keys are capitalised
+        // (`Timezone`, not `timezone`). This stub used to answer a tidy lowercase
+        // object the product never sends, and a page reading the wrong key
+        // passed every spec. Stub the API as it is: a spec that only passes
+        // against a made-up payload is not testing anything.
         return send(res, 200, {
-          data: { id: activeHousehold.id, name: activeHousehold.name, timezone: activeHousehold.timezone ?? "UTC" },
+          data: {
+            ID: activeHousehold.id,
+            Name: activeHousehold.name,
+            Timezone: activeHousehold.timezone ?? "UTC",
+            Settings: null,
+            CreatedAt: "2026-01-01T00:00:00Z",
+            UpdatedAt: "2026-01-01T00:00:00Z",
+          },
         });
       }
       // Lists and records the spec seeds per household: only the active
