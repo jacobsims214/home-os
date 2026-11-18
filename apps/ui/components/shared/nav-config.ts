@@ -136,12 +136,16 @@ export const NAV_SECTIONS: readonly NavSection[] = [
   {
     id: "people",
     label: "People & House",
-    // The People page (#4565) doesn't exist yet; properties is today's way in.
-    href: "/dashboard/properties",
+    // The People page (#4565) is the way in: the family comes first, the house
+    // follows from the same section (properties, vehicles, pets, vendors).
+    href: "/dashboard/people",
     icon: IconHome,
     group: "household",
     matches: [
       "/dashboard/people",
+      // Properties led this section before the People page existed; it is
+      // still part of it now that the href is People.
+      "/dashboard/properties",
       "/dashboard/members",
       "/dashboard/assets",
       "/dashboard/maintenance",
@@ -165,6 +169,8 @@ export const NAV_SECTIONS: readonly NavSection[] = [
 
 /** Page titles for routes that aren't a section's own page. */
 const ROUTE_TITLES: ReadonlyArray<[prefix: string, title: string]> = [
+  // The People page (#4565); a person's own page keeps the same title.
+  ["/dashboard/people", "People"],
   ["/dashboard/properties", "Properties"],
   ["/dashboard/members", "Members"],
   ["/dashboard/assets", "Assets"],

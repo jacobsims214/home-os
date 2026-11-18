@@ -37,6 +37,15 @@ interface DetailPageLayoutProps {
   entityType: string;
   entityId: string;
   title: string;
+  /**
+   * Where the back link goes. Defaults to `/dashboard/<plural entityType>`,
+   * which is right for every entity whose list path is the plural of its kind.
+   * "person" is not: its plural path derives to "persons", so the People page
+   * (#4565) passes `/dashboard/people` and its own label.
+   */
+  backHref?: string;
+  /** The back link's text and accessible name; default "Back to <Plural>". */
+  backLabel?: string;
   isEditing?: boolean;
   onEdit?: () => void;
   onDelete?: () => void;
@@ -67,6 +76,8 @@ export default function DetailPageLayout({
   entityType,
   entityId,
   title,
+  backHref,
+  backLabel,
   isEditing,
   onEdit,
   onDelete,
@@ -89,8 +100,8 @@ export default function DetailPageLayout({
   ]
     .filter(Boolean)
     .join(", ");
-  const backHref = `/dashboard/${pluralPath(entityType)}`;
-  const backLabel = `Back to ${pluralLabel(entityType)}`;
+  const resolvedBackHref = backHref ?? `/dashboard/${pluralPath(entityType)}`;
+  const resolvedBackLabel = backLabel ?? `Back to ${pluralLabel(entityType)}`;
   const heading = title || "Untitled";
 
   const startEdit = () => {
@@ -114,17 +125,17 @@ export default function DetailPageLayout({
     <div className="min-w-0">
       {/* Title bar. Sticky on phones only; spans the shell's 16 px gutter. */}
       <div className="sticky top-[var(--app-shell-header-offset,0px)] z-10 -mx-4 -mt-4 mb-4 flex min-h-14 items-center gap-1 border-b border-line bg-bg px-2 md:static md:mx-0 md:mt-0 md:mb-6 md:items-end md:gap-4 md:border-0 md:bg-transparent md:px-0">
-        <Link href={backHref} aria-label={backLabel} className={`${iconButton} md:hidden`}>
+        <Link href={resolvedBackHref} aria-label={resolvedBackLabel} className={`${iconButton} md:hidden`}>
           <IconArrowLeft size={22} stroke={ICON_STROKE} aria-hidden />
         </Link>
 
         <div className="min-w-0 flex-1">
           <Link
-            href={backHref}
+            href={resolvedBackHref}
             className="hidden items-center gap-1 text-sm text-ink-3 hover:text-accent md:inline-flex"
           >
             <IconArrowLeft size={16} stroke={ICON_STROKE} aria-hidden />
-            {backLabel}
+            {resolvedBackLabel}
           </Link>
           <h2 className="truncate text-lg font-semibold leading-tight text-ink md:mt-1 md:text-2xl md:font-bold">
             {heading}
