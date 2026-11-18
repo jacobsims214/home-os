@@ -27,20 +27,29 @@
  * under the shell header — without the tabs.
  *
  * Roles (#4689): reading a guide is granted to family, viewer and housesitter;
- * a sitter reading "reset the router" is the reason guides exist. This page is
- * read-only for everyone (editing is its own ticket), so there is no Edit
- * affordance to hide from anyone.
+ * a sitter reading "reset the router" is the reason guides exist. WRITING is
+ * family roles only (#5309), so the Edit button is drawn only for them and the
+ * API refuses the rest anyway.
+ *
+ * Authoring (#5309) lives here rather than at a separate /edit route: the
+ * person who opens a guide to fix a step wants the step in front of them, not
+ * a form that reloads the same body into a different page. The editor is
+ * `components/guides/GuideEditor.tsx`, opened from the header or by
+ * `?edit=1` (the list's "New guide" flow links there), and `?tab=history`
+ * opens it on the revision list.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { Button, Skeleton } from "@mantine/core";
-import { IconAlertTriangle, IconArrowLeft, IconBook, IconCheck } from "@tabler/icons-react";
+import { IconAlertTriangle, IconArrowLeft, IconBook, IconCheck, IconPencil } from "@tabler/icons-react";
 import { apiFetch } from "@/lib/api";
 import { guideKeys } from "@/lib/query-keys";
 import { GuideStepBody } from "@/components/guides/GuideBody";
+import GuideEditor from "@/components/guides/GuideEditor";
+import { useNavRole } from "@/components/shared/use-nav-role";
 import {
   formatGuideDate,
   guideStepCount,
@@ -50,6 +59,9 @@ import {
 } from "@/lib/guides/model";
 
 const STROKE = 1.75;
+
+/** Family roles may write guides (apps/api/internal/auth/roles.go ResGuides). */
+const WRITER_ROLES = new Set(["owner", "family_manager", "family_member"]);
 
 /** The phone's back button: a 44 px target, like the detail frame's. */
 const iconButton =
@@ -86,7 +98,7 @@ function saveDone(guideId: string, done: Set<number>): void {
   }
 }
 
-function BackBar({ title }: { title: string }) {
+function BackBar({ title, actions }: { title: string; actions?: React.ReactNode }) {
   return (
     <div className="sticky top-[var(--app-shell-header-offset,0px)] z-10 -mx-4 -mt-4 mb-4 flex min-h-14 items-center gap-1 border-b border-line bg-bg px-2 md:static md:mx-0 md:mt-0 md:mb-6 md:border-0 md:bg-transparent md:px-0">
       <Link href="/dashboard/guides" aria-label="Back to Guides" className={`${iconButton} md:hidden`}>
@@ -110,6 +122,7 @@ function BackBar({ title }: { title: string }) {
           {title}
         </h2>
       </div>
+      {actions && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
     </div>
   );
 }
@@ -176,6 +189,14 @@ function StepCard({
 
 export default function GuidePage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const role = useNavRole();
+  const canWrite = role == null || WRITER_ROLES.has(role);
+  const wantsEdit = searchParams?.get("edit") === "1";
+  const wantsHistory = searchParams?.get("tab") === "history";
+  const [editing, setEditing] = useState(false);
+  const [historyOnly, setHistoryOnly] = useState(false);
   const guideId =
     typeof params?.id === "string" ? params.id : Array.isArray(params?.id) ? params.id[0] ?? "" : "";
 
@@ -196,6 +217,24 @@ export default function GuidePage() {
     if (!guideId) return;
     setDone(loadDone(guideId));
   }, [guideId]);
+
+  // The list's "New guide" flow lands on ?edit=1, so the editor opens on
+  // arrival. Read once: closing the editor must not be undone by a re-render.
+  useEffect(() => {
+    if (wantsEdit) setEditing(true);
+    if (wantsHistory) {
+      setEditing(true);
+      setHistoryOnly(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const closeEditor = useCallback(() => {
+    setEditing(false);
+    setHistoryOnly(false);
+    // Drop the query string so a reload does not reopen the editor.
+    if (wantsEdit || wantsHistory) router.replace(`/dashboard/guides/${guideId}`, { scroll: false });
+  }, [guideId, router, wantsEdit, wantsHistory]);
 
   const toggle = useCallback(
     (index: number) => {
@@ -262,7 +301,57 @@ export default function GuidePage() {
 
   return (
     <div className="mx-auto w-full max-w-3xl min-w-0" data-guide-detail={guide.id}>
-      <BackBar title={guide.title} />
+      <BackBar
+        title={guide.title}
+        actions={
+          canWrite && !editing ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                aria-label="Edit this guide"
+                className={iconButton}
+                data-guide-edit-button
+              >
+                <IconPencil size={20} stroke={STROKE} aria-hidden />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setHistoryOnly(true);
+                  setEditing(true);
+                }}
+                className="inline-flex min-h-11 items-center rounded-token-sm px-3 text-sm font-semibold text-ink-2 transition-colors hover:bg-surface-2 hover:text-ink"
+                data-guide-history-button
+              >
+                History
+              </button>
+            </>
+          ) : undefined
+        }
+      />
+
+      {/* The editor sits above the steps: someone who came to fix step 3
+          should not have to scroll past the guide to reach the form. */}
+      {canWrite && editing && (
+        <div className="mb-4">
+          <GuideEditor
+            guide={guide}
+            canWrite={canWrite}
+            initialTab={historyOnly ? "history" : "edit"}
+            onSaved={() => {
+              /* stay open: saving twice in a row is normal */
+            }}
+            onClose={closeEditor}
+          />
+        </div>
+      )}
+
+      {guide.id && editing && canWrite && historyOnly && (
+        <p className="sr-only" aria-live="polite">
+          Showing this guide&apos;s history.
+        </p>
+      )}
 
       {/* The head: what the guide is for, how long it is, when it last changed. */}
       <header className="mb-4 min-w-0 md:mb-6">

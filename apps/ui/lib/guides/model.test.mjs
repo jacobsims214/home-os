@@ -7,11 +7,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  currentRevisionId,
   formatGuideDate,
+  guideIsDirty,
+  guideSaveBody,
   guideStepCount,
   guideSubtitle,
+  isRestoreNote,
   matchesSearch,
   parseGuideSteps,
+  restoreWarning,
+  restoredRevisionId,
+  revisionAuthor,
+  revisionSizeLabel,
+  revisionWhen,
   splitTags,
   stepCountLabel,
 } from "./model.ts";
@@ -107,4 +116,96 @@ test("a date is formatted for a person, and an unparseable one is not invented",
   assert.equal(formatGuideDate(null), null);
   assert.equal(formatGuideDate(""), null);
   assert.equal(formatGuideDate("not a date"), null);
+});
+
+// --- #5309: editing and revision history ---
+
+test("a save body carries EVERY field, subject columns included (#4565 trap)", () => {
+  const guide = { property_id: "p1", asset_id: null, vehicle_id: "v1" };
+  const body = guideSaveBody(guide, {
+    title: "  Reset the router  ",
+    summary: "",
+    body: "## Unplug it\n\nWait.",
+    tags: "wifi, Router",
+    change_note: "  fixed step 2  ",
+  });
+
+  // The editable fields, normalised the way guideEditBody does.
+  assert.equal(body.title, "Reset the router");
+  assert.equal(body.summary, "", "an emptied summary is sent as '', which clears it");
+  assert.equal(body.body, "## Unplug it\n\nWait.");
+  assert.deepEqual(body.tags, ["wifi", "router"]);
+  assert.equal(body.change_note, "fixed step 2");
+
+  // The trap: the form cannot change these, but omitting one makes the API
+  // write back whatever the row held when it locked. A null must be sent as
+  // "" (subject.Apply's clear), never left out.
+  assert.equal(body.property_id, "p1", "the subject columns are echoed, not dropped");
+  assert.equal(body.asset_id, "");
+  assert.equal(body.vehicle_id, "v1");
+  for (const key of ["title", "summary", "body", "tags", "change_note", "property_id", "asset_id", "vehicle_id"]) {
+    assert.ok(key in body, `${key} must be present in a save body`);
+  }
+});
+
+test("a restore's API note is recognised, and its revision id recovered", () => {
+  const rev = "8f14e45f-ceea-467a-9a3e-1b0f2f0b8b1a";
+  assert.equal(isRestoreNote(`Restored revision ${rev}`), true);
+  assert.equal(restoredRevisionId(`Restored revision ${rev}`), rev);
+  assert.equal(isRestoreNote("fixed the wifi step"), false, "a person's own note is not a restore");
+  assert.equal(isRestoreNote(null), false);
+  assert.equal(restoredRevisionId("  Restored revision " + rev + "  "), rev, "surrounding space is fine");
+});
+
+test("the current revision is the NEWEST whose body matches - which is the restore after one", () => {
+  const revisions = [
+    { id: "r3", body: "old body" },   // the restore: old text written as a new revision
+    { id: "r2", body: "new body" },   // the version it replaced, still present
+    { id: "r1", body: "old body" },
+  ];
+  assert.equal(currentRevisionId(revisions, "old body"), "r3");
+  assert.equal(currentRevisionId(revisions, "new body"), "r2");
+  assert.equal(currentRevisionId(revisions, "gone"), null);
+  assert.equal(currentRevisionId(revisions, null), null);
+  assert.equal(currentRevisionId([{ id: "r1" }], "x"), null, "the list carries no body: no answer, not a wrong one");
+});
+
+test("who and when of a revision are said honestly, and never invented", () => {
+  assert.equal(revisionAuthor({ edited_by: "u1", edited_by_name: "Jacob" }), "Jacob");
+  assert.equal(revisionAuthor({ edited_by: "u1", edited_by_name: "  " }), "Someone");
+  assert.equal(revisionAuthor({ edited_by: null, edited_by_name: null }), "Not recorded");
+
+  const now = Date.parse("2026-11-18T12:00:00Z");
+  assert.equal(revisionWhen("2026-11-18T11:59:40Z", now), "just now");
+  assert.equal(revisionWhen("2026-11-18T11:30:00Z", now), "30 min ago");
+  assert.equal(revisionWhen("2026-11-18T09:00:00Z", now), "3 hours ago");
+  assert.equal(revisionWhen("2026-11-18T10:00:00Z", now), "2 hours ago");
+  assert.equal(revisionWhen("2026-10-02T12:00:00Z", now), "Oct 2, 2026", "old versions read as a date");
+  assert.equal(revisionWhen(null, now), null);
+  assert.equal(revisionWhen("nonsense", now), null);
+});
+
+test("saving an untouched form is refused, because it would add a copy to the history", () => {
+  const guide = { title: "Reset the router", summary: "When wifi drops.", body: "## Step", tags: ["wifi"] };
+  const same = { title: "Reset the router", summary: "When wifi drops.", body: "## Step", tags: "wifi" };
+  assert.equal(guideIsDirty(guide, same), false, "nothing changed");
+  assert.equal(guideIsDirty(guide, { ...same, tags: " WiFi , wifi " }), false, "tag order/space is not a change");
+  assert.equal(guideIsDirty(guide, { ...same, title: " Reset the router " }), false, "trim is not a change");
+  assert.equal(guideIsDirty(guide, { ...same, body: "## Step 2" }), true);
+  assert.equal(guideIsDirty(guide, { ...same, summary: "" }), true, "clearing a field is a change");
+  assert.equal(guideIsDirty({ ...guide, summary: null }, { ...same, summary: "" }), false);
+});
+
+test("the restore warning promises that the replaced version survives", () => {
+  const withDate = restoreWarning("3 hours ago");
+  assert.match(withDate, /stays in the history/);
+  assert.match(withDate, /restore that one too/);
+  assert.match(restoreWarning(null), /stays in the history/);
+  assert.doesNotMatch(restoreWarning(null), /undefined|null/, "no placeholder leaks into the sentence");
+});
+
+test("a size label is a fact: characters, or 'empty'", () => {
+  assert.equal(revisionSizeLabel(412), "412 characters");
+  assert.equal(revisionSizeLabel(1), "1 character");
+  assert.equal(revisionSizeLabel(0), "empty");
 });
