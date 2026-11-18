@@ -54,6 +54,7 @@ import {
   formatMoney,
   frequencyChips,
   mergeRows,
+  monthlyAmount,
   monthlyTotal,
   roleKnown,
   scheduleLabel,
@@ -175,11 +176,43 @@ export default function BillsPage() {
             {due > 0 ? `${due} due now` : "Nothing due right now"} · sorted by next due date
           </p>
 
-          <Card withBorder radius="md" padding={0} className="overflow-hidden">
+          {/* Phones: the list's cards (the mockup's .elist-cards). */}
+          <Card withBorder radius="md" padding={0} className="overflow-hidden md:hidden">
             {shown.map((row, i) => (
               <BillListItem key={row.bill.id} row={row} names={(subjects.data ?? NO_SUBJECTS).names} first={i === 0} />
             ))}
           </Card>
+
+          {/* 768px and up: the mockup's table (.elist-tbl). The same rows, the
+              same reading, with the columns a wide screen has room for. */}
+          <div className="hidden md:block" data-testid="bills-table">
+            <Card withBorder radius="md" padding={0} className="overflow-x-auto">
+              <table className="w-full min-w-[36rem] border-collapse text-sm">
+                <caption className="sr-only">Bills, next due, amount, how often, per month, budget category and what each is for</caption>
+                <thead>
+                  <tr className="bg-surface-2 text-left">
+                    {["Bill", "Next due", "Amount", "How often", "Per month", "Budget", "For"].map((h, i) => (
+                      <th
+                        key={h}
+                        scope="col"
+                        className={[
+                          "border-b border-line px-3.5 py-2.5 text-[12px] font-semibold uppercase tracking-[.04em] text-ink-3",
+                          i === 2 || i === 4 ? "text-right" : "",
+                        ].join(" ")}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {shown.map((row) => (
+                    <BillTableRow key={row.bill.id} row={row} names={(subjects.data ?? NO_SUBJECTS).names} />
+                  ))}
+                </tbody>
+              </table>
+            </Card>
+          </div>
 
           {dueSoon.isError && (
             <div className="mt-3 rounded-token-md border border-warn-line bg-warn-bg px-3.5 py-3 text-[13px] text-warn-ink" role="status" data-testid="due-soon-gap">
@@ -271,6 +304,67 @@ function BillListItem({ row, names, first }: { row: BillRow; names: Parameters<t
       </span>
       <IconChevronRight size={18} stroke={ICON_STROKE} className="shrink-0 text-ink-3" aria-hidden />
     </Link>
+  );
+}
+
+/**
+ * One bill as a table row (768px and up). Same reading as the card: the due
+ * line, the amount and the "per month" spread all come from the model, and the
+ * paid state is the API's, never inferred here.
+ */
+function BillTableRow({ row, names }: { row: BillRow; names: Parameters<typeof subjectLabel>[1] }) {
+  const { bill, due } = row;
+  const state = dueState(row);
+  const amount = formatMoney(bill.amount);
+  const perMonth = formatMoney((bill.frequency ?? "monthly") === "once" ? null : monthlyAmount(bill));
+  const subject = subjectLabel(bill, names);
+  const paidFor = bill.paid_for_due_date ?? null;
+
+  return (
+    <tr
+      data-bill-row={bill.id}
+      data-due-state={state}
+      className="border-b border-line last:border-b-0 hover:bg-surface-2"
+    >
+      <td className="px-3.5 py-3">
+        <Link href={`/dashboard/bills/${bill.id}`} className="inline-flex items-center gap-2.5 font-semibold text-ink">
+          <span className="grid h-8 w-8 flex-none place-items-center rounded-lg bg-surface-2 text-ink-2" aria-hidden>
+            {bill.vehicle_id ? (
+              <IconCar size={16} stroke={ICON_STROKE} />
+            ) : bill.property_id ? (
+              <IconHome size={16} stroke={ICON_STROKE} />
+            ) : (
+              <IconReceipt size={16} stroke={ICON_STROKE} />
+            )}
+          </span>
+          <span className="min-w-0">{bill.name}</span>
+        </Link>
+      </td>
+      <td className="whitespace-nowrap px-3.5 py-3 text-ink-2">
+        {state === "paid" && due ? (
+          <>
+            <span className="block">{dueLabel(due)}</span>
+            <span className="block text-[12px] font-semibold text-[var(--ok-ink,#2b8a3e)]">
+              Paid{paidFor ? ` ${dayMonth(paidFor)}` : ""}
+            </span>
+          </>
+        ) : state === "due" && due ? (
+          <>
+            <span className="block">{dueLabel(due)}</span>
+            <span className="block text-[12px] text-ink-3">{dueWhen(due.days_until_due)}</span>
+          </>
+        ) : (
+          <span className="block text-ink-3">{scheduleLabel(bill)}</span>
+        )}
+      </td>
+      <td className="whitespace-nowrap px-3.5 py-3 text-right tabular-nums">
+        {amount ? <b className="font-semibold text-ink">{amount}</b> : <span className="text-ink-3">No amount</span>}
+      </td>
+      <td className="whitespace-nowrap px-3.5 py-3 text-ink-2">{scheduleLabel(bill)}</td>
+      <td className="whitespace-nowrap px-3.5 py-3 text-right tabular-nums text-ink-2">{perMonth ?? <span className="text-ink-3">–</span>}</td>
+      <td className="px-3.5 py-3 text-ink-2">{bill.category || <span className="text-ink-3">None</span>}</td>
+      <td className="px-3.5 py-3 text-ink-2">{subject ? subject.name : <span className="text-ink-3">–</span>}</td>
+    </tr>
   );
 }
 
