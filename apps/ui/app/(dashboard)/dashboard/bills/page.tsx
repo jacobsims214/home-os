@@ -175,12 +175,17 @@ export default function BillsPage() {
             {due > 0 ? `${due} due now` : "Nothing due right now"} · sorted by next due date
           </p>
 
-          {/* Phones: the list's cards (the mockup's .elist-cards). */}
-          <Card withBorder radius="md" padding={0} className="overflow-hidden md:hidden">
-            {shown.map((row, i) => (
-              <BillListItem key={row.bill.id} row={row} names={(subjects.data ?? NO_SUBJECTS).names} first={i === 0} />
-            ))}
-          </Card>
+          {/* Phones: the list's cards (the mockup's .elist-cards). The display
+              rule lives on a plain div: Mantine's Card class out-specifies a
+              Tailwind utility on the component itself, which left the cards
+              showing at 1440px beside the table. */}
+          <div className="md:hidden">
+            <Card withBorder radius="md" padding={0} className="overflow-hidden">
+              {shown.map((row, i) => (
+                <BillListItem key={row.bill.id} row={row} names={(subjects.data ?? NO_SUBJECTS).names} first={i === 0} />
+              ))}
+            </Card>
+          </div>
 
           {/* 768px and up: the mockup's table (.elist-tbl). The same rows, the
               same reading, with the columns a wide screen has room for. */}
