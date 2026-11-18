@@ -1,0 +1,617 @@
+/*
+ * The Members page (#4559), drawn to the approved settings mockup
+ * (artifact #103 v1, its "Family & members" pane) inside the approved shell
+ * (artifact #75 v1). Tokens only (app/globals.css): --surface, --ink-2,
+ * --accent-soft… never a hex, so light and dark both work.
+ *
+ * Phone first. The roster is a LIST of rows, not a table: a 390 px phone
+ * cannot show name + relationship + role + allergies + an actions menu in
+ * columns, and the audit that sent this ticket (#4509, artifact 74) found the
+ * old table's row actions cut off past the right edge. From 768 px up the same
+ * rows get more room and two columns of text; the table never comes back,
+ * because a row that wraps is readable at any width and a clipped cell is not.
+ */
+
+.page {
+  max-width: 760px;
+}
+
+/* ---------- page heading (the shell's h1 is the route title) ---------- */
+
+.lede {
+  margin: 0 0 16px;
+  color: var(--ink-2);
+  font-size: 14px;
+  line-height: 1.5;
+  max-width: 62ch;
+}
+
+/* ---------- the household card ---------- */
+
+.houseCard {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.houseMark {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 18px;
+  flex: none;
+}
+
+.houseBody {
+  flex: 1;
+  min-width: 0;
+}
+
+.houseName {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.houseMeta {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.houseNote {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--ink-3);
+  line-height: 1.45;
+}
+
+/* ---------- a section heading with a count and an action ---------- */
+
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 24px 0 10px;
+  min-height: 40px;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.count {
+  color: var(--ink-3);
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.hint {
+  margin: -4px 0 10px;
+  font-size: 13px;
+  color: var(--ink-3);
+  line-height: 1.45;
+}
+
+/* ---------- the roster ---------- */
+
+.roster {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 8px 12px 14px;
+  min-height: 64px;
+}
+
+.row + .row {
+  border-top: 1px solid var(--line);
+}
+
+/* The colour dot doubles as the avatar: the mockup draws members in their
+   colour, and a second avatar ring would say the same thing twice. */
+.dot {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  flex: none;
+  margin-top: 2px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* An unknown/missing colour (never written by this UI) gets a neutral ring so
+   the row still has a swatch and nothing unvalidated is interpolated. */
+.dotFallback {
+  background: var(--surface-2);
+  color: var(--ink-3);
+  box-shadow: inset 0 0 0 1.5px var(--line);
+}
+
+.rowBody {
+  flex: 1;
+  min-width: 0;
+}
+
+.nameLine {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.you {
+  font-size: 13px;
+  color: var(--ink-3);
+  font-weight: 500;
+}
+
+.sub {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.roleTag {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.roleManager {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.allergy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  border: 1px solid var(--warn-line);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.vendorLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* The row's single actions opener. 44 px: the tap target the audit asked for
+   (#11636: row actions were cut off at phone widths). */
+.rowMenu {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  margin: -6px -2px 0 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.rowMenu:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/* ---------- invites ---------- */
+
+.inviteRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  flex-wrap: wrap;
+}
+
+.inviteRow + .inviteRow {
+  border-top: 1px solid var(--line);
+}
+
+.inviteBody {
+  flex: 1;
+  min-width: 160px;
+}
+
+.inviteActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.expiring {
+  color: var(--warn-ink);
+  font-weight: 600;
+}
+
+/* ---------- colour picker ---------- */
+
+.swatches {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 4px 0 16px;
+}
+
+@media (min-width: 48em) {
+  /* Find the page's number above. */
+  .swatches {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
+}
+
+.swatch {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 4px;
+  min-height: 64px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.swatch:hover {
+  border-color: var(--ink-3);
+}
+
+.swatch[aria-checked="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  background: var(--accent-soft);
+}
+
+.swatchDisc {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.swatchLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-2);
+  line-height: 1.1;
+}
+
+.swatch:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ---------- role picker ---------- */
+
+.roleCards {
+  display: grid;
+  gap: 8px;
+}
+
+.roleCard {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  width: 100%;
+  min-height: 60px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.roleCard[aria-checked="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  background: var(--accent-soft);
+}
+
+.roleCard:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.roleRadio {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid var(--ink-3);
+  flex: none;
+  margin-top: 1px;
+  display: grid;
+  place-items: center;
+}
+
+.roleCard[aria-checked="true"] .roleRadio {
+  border-color: var(--accent);
+}
+
+.roleCard[aria-checked="true"] .roleRadio::after {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.roleCardBody {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.roleCardTitle {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.roleCardText {
+  display: block;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+/* The confirmation's actions. On a PHONE the two buttons stack, so the primary
+   one can carry its whole label ("Change to Family manager") across the sheet
+   instead of being clipped by the edge — the mobile audit's lesson (#4509 /
+   #11636) applied to a control this page adds. From 768 px they sit in a row
+   again, where the dialog is 560 px wide and both labels fit. */
+.confirmActions {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  width: 100%;
+}
+
+.confirmActions > * {
+  width: 100%;
+  min-height: 44px;
+}
+
+@media (min-width: 48em) {
+  .confirmActions {
+    flex-direction: row;
+    justify-content: flex-end;
+  }
+
+  .confirmActions > * {
+    width: auto;
+  }
+}
+
+/* ---------- a consequence block (the role-change confirmation) ---------- */
+
+.consequence {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.consequenceWarn {
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  border: 1px solid var(--warn-line);
+}
+
+.consequenceTitle {
+  display: block;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+
+.consequenceWarn .consequenceTitle {
+  color: var(--warn-ink);
+}
+
+.changeList {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  list-style: disc;
+}
+
+.changeList li + li {
+  margin-top: 2px;
+}
+
+/* ---------- legend ---------- */
+
+.legend {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.legendRow {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.legendRow + .legendRow {
+  border-top: 1px solid var(--line);
+}
+
+.legendRow b {
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+@media (min-width: 48em) {
+  .legendRow {
+    grid-template-columns: 150px minmax(0, 1fr);
+  }
+}
+
+/* ---------- states: loading, error, empty ---------- */
+
+.skeletonRow {
+  display: flex;
+  gap: 12px;
+  padding: 14px;
+  align-items: center;
+}
+
+.skeletonRow + .skeletonRow {
+  border-top: 1px solid var(--line);
+}
+
+.sk {
+  background: var(--line);
+  border-radius: 6px;
+  position: relative;
+  overflow: hidden;
+}
+
+.sk::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--skeleton-shine), transparent);
+  animation: shimmer 1.4s infinite;
+}
+
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sk::after {
+    animation: none;
+  }
+}
+
+.stateCard {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 32px 20px;
+  text-align: center;
+}
+
+.stateArt {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  margin: 0 auto 14px;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.stateTitle {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.stateText {
+  margin: 6px auto 16px;
+  max-width: 46ch;
+  color: var(--ink-2);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.errorCard {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px;
+  border-radius: var(--r-md);
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  border: 1px solid var(--warn-line);
+}
+
+.errorCard b {
+  display: block;
+  font-weight: 600;
+}
+
+.errorCard p {
+  margin: 2px 0 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
