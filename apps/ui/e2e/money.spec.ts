@@ -231,7 +231,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       // A record with no amount is named, not counted as zero.
       await expect(main.getByTestId("money-uncounted")).toContainText("Lawn care");
       await expect(main.getByTestId("money-uncounted")).toContainText("no amount");
-      await expect(main.locator("main")).not.toContainText("$0.00");
+      await expect(main).not.toContainText("$0.00");
 
       // The due-soon card: the API's own 30-day total and counts.
       await expect(main.getByTestId("money-due-total")).toHaveText("$2,360.00");
@@ -255,10 +255,10 @@ for (const colorScheme of ["light", "dark"] as const) {
       await snap(page, testInfo, `money-390-${colorScheme}`, true);
     });
 
-    test("phone 390: housesitter and vendor see no money at all", async ({ loggedInPage: page }, testInfo: TestInfo) => {
-      onlyOn("phone");
-      await page.setViewportSize({ width: 390, height: 844 });
-      for (const role of ["housesitter", "vendor"]) {
+    for (const role of ["housesitter", "vendor"] as const) {
+      test(`phone 390: a ${role} sees no money at all`, async ({ loggedInPage: page }, testInfo: TestInfo) => {
+        onlyOn("phone");
+        await page.setViewportSize({ width: 390, height: 844 });
         await stubMoneyApi(page, { role });
         await page.goto("/dashboard/money");
         const main = page.locator("main");
@@ -268,9 +268,9 @@ for (const colorScheme of ["light", "dark"] as const) {
         await expect(main).not.toContainText("$4,194.05");
         await expect(main.getByTestId("money-committed")).toHaveCount(0);
         await expectNoHorizontalOverflow(page);
-      }
-      await snap(page, testInfo, "money-no-access-390");
-    });
+        await snap(page, testInfo, `money-no-access-${role}-390`);
+      });
+    }
   });
 }
 
@@ -339,7 +339,7 @@ test("desktop 1440: the overview uses the two-column layout", async ({ loggedInP
 
   // Due soon on the left, budget on the right.
   const due = (await main.getByRole("region", { name: "Due soon" }).boundingBox())!;
-  const budget = (await main.getByRole("region", { name: "Budget November" }).boundingBox())!;
+  const budget = (await main.locator('section[aria-labelledby="money-budget-heading"]').boundingBox())!;
   expect(budget.x).toBeGreaterThan(due.x + due.width - 1);
   await expectNoHorizontalOverflow(page);
   await snap(page, testInfo, "money-1440");
