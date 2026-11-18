@@ -19,6 +19,7 @@ import (
 	"home-os/api/internal/middleware"
 	"home-os/api/pkg/apierr"
 	"home-os/api/pkg/jsonopt"
+	"home-os/api/pkg/money"
 )
 
 // Policy decides what a member with a given household role may do with the
@@ -570,12 +571,11 @@ func parseCents(s string) (int64, bool) {
 	return w*100 + f, true
 }
 
+// formatCents renders integer cents as the wire's decimal dollars ("2340.00").
+// It delegates to package money: every amount the API sends follows ONE rule
+// (#5297), whether it was loaded as cents or as a NUMERIC.
 func formatCents(c int64) string {
-	sign := ""
-	if c < 0 {
-		sign, c = "-", -c
-	}
-	return fmt.Sprintf("%s%d.%02d", sign, c/100, c%100)
+	return money.Cents(c)
 }
 
 func centsPtr(c *int64) *string {

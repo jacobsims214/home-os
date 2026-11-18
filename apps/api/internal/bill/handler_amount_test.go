@@ -1,0 +1,96 @@
+package bill
+
+// #5297: the bill amount on the wire is a decimal string of DOLLARS.
+//
+// bills.amount is NUMERIC(12,2) (migration 007) and is scanned into
+// pgtype.Numeric, which keeps a value as Int * 10^Exp: 2340.00 is
+// Int=234000, Exp=-2. The handler used to serialise `Amount.Int.String()` (the
+// mantissa alone), so /bff/bills carried "234000" and the UI — which reads its
+// amounts as dollars — rendered the $2,340 mortgage as $234,000 on both Money
+// and Today.
+//
+// These tests drive toResponse, the ONE function every bill response goes
+// through (List, Get, Create, Update), so a regression here cannot come back
+// through a second path. No database needed: the domain model is built directly.
+//
+// Requires nothing: `go test ./internal/bill/ -run TestBillAmount`.
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
+func amountOf(t *testing.T, b *Bill) any {
+	t.Helper()
+	body, err := json.Marshal(toResponse(b))
+	if err != nil {
+		t.Fatalf("marshal bill response: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal bill response: %v", err)
+	}
+	return decoded["amount"]
+}
+
+// TestBillAmountIsDollars is the ticket's own numbers: the ground truth from
+// MCP bill_find (2340 / 180 / 75 / 35 / 82.50 dollars) must come back from the
+// API unchanged, not multiplied by 100.
+func TestBillAmountIsDollars(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"mortgage", "2340.00", "2340.00"},
+		{"electric", "180.00", "180.00"},
+		{"internet", "75.00", "75.00"},
+		{"riverside copay", "35.00", "35.00"},
+		{"partial", "82.50", "82.50"},
+		{"zero", "0.00", "0.00"},
+		{"cent", "0.05", "0.05"},
+		// A NUMERIC(12,2) always arrives with its scale, but a whole-dollar
+		// value stored without one must not gain or lose digits either.
+		{"unscaled", "2450", "2450"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var amount pgtype.Numeric
+			if err := amount.Scan(tc.in); err != nil {
+				t.Fatalf("scan %q: %v", tc.in, err)
+			}
+			got := amountOf(t, &Bill{Name: tc.name, Amount: amount})
+			if got != tc.want {
+				t.Fatalf("amount for %q = %v, want %q (100x means the exponent was dropped)", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBillAmountNullStaysNull pins #4806: a role without money, or a bill with
+// no amount, gets a null — never "$0.00", and never a missing key the UI would
+// have to guess at.
+func TestBillAmountNullStaysNull(t *testing.T) {
+	got := amountOf(t, &Bill{Name: "Water"})
+	if got != nil {
+		t.Fatalf("NULL amount = %v, want null", got)
+	}
+}
+
+// TestBillAmountIsNotTheMantissa is the revert-check in test form: it asserts
+// the specific wrong value the old code produced, so a future refactor back to
+// `Amount.Int.String()` fails loudly with the reason.
+func TestBillAmountIsNotTheMantissa(t *testing.T) {
+	var amount pgtype.Numeric
+	if err := amount.Scan("2340.00"); err != nil {
+		t.Fatal(err)
+	}
+	if mantissa := amount.Int.String(); mantissa != "234000" {
+		t.Fatalf("pgx representation changed: mantissa = %q, want 234000", mantissa)
+	}
+	if got := amountOf(t, &Bill{Name: "Mortgage", Amount: amount}); got == "234000" {
+		t.Fatal(`amount = "234000": the numeric's exponent was dropped, so every bill is 100x too large (#5297)`)
+	}
+}
