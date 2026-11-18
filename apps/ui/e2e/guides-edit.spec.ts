@@ -1,4 +1,4 @@
-import type { Page, Route } from "@playwright/test";
+import type { Page, Route, TestInfo } from "@playwright/test";
 import { test, expect, expectNoHorizontalOverflow, onlyOn } from "./fixtures";
 
 /**
@@ -227,6 +227,13 @@ async function gotoGuideEdit(page: Page) {
   await expect(page.locator("[data-guide-editor]")).toBeVisible();
 }
 
+/** Attaches a screenshot, so a person can see the screen the test proved. */
+async function snap(page: Page, testInfo: TestInfo, name: string) {
+  const path = testInfo.outputPath(`${name}.png`);
+  await page.screenshot({ path, fullPage: true });
+  await testInfo.attach(name, { path, contentType: "image/png" });
+}
+
 async function gotoHistory(page: Page) {
   await page.goto("/dashboard/guides/g1");
   await expect(page.locator("[data-guide-detail]")).toBeVisible();
@@ -237,7 +244,7 @@ async function gotoHistory(page: Page) {
 test.describe("guides: edit and revision history (#5309)", () => {
   test("phone 390: editing a guide saves the FULL record and keeps the subject", async ({
     loggedInPage: page,
-  }) => {
+  }, testInfo) => {
     onlyOn("phone");
     const stub = await stubGuideApi(page);
     await gotoGuideEdit(page);
@@ -252,6 +259,7 @@ test.describe("guides: edit and revision history (#5309)", () => {
     await expect(steps).toHaveValue(/Pull the plug/);
     await expect(page.getByRole("textbox", { name: "Summary" })).toHaveValue(GUIDE.summary!);
     await expectNoHorizontalOverflow(page);
+    await snap(page, testInfo, "guides-edit-phone");
 
     // An untouched form cannot be saved: a save would add a copy to history.
     await expect(page.locator("[data-guide-save]")).toBeDisabled();
@@ -290,7 +298,7 @@ test.describe("guides: edit and revision history (#5309)", () => {
 
   test("phone 390: history lists who and when, and a restore keeps the version it replaced", async ({
     loggedInPage: page,
-  }) => {
+  }, testInfo) => {
     onlyOn("phone");
     const stub = await stubGuideApi(page);
     await gotoHistory(page);
@@ -307,6 +315,7 @@ test.describe("guides: edit and revision history (#5309)", () => {
     await expect(rows.nth(0)).toHaveAttribute("data-guide-revision-current", "true");
     await expect(page.locator("[data-guide-revision-restore]")).toHaveCount(2);
     await expectNoHorizontalOverflow(page);
+    await snap(page, testInfo, "guides-history-phone");
 
     // A version's body is fetched only when asked for.
     await page.locator("[data-guide-revision-preview]").nth(1).click();
@@ -320,6 +329,7 @@ test.describe("guides: edit and revision history (#5309)", () => {
     await expect(confirm).toBeVisible();
     await expect(confirm).toContainText("stays in the history");
     await expectNoHorizontalOverflow(page);
+    await snap(page, testInfo, "guides-restore-confirm-phone");
 
     await page.locator("[data-guide-restore-confirm-button]").click();
     await expect
