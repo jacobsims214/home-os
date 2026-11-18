@@ -78,9 +78,9 @@ import { bffPath } from "@/lib/api";
 import { useDeleteDocument, useDocument, useDocumentLinks, usePeople, useUpdateDocument } from "@/lib/documents/api";
 import {
   CATEGORIES,
-  CATEGORY_SINGULAR,
   categoryOf,
   displayTitle,
+  documentCategoryLabel,
   expiryOf,
   fileKind,
   formatDay,
@@ -90,7 +90,7 @@ import {
   type Category,
 } from "@/lib/documents/model";
 import { attachmentOf, documentLinks, metadataPatch } from "@/lib/documents/entity-links";
-import { CategoryIcon } from "@/components/documents/categories";
+import { CategoryIcon, categoryLabel, categoryTint } from "@/components/documents/categories";
 import type { FileRecord } from "@/lib/types/api";
 
 const ICON_STROKE = NAV_ICON_STROKE;
@@ -209,7 +209,9 @@ function DocumentDetail({
     <div className="mx-auto w-full max-w-4xl" data-document-detail data-document-id={file.id}>
       <BackLink />
 
-      {/* Header: what this is, at a glance. */}
+      {/* Header: what this is, at a glance. The tint and the chip both come
+          from the one filing rule (#5299), so a document filed as "Other" reads
+          the same here as it does on its card in the hub. */}
       <div className="mb-4 flex items-start gap-3.5">
         <span
           aria-hidden
@@ -220,8 +222,7 @@ function DocumentDetail({
             display: "grid",
             placeItems: "center",
             borderRadius: 14,
-            background: category === "other" ? "var(--surface-2)" : "var(--accent-soft)",
-            color: category === "other" ? "var(--ink-2)" : "var(--accent)",
+            ...categoryTint(file),
           }}
         >
           <CategoryIcon category={category} size={28} />
@@ -238,7 +239,7 @@ function DocumentDetail({
           <div className="mt-2 flex flex-wrap gap-1.5">
             <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] font-semibold leading-5" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
               <CategoryIcon category={category} size={13} />
-              {CATEGORY_SINGULAR[category]}
+              {documentCategoryLabel(file)}
             </span>
             {expiry.state !== "none" && (
               <span
@@ -725,7 +726,7 @@ function MetadataForm({ file, onDone }: { file: FileRecord; onDone: () => void }
                     cursor: "pointer",
                   }}
                 >
-                  {CATEGORY_SINGULAR[c]}
+                  {categoryLabel(c)}
                 </button>
               );
             })}
