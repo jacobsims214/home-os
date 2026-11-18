@@ -56,7 +56,6 @@ import {
   mergeRows,
   monthlyAmount,
   monthlyTotal,
-  roleKnown,
   scheduleLabel,
   subjectLabel,
   type BillRow,

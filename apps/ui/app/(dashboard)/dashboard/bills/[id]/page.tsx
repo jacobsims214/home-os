@@ -34,18 +34,15 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { Button, Menu, Skeleton, Text, Title } from "@mantine/core";
+import { Button, Menu, Skeleton } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import {
   IconArrowLeft,
-  IconCar,
   IconCheck,
   IconChevronDown,
   IconDotsVertical,
-  IconHome,
   IconLock,
   IconPencil,
-  IconReceipt,
   IconRefresh,
   IconTrash,
   IconAlertTriangle,
