@@ -21,19 +21,6 @@
   padding: 0 6px;
 }
 
-.logo {
-  display: inline-grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--r-sm);
-  background: var(--accent-fill);
-  color: var(--mantine-color-white);
-  font-size: 15px;
-  font-weight: 700;
-  line-height: 1;
-}
-
 .brandName {
   font-size: 16px;
   font-weight: 700;

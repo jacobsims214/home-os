@@ -297,10 +297,16 @@
   <body>
     <header class="header">
       <div class="headerRow">
+        <!-- The brand mark (#5200): the approved mockup's #i-house glyph on its
+             28 px accent tile, the same paths as components/shared/HomeMark.tsx
+             (artifact #75 v1: 18 px glyph, stroke-width 2 on a 24 grid). This
+             document is static and cannot import the component, so the glyph is
+             repeated here verbatim — keep the two in step. -->
         <span class="mark" aria-hidden="true">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 10.5 12 3l9 7.5" />
-            <path d="M5 9.5V21h14V9.5" />
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 12H3l9-9 9 9h-2" />
+            <path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7" />
+            <path d="M10 21v-5a2 2 0 0 1 4 0v5" />
           </svg>
         </span>
         <span class="brand">Home OS</span>
