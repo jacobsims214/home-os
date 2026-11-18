@@ -100,7 +100,12 @@ function BackBar({ title }: { title: string }) {
           <IconArrowLeft size={16} stroke={STROKE} aria-hidden />
           Back to Guides
         </Link>
-        <h2 className="truncate text-lg font-semibold leading-tight text-ink md:mt-1 md:text-2xl md:font-bold">
+        {/* On a phone the guide's own h1 sits directly under this bar, so a
+            second copy here would read as two titles stacked. It stays in the
+            accessibility tree (sr-only) — it is the bar's only label — and is
+            drawn from md up, where the bar is a breadcrumb line rather than a
+            sticky header. */}
+        <h2 className="sr-only truncate text-lg font-semibold leading-tight text-ink md:not-sr-only md:mt-1 md:text-2xl md:font-bold">
           {title}
         </h2>
       </div>

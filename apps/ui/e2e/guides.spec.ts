@@ -51,7 +51,7 @@ password: correct-horse-battery-staple-2026
 If it still does not come back, call the ISP and read them the serial:
 
 \`\`\`
-SN 4f9a2c1e77b40d3a9f6e1c55a0b7d2e8f3c4a6b9
+SN 4f9a2c1e77b40d3a9f6e1c55a0b7d2e8f3c4a6b9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9
 \`\`\`
 `;
 
@@ -248,36 +248,55 @@ for (const colorScheme of ["light", "dark"] as const) {
       // scroll inside their own <pre>, and the page does not move.
       const codeBlocks = page.locator("[data-guide-code]");
       await expect(codeBlocks).toHaveCount(2);
-      const scrolls = await codeBlocks.evaluateAll((els) => els.map((el) => el.scrollWidth > el.clientWidth));
-      expect(scrolls.some(Boolean), "a long serial scrolls inside its own block").toBe(true);
+      const blocks = await codeBlocks.evaluateAll((els) =>
+        els.map((el) => ({
+          scrolls: el.scrollWidth > el.clientWidth,
+          overflowX: getComputedStyle(el).overflowX,
+        })),
+      );
+      expect(blocks.filter((b) => b.scrolls).length, "the long serial scrolls inside its own block").toBeGreaterThan(0);
+      for (const b of blocks) expect(b.overflowX, "a code block clips its own overflow").toMatch(/auto|scroll/);
       await expectNoHorizontalOverflow(page);
     });
 
-    test("phone 390: a guide with no steps says so, and a failed load offers a retry", async ({
+    test("phone 390: a guide with no steps says so, it does not claim zero of zero", async ({
       loggedInPage: page,
     }, testInfo) => {
       onlyOn("phone");
       await stubGuides(page);
       await gotoGuide(page, "g3");
-      await expect(page.getByText(/no steps yet/i)).toBeVisible();
+
+      // "No steps yet" in the header AND a sentence in the body: two different
+      // places, both honest, neither pretending the guide is empty of content.
+      await expect(page.locator("[data-guide-progress]")).toHaveText("No steps yet");
+      await expect(page.getByText(/This guide has no steps yet/)).toBeVisible();
       await expect(page.locator("[data-guide-step]")).toHaveCount(0);
+      await expect(page.locator("[data-guide-complete]")).toHaveCount(0);
       await expectNoHorizontalOverflow(page);
       await snap(page, testInfo, `${colorScheme}-guide-empty`);
+    });
 
-      // A 500 is not an empty guide: it says it could not open it, and offers a
-      // retry rather than a page that looks like "this guide has no steps".
+    test("phone 390: a failed load offers a retry, and it is not an empty guide", async ({
+      loggedInPage: page,
+    }, testInfo) => {
+      onlyOn("phone");
+      // A 500 is NOT "this guide has no steps": the page must say it could not
+      // open it, and give a retry that actually re-fetches.
       const stub = await stubGuides(page);
       stub.fail = true;
       await gotoGuide(page, "g1");
-      await expect(page.getByRole("alert")).toContainText(/Couldn't open this guide/);
+
+      const alert = page.locator("main").getByRole("alert");
+      await expect(alert).toContainText(/Couldn't open this guide/);
       await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
       await expect(page.locator("[data-guide-step]")).toHaveCount(0);
       await snap(page, testInfo, `${colorScheme}-guide-error`);
 
-      // The retry is a real button: the same page, now working.
+      // The retry is real: the same page, now working, shows the steps.
       stub.fail = false;
       await page.getByRole("button", { name: "Try again" }).click();
       await expect(page.locator("[data-guide-step]")).toHaveCount(3);
+      await expect(alert).toHaveCount(0);
       expect(stub.writes, "opening a guide never writes").toHaveLength(0);
     });
 
