@@ -196,11 +196,16 @@ async function stubApi(page: Page, routes: Routes = {}): Promise<Writes> {
 }
 
 /**
- * Pins the browser's clock to a Monday so "this week" is deterministic: the
- * page reads today from the browser (never the server's clock), so a test that
- * did not pin it would change meaning as the calendar moved.
+ * Pins the clock so "this week" is deterministic: without it every test would
+ * change meaning as the calendar moved.
+ *
+ * The instant is written in UTC on purpose (17:00Z = noon on Monday Nov 16 in
+ * America/New_York, the household's zone). An ISO string without a `Z` is read
+ * in the MACHINE's zone, so the same test would pin a different day on a CI box
+ * that runs on UTC than on a laptop in New York — the boundary class of bug
+ * #5305 in the test harness itself.
  */
-async function freezeToday(page: Page, iso = "2026-11-16T12:00:00") {
+async function freezeToday(page: Page, iso = "2026-11-16T17:00:00Z") {
   await page.clock.setFixedTime(new Date(iso));
 }
 
@@ -683,6 +688,76 @@ test.describe("error and empty states", () => {
     await snap(page, testInfo, "meals-empty-week-phone");
   });
 
+  /**
+   * #5305 / War Game R2 G8: "Mon is open — November 16 has no dinner planned.
+   * Plan Mon's dinner" shown on Wednesday the 18th, in the week Nov 16-22.
+   *
+   * Two separate faults made that sentence, and this test plus the UTC one
+   * below pin both:
+   *   (a) the nag was the first empty ROW of the week, with no idea that Monday
+   *       had already gone;
+   *   (b) "today" was the browser's calendar, so a household in New York with a
+   *       browser (or a server) on UTC lost an evening at the boundary.
+   */
+  test("phone 390: mid-week, the nag is today — never the Monday that has gone", async ({ loggedInPage: page }, testInfo) => {
+    onlyOn("phone");
+    await page.setViewportSize({ width: 390, height: 844 });
+    // Wednesday lunchtime in the household's zone (America/New_York).
+    await freezeToday(page, "2026-11-18T17:00:00Z"); // noon on Wed the 18th in New York
+    await stubApi(page, { plans: [] });
+    await gotoMeals(page);
+
+    // Still "This week" (Nov 16 - 22), still five days that can be cooked.
+    await expect(page.locator("[data-meals-weekday]")).toHaveText("This week");
+    await expect(page.locator("[data-meals-weekrange]")).toContainText("Nov 16 – 22");
+
+    // THE FIX: today, not Monday the 16th.
+    await expect(page.getByText("Wed is open")).toBeVisible();
+    await expect(page.getByText("Mon is open")).toHaveCount(0);
+    await expect(page.getByText("November 16 has no dinner planned")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Plan Mon's dinner" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Plan Wed's dinner" })).toBeVisible();
+
+    // Monday and Tuesday render as settled history: no dashed "Plan dinner",
+    // no invitation at all — and Wednesday onward still offers one.
+    await expect(page.locator('[data-meal-day="2026-11-16"]')).toHaveAttribute("data-meal-past", "true");
+    await expect(page.locator('[data-meal-day="2026-11-17"]')).toHaveAttribute("data-meal-past", "true");
+    await expect(page.locator('[data-meal-day="2026-11-18"]')).not.toHaveAttribute("data-meal-past", "true");
+    await expect(page.locator('[data-meal-settled="2026-11-16"]')).toContainText("No dinner planned");
+    await expect(page.locator('[data-meal-empty="2026-11-16"]')).toHaveCount(0);
+    await expect(page.locator('[data-meal-empty="2026-11-17"]')).toHaveCount(0);
+    // Wed..Sun: five days still open.
+    await expect(page.locator("[data-meal-empty]")).toHaveCount(5);
+
+    await expectNoHorizontalOverflow(page);
+    await snap(page, testInfo, "meals-midweek-no-past-nag-phone");
+  });
+
+  test("phone 390: browsing back to a past week nags about nothing at all", async ({ loggedInPage: page }, testInfo) => {
+    onlyOn("phone");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await freezeToday(page, "2026-11-18T17:00:00Z");
+    await stubApi(page, { plans: [] });
+    await gotoMeals(page);
+    // One press of ‹ is last week (Nov 9 - 15): every day of it has gone.
+    await page.getByRole("button", { name: "Previous week" }).click();
+    await expect(page.locator("[data-meals-weekday]")).toHaveText("Last week");
+
+    // No nag section at all, and no invitation anywhere in the week: all seven
+    // rows are settled, and the grocery card stops saying "Plan a dinner".
+    await expect(page.getByText("is open")).toHaveCount(0);
+    await expect(page.locator("[data-meal-settled]")).toHaveCount(7);
+    await expect(page.locator("[data-meal-empty]")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^Plan .*'s dinner$/ })).toHaveCount(0);
+    await expect(page.locator("[data-meals-grocery]")).toContainText("No dinner was planned this week.");
+    // Every row is marked past, under the shared rule.
+    for (const day of ["2026-11-09", "2026-11-12", "2026-11-15"]) {
+      await expect(page.locator(`[data-meal-day="${day}"]`)).toHaveAttribute("data-meal-past", "true");
+    }
+    await expectNoHorizontalOverflow(page);
+    await snap(page, testInfo, "meals-past-week-no-nag-phone");
+  });
+
   test("desktop: the week plan and the grocery preview side by side", async ({ loggedInPage: page }, testInfo) => {
     onlyOn("desktop");
     await freezeToday(page);
@@ -712,5 +787,39 @@ test.describe("error and empty states", () => {
     await expect(page.locator("[data-suggestion-body]")).toHaveCount(0);
     // Focus returns to the button that opened it (Mantine Drawer).
     await expect(opener).toBeFocused();
+  });
+});
+
+
+/**
+ * The other half of #5305, isolated: the BROWSER's clock is on UTC while the
+ * household is in America/New_York — a travelling phone, a laptop whose zone
+ * never got set, or the server-side render. At 22:30 Wednesday in New York it
+ * is already 03:30 Thursday in UTC.
+ *
+ * The old page took today from `dayjs()`, so it used the UTC day: Wednesday
+ * became "past" and the nag moved to Thursday. A family still has to cook
+ * Wednesday's dinner, so the household's day is the one that counts.
+ */
+test.describe("household day beats a UTC browser clock", () => {
+  test.use({ timezoneId: "UTC" });
+
+  test("phone 390: 22:30 Wed in New York is Wednesday's dinner, not Thursday's", async ({ loggedInPage: page }, testInfo) => {
+    onlyOn("phone");
+    await page.setViewportSize({ width: 390, height: 844 });
+    // 03:30Z Thu 2026-11-19 == 22:30 EST Wed 2026-11-18 (America/New_York).
+    await freezeToday(page, "2026-11-19T03:30:00Z");
+    await stubApi(page, { plans: [] });
+    await gotoMeals(page);
+
+    await expect(page.getByText("Wed is open")).toBeVisible();
+    await expect(page.getByText("Thu is open")).toHaveCount(0);
+    // Wednesday is TODAY for this family: not settled, and still plannable.
+    await expect(page.locator('[data-meal-day="2026-11-18"]')).toHaveAttribute("data-meal-today", "true");
+    await expect(page.locator('[data-meal-day="2026-11-18"]')).not.toHaveAttribute("data-meal-past", "true");
+    await expect(page.locator('[data-meal-empty="2026-11-18"]')).toHaveCount(1);
+
+    await expectNoHorizontalOverflow(page);
+    await snap(page, testInfo, "meals-utc-browser-late-evening-phone");
   });
 });
