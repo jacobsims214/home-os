@@ -322,7 +322,7 @@ function BillTableRow({ row, names }: { row: BillRow; names: Parameters<typeof s
 
   return (
     <tr
-      data-bill-row={bill.id}
+      data-bill-table-row={bill.id}
       data-due-state={state}
       className="border-b border-line last:border-b-0 hover:bg-surface-2"
     >

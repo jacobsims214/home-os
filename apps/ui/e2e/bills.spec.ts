@@ -296,9 +296,17 @@ test("desktop 1440: the list and the detail use the wider layout", async ({ logg
   await page.goto("/dashboard/bills");
   const main = page.locator("main");
   await expect(main.getByRole("heading", { level: 2, name: "Bills" })).toBeVisible();
-  // The same reading at desktop width: paid is paid, due is due.
-  await expect(main.locator('[data-bill-row="b-electric"]')).toHaveAttribute("data-due-state", "paid");
-  await expect(main.locator('[data-bill-row="b-water"]')).toContainText("Next Fri, Nov 20 · in 2 days");
+  // The same reading at desktop width, in the mockup's table: paid is paid,
+  // due is due, and the columns a wide screen has room for are there.
+  await expect(main.getByTestId("bills-table")).toBeVisible();
+  await expect(main.locator('[data-bill-table-row="b-electric"]')).toHaveAttribute("data-due-state", "paid");
+  await expect(main.locator('[data-bill-table-row="b-water"]')).toContainText("Nov 20");
+  await expect(main.locator('[data-bill-table-row="b-water"]')).toContainText("in 2 days");
+  // Earliest first in the table too.
+  const tableOrder = await main
+    .locator("[data-bill-table-row]")
+    .evaluateAll((rows) => rows.map((r) => r.getAttribute("data-bill-table-row")));
+  expect(tableOrder).toEqual(["b-water", "b-electric"]);
   await expectNoHorizontalOverflow(page);
   await snap(page, testInfo, "bills-1440");
 
