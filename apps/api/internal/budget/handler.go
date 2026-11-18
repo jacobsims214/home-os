@@ -573,7 +573,8 @@ func parseCents(s string) (int64, bool) {
 
 // formatCents renders integer cents as the wire's decimal dollars ("2340.00").
 // It delegates to package money: every amount the API sends follows ONE rule
-// (#5297), whether it was loaded as cents or as a NUMERIC.
+// (#5297, #5312), whether it was loaded as cents or as a NUMERIC. Do not
+// re-inline the arithmetic here; a second copy is how the copies are born.
 func formatCents(c int64) string {
 	return money.Cents(c)
 }

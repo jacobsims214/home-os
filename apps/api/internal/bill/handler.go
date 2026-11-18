@@ -192,7 +192,7 @@ func toResponse(b *Bill) billResponse {
 	// NUMERIC's mantissa: pgx stores 2340.00 as Int=234000, Exp=-2, and
 	// Int.String() alone sent "234000", which rendered as $234,000 (#5297).
 	// money.DecimalString keeps the exponent, so the wire carries the same
-	// number the database does.
+	// number the database does (#5312: this was the API's only such case).
 	resp.Amount = money.DecimalString(b.Amount)
 	return resp
 }

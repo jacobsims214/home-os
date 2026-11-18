@@ -17,6 +17,7 @@ package bill
 
 import (
 	"encoding/json"
+	"math/big"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -92,5 +93,49 @@ func TestBillAmountIsNotTheMantissa(t *testing.T) {
 	}
 	if got := amountOf(t, &Bill{Name: "Mortgage", Amount: amount}); got == "234000" {
 		t.Fatal(`amount = "234000": the numeric's exponent was dropped, so every bill is 100x too large (#5297)`)
+	}
+}
+
+// TestBillAmountHonoursExponent is #5312's own test: a NUMERIC(12,2) with a
+// NON-ZERO exponent, built from the mantissa and exponent pair pgx actually
+// produces (never from a string, so the exponent cannot quietly be zero),
+// must serialise as the decimal it represents.
+//
+// NUMERIC(12,2) always arrives as Int = the digits without the point and
+// Exp = -2: 2340.00 → {234000, -2}. The old `Amount.Int.String()` returned only
+// the mantissa, a silent power-of-ten error with no exception anywhere — this
+// test names every shape of that error, including the ones an unscaled value
+// would hide:
+//
+//	{234000, -2} → "2340.00"  (the old code sent "234000": 100x)
+//	{245,    1}  → "2450"     (the old code sent "245":  10x too small)
+//	{5,     -2}  → "0.05"     (the old code sent "5":    100x)
+func TestBillAmountHonoursExponent(t *testing.T) {
+	tests := []struct {
+		name     string
+		mantissa int64
+		exp      int32
+		want     string
+	}{
+		{"mortgage at scale 2", 234000, -2, "2340.00"},
+		{"mortgage with positive exponent", 245, 1, "2450"},
+		{"copay at scale 2", 8250, -2, "82.50"},
+		{"cent at scale 2", 5, -2, "0.05"},
+		{"negative at scale 2", -1234, -2, "-12.34"},
+		{"zero at scale 2", 0, -2, "0.00"},
+		{"positive exponent large", 999999999999, 2, "99999999999900"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			n := pgtype.Numeric{Int: big.NewInt(tc.mantissa), Exp: tc.exp, Valid: true}
+			if n.Exp == 0 {
+				t.Fatalf("test is vacuous: exponent is 0, which cannot catch a dropped exponent")
+			}
+			got := amountOf(t, &Bill{Name: tc.name, Amount: n})
+			if got != tc.want {
+				t.Fatalf("Int=%d Exp=%d serialised as %v, want %q (mantissa alone would be %q)",
+					tc.mantissa, tc.exp, got, tc.want, n.Int.String())
+			}
+		})
 	}
 }
