@@ -40,8 +40,13 @@ export interface CreatedAgentToken extends AgentToken {
 export const SCOPE_READ = "read";
 export const SCOPE_WRITE = "write";
 
-/** Household roles that may create a token (API: ResAgentTokens ActCreate). */
-const CREATORS: readonly string[] = ["owner", "family_manager", "family_member"];
+/**
+ * Household roles that may create a token. API: ResAgentTokens ActCreate is
+ * rolesReaders = owner, family_manager, family_member AND viewer (a viewer's
+ * token can only be read-scoped, see below). Only housesitter and vendor have
+ * no create right at all.
+ */
+const CREATORS: readonly string[] = ["owner", "family_manager", "family_member", "viewer"];
 /** Household roles that may ask for the write scope (API: ActWriteScope). */
 const WRITERS: readonly string[] = ["owner", "family_manager", "family_member"];
 

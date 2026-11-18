@@ -523,7 +523,8 @@ export default function AgentTokensSection() {
             </Button>
           ) : (
             <Text size="sm" c="var(--ink-3)">
-              Only an owner, a family manager or a family member can create agent tokens.
+              Your role in this family can&apos;t create agent tokens. An owner or a family manager
+              can change your role if you need one.
             </Text>
           )}
         </div>

@@ -46,12 +46,15 @@ test("the create body always carries read, and write only when asked", () => {
   assert.deepEqual(scopesFor(true), ["read", "write"]);
 });
 
-test("who may create a token: owner, family_manager, family_member (API ActCreate)", () => {
-  for (const role of ["owner", "family_manager", "family_member"]) {
+test("who may create a token: rolesReaders, viewer included (API ActCreate)", () => {
+  // ResAgentTokens ActCreate is rolesReaders = owner, family_manager,
+  // family_member, viewer. A viewer may only ask for the read scope, which is
+  // canWriteAgentTokens's job, not this one's.
+  for (const role of ["owner", "family_manager", "family_member", "viewer"]) {
     assert.equal(canCreateAgentTokens(role), true, role);
   }
-  // rolesReaders is the API's list; housesitter and vendor are not in it.
-  for (const role of ["viewer", "housesitter", "vendor"]) {
+  // Housesitter and vendor are not in rolesReaders: no token at all.
+  for (const role of ["housesitter", "vendor"]) {
     assert.equal(canCreateAgentTokens(role), false, role);
   }
   // Unknown role or not loaded yet fails closed for the destructive half.
@@ -63,10 +66,15 @@ test("who may ask for write: the same three family roles (API ActWriteScope)", (
   for (const role of ["owner", "family_manager", "family_member"]) {
     assert.equal(canWriteAgentTokens(role), true, role);
   }
-  // A viewer's token is read-only; the API refuses the write scope.
+  // A viewer's token is read-only; the API refuses the write scope
+  // (ActWriteScope is rolesFamily). Same for the roles with no token at all.
   for (const role of ["viewer", "housesitter", "vendor"]) {
     assert.equal(canWriteAgentTokens(role), false, role);
   }
+  // Creating and writing are different rights: a viewer has the first, not
+  // the second. This is the pair the form depends on.
+  assert.equal(canCreateAgentTokens("viewer"), true);
+  assert.equal(canWriteAgentTokens("viewer"), false);
   assert.equal(canWriteAgentTokens(null), false);
 });
 
