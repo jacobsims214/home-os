@@ -107,7 +107,7 @@ test("logout purges the caches and the persisted user from the page itself", asy
   await Promise.all([
     page.waitForURL(/\/login/, { timeout: 20_000, waitUntil: "commit" }),
     page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: /^Account menu for/ }).click()
-      .then(() => page.getByRole("menuitem", { name: "Log out" }).click()),
+      .then(() => page.getByRole("dialog", { name: "Account menu" }).getByRole("button", { name: "Log out" }).click()),
   ]);
 
   // The login page has rendered, so it has mounted and its sweep has run, and

@@ -132,12 +132,15 @@ for (const width of [375, 390]) {
       await expect(page).toHaveURL(/\/dashboard\/bills$/);
       await expect(sheet).toBeHidden();
 
-      // The account row opens the account menu (with the logout form).
+      // The account row opens the account menu — the phone's bottom sheet — with
+      // the identity header and the logout form (#5198).
       await more.click();
       await sheet.getByRole("button", { name: /Account & log out/ }).click();
       await expect(sheet).toBeHidden();
-      await expect(page.getByRole("menu")).toBeVisible();
-      await expect(page.getByRole("menuitem", { name: "Log out" })).toBeVisible();
+      const account = page.getByRole("dialog", { name: /Account menu for/ });
+      await expect(account).toBeVisible();
+      await expect(account.getByRole("button", { name: "Log out" })).toBeVisible();
+      await expect(account.getByRole("link", { name: "Profile" })).toBeVisible();
     });
   });
 }
