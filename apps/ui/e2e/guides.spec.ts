@@ -155,9 +155,16 @@ async function gotoGuides(page: Page) {
   await expect(page.getByRole("heading", { level: 2, name: /Guides/ })).toBeVisible();
 }
 
+/**
+ * Opens one guide and waits for it to have FINISHED loading — either the
+ * reading view or the failed state, since some tests are about the failure.
+ * It deliberately does not wait on a heading level: the title is an h1 on a
+ * phone and the frame's bar takes over from md up, so a level is a width
+ * detail, not what "the page is ready" means.
+ */
 async function gotoGuide(page: Page, id = "g1") {
   await page.goto(`/dashboard/guides/${id}`);
-  await expect(page.locator("main").getByRole("heading", { level: 2 }).first()).toBeVisible();
+  await expect(page.locator("[data-guide-detail], [data-guide-error]").first()).toBeVisible();
 }
 
 async function snap(page: Page, testInfo: TestInfo, name: string, fullPage = false) {
@@ -217,6 +224,10 @@ for (const colorScheme of ["light", "dark"] as const) {
       await gotoGuide(page, "g1");
 
       // A heading per step: the reader scrolls to the step they are on.
+      // The title is drawn ONCE, and it is the h1 of the content: the bar
+      // above it is a back button on a phone, not a second copy.
+      await expect(page.locator("main").getByRole("heading", { name: "Reset the router" })).toHaveCount(1);
+
       const steps = page.locator("[data-guide-step]");
       await expect(steps).toHaveCount(3);
       await expect(steps.nth(0)).toContainText("Turn it off and on");
@@ -306,6 +317,10 @@ for (const colorScheme of ["light", "dark"] as const) {
       onlyOn("desktop");
       await stubGuides(page);
       await gotoGuide(page, "g1");
+
+      // The frame's title bar carries the title here, the same as every other
+      // detail page, and the content does not repeat it.
+      await expect(page.locator("main").getByRole("heading", { name: "Reset the router" })).toHaveCount(1);
 
       const paragraphWidth = await page
         .locator("[data-guide-step] p")

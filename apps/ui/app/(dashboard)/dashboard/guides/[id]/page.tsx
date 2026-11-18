@@ -100,12 +100,13 @@ function BackBar({ title }: { title: string }) {
           <IconArrowLeft size={16} stroke={STROKE} aria-hidden />
           Back to Guides
         </Link>
-        {/* On a phone the guide's own h1 sits directly under this bar, so a
-            second copy here would read as two titles stacked. It stays in the
-            accessibility tree (sr-only) — it is the bar's only label — and is
-            drawn from md up, where the bar is a breadcrumb line rather than a
-            sticky header. */}
-        <h2 className="sr-only truncate text-lg font-semibold leading-tight text-ink md:not-sr-only md:mt-1 md:text-2xl md:font-bold">
+        {/* Drawn from md up only. On a phone the guide's own h1 sits directly
+            under this bar, so a copy here would be two stacked titles — and a
+            sr-only copy still makes two "Reset the router" headings for anyone
+            navigating by heading, which is worse than one. The back link
+            carries its own label ("Back to Guides"), so the bar needs no text
+            of its own at that width. */}
+        <h2 className="hidden truncate text-lg font-semibold leading-tight text-ink md:mt-1 md:block md:text-2xl md:font-bold">
           {title}
         </h2>
       </div>
@@ -232,6 +233,7 @@ export default function GuidePage() {
         <BackBar title="Guide" />
         <div
           role="alert"
+          data-guide-error
           className="flex flex-col items-start gap-3 rounded-token-md border border-warn-line bg-warn-bg p-4 text-warn-ink sm:flex-row sm:items-center"
         >
           <IconAlertTriangle size={20} stroke={STROKE} className="shrink-0" aria-hidden />
@@ -264,19 +266,26 @@ export default function GuidePage() {
 
       {/* The head: what the guide is for, how long it is, when it last changed. */}
       <header className="mb-4 min-w-0 md:mb-6">
+        {/* The title is drawn ONCE at every width: from md up the bar above is
+            the title line (it is the frame every detail page uses), and on a
+            phone the bar's copy is sr-only while this one shows under the back
+            button. The icon and the h1 are therefore phone-only, and the
+            summary and the chips are shared. */}
         <div className="mb-3 flex items-center gap-3.5">
           <span
             aria-hidden
-            className="grid size-12 shrink-0 place-items-center rounded-token-md bg-accent-soft text-accent"
+            className="grid size-12 shrink-0 place-items-center rounded-token-md bg-accent-soft text-accent md:hidden"
           >
             <IconBook size={24} stroke={STROKE} />
           </span>
           <div className="min-w-0 flex-1">
-            <h1 className="text-xl font-semibold leading-tight text-ink [overflow-wrap:anywhere] md:text-2xl">
+            <h1 className="text-xl font-semibold leading-tight text-ink [overflow-wrap:anywhere] md:hidden">
               {guide.title}
             </h1>
             {summary && (
-              <p className="mt-0.5 max-w-[68ch] text-sm text-ink-3 [overflow-wrap:anywhere]">{summary}</p>
+              <p className="mt-0.5 max-w-[68ch] text-sm text-ink-3 [overflow-wrap:anywhere] md:mt-0">
+                {summary}
+              </p>
             )}
           </div>
         </div>
