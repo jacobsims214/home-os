@@ -36,13 +36,13 @@ import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Skeleton, Stack, Table } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { IconAlertTriangle, IconChevronRight, IconPaw, IconPhone, IconPlus } from "@tabler/icons-react";
+import { IconAlertTriangle, IconChevronRight, IconPaw, IconPlus } from "@tabler/icons-react";
 import { apiFetch } from "@/lib/api";
 import { petKeys } from "@/lib/query-keys";
 import { householdToday } from "@/lib/today/agenda";
 import { useCurrentHousehold } from "@/components/shared/use-nav-role";
 import { ResponsiveModal, ResponsiveModalActions, TextInput } from "@/components/ui";
-import { petSubtitle, telHref, vetName } from "@/components/pet/pet-care";
+import { ageShort, petLine, vetName } from "@/components/pet/pet-care";
 
 const STROKE = 1.75;
 
@@ -60,55 +60,35 @@ interface Pet {
   notes?: string | null;
 }
 
-/** "Golden retriever · 6 · Springfield Animal Hospital": what a row says. */
-function petLine(pet: Pet, today: string | null): string {
-  return [petSubtitle(pet, today), vetName(pet)].filter(Boolean).join(" · ");
-}
-
 /**
- * The tap-to-call button for the vet, when the contact has a phone. It is a
- * link of its own, so it never sits inside the card's link (nested links are
- * invalid HTML and two targets in one tap area is a phone trap).
+ * One pet, as the mockup's list row draws it: a paw, the name, and "Golden
+ * retriever · 6 · Springfield Animal Hospital" under it. The whole card is the
+ * link (one tap target, like the assets and vehicles lists); calling the vet
+ * is one tap further, on the pet's page.
  */
-function CallVet({ pet }: { pet: Pet }) {
-  const name = vetName(pet);
-  const phone = typeof pet.vet_phone === "string" && pet.vet_phone.trim() ? pet.vet_phone.trim() : "";
-  if (!name || !phone) return null;
-  return (
-    <a
-      href={telHref(phone)}
-      aria-label={`Call ${name} about ${pet.name}, ${phone}`}
-      className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-token-sm bg-surface-2 text-accent transition-colors hover:bg-accent-soft"
-    >
-      <IconPhone size={18} stroke={STROKE} aria-hidden />
-    </a>
-  );
+/** The Age cell: a number, a dash when unknown, and never a zone-shifted date. */
+function ageColumn(pet: Pet, today: string | null): string {
+  const age = today ? ageShort(pet.date_of_birth, today) : "";
+  return age || "\u2014";
 }
 
 function PetCard({ pet, today }: { pet: Pet; today: string | null }) {
   const line = petLine(pet, today);
-  const canCall = vetName(pet) && pet.vet_phone;
   return (
-    <div
+    <Link
+      href={`/dashboard/pets/${pet.id}`}
       data-pet-card={pet.id}
-      className="rounded-token-md border border-line bg-surface shadow-token-sm transition-colors hover:bg-surface-2"
+      className="flex min-h-11 items-center gap-3 rounded-token-md border border-line bg-surface p-4 shadow-token-sm transition-colors hover:bg-surface-2 active:bg-surface-2"
     >
-      <Link href={`/dashboard/pets/${pet.id}`} className="flex min-h-11 items-center gap-3 p-4">
-        <span aria-hidden className="grid size-11 shrink-0 place-items-center rounded-token-md bg-accent-soft text-accent">
-          <IconPaw size={22} stroke={STROKE} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <h3 className="text-[15px] font-semibold leading-snug text-ink [overflow-wrap:anywhere]">{pet.name}</h3>
-          {line && <p className="mt-0.5 text-sm text-ink-3 [overflow-wrap:anywhere]">{line}</p>}
-        </div>
-        <IconChevronRight size={20} stroke={STROKE} className="shrink-0 text-ink-3" aria-hidden />
-      </Link>
-      {canCall && (
-        <div className="flex items-center justify-end gap-2 border-t border-line px-4 py-1.5">
-          <CallVet pet={pet} />
-        </div>
-      )}
-    </div>
+      <span aria-hidden className="grid size-11 shrink-0 place-items-center rounded-token-md bg-accent-soft text-accent">
+        <IconPaw size={22} stroke={STROKE} />
+      </span>
+      <div className="min-w-0 flex-1">
+        <h3 className="text-[15px] font-semibold leading-snug text-ink [overflow-wrap:anywhere]">{pet.name}</h3>
+        {line && <p className="mt-0.5 text-sm text-ink-3 [overflow-wrap:anywhere]">{line}</p>}
+      </div>
+      <IconChevronRight size={20} stroke={STROKE} className="shrink-0 text-ink-3" aria-hidden />
+    </Link>
   );
 }
 
@@ -321,7 +301,7 @@ export default function PetsPage() {
                     <Table.Td className="whitespace-nowrap text-ink-2">{pet.species || "\u2014"}</Table.Td>
                     <Table.Td className="text-ink-2 [overflow-wrap:anywhere]">{pet.breed || "\u2014"}</Table.Td>
                     {/* The age, from the shared helper: never a Date on a date-only string. */}
-                    <Table.Td className="whitespace-nowrap text-ink-2">{petSubtitle(pet, today) || "\u2014"}</Table.Td>
+                    <Table.Td className="whitespace-nowrap text-ink-2">{ageColumn(pet, today)}</Table.Td>
                     <Table.Td className="text-ink-2 [overflow-wrap:anywhere]">{vetName(pet) || "\u2014"}</Table.Td>
                     <Table.Td className="text-ink-3">
                       <IconChevronRight size={18} stroke={STROKE} aria-hidden />

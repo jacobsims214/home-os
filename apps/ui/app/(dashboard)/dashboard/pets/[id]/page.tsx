@@ -94,13 +94,24 @@ const LABELS: Record<string, string> = {
  * value on a phone, a label/value grid from 768 px. `data-field` is the
  * handle the other detail specs use (e.g. pet-vet-picker's vet row).
  */
-function Row({ field, label, value }: { field: string; label: string; value: React.ReactNode }) {
+function Row({
+  field,
+  label,
+  value,
+  hideLabel = false,
+}: {
+  field: string;
+  label: string;
+  value: React.ReactNode;
+  /** The section heading already says it, so it is not printed twice. */
+  hideLabel?: boolean;
+}) {
   return (
     <div
       data-field={field}
       className="flex flex-col gap-1 py-2.5 md:grid md:grid-cols-[minmax(7rem,1fr)_minmax(0,2fr)] md:items-baseline md:gap-x-6"
     >
-      <dt className="text-sm font-medium text-ink-3">{label}</dt>
+      <dt className={hideLabel ? "sr-only" : "text-sm font-medium text-ink-3"}>{label}</dt>
       <dd className="m-0 whitespace-pre-line text-sm text-ink [overflow-wrap:anywhere]">{value}</dd>
     </div>
   );
@@ -242,6 +253,7 @@ export default function PetDetailPage() {
           <Row
             field="vet_vendor_id"
             label="Vet"
+            hideLabel
             value={
               vet ? (
                 <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -281,16 +293,12 @@ export default function PetDetailPage() {
     </div>
   );
 
+  // NOT a <form>: the vet picker's sheet lives in here and its "Use this vet"
+  // button is a submit, so a form here would save the pet when a vet is chosen.
+  // The frame's Save is the only way to save (as on the vehicle page, #4555).
+  // Phone inputs still get 44 px and 16 px text (no iOS zoom on focus).
   const edit = (
-    <form
-      id="pet-edit"
-      onSubmit={(e) => {
-        e.preventDefault();
-        submit();
-      }}
-      noValidate
-    >
-      <Stack gap="md">
+    <Stack gap="md" className="max-md:[&_input]:min-h-11 max-md:[&_input]:text-base max-md:[&_textarea]:min-h-11 max-md:[&_textarea]:text-base">
         {FORM_GROUPS.map((group) => (
           <div key={group.title} className="flex flex-col gap-3 max-md:rounded-token-md max-md:border max-md:border-line max-md:bg-surface max-md:p-4 max-md:shadow-token-sm">
             <h3 className="text-sm font-semibold text-ink-2">{group.title}</h3>
@@ -333,7 +341,7 @@ export default function PetDetailPage() {
 
         {/* The vet picker (a ResponsiveModal sheet): a family contact tagged
             vet, stored as vet_vendor_id. Never the contact's phone. */}
-        <div className="rounded-token-md border border-line bg-surface p-4 shadow-token-sm md:border-0 md:bg-transparent md:p-0 md:shadow-none max-md:[&_.mantine-Input-input]:min-h-11 max-md:[&_.mantine-Input-input]:text-base">
+        <div className="rounded-token-md border border-line bg-surface p-4 shadow-token-sm md:border-0 md:bg-transparent md:p-0 md:shadow-none">
           <VetPicker
             value={vetId}
             onChange={setVetId}
@@ -347,10 +355,7 @@ export default function PetDetailPage() {
             Couldn&apos;t save: {save.error instanceof Error ? save.error.message : "try again"}
           </p>
         )}
-        {/* The layout's Save in the title bar submits this form. */}
-        <button type="submit" className="sr-only" tabIndex={-1} aria-hidden />
       </Stack>
-    </form>
   );
 
   return (
