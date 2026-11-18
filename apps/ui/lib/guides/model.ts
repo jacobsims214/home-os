@@ -195,6 +195,34 @@ export function guideStepCount(body: string | null | undefined): number {
   return parseGuideSteps(body).length;
 }
 
+/** "4 steps" / "1 step" — never "4 step"; and "No steps yet" when empty. */
+export function stepCountLabel(count: number): string {
+  if (count === 0) return "No steps yet";
+  return `${count} step${count === 1 ? "" : "s"}`;
+}
+
+/** Everything a person might type to find this guide, lower-cased. */
+function haystack(guide: Pick<Guide, "title" | "summary" | "body" | "tags">): string {
+  return [guide.title, guide.summary ?? "", guide.body, (guide.tags ?? []).join(" ")]
+    .join(" ")
+    .toLowerCase();
+}
+
+/**
+ * Whether a guide matches a search. Every whitespace-separated word must
+ * appear somewhere, so "router wifi" finds "Reset the router" whose body
+ * mentions wifi, and "reset" alone still does.
+ */
+export function matchesSearch(
+  guide: Pick<Guide, "title" | "summary" | "body" | "tags">,
+  query: string,
+): boolean {
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return true;
+  const hay = haystack(guide);
+  return words.every((w) => hay.includes(w));
+}
+
 /** A one-line preview: the summary, or the body's first real line when none. */
 export function guideSubtitle(guide: Pick<Guide, "summary" | "body">): string | null {
   const summary = (guide.summary ?? "").trim();

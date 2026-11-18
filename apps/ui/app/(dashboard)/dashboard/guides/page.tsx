@@ -41,37 +41,16 @@ import { apiFetch } from "@/lib/api";
 import { guideKeys } from "@/lib/query-keys";
 import { ResponsiveModal, ResponsiveModalActions } from "@/components/ui";
 import { useNavRole } from "@/components/shared/use-nav-role";
-import { guideStepCount, guideSubtitle, type Guide } from "@/lib/guides/model";
+import { guideStepCount, guideSubtitle, matchesSearch, stepCountLabel, type Guide } from "@/lib/guides/model";
 
 const STROKE = 1.75;
 
 /** Family roles may write guides (apps/api/internal/auth/roles.go ResGuides). */
 const WRITER_ROLES = new Set(["owner", "family_manager", "family_member"]);
 
-/** "4 steps" / "1 step" — never "4 step"; and "No steps yet" when empty. */
-export function stepCountLabel(count: number): string {
-  if (count === 0) return "No steps yet";
-  return `${count} step${count === 1 ? "" : "s"}`;
-}
-
-/** Everything a person might type to find this guide, lower-cased. */
-function haystack(guide: Guide): string {
-  return [guide.title, guide.summary ?? "", guide.body, (guide.tags ?? []).join(" ")]
-    .join(" ")
-    .toLowerCase();
-}
-
-/**
- * Whether a guide matches a search. Every whitespace-separated word must
- * appear somewhere, so "router wifi" finds "Reset the router" whose body
- * mentions wifi, and "reset" alone still does.
- */
-export function matchesSearch(guide: Guide, query: string): boolean {
-  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return true;
-  const hay = haystack(guide);
-  return words.every((w) => hay.includes(w));
-}
+// A Next.js page may export only its component and Next's own fields, so the
+// two pure helpers below live in lib/guides/model.ts (where node --test can
+// reach them): stepCountLabel and matchesSearch.
 
 function GuideCard({ guide, canWrite }: { guide: Guide; canWrite: boolean }) {
   const subtitle = guideSubtitle(guide);
