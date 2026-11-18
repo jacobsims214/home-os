@@ -887,15 +887,20 @@ function InviteDialog({
           <p className={classes.hint} style={{ marginTop: 0 }}>
             Send them this link: text, email or in person. It works once and expires in 7 days.
           </p>
-          <div className={classes.inviteActions} style={{ marginLeft: 0 }}>
+          {/* Copy link is the one that always works; Share joins it where the
+              browser has the OS sheet (a phone). Side by side, so neither takes
+              the row the other needs at 390 px. */}
+          <div className={classes.inviteShareRow}>
+            <CopyLinkButton url={result} email={email} block />
             <ShareLinkButton url={result} email={email} />
           </div>
           <div className={classes.inviteSecret} role="note" data-testid="invite-secret-note">
             <IconAlertTriangle size={18} stroke={ICON_STROKE} />
             <span>
-              Anyone with this link can join as {picked ? householdRoleLabel(picked).toLowerCase() : "a family member"},
-              so send it only to {email.trim() || "the person you're inviting"}. The link is the invite:
-              don&apos;t post it in a group chat. No email was sent.
+              Anyone who has this link can join as{" "}
+              <b>{picked ? householdRoleLabel(picked) : "a family member"}</b>, so send it only to{" "}
+              {email.trim() || "the person you're inviting"}. The link is the invite: don&apos;t post
+              it in a group chat. No email was sent.
             </span>
           </div>
         </>

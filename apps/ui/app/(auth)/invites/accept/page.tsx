@@ -307,9 +307,18 @@ function InviteAccept() {
         <DoneIcon />
         <h1 className={H1}>{copy.title}</h1>
         <p className={SUB}>{copy.detail}</p>
-        <Button component={Link} href="/login" size="md" fullWidth className={ACTION} data-testid="invite-signin">
-          Sign in
-        </Button>
+        {/* Signup (201) has no session yet: the person signs in with the password
+            they just chose. Accept (200) already had one, so it goes into the app
+            rather than asking them to sign in again. */}
+        {phase.success.userCreated ? (
+          <Button component={Link} href="/login" size="md" fullWidth className={ACTION} data-testid="invite-signin">
+            Sign in
+          </Button>
+        ) : (
+          <Button component={Link} href="/dashboard" size="md" fullWidth className={ACTION} data-testid="invite-home">
+            Go to Home OS
+          </Button>
+        )}
       </div>
     );
   }

@@ -98,6 +98,7 @@ test("signed out: the link opens the form and posts to the public API route", as
   await page.getByTestId("invite-create").click();
 
   await expect(page.getByRole("heading", { name: "You're in" })).toBeVisible();
+  // Signed up but not signed in yet: the first sign-in uses the password just set.
   await expect(page.getByTestId("invite-signin")).toHaveAttribute("href", "/login");
 
   // Exactly one request, straight to the API's public route: the BFF would have
@@ -140,6 +141,8 @@ test("signed in: one press accepts through the BFF as the session's email", asyn
 
   await page.getByTestId("invite-accept").click();
   await expect(page.getByRole("heading", { name: "You're in" })).toBeVisible();
+  // Already signed in: the way on is the app, not a second sign-in.
+  await expect(page.getByTestId("invite-home")).toHaveAttribute("href", "/dashboard");
 
   expect(requests).toHaveLength(1);
   expect(requests[0].path).toBe("/bff/invites/accept");
@@ -291,7 +294,69 @@ test("the 'already have an account' link carries the invite back after login", a
   expect(redirect).toBe(ACCEPT_PATH);
 });
 
-// ── 5. The phone rules ─────────────────────────────────────────────────
+// ── 5. The members page hands the link over safely ─────────────────────
+
+test("members: a fresh invite offers Copy link, Share where available, and says who could use it", async ({ loggedInPage: page }) => {
+  onlyChromium();
+  const HOUSEHOLD = {
+    id: "0b9d4f1e-6a3c-4b8e-9f52-1c7d2a5e8b10",
+    name: "Sims family",
+    timezone: "America/Chicago",
+    role: "owner",
+    joined_at: "2026-01-01T00:00:00Z",
+    is_default: true,
+    current: true,
+  };
+  await page.route("**/bff/me/households", (route) => route.fulfill({ json: { data: [HOUSEHOLD] } }));
+  await page.route("**/bff/auth/me", (route) => route.fulfill({ json: { data: { id: "u1", email: "jacob@sims.family" } } }));
+  await page.route("**/bff/households/me", (route) =>
+    route.fulfill({ json: { data: { id: HOUSEHOLD.id, name: HOUSEHOLD.name, timezone: HOUSEHOLD.timezone } } }),
+  );
+  await page.route("**/bff/households/me/members", (route) =>
+    route.fulfill({
+      json: {
+        data: [
+          { user_id: "u1", email: "jacob@sims.family", name: "Jacob Sims", role: "owner", joined_at: "2026-03-02T00:00:00Z", vendor_id: null, vendor_name: null, color: "cyan" },
+        ],
+      },
+    }),
+  );
+  await page.route("**/bff/people", (route) =>
+    route.fulfill({
+      json: { data: [{ id: "p1", display_name: "Jacob Sims", relationship: "parent", allergies: [], user_id: "u1", color: "cyan" }] },
+    }),
+  );
+  await page.route("**/bff/vendors**", (route) => route.fulfill({ json: { data: [] } }));
+  await page.route("**/bff/invites", (route) =>
+    route.request().method() === "GET"
+      ? route.fulfill({ json: { data: [] } })
+      : route.fulfill({ status: 201, json: { data: { accept_url: `https://home.example${ACCEPT_PATH}` } } }),
+  );
+  // A phone has the OS share sheet; this browser has to be told it does.
+  await page.addInitScript(() => {
+    // @ts-expect-error test shim
+    navigator.share = async () => undefined;
+  });
+
+  await page.goto("/dashboard/members");
+  await page.getByTestId("invite-open").click();
+  await page.getByLabel("Their email").fill("kim.hart@example.test");
+  await page.getByTestId("invite-create").click();
+
+  // Copy link is always there; Share joins it when the browser can share.
+  await expect(page.getByTestId("invite-copy")).toBeVisible();
+  await expect(page.getByTestId("invite-share")).toBeVisible();
+  // The warning names the role the link grants and who it is for, and it never
+  // prints the URL: the token leaves only through the clipboard or the sheet.
+  const note = page.getByTestId("invite-secret-note");
+  await expect(note).toContainText("Anyone who has this link can join as");
+  await expect(note).toContainText("Family member");
+  await expect(note).toContainText("kim.hart@example.test");
+  expect(await note.innerText()).not.toContain(TOKEN);
+  expect(await page.locator("[data-testid=invite-copy]").innerText()).not.toContain(TOKEN);
+});
+
+// ── 6. The phone rules ─────────────────────────────────────────────────
 
 test("phone 390: the signup form fits, with one h1 and 16 px fields", async ({ page }) => {
   onlyPhone();

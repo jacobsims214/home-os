@@ -287,6 +287,19 @@
   font-weight: 600;
 }
 
+/* Copy link, then Share where the browser can (#4579). Side by side rather than
+   stacked: at 390 px two 44 px buttons still fit on one row. */
+.inviteShareRow {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.inviteShareRow > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
 /* The warning under a fresh invite link (#4579): the link is the credential, so
    the dialog says who could use it before the person sends it. Tokens only
    (app/globals.css), so light and dark both work. */
