@@ -86,20 +86,23 @@ data:
         enforce: true
         codeChallengeMethodsSupported: ["S256"]
       {{- with .Values.dex.passwordConnector }}
-      # INTERIM (#4886) - RETIRED BY #4540. Turns on the OAuth2 password grant
-      # (grant_type=password) at /dex/token and its root /token alias, so a
-      # headless caller can exchange a member's Dex password for an id_token.
-      # It exists only because the moltis family agents and tools/wargame need a
-      # headless auth path before per-member agent tokens (#4535) are issued;
-      # agent tokens are the designed path and this setting goes away with #4540.
+      # RETIRED (#4540). This block only renders when dex.passwordConnector is
+      # set, which the DEPLOYED values do not do (it is ""). Setting it turns the
+      # OAuth2 password grant back on: grant_type=password at /dex/token and its
+      # root /token alias, trading a member's Dex password for an id_token.
+      #
+      # LOCAL DEV ONLY. That grant was an INTERIM stopgap (#4886) so a headless
+      # caller had some way in before per-member agent tokens existed; #4535
+      # issued those to every family agent, so nothing needs it. A password grant
+      # means any valid Dex password becomes an UNSCOPED bearer token for the MCP
+      # audience, with no per-agent revocation, and /dex/token is deliberately NOT
+      # rate limited at Envoy (Envoy cannot tell a password grant from a refresh
+      # without reading the body). See KB architecture/dex-password-grant-interim.md.
       #
       # It is a CHART VALUE and must stay one: the war game originally added it
-      # by hand to the live ConfigMap, and the next sync from this chart erased
-      # it, silently leaving every agent with no headless auth (#4357).
-      #
-      # Security: this is NOT rate limited at Envoy (which cannot tell a password
-      # grant from a refresh without reading the body), and a password grant
-      # carries no scope and no per-agent revocation. Do not outlive #4540.
+      # by hand to the live ConfigMap, and the next sync from a chart without it
+      # erased the patch, silently leaving every agent with no headless auth
+      # (#4357). That is also why the deployed values keep the key with "".
       passwordConnector: {{ . | quote }}
       {{- end }}
     
