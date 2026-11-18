@@ -27,7 +27,7 @@ export const PUBLIC_PREFIXES = [
   "/register",
   "/reset-password",
   "/invites", // invite accept page: /invites/accept?token=… (#4579)
-  "/invite", // the flat /invite/<token> spelling, kept for links already sent out
+  "/invite", // the flat /invite/<token> spelling listed since #4413; no page uses it yet
   "/onboarding",
   "/api/auth", // OIDC login start + callback, logout
 ];
