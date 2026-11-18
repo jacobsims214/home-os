@@ -3,7 +3,7 @@ import { test, expect, expectNoHorizontalOverflow, onlyOn, pressOpener } from ".
 
 /**
  * Phone bottom tab bar and More sheet (#4536), per KB design/app-shell.md:
- * Today / Calendar / Lists / Meals / More below 768 px, nothing from 768 up.
+ * Today / Calendar / Meals / More below 768 px, nothing from 768 up.
  * Viewports are pinned here. Phone widths run in desktop-chrome and on
  * iphone-390 (WebKit, touch); 768/1440 only in desktop-chrome (#4757).
  */
@@ -56,7 +56,7 @@ for (const width of [375, 390]) {
       const nav = tabBar(page);
       await expect(nav).toBeVisible();
 
-      // Pinned to the bottom of the viewport, 56 px tall, five equal tabs.
+      // Pinned to the bottom of the viewport, 56 px tall, one cell per tab.
       const box = (await page.getByTestId("tab-bar").boundingBox())!;
       expect(Math.round(box.height)).toBe(56);
       expect(Math.round(box.y + box.height)).toBe(844);
@@ -64,16 +64,12 @@ for (const width of [375, 390]) {
       await expect(nav.getByRole("link", { name: "Calendar" })).not.toHaveAttribute("aria-current", "page");
       await expect(nav.getByRole("button", { name: "More" })).toBeVisible();
 
-      // Sections with no page yet aren't links (no 404). Meals left this list
-      // in #4567: /dashboard/recipes is a real page, so the tab links to it.
-      const soon = nav.getByRole("button", { name: /^Lists/ });
-      await expect(soon).toHaveAttribute("aria-disabled", "true");
-      await expect(nav.getByRole("link", { name: "Lists" })).toHaveCount(0);
-      // aria-disabled (not disabled) so it still explains itself when tapped;
-      // Playwright treats aria-disabled as not actionable, hence force.
-      await soon.click({ force: true });
-      await expect(page.getByText("Lists is coming soon.")).toBeVisible();
-      await expect(page).toHaveURL(/\/dashboard$/);
+      // #5199: every tab is a real destination and a link. A section with no
+      // page is not in the nav at all, so no tab is disabled or labelled
+      // "coming soon".
+      await expect(nav.getByRole("link", { name: "Meals" })).toBeVisible();
+      await expect(nav.getByRole("button", { name: /^Lists/ })).toHaveCount(0);
+      await expect(page.getByText(/coming soon/i)).toHaveCount(0);
 
       await expectLastElementUncovered(page);
       await expectNoHorizontalOverflow(page);
@@ -98,9 +94,13 @@ for (const width of [375, 390]) {
       await expect(nav.getByRole("link", { name: "Today" })).not.toHaveAttribute("aria-current", "page");
 
       await expect(sheet.getByRole("searchbox", { name: "Search" })).toBeVisible();
-      for (const name of ["Documents", "People & House", "Money", "Guides"]) {
+      // The Household tiles, each a real destination with descriptive copy
+      // (#5199 — no "Coming soon" subtitles).
+      for (const name of ["People & House", "Money"]) {
         await expect(sheet.getByText(name, { exact: true })).toBeVisible();
       }
+      await expect(sheet.getByText(/coming soon/i)).toHaveCount(0);
+      await expect(sheet.getByText("Family, home, cars, pets, vendors")).toBeVisible();
       await expect(sheet.getByRole("button", { name: /^Notifications/ })).toBeVisible();
       // One family in the stub: the row names it and goes to Members, rather
       // than offering a switch there is nothing to switch to (#4574).

@@ -175,7 +175,7 @@ test.describe("family switcher, phone 390", () => {
     await expect(page.locator("main")).not.toContainText("Oak Street water");
   });
 
-  test("the role is re-read per household: Money and Documents leave the nav for a housesitter", async ({
+  test("the role is re-read per household: Money leaves the nav for a housesitter", async ({
     loggedInPage: page,
     request,
     stubSid,
@@ -185,8 +185,7 @@ test.describe("family switcher, phone 390", () => {
     await gotoBills(page);
 
     // The drawer lists every section, so it shows the role-filtered nav in full.
-    // Rows are counted by their label text: Documents has no page yet, so it
-    // renders as a disabled span, not a link (#4536).
+    // Every row is a link now (#5199): a section with no page is not in the nav.
     const navInDrawer = async () => {
       await header(page).getByRole("button", { name: "Open menu" }).click();
       const drawer = page.getByRole("dialog", { name: /Home OS menu/ });
@@ -194,30 +193,31 @@ test.describe("family switcher, phone 390", () => {
       const row = (label: string) => drawer.getByText(label, { exact: true }).count();
       const counts = {
         money: await row("Money"),
-        documents: await row("Documents"),
         people: await row("People & House"),
+        calendar: await row("Calendar"),
       };
       await page.keyboard.press("Escape");
       await expect(drawer).toBeHidden();
       return counts;
     };
 
-    // Owner: Money and Documents are both reachable.
-    expect(await navInDrawer()).toEqual({ money: 1, documents: 1, people: 1 });
+    // Owner: money, people and calendar are all reachable.
+    expect(await navInDrawer()).toEqual({ money: 1, people: 1, calendar: 1 });
 
     await (await openPicker(page)).getByRole("radio", { name: /Oak Street/ }).click();
     await expect(chip(page)).toContainText("Oak Street");
     await expect(page.locator("main")).toContainText("Oak Street water");
 
-    // Housesitter: neither. The nav must never keep the previous family's role
-    // on screen, so this is asserted as soon as the switch's data has landed.
-    expect(await navInDrawer()).toEqual({ money: 0, documents: 0, people: 1 });
+    // Housesitter: no money (and no documents, which is not in the nav at all).
+    // The nav must never keep the previous family's role on screen, so this is
+    // asserted as soon as the switch's data has landed.
+    expect(await navInDrawer()).toEqual({ money: 0, people: 1, calendar: 1 });
 
     // And it follows the household back: nothing is cached from the last role.
     await (await openPicker(page)).getByRole("radio", { name: /Sims family/ }).click();
     await expect(chip(page)).toContainText("Sims family");
     await expect(page.locator("main")).toContainText("Duke Energy electric");
-    expect(await navInDrawer()).toEqual({ money: 1, documents: 1, people: 1 });
+    expect(await navInDrawer()).toEqual({ money: 1, people: 1, calendar: 1 });
   });
 
   test("switching off a record page lands on that section's list, not on a 404 for the other family's row", async ({

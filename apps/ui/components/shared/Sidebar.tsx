@@ -199,17 +199,8 @@ function NavRow({ section, active }: { section: NavSection; active: boolean }) {
     </>
   );
 
-  if (section.comingSoon) {
-    // The page isn't built yet; show the section without linking to a 404.
-    return (
-      <span className={classes.row} aria-disabled="true" title={`${section.label}: coming soon`}>
-        {inner}
-        <span className={classes.soon}>
-          Soon<VisuallyHidden>: coming soon</VisuallyHidden>
-        </span>
-      </span>
-    );
-  }
+  // Every section in nav-config is a real page (#5199): a destination with no
+  // page is not in the list at all, so a row is always a link.
   return (
     <Link
       href={section.href}

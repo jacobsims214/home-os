@@ -1,6 +1,9 @@
 // Run: npm test (node --test strips the TypeScript types natively).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   NAV_SECTIONS,
   TAB_SECTIONS,
@@ -11,16 +14,53 @@ import {
   sectionsInGroup,
 } from "./nav-config.ts";
 
-test("all nine sections, in the approved order and groups", () => {
+test("the six built sections, in the approved order and groups", () => {
   assert.deepEqual(
     NAV_SECTIONS.map((s) => s.id),
-    ["today", "calendar", "lists", "meals", "documents", "people", "money", "guides", "settings"],
+    ["today", "calendar", "meals", "people", "money", "settings"],
   );
-  assert.deepEqual(sectionsInGroup("main").map((s) => s.label), ["Today", "Calendar", "Lists", "Meals"]);
-  assert.deepEqual(sectionsInGroup("household").map((s) => s.label), ["Documents", "People & House", "Money", "Guides"]);
+  assert.deepEqual(sectionsInGroup("main").map((s) => s.label), ["Today", "Calendar", "Meals"]);
+  assert.deepEqual(sectionsInGroup("household").map((s) => s.label), ["People & House", "Money"]);
   assert.deepEqual(sectionsInGroup("you").map((s) => s.label), ["Settings"]);
-  assert.deepEqual(TAB_SECTIONS.map((s) => s.id), ["today", "calendar", "lists", "meals"]);
+  assert.deepEqual(TAB_SECTIONS.map((s) => s.id), ["today", "calendar", "meals"]);
 });
+
+// #5199: the shell shipped "Soon" pills and "Coming soon" tile copy for Lists,
+// Documents and Guides — placeholder text advertising pages that do not exist
+// (artifact #168 D7/D8). The approved shell design has no such badge, so a
+// destination with no page is now simply absent from the nav. This test is the
+// guard: no section may be planned-but-unbuilt, and the three unfinished
+// destinations must not come back as inert entries.
+test("only real destinations are in the nav — no placeholder/coming-soon sections (#5199)", () => {
+  for (const id of ["lists", "documents", "guides"]) {
+    assert.equal(NAV_SECTIONS.find((s) => s.id === id), undefined, `${id} has no page, so it must not be in the nav`);
+  }
+  for (const s of NAV_SECTIONS) {
+    assert.equal("comingSoon" in s, false, `${s.id} must not carry a coming-soon flag`);
+    assert.equal(s.href, s.href.trim(), s.id);
+  }
+  // Every section's href must be a route that actually exists: checked against
+  // the app directory below, so a new page needs no edit here and a deleted
+  // page fails loudly instead of shipping a link to a 404.
+  const routes = existingRoutes();
+  for (const s of NAV_SECTIONS) {
+    assert.ok(routes.has(s.href), `${s.id}: ${s.href} has no page.tsx under app/(dashboard)`);
+  }
+});
+
+/** Routable paths with a page.tsx under app/(dashboard)/dashboard. */
+function existingRoutes() {
+  const root = fileURLToPath(new URL("../../app/(dashboard)/dashboard", import.meta.url));
+  const out = new Set();
+  const walk = (dir, prefix) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) walk(join(dir, entry.name), `${prefix}/${entry.name}`);
+      else if (entry.name === "page.tsx") out.add(`/dashboard${prefix || ""}`);
+    }
+  };
+  walk(root, "");
+  return out;
+}
 
 test("activeSection: Today is the home page only, not every /dashboard route", () => {
   assert.equal(activeSection("/dashboard")?.id, "today");
@@ -62,8 +102,8 @@ test("sectionsForRole follows the household role policy", () => {
   for (const role of ["owner", "family_manager", "family_member", "viewer"]) {
     assert.deepEqual(ids(role), all, role);
   }
-  // No money, documents (files) for a housesitter.
-  assert.deepEqual(ids("housesitter"), ["today", "calendar", "lists", "meals", "people", "guides", "settings"]);
+  // No money or documents (files) for a housesitter.
+  assert.deepEqual(ids("housesitter"), ["today", "calendar", "meals", "people", "settings"]);
   // A vendor reads properties/assets/maintenance only (People & House).
   assert.deepEqual(ids("vendor"), ["today", "people", "settings"]);
 });
@@ -82,7 +122,6 @@ test("sectionsForRole: unknown role yet shows everything; an unrecognised role f
 // box stays under Meals through `matches`, and keeps its own page title.
 test("Meals links to the week plan and still owns the recipe box (#4568)", () => {
   const meals = NAV_SECTIONS.find((s) => s.id === "meals");
-  assert.equal(meals.comingSoon, undefined, "Meals is built");
   assert.equal(meals.href, "/dashboard/meals", "the tab links to the week plan");
   assert.equal(activeSection("/dashboard/meals")?.id, "meals");
   assert.equal(activeSection("/dashboard/meals/grocery")?.id, "meals", "the grocery preview belongs to Meals");
