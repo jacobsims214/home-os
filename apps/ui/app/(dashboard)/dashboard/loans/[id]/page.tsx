@@ -301,7 +301,7 @@ export default function LoanDetailPage() {
       })()}
 
       <div>
-        <h3 className="text-sm font-semibold text-ink-2">Loan</h3>
+        <h3 className="text-sm font-semibold text-ink-2">Lender &amp; balance</h3>
         <dl className="m-0 divide-y divide-line">
           <Row label="Lender">{loan.lender || "—"}</Row>
           <Row label="Amount borrowed">{usd(loan.original_amount, 2) ?? "—"}</Row>
