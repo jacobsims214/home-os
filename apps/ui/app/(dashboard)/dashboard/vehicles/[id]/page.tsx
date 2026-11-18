@@ -338,10 +338,10 @@ export default function VehicleDetailPage() {
             />
           </dl>
 
-          <section aria-labelledby="vehicle-details" className="min-w-0">
-            <h2 id="vehicle-details" className="mb-1 text-sm font-semibold text-ink-2">
-              Details
-            </h2>
+          {/* The vehicle's own fields. No heading of its own: the frame's
+              collapsible section is already titled "Details", and a second one
+              inside it reads as a duplicate (property detail does the same). */}
+          <section aria-label="Vehicle details" className="min-w-0">
             <dl className="m-0 divide-y divide-line">
               <Row field="year" label="Year" value={vehicle.year ?? "—"} />
               <Row field="make" label="Make" value={vehicle.make || "—"} />
