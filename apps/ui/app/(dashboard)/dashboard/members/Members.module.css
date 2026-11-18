@@ -287,6 +287,28 @@
   font-weight: 600;
 }
 
+/* The warning under a fresh invite link (#4579): the link is the credential, so
+   the dialog says who could use it before the person sends it. Tokens only
+   (app/globals.css), so light and dark both work. */
+.inviteSecret {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--warn-line);
+  border-radius: var(--r-md);
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.inviteSecret svg {
+  flex: none;
+  margin-top: 1px;
+}
+
 /* ---------- colour picker ---------- */
 
 .swatches {

@@ -62,6 +62,7 @@ import {
   IconLink,
   IconPalette,
   IconRefresh,
+  IconShare,
   IconTrash,
   IconUserPlus,
   IconUsers,
@@ -886,7 +887,17 @@ function InviteDialog({
           <p className={classes.hint} style={{ marginTop: 0 }}>
             Send them this link: text, email or in person. It works once and expires in 7 days.
           </p>
-          <CopyLinkButton url={result} email={email} block />
+          <div className={classes.inviteActions} style={{ marginLeft: 0 }}>
+            <ShareLinkButton url={result} email={email} />
+          </div>
+          <div className={classes.inviteSecret} role="note" data-testid="invite-secret-note">
+            <IconAlertTriangle size={18} stroke={ICON_STROKE} />
+            <span>
+              Anyone with this link can join as {picked ? householdRoleLabel(picked).toLowerCase() : "a family member"},
+              so send it only to {email.trim() || "the person you're inviting"}. The link is the invite:
+              don&apos;t post it in a group chat. No email was sent.
+            </span>
+          </div>
         </>
       ) : (
         <>
@@ -988,6 +999,47 @@ function InviteDialog({
         )}
       </ResponsiveModalActions>
     </ResponsiveModal>
+  );
+}
+
+// ─── Share link ───────────────────────────────────────────────────────
+
+/**
+ * The phone's own share sheet (SMS, WhatsApp, AirDrop), which is how an invite
+ * actually reaches someone (#4579, artifact #103's "Share…"). The Web Share API
+ * needs a user gesture, a secure context and a browser that has it, so its
+ * absence is not an error: the button simply is not drawn, and Copy link stays.
+ * The URL only ever leaves through the OS sheet: it is never rendered, logged or
+ * put in the page's text.
+ */
+function ShareLinkButton({ url, email }: { url: string; email: string }) {
+  // Read after mount: `navigator.share` is undefined while server-rendering, and
+  // drawing a button that then vanishes would shift the layout.
+  const [canShare, setCanShare] = useState(false);
+  useEffect(() => {
+    setCanShare(typeof navigator !== "undefined" && typeof navigator.share === "function");
+  }, []);
+  if (!canShare) return null;
+  return (
+    <Button
+      variant="default"
+      leftSection={<IconShare size={16} stroke={ICON_STROKE} />}
+      onClick={() => {
+        void navigator
+          .share({
+            title: "Join the family on Home OS",
+            text: email ? `You're invited to Home OS as ${email}.` : "You're invited to Home OS.",
+            url,
+          })
+          .catch(() => {
+            // Cancelled, or the browser refused: nothing to undo, and the link
+            // was not shared. Copy link is still there.
+          });
+      }}
+      data-testid="invite-share"
+    >
+      Share
+    </Button>
   );
 }
 
