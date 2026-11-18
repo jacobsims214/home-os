@@ -904,8 +904,12 @@ export default function AdminPage() {
                         {family.name}
                       </p>
                       <p className="m-0 text-sm text-ink-3 [overflow-wrap:anywhere]">
-                        {zoneLabel(family.timezone)} · {family.member_count}{" "}
-                        {family.member_count === 1 ? "member" : "members"} · since {day(family.created_at)}
+                        {/* Non-breaking spaces keep "5 members" and "since Mar 2, 2026" whole:
+                            a phone line that ends after "5" reads as a count with no noun. */}
+                        {zoneLabel(family.timezone)} · {family.member_count}
+                        {"\u00a0"}
+                        {family.member_count === 1 ? "member" : "members"} ·{"\u00a0"}since{"\u00a0"}
+                        {day(family.created_at)}
                       </p>
                     </div>
                   </li>
