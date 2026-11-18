@@ -45,6 +45,7 @@ import {
   type NavSection,
 } from "@/components/shared/nav-config";
 import { useNavSections } from "@/components/shared/use-nav-role";
+import HomeMark from "@/components/shared/HomeMark";
 import classes from "./Sidebar.module.css";
 
 export type SidebarVariant = "sidebar" | "drawer";
@@ -93,13 +94,19 @@ export default function Sidebar({ variant = "sidebar", familySlot }: SidebarProp
 
 // ─── Brand ────────────────────────────────────────────────────
 
-/** The accent logo tile and wordmark (also the drawer's title). */
+/**
+ * The accent logo tile and wordmark (also the drawer's title).
+ *
+ * The mark is `HomeMark` (#5200): the approved shell mockup's house glyph on
+ * the 28 px accent tile, transcribed from artifact #75 v1. It used to be a
+ * letter "H", which read as a placeholder for the product's only piece of
+ * brand. The tile's geometry now lives in that component, so the mark is
+ * identical wherever it is used; this row only supplies the wordmark.
+ */
 export function Brand({ as: Tag = "div" }: { as?: "div" | "span" }) {
   return (
     <Tag className={classes.brand}>
-      <span className={classes.logo} aria-hidden>
-        H
-      </span>
+      <HomeMark size={28} />
       <span className={classes.brandName}>Home OS</span>
     </Tag>
   );
