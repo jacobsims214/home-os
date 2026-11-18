@@ -15,6 +15,7 @@ import (
 
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchqueue"
 	"home-os/api/internal/subject"
 	"home-os/api/pkg/apierr"
 )
@@ -111,26 +112,11 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 // DocumentID is the guide's household_search document id.
 func DocumentID(id uuid.UUID) string { return EntityType + "-" + id.String() }
 
-// Document is the household_search document of a guide. The summary leads
-// the body because the embedding model only reads the first ~256 tokens.
-func Document(g *Guide) search.SearchDocument {
-	body := g.Body
-	if g.Summary != nil && *g.Summary != "" {
-		body = *g.Summary + "\n\n" + g.Body
-	}
-	return search.SearchDocument{
-		ID:          DocumentID(g.ID),
-		HouseholdID: g.HouseholdID.String(),
-		EntityType:  EntityType,
-		EntityID:    g.ID.String(),
-		Title:       g.Title,
-		Body:        body,
-		Tags:        g.Tags,
-		PropertyID:  subject.String(g.PropertyID),
-		CreatedAt:   g.CreatedAt.Unix(),
-		UpdatedAt:   g.UpdatedAt.Unix(),
-	}
-}
+// The guide document builder used to live here. It is now the single shared
+// builder in packages/searchindex (#5314): migration 075 queues guides through
+// that builder, so having a second copy here meant the index could hold one
+// guide two different ways. Callers use searchqueue.IndexNow (the handler) or
+// searchindex.Build (cmd/reindex).
 
 // searchCtx is detached from the request so a client hang-up doesn't cancel
 // the index write, and bounded so an unreachable Typesense can't hold the
@@ -140,13 +126,16 @@ func searchCtx(r *http.Request) (context.Context, context.CancelFunc) {
 }
 
 func (h *Handler) index(r *http.Request, g *Guide) {
+	// Same builder the index queue's drain uses, so a guide saved here and one
+	// saved through an MCP tool produce identical documents (#5314). A failure
+	// is only logged: the trigger already queued the row.
 	if h.search == nil {
 		return
 	}
 	ctx, cancel := searchCtx(r)
 	defer cancel()
-	if err := h.search.IndexDocument(ctx, Document(g)); err != nil {
-		slog.Warn("guides: saved but not indexed for search", "guide_id", g.ID, "error", err)
+	if err := searchqueue.IndexNow(ctx, h.repo.pool, h.search, EntityType, g.ID.String()); err != nil {
+		slog.Warn("guides: indexed later by the queue", "guide_id", g.ID, "error", err)
 	}
 }
 

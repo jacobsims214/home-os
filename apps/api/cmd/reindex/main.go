@@ -10,8 +10,8 @@ import (
 
 	"home-os/api/internal/config"
 	"home-os/api/internal/file"
-	"home-os/api/internal/guides"
 	"home-os/api/internal/search"
+	"home-os/searchindex"
 )
 
 func main() {
@@ -93,17 +93,16 @@ func main() {
 		}
 		rows.Close()
 	}
-	// Guides carry tags and property_id too, so they use the same document
-	// builder as the API instead of the generic name/body query above.
-	if err := guides.NewRepo(pool).All(ctx, func(g *guides.Guide) error {
-		if err := sc.IndexDocument(ctx, guides.Document(g)); err != nil {
-			log.Printf("ERR guides/%s: %v", g.ID, err)
-		} else {
-			total++
+	// Guides, and every other type whose document needs more than a name and a
+	// body (tags, property_id, the secret parent rule), are built by the ONE
+	// shared builder in packages/searchindex (#5314) rather than a copy here.
+	// 075's triggers queue every row; this drains what the loop above did not
+	// write. Re-running it is harmless — the builder is deterministic.
+	for _, typ := range searchindex.Types() {
+		if err := drainType(ctx, pool, sc, typ); err != nil {
+			log.Printf("skip %s: %v", typ, err)
+			continue
 		}
-		return nil
-	}); err != nil {
-		log.Printf("skip guides: %v", err)
 	}
 
 	// Document metadata (048): one household_search document per file, built
@@ -121,4 +120,28 @@ func main() {
 	}
 
 	fmt.Printf("Indexed %d documents\n", total)
+}
+
+// drainType writes the documents of every row of one entity type through the
+// shared builder. It exists so cmd/reindex has no per-type document knowledge:
+// the builder list in packages/searchindex is the only list.
+func drainType(ctx context.Context, pool *pgxpool.Pool, sc *search.Client, typ string) error {
+	ids, err := searchindex.IDs(ctx, pool, typ)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		doc, found, err := searchindex.Build(ctx, pool, typ, id)
+		if err != nil {
+			log.Printf("ERR %s/%s: %v", typ, id, err)
+			continue
+		}
+		if !found {
+			continue
+		}
+		if err := sc.IndexDocument(ctx, search.SearchDocument(*doc)); err != nil {
+			log.Printf("ERR %s/%s: %v", typ, id, err)
+		}
+	}
+	return nil
 }

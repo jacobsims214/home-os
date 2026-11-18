@@ -192,7 +192,8 @@ jobs:
           set -o pipefail
           go test -count=1 -v ./... | tee "$RUNNER_TEMP/searchindex-tests.log"
           for t in TestMCPWrittenNoteIsIndexed TestUpdateAndDeleteThroughTheQueue \
-                   TestBuildersCoverEveryQueuedType TestRejectedWriteIsParkedNotLost; do
+                   TestBuildersCoverEveryQueuedType TestRejectedWriteIsParkedNotLost \
+                   TestIDsCoverEveryBuilder; do
             grep -q -- "--- PASS: $t " "$RUNNER_TEMP/searchindex-tests.log" \
               || { echo "::error::$t did not PASS (skipped or missing)"; exit 1; }
           done

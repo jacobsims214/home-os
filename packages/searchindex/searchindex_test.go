@@ -310,3 +310,16 @@ func TestRejectedWriteIsParkedNotLost(t *testing.T) {
 		t.Errorf("the retried row was not indexed")
 	}
 }
+
+// TestIDsCoverEveryBuilder keeps the second table list honest: a type with a
+// document builder but no id query would build fine and then be silently
+// skipped by a full rebuild (cmd/reindex).
+func TestIDsCoverEveryBuilder(t *testing.T) {
+	pool := testDB(t)
+	ctx := context.Background()
+	for _, typ := range searchindex.Types() {
+		if _, err := searchindex.IDs(ctx, pool, typ); err != nil {
+			t.Errorf("entity type %q has a document builder but no usable id query: %v", typ, err)
+		}
+	}
+}

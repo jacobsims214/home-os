@@ -383,6 +383,48 @@ var queries = map[string]builder{
 		  FROM people p WHERE p.id = $1`},
 }
 
+// idQueries maps entity_type to a query returning every row id of that type.
+// It is the table list from queries, once, so a caller that wants to rebuild a
+// whole type (cmd/reindex) does not need its own copy of the tables.
+var idQueries = map[string]string{
+	"note":                 `SELECT id FROM notes`,
+	"bill":                 `SELECT id FROM bills`,
+	"asset":                `SELECT id FROM assets`,
+	"vehicle":              `SELECT id FROM vehicles`,
+	"pet":                  `SELECT id FROM pets`,
+	"property":             `SELECT id FROM properties`,
+	"vendor":               `SELECT id FROM vendors`,
+	"maintenance_task":     `SELECT id FROM maintenance_tasks`,
+	"maintenance_schedule": `SELECT id FROM maintenance_schedules`,
+	"secret":               `SELECT id FROM secrets`,
+	"guide":                `SELECT id FROM guides`,
+	"person":               `SELECT id FROM people`,
+}
+
+// IDs returns every row id of one entity type, for a full rebuild. It is here
+// so the table list lives beside the document builders: a type that gains a
+// builder must gain an id query in the same edit.
+func IDs(ctx context.Context, pool *pgxpool.Pool, entityType string) ([]string, error) {
+	q, ok := idQueries[entityType]
+	if !ok {
+		return nil, fmt.Errorf("searchindex: no id query for entity type %q", entityType)
+	}
+	rows, err := pool.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("searchindex: list %s ids: %w", entityType, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("searchindex: scan %s id: %w", entityType, err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // Types returns the entity types this package can build documents for. The
 // test that reads migration 075 uses it to prove the trigger list and the
 // builder list agree.
