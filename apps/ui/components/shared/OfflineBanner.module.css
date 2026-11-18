@@ -1,0 +1,71 @@
+/*
+ * The offline banner and the "reload to update" bar (#4538), per KB
+ * design/app-shell.md (artifact #75 v1) "Offline" state: a warn banner under the
+ * header, role="status". Theme tokens only (app/globals.css, #4529).
+ *
+ * IN THE PAGE FLOW, not floating. The spec draws the offline state as a banner
+ * under the header, and a fixed bar would cover the content someone is trying to
+ * read (and, on a phone, the tab bar). DashboardShell mounts these at the top of
+ * its content, so the shell's own padding and safe-area handling apply.
+ */
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-line);
+  border-radius: var(--r-md);
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.bannerIcon {
+  flex: none;
+  margin-top: 1px;
+}
+
+/* The update bar is a notice with an action, so it is the surface colour with an
+   accent edge rather than the warn colours (nothing is wrong). */
+.update {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.updateText {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 44 px minimum hit target (spec: touch). */
+.updateButton {
+  flex: none;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--accent-fill);
+  color: var(--mantine-color-white);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.updateButton:disabled {
+  opacity: 0.7;
+  cursor: default;
+}

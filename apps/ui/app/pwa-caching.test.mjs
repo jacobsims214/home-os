@@ -228,3 +228,29 @@ test("the built worker imports the custom worker that purges unknown caches", { 
     assert.ok(code.includes(`"${name}"`), `${name} is on the worker's allowlist`);
   }
 });
+
+// ── the offline shell (#4538) ─────────────────────────────────────────────
+
+test("the built worker's precache manifest carries the offline shell", { skip }, () => {
+  // public/offline.html is in the manifest only because next-pwa's default glob
+  // over public/ picks it up. If a future publicExcludes or an
+  // additionalManifestEntries replaces that glob, the shell silently stops being
+  // precached and offline navigations fall back to the browser's error page.
+  assert.ok(sw.includes("offline.html"), "offline.html is in the built worker's manifest");
+});
+
+test("the built worker answers a failed navigation with the shell, and only then", { skip }, () => {
+  // The custom worker half (worker-*.js) holds the fetch listener; it is
+  // imported before the Workbox routes. Assert on the compiled code, because the
+  // source being right is not the same as webpack compiling it in.
+  const custom = readdirSync(join(ui, "public")).filter((f) => /^worker-.*\.js$/.test(f));
+  assert.equal(custom.length, 1, "exactly one custom worker was written");
+  const code = readFileSync(join(ui, "public", custom[0]), "utf8");
+  assert.match(code, /addEventListener\("fetch"/, "the offline shell listener survives the build");
+  assert.match(code, /offline\.html/, "and it knows the shell");
+  assert.match(code, /navigate/, "and is limited to navigations");
+  // The page-caching guarantee: no navigation is ever written to a cache.
+  assert.doesNotMatch(code, /cache\.put\(/, "the shell is a fallback, never a stored page");
+  // And nothing new is cached by the built worker either.
+  assert.doesNotMatch(sw, /offline\.html",[^)]*cacheName/, "offline.html is not a runtime route's cache");
+});

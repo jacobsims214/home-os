@@ -17,18 +17,27 @@
 
 // Relative with the extension so `node --test` can load this file directly.
 import { safeRedirectPath } from "../middleware.ts";
+import { offlineReadMessage, offlineWriteMessage } from "./pwa/offline.js";
 
 export class ApiError extends Error {
   // Explicit fields rather than constructor parameter properties, which
   // Node's type stripping (node --test) cannot run.
   status: number;
   body?: unknown;
+  /**
+   * True when the request never reached the server because the network was
+   * gone (#4538). The caller must treat this as "nothing was saved": there is
+   * no queue and no retry, so a UI that showed the write as pending would be
+   * lying. Lets a form say so without matching on the message.
+   */
+  offline: boolean;
 
-  constructor(status: number, message: string, body?: unknown) {
+  constructor(status: number, message: string, body?: unknown, offline = false) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.body = body;
+    this.offline = offline;
   }
 }
 
@@ -110,8 +119,23 @@ export function isBffPath(pathname: string): boolean {
 }
 
 /**
+ * Whether a request changes state. Anything that is not a GET or HEAD is a
+ * write, so its failure is reported as "not saved" rather than "could not
+ * load" (#4538).
+ */
+function isWriteMethod(method: string | undefined): boolean {
+  const m = (method || "GET").toUpperCase();
+  return m !== "GET" && m !== "HEAD";
+}
+
+/**
  * Typed fetch wrapper for the Home OS API, routed through the BFF.
  * No Authorization header is sent: the BFF adds it from the session cookie.
+ *
+ * Offline (#4538): a request whose network attempt fails throws an ApiError with
+ * `status: 0` and `offline: true`, whose message says whether nothing was SAVED
+ * (a write) or could not be LOADED (a read). It is never retried and never
+ * queued — see lib/pwa/offline.js for why.
  */
 export async function apiFetch<T = unknown>(
   path: string,
@@ -146,12 +170,30 @@ export async function apiFetch<T = unknown>(
         : JSON.stringify(body)
       : undefined;
 
-  const response = await fetch(url.toString(), {
-    ...init,
-    headers,
-    credentials: "same-origin",
-    body: serializedBody,
-  });
+  let response: Response;
+  try {
+    response = await fetch(url.toString(), {
+      ...init,
+      headers,
+      credentials: "same-origin",
+      body: serializedBody,
+    });
+  } catch (error) {
+    // The network is gone (or the request was blocked before it left). #4538:
+    // this must be LOUD and specific, never a silent queue — a note that looks
+    // saved but never reached the server is a data-loss trap between
+    // co-parents. status 0 is the conventional "no response" status.
+    //
+    // Only a genuine network failure gets here: an HTTP error response is a
+    // resolved promise and is handled below as before.
+    const write = isWriteMethod(init.method);
+    throw new ApiError(
+      0,
+      write ? offlineWriteMessage() : offlineReadMessage(),
+      { error: { code: "OFFLINE" } },
+      true,
+    );
+  }
 
   if (!response.ok) {
     let errorBody: unknown;

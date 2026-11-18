@@ -51,6 +51,7 @@ import { useDisclosure, useMediaQuery, useReducedMotion } from "@mantine/hooks";
 import { IconChevronDown, IconMenu2 } from "@tabler/icons-react";
 import dayjs from "dayjs";
 import BottomNav from "@/components/shared/BottomNav";
+import OfflineBanner, { ServiceWorkerBridge } from "@/components/shared/OfflineBanner";
 import NotificationsSurface from "@/components/notifications/NotificationsSurface";
 import Sidebar, { AccountMenuItems, Brand } from "@/components/shared/Sidebar";
 import HouseholdSwitcher, {
@@ -124,7 +125,19 @@ export default function DashboardShell({ children }: { children: React.ReactNode
       </AppShell.Navbar>
 
       <AppShell.Main>
-        <div className={classes.content}>{children}</div>
+        <div className={classes.content}>
+          {/* Offline + "reload to update" (#4538), under the header in the page
+              flow, as the shell spec's Offline state draws them. */}
+          <OfflineBanner />
+          {children}
+        </div>
+        {/* Registers the service worker (#4538). Mounted HERE, not in the root
+            layout, on purpose: the auth pages must not register it. Logout
+            unregisters the worker and deletes every cache (#4648), and a
+            registration on /login would immediately precache again — leaving
+            caches behind for the next person on a shared device. The offline
+            shell belongs to the signed-in app. */}
+        <ServiceWorkerBridge />
       </AppShell.Main>
 
       <AppShell.Footer hiddenFrom="sm" withBorder={false} className={bottomNavClasses.footer}>
