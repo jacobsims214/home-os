@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+  <!--
+    The offline shell (#4538).
+
+    Served by the service worker when a NAVIGATION fails with the network down
+    (worker/index.js), and precached by next-pwa so it is already on the device.
+    It is a public ASSET, not a route: it has to render with no server, no JS
+    bundle and no stylesheet from /_next/static, because none of those can be
+    fetched when it is needed.
+
+    Deliberately self-contained: inline CSS, one inline theme script, inline SVG
+    mark. The only font is the system stack — Fira Sans comes from
+    fonts.googleapis.com, a network fetch that will fail here; the system stack
+    is what a phone renders instantly and offline.
+
+    Copy: NO stale data, NO "we'll sync when you're back". There is no data cache
+    and no write queue, so promising either would be a lie. It says what is true:
+    the app frame is here, the household data is not, writes did not happen.
+
+    Design: tokens and type from KB design/app-shell.md (artifact #75 v1), phone
+    first, both schemes, safe-area insets, 44 px targets. Colour literals below
+    are the token VALUES from app/globals.css — this document cannot load it.
+  -->
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Offline — Home OS</title>
+    <meta name="robots" content="noindex" />
+    <!-- Both schemes, by the phone's own preference: no Mantine colour manager
+         runs here, so the media query is the only signal available. -->
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#242424" media="(prefers-color-scheme: dark)" />
+    <style>
+      :root {
+        color-scheme: light dark;
+
+        --bg: #f8f9fa;
+        --surface: #ffffff;
+        --surface-2: #f1f3f5;
+        --raised: #ffffff;
+        --line: #e2e6ea;
+
+        --ink: #212529;
+        --ink-2: #495057;
+        --ink-3: #636a71;
+
+        --accent: #0b7285;
+        --accent-fill: #0b7285;
+        --accent-soft: #e3fafc;
+
+        --warn-bg: #fff4e6;
+        --warn-ink: #8a3c00;
+        --warn-line: #ffd8a8;
+
+        --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+        --r-sm: 8px;
+        --r-md: 12px;
+        --r-lg: 16px;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1f1f1f;
+          --surface: #242424;
+          --surface-2: #2e2e2e;
+          --raised: #2b2b2b;
+          --line: #3a3a3a;
+
+          --ink: #e9ecef;
+          --ink-2: #c1c2c5;
+          --ink-3: #9d9fa3;
+
+          --accent: #66d9e8;
+          --accent-fill: #0b7285;
+          --accent-soft: rgba(59, 201, 219, 0.14);
+
+          --warn-bg: #3a2a14;
+          --warn-ink: #ffd8a8;
+          --warn-line: #5c4320;
+
+          --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+        }
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--ink);
+      }
+
+      body {
+        min-height: 100dvh;
+        font-family: "Fira Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+        font-variant-numeric: tabular-nums;
+        -webkit-text-size-adjust: 100%;
+        touch-action: manipulation;
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+
+      /* The app frame: a header the shell would have, then the content area.
+         The header is what makes this read as "Home OS, offline" rather than as
+         a browser error page. */
+      .header {
+        background: var(--surface);
+        border-bottom: 1px solid var(--line);
+        padding-top: env(safe-area-inset-top, 0px);
+      }
+
+      .headerRow {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 56px;
+        padding: 0 16px;
+      }
+
+      .mark {
+        display: grid;
+        place-items: center;
+        flex: none;
+        width: 28px;
+        height: 28px;
+        border-radius: var(--r-sm);
+        background: var(--accent-fill);
+        color: #ffffff;
+      }
+
+      .brand {
+        font-size: 16px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .main {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 24px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+      }
+
+      @media (min-width: 48em) {
+        .main {
+          padding: 32px 24px 40px;
+        }
+      }
+
+      /* The offline state is a status, not an error: warn colours (the spec's
+         offline banner) rather than --danger. role="status" on the banner. */
+      .banner {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 12px 14px;
+        border: 1px solid var(--warn-line);
+        border-radius: var(--r-md);
+        background: var(--warn-bg);
+        color: var(--warn-ink);
+        font-weight: 500;
+      }
+
+      .banner svg {
+        flex: none;
+        margin-top: 2px;
+      }
+
+      h1 {
+        margin: 24px 0 8px;
+        font-size: 24px;
+        line-height: 1.2;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      @media (min-width: 48em) {
+        h1 {
+          font-size: 28px;
+        }
+      }
+
+      p {
+        margin: 0 0 12px;
+        color: var(--ink-2);
+        max-width: 60ch;
+      }
+
+      .list {
+        margin: 16px 0 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        gap: 8px;
+        max-width: 60ch;
+      }
+
+      .list li {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-sm);
+        background: var(--surface);
+        box-shadow: var(--shadow-sm);
+        color: var(--ink-2);
+      }
+
+      .list svg {
+        flex: none;
+        margin-top: 1px;
+        color: var(--accent);
+      }
+
+      .list strong {
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 24px;
+      }
+
+      /* 44 px minimum hit target (spec: touch). */
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        min-height: 44px;
+        padding: 0 18px;
+        border-radius: var(--r-md);
+        border: 1px solid transparent;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+        text-decoration: none;
+      }
+
+      .buttonPrimary {
+        background: var(--accent-fill);
+        color: #ffffff;
+      }
+
+      .buttonSecondary {
+        background: var(--surface);
+        border-color: var(--line);
+        color: var(--ink-2);
+      }
+
+      .button:hover {
+        filter: brightness(0.96);
+      }
+
+      .hint {
+        margin-top: 20px;
+        font-size: 12px;
+        color: var(--ink-3);
+        max-width: 60ch;
+      }
+
+      /* Visually hidden, still announced. */
+      .sr {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .button {
+          transition: filter 150ms ease-out;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="header">
+      <div class="headerRow">
+        <span class="mark" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 10.5 12 3l9 7.5" />
+            <path d="M5 9.5V21h14V9.5" />
+          </svg>
+        </span>
+        <span class="brand">Home OS</span>
+      </div>
+    </header>
+
+    <main class="main">
+      <div class="banner" role="status">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M1 1l22 22" />
+          <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55" />
+          <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39" />
+          <path d="M10.71 5.05A16 16 0 0 1 22.58 9" />
+          <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88" />
+          <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+          <line x1="12" y1="20" x2="12.01" y2="20" />
+        </svg>
+        <span>You&rsquo;re offline.</span>
+      </div>
+
+      <h1>Home OS can&rsquo;t reach the house right now</h1>
+      <p>
+        The app is here, but nothing from your family&rsquo;s household can be shown
+        until the connection is back. It&rsquo;s the app&rsquo;s own limit, not something
+        you did.
+      </p>
+
+      <ul class="list">
+        <li>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" />
+            <line x1="12" y1="8" x2="12" y2="13" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          <span><strong>No saved household data is shown</strong>, on purpose: a bill that was paid or a list that changed would otherwise look current when it isn&rsquo;t.</span>
+        </li>
+        <li>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 6 9 17l-5-5" />
+            <path d="M3 3l18 18" />
+          </svg>
+          <span><strong>Anything you tried to save didn&rsquo;t go through.</strong> Nothing is queued, so please add the note, task or event again once you&rsquo;re back online.</span>
+        </li>
+      </ul>
+
+      <div class="actions">
+        <button type="button" class="button buttonPrimary" id="retry">Try again</button>
+        <a class="button buttonSecondary" href="/dashboard">Go to Today</a>
+      </div>
+
+      <p class="hint">
+        If this keeps appearing while the phone says it has signal, the house
+        server may be restarting &mdash; waiting a minute and trying again usually
+        works.
+      </p>
+    </main>
+
+    <script>
+      // Try again re-requests the page the person was on, not the shell: the
+      // worker's fetch listener only sees a navigation once the network is gone,
+      // so a successful retry renders the real page. location.reload() would
+      // re-request the SAME url the shell was served for, which is what the
+      // browser already has; going to "/" would lose their place. history.back()
+      // is wrong too (it may be the shell again).
+      (function () {
+        var retry = document.getElementById("retry");
+        if (!retry) return;
+        retry.addEventListener("click", function () {
+          retry.disabled = true;
+          // 1. Re-run the failed navigation. If the network is back this
+          //    resolves; if not, the worker serves this shell again.
+          location.reload();
+          // Re-enable for the case where the browser restored this document from
+          // the back/forward cache instead of re-fetching it.
+          setTimeout(function () {
+            retry.disabled = false;
+          }, 4000);
+        });
+      })();
+    </script>
+  </body>
+</html>

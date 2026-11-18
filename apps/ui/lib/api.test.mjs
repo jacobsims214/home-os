@@ -95,3 +95,66 @@ test("isBffPath matches /bff and its subpaths only", () => {
   assert.ok(!isBffPath("/bffx"));
   assert.ok(!isBffPath("/api/v1/auth/forgot-password"));
 });
+
+// ── offline (#4538) ────────────────────────────────────────────────────────
+// A request whose network attempt fails is the one case where "the fetch threw"
+// has to reach the person as a specific message. The trap this guards against is
+// a write that looks saved: nothing is queued or retried, so the message must say
+// so, and the error must be distinguishable from an HTTP error.
+
+/** A fetch that fails the way the browser does with no connection. */
+function noNetwork() {
+  globalThis.fetch = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+}
+
+test("a write while offline fails loudly and says nothing was saved", async () => {
+  noNetwork();
+  await assert.rejects(
+    apiFetch("/api/v1/notes", { method: "POST", body: { body: "milk" } }),
+    (e) => {
+      assert.ok(e instanceof ApiError);
+      assert.equal(e.status, 0, "no response at all");
+      assert.equal(e.offline, true, "the caller can tell this apart from an HTTP error");
+      assert.match(e.message, /offline/i);
+      assert.match(e.message, /wasn't saved/i);
+      // Never a promise of a later sync.
+      assert.doesNotMatch(e.message, /will be saved|saved for later|queued/i);
+      return true;
+    },
+  );
+});
+
+test("every non-GET method counts as a write", async () => {
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    noNetwork();
+    await assert.rejects(apiFetch("/bff/notes", { method, body: {} }), (e) => e.offline === true, method);
+  }
+});
+
+test("a read while offline says it could not load, not that something was lost", async () => {
+  noNetwork();
+  await assert.rejects(apiFetch("/bff/bills"), (e) => {
+    assert.equal(e.offline, true);
+    assert.match(e.message, /offline/i);
+    assert.match(e.message, /can't load fresh data/i);
+    assert.doesNotMatch(e.message, /wasn't saved/i);
+    return true;
+  });
+});
+
+test("an HTTP error is still an HTTP error (not reported as offline)", async () => {
+  answer(500);
+  await assert.rejects(apiFetch("/bff/bills"), (e) => {
+    assert.equal(e.status, 500);
+    assert.equal(e.offline, false);
+    return true;
+  });
+});
+
+test("an offline WRITE never redirects to /login (the session is not the problem)", async () => {
+  noNetwork();
+  await assert.rejects(apiFetch("/bff/notes", { method: "POST", body: {} }), () => true);
+  assert.deepEqual(assigned, []);
+});
