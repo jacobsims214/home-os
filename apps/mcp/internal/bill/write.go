@@ -153,8 +153,8 @@ func writeOutbox(ctx context.Context, tx pgx.Tx, eventType, householdID string, 
 // document, so a mistyped amount cannot be filed as if it had been checked.
 func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
-		mcp.WithDescription("Add a bill (electric, Netflix, property tax). Give due_day for monthly bills, or frequency " +
-			"plus due_date for quarterly, annual or one-time ones. Use this, not a calendar event."),
+		mcp.WithDescription("Add a bill (electric, Netflix): due_day for monthly, or frequency plus due_date; not a calendar event. " +
+			"It files no document: document_upload a paper bill, then link source_document_id."),
 		mcp.WithString("name", mcp.Description("Bill name, e.g. Electric"), mcp.Required()),
 		mcp.WithNumber("amount", mcp.Description("Amount due each time, e.g. 142.50"), mcp.Required(), mcp.Min(0)),
 		mcp.WithString("frequency", mcp.Description("How often it is due (default monthly)"), mcp.Enum(frequencies...)),
@@ -295,10 +295,13 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			next = append(next, fmt.Sprintf("Read the source with document_get document_id=%s, then correct the "+
 				"amount with bill_update bill_id=%s amount=…", check.Doc.ID, b.ID))
 		}
+		if h := filingHint(b); h != "" {
+			next = append(next, h)
+		}
 		next = append(next, "See monthly totals by category with budget_summary.")
 		return respond.OK(
 			fmt.Sprintf("Created bill %s, %s %s.", b.Name, money(in.amount), b.dueText())+
-				budgetText(cat)+check.cite()+check.warn()+check.note(),
+				budgetText(cat)+check.cite()+check.warn()+check.note()+linkedNote(b)+filingNote(b),
 			b,
 			next...,
 		), nil
@@ -543,11 +546,14 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		if d := b.dueText(); d != "" {
 			summary = fmt.Sprintf("Updated bill %s (%s); next %s.", b.Name, strings.Join(in.params, ", "), d)
 		}
-		summary += budgetText(cat) + check.cite() + check.warn() + check.note()
+		summary += budgetText(cat) + check.cite() + check.warn() + check.note() + linkedNote(b) + filingNote(b)
 		next := []string{fmt.Sprintf("Mark it paid with bill_pay bill_id=%s.", b.ID)}
 		if in.amountGiven != nil {
 			next = append(next, fmt.Sprintf("See the change in the family feed with activity_find about_type=bill since=%q.",
 				today.Format(time.DateOnly)))
+		}
+		if h := filingHint(b); h != "" {
+			next = append(next, h)
 		}
 		return respond.OK(summary, b, next...), nil
 	}

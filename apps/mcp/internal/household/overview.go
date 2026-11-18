@@ -173,14 +173,19 @@ const (
 // game R2 F-AGENT-2 — an assistant called the bill-sync entries "duplicates I
 // added" and offered to delete them — and it is the agent-facing half of the
 // guard event_delete/event_update enforce.
+//
+// #5306 then added the bill-is-not-a-document line. Both tickets had already
+// spent their line by folding the two id hints into one, so landing both inside
+// the same 5-8 budget (#5318 merge) folds the two paging hints into one too:
+// they state one instruction, how to get the rest of a result set.
 var howTo = []string{
 	"Dates are YYYY-MM-DD in the family timezone; times are ISO 8601 with an offset, e.g. 2026-11-19T17:30:00-05:00.",
 	"Every date in a result also carries local_date and weekday; trust those over your own weekday math.",
-	"find tools list and search in one call; pass id for exactly one full record.",
-	"When a list is truncated, pass its next_cursor back as cursor (same filters) to get the next page.",
+	"find tools list and search in one call; pass id for exactly one full record. A truncated list takes its next_cursor back as cursor (same filters) for the next page.",
 	"person_id comes from people[].id or person_find; calendar_id takes a calendar name, e.g. Family.",
 	"Not sure which area something is in? search_all looks everywhere at once.",
 	"An event with managed_by is kept by that bill or upkeep task, not created by you or an earlier session: change the bill with bill_update bill_id=managed_id, and never offer to delete the event.",
+	"A bill is not a document. For a paper bill, document_upload its text verbatim, then bill_update source_document_id; never call a bill filed without one.",
 	"The family owns everything (rename it or change its timezone with family_update): properties have rooms, and an asset sits in a room, a property or the family. Bills, loans and upkeep may be for one property, vehicle or asset; none needs a property.",
 }
 
