@@ -78,6 +78,7 @@ test.describe("phone 390px", () => {
     const sheet = page.getByRole("dialog", { name: "More" });
     await expect(sheet).toBeVisible();
     expect(await placeholderCopy(page), "placeholder copy with the More sheet open").toEqual([]);
+    await expect(sheet.getByRole("link", { name: /Documents/ })).toBeVisible();
     await expect(sheet.getByRole("link", { name: /People & House/ })).toBeVisible();
     await expect(sheet.getByRole("link", { name: /Money/ })).toBeVisible();
     await expect(sheet.getByText("Family, home, cars, pets, vendors")).toBeVisible();
@@ -90,7 +91,7 @@ test.describe("phone 390px", () => {
     const drawer = page.getByRole("dialog", { name: /Home OS menu/ });
     await expect(drawer).toBeVisible();
     expect(await placeholderCopy(page), "placeholder copy with the drawer open").toEqual([]);
-    await expect(drawer.locator("ul li > a")).toHaveCount(6);
+    await expect(drawer.locator("ul li > a")).toHaveCount(7);
     await expect(drawer.locator("[aria-disabled]")).toHaveCount(0);
   });
 });
@@ -106,13 +107,14 @@ for (const width of [820, 1440]) {
       await expect(nav).toBeVisible();
       expect(await placeholderCopy(page), `placeholder copy at ${width}px`).toEqual([]);
       // The section rows only (the sidebar also links its family card).
-      // Today, Calendar, Meals | People & House, Money | Settings.
+      // Today, Calendar, Meals | Documents, People & House, Money | Settings.
       const rows = nav.locator("ul li > a, ul li > span[aria-disabled=\"true\"]");
-      await expect(rows).toHaveCount(6);
+      await expect(rows).toHaveCount(7);
       await expect(nav.locator("[aria-disabled]")).toHaveCount(0);
       await expect(nav.getByRole("link", { name: "Meals" })).toBeVisible();
-      // Lists / Documents / Guides have no page yet, so they are not promised.
-      for (const gone of ["Lists", "Documents", "Guides"]) {
+      // Lists / Guides have no page yet, so they are not promised. (Documents
+      // left this list in #4569: /dashboard/documents exists.)
+      for (const gone of ["Lists", "Guides"]) {
         await expect(nav.getByRole("link", { name: gone, exact: true })).toHaveCount(0);
         await expect(nav.getByText(gone, { exact: true })).toHaveCount(0);
       }

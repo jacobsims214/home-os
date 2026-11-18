@@ -13,8 +13,9 @@
  *   as tiles, then Notifications, Switch family, Settings and the account row.
  *   While the sheet is open More is the active tab.
  * - Tabs and tiles are filtered by the user's household role
- *   (useNavSections, #4543): a housesitter has no Money or Documents tile,
- *   a vendor keeps Today and More only. The UI hides; the API enforces.
+ *   (useNavSections, #4543): a housesitter has no Money or Documents tile (the
+ *   documents hub #4569 is READERS-only, like Money), a vendor keeps Today and
+ *   More only. The UI hides; the API enforces.
  * - DashboardShell mounts this in AppShell.Footer, below 48em only. The bar
  *   owns the bottom safe-area inset (env(safe-area-inset-bottom)).
  * - The "Switch family" row (#4574) is the family switcher's phone entry point:
@@ -54,6 +55,8 @@ import classes from "./BottomNav.module.css";
  * due-soon data the page tickets own.
  */
 const TILE_HINTS: Partial<Record<NavSectionId, string>> = {
+  // #4569: the artifact's own subtitle for the Documents tile (artifact #75 v1).
+  documents: "Insurance, school forms, receipts",
   people: "Family, home, cars, pets, vendors",
   money: "Bills and loans",
 };

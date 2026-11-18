@@ -141,7 +141,7 @@ test.describe("desktop 1440px", () => {
 
 // #5199: only sections with a real page are in the nav, so each row is a link
 // and there is no "Soon" tag to strip.
-const ALL_SECTIONS = ["Today", "Calendar", "Meals", "People & House", "Money", "Settings"];
+const ALL_SECTIONS = ["Today", "Calendar", "Meals", "Documents", "People & House", "Money", "Settings"];
 
 /** Section names in a nav surface, in order. */
 async function sectionNames(scope: ReturnType<Page["locator"]>) {
@@ -190,7 +190,9 @@ test.describe("phone 390px drawer content", () => {
 test.describe("role-aware navigation", () => {
   // Resizes across all three breakpoints in one page: desktop-chrome only.
   test.beforeEach(() => onlyOn("desktop"));
-  test("housesitter: no Money in the sidebar, drawer, rail or More sheet", async ({ loggedInPage: page }) => {
+  // #4569: Documents joined the Household group (READERS only), so a family
+  // member sees it and a housesitter does not, the same as Money.
+  test("housesitter: no Money or Documents in the sidebar, drawer, rail or More sheet", async ({ loggedInPage: page }) => {
     await asRole(page, "housesitter");
     const expected = ["Today", "Calendar", "Meals", "People & House", "Settings"];
 
@@ -201,6 +203,7 @@ test.describe("role-aware navigation", () => {
 
     await page.setViewportSize({ width: 768, height: 1024 });
     await expect(nav.getByRole("link", { name: "Money" })).toHaveCount(0);
+    await expect(nav.getByRole("link", { name: "Documents" })).toHaveCount(0);
     await expect(nav.getByRole("link", { name: "People & House" })).toBeVisible();
     await nav.getByRole("button", { name: "Open menu" }).click();
     const drawer = page.getByRole("dialog", { name: /Home OS menu/ });

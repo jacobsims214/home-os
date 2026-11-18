@@ -153,6 +153,21 @@ export interface FileRecord {
   text_verified?: boolean;
   /** Display name of the member who uploaded the file (files.created_by). */
   uploaded_by_name?: string | null;
+
+  // ── Document metadata (migration 048, #4478) ──────────────────────────────
+  // Returned by GET/PATCH /files and accepted as optional multipart form fields
+  // on upload. Dates are "YYYY-MM-DD" strings: the columns are DATE and the repo
+  // selects them with to_char, so no time zone can shift a receipt to the day
+  // before.
+  /** Metadata title; the display name is title, falling back to the file name. */
+  title?: string | null;
+  /** One of the API's categories (CATEGORIES below); "other" is the default. */
+  category?: string;
+  document_date?: string | null;
+  expires_on?: string | null;
+  description?: string | null;
+  /** The household person this document is for (GET /people). */
+  person_id?: string | null;
 }
 
 // ─── Secret types ─────────────────────────────────────────────
