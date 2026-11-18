@@ -15,6 +15,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 import { personKeys } from "@/lib/query-keys";
+import { shouldRetrySessionRead } from "@/lib/auth/session-readiness";
 import { useCurrentHousehold, useNavRole } from "@/components/shared/use-nav-role";
 import type { ActivityRow, BillRow, CalendarRow, CalEvent, DayInfo, PersonRow } from "./model";
 
@@ -45,7 +46,7 @@ export function useCalendars(enabled = true) {
     queryFn: () => apiFetch<{ data: CalendarRow[] }>("/api/v1/calendars"),
     enabled,
     staleTime: 5 * 60_000,
-    retry: false,
+    retry: shouldRetrySessionRead,
   });
 }
 
@@ -64,7 +65,7 @@ export function useCalendarEvents(start: string | null, end: string | null) {
       }),
     enabled: !!start && !!end,
     staleTime: 60_000,
-    retry: false,
+    retry: shouldRetrySessionRead,
   });
 }
 
@@ -78,7 +79,7 @@ export function useBills(enabled = true) {
     queryFn: () => apiFetch<{ data: BillRow[] }>("/api/v1/bills"),
     enabled,
     staleTime: 60_000,
-    retry: false,
+    retry: shouldRetrySessionRead,
   });
 }
 
@@ -89,7 +90,7 @@ export function usePeople(enabled = true) {
     queryFn: () => apiFetch<{ data: PersonRow[] }>("/api/v1/people"),
     enabled,
     staleTime: 60_000,
-    retry: false,
+    retry: shouldRetrySessionRead,
   });
 }
 
@@ -110,7 +111,7 @@ export function useCalendarActivity(enabled = true) {
       }),
     enabled,
     staleTime: 30_000,
-    retry: false,
+    retry: shouldRetrySessionRead,
   });
 }
 

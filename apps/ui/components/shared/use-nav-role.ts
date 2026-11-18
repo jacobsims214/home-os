@@ -33,6 +33,7 @@ import { HOUSEHOLD_COOKIE } from "@/lib/household-cookie";
 import { HOUSEHOLD_LIST_QUERY_KEY } from "@/lib/household-switch";
 import { useHouseholdStore } from "@/stores/household";
 import { NAV_SECTIONS, sectionsForRole, type NavSection } from "@/components/shared/nav-config";
+import { shouldRetrySessionRead } from "@/lib/auth/session-readiness";
 
 export interface MyHousehold {
   id: string;
@@ -54,8 +55,13 @@ export function useMyHouseholds() {
     // The list is the user's own families and their roles, so it is not
     // household-scoped data and a switch keeps it (lib/household-switch.ts).
     // Still short-lived: a role change made in another tab shows up quickly.
+    //
+    // #5307: retry the transient session race once. This query is the
+    // precondition every household-scoped page waits on, so answering "failed"
+    // on a first-load 401/503 would open the gate onto the very session that
+    // isn't ready yet — the first-load bug moved one layer up, not fixed.
     staleTime: 60_000,
-    retry: false,
+    retry: shouldRetrySessionRead,
   });
 }
 
@@ -102,6 +108,24 @@ export function useCurrentHousehold(): MyHousehold | null {
   // The memo's dependency: a new [] every render would defeat it.
   const list = useMemo(() => (Array.isArray(q.data?.data) ? q.data!.data : []), [q.data]);
   return useMemo(() => pickCurrentHousehold(list, activeId), [list, activeId]);
+}
+
+/**
+ * Whether household-scoped reads may fire (#5307).
+ *
+ * `resolved` means GET /me/households has ANSWERED, so the household whose data
+ * a page should read (and its timezone) is known before the first request goes
+ * out. A page that read earlier was reading before it knew which family it was
+ * in — which is exactly the first-load race after a fresh sign-in, when the auth
+ * callback has just cleared the household cookie (#4574).
+ *
+ * `failed` is the escape hatch: if the list itself failed, waiting can't end,
+ * so a page must load and say what's wrong instead of spinning forever. See
+ * lib/auth/session-readiness.ts for the rule and its tests.
+ */
+export function useHouseholdReadiness(): { resolved: boolean; failed: boolean } {
+  const q = useMyHouseholds();
+  return { resolved: q.isSuccess, failed: q.isError };
 }
 
 /** The current household's role, or null while it isn't known. */
