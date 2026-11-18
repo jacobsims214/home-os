@@ -122,6 +122,31 @@ test("an owner's phone: the index lists every section and each one opens", async
   await expect(page).toHaveURL(/\/dashboard\/settings$/);
 });
 
+test("the CalDAV server shown is the API's server_url, never a localhost literal (#5289)", async ({
+  loggedInPage: page,
+}) => {
+  await page.goto("/dashboard/settings/phone-calendar");
+
+  // Before the app password exists there is no response to read, so the field
+  // shows this deployment's own /dav/ — the page's origin, not a dev port.
+  const serverField = page.locator('[data-settings-readonly="caldav-server"]');
+  await expect(serverField).toHaveValue(/\/dav\/$/);
+
+  await page.getByRole("button", { name: "Generate app password" }).click();
+
+  // After it exists, the API's answer wins: the stub reports a public URL
+  // (e2e/stub-server.mjs CALDAV_SERVER_URL), and it is what must be displayed.
+  await expect(serverField).toHaveValue("https://home.example/dav/");
+  await expect(serverField).not.toHaveValue(/localhost/);
+  await expect(serverField).not.toHaveValue(/8081/);
+
+  // The user name comes from the same response, so the pair on screen is the
+  // pair the person types into the phone.
+  await expect(page.locator('[data-settings-readonly="caldav-username"]')).toHaveValue(
+    "e2e@homeos.test",
+  );
+});
+
 test("an unknown section segment says so, and links back to the index", async ({ loggedInPage: page }) => {
   await page.goto("/dashboard/settings/not-a-section");
   await expect(page.getByTestId("settings-section-missing")).toBeVisible();
