@@ -55,6 +55,30 @@ test("verifier value is unchanged: matches the pre-051 key_hash computation", as
   assert.equal(await computeVerifier(key), legacyVerifier(PASSWORD, SALT));
 });
 
+test("the vault key is NON-EXTRACTABLE and its verifier is the stored value (#4575)", async () => {
+  const { deriveKeyAndVerifier } = await import("../lib/crypto.ts");
+  const { key, verifier } = await deriveKeyAndVerifier(PASSWORD, SALT);
+  // Same verifier as the pre-051 key_hash, so no household is locked out.
+  assert.equal(verifier, legacyVerifier(PASSWORD, SALT));
+  // ...but the key itself cannot be exported out of WebCrypto.
+  assert.equal(key.extractable, false);
+  await assert.rejects(() => crypto.subtle.exportKey("raw", key));
+  // It still encrypts/decrypts, which is all the vault needs it for.
+  assert.deepEqual(key.usages.sort(), ["decrypt", "encrypt"]);
+  const { encrypt, decrypt } = await import("../lib/crypto.ts");
+  const { ciphertext, iv } = await encrypt(key, JSON.stringify({ a: "b" }));
+  assert.equal(await decrypt(key, ciphertext, iv), JSON.stringify({ a: "b" }));
+});
+
+test("setup/unlock put a non-extractable key in the store", async () => {
+  routes["GET /bff/secrets/key"] = [200, { data: { key_salt: SALT, key_version: 1 } }];
+  routes["POST /bff/secrets/verify"] = [200, { data: { verified: true } }];
+  await useSecretsStore.getState().unlock(PASSWORD);
+  const stored = useSecretsStore.getState().cryptoKey;
+  assert.ok(stored);
+  assert.equal(stored.extractable, false);
+});
+
 test("request builders send `verifier`, never `key_hash`", () => {
   assert.deepEqual(buildSetupRequest("v", "s", 1), { verifier: "v", key_salt: "s", key_version: 1 });
   assert.deepEqual(buildVerifyRequest("v", 1), { verifier: "v", key_version: 1 });

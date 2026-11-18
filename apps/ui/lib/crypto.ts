@@ -60,27 +60,24 @@ const IV_LENGTH = 12; // bytes (AES-GCM standard nonce)
 // --- Public API --------------------------------------------------------------
 
 /**
- * Derive an AES-GCM 256-bit key from a master password + salt using PBKDF2.
- *
- * @param password   The user's master password (UTF-8).
- * @param saltBase64 Base64-encoded salt (from generateSalt or the API).
- * @returns An extractable CryptoKey usable for AES-GCM encrypt/decrypt.
- *          Extractable so computeVerifier() can export + hash it.
+ * Derive the raw 32 bytes of the vault key from a master password + salt using
+ * PBKDF2. The AES key and the verifier both come from this one output, which
+ * is what lets the verifier exist without ever exporting a key object (#4575).
  */
-export async function deriveKey(
+async function deriveKeyBits(
   password: string,
   saltBase64: string,
-): Promise<CryptoKey> {
+): Promise<Uint8Array> {
   const salt = base64ToBytes(saltBase64);
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
     stringToBytes(password),
     { name: "PBKDF2" },
     false,
-    ["deriveKey"],
+    ["deriveBits"],
   );
 
-  return crypto.subtle.deriveKey(
+  const bits = await crypto.subtle.deriveBits(
     {
       name: "PBKDF2",
       salt,
@@ -88,10 +85,64 @@ export async function deriveKey(
       hash: "SHA-256",
     },
     keyMaterial,
+    256,
+  );
+  return new Uint8Array(bits);
+}
+
+/**
+ * Derive an AES-GCM 256-bit key from a master password + salt using PBKDF2.
+ *
+ * @returns An EXTRACTABLE CryptoKey usable for AES-GCM encrypt/decrypt.
+ *          Extractable only so computeVerifier() (tests, tools) can export and
+ *          hash it. The app uses deriveKeyAndVerifier(), whose key is
+ *          non-extractable.
+ */
+export async function deriveKey(
+  password: string,
+  saltBase64: string,
+): Promise<CryptoKey> {
+  const raw = await deriveKeyBits(password, saltBase64);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    raw,
     { name: "AES-GCM", length: 256 },
     /* extractable */ true,
     ["encrypt", "decrypt"],
   );
+  raw.fill(0);
+  return key;
+}
+
+/**
+ * Derive the vault key AND its verifier in a single KDF pass, with the key
+ * created NON-EXTRACTABLE (#4575).
+ *
+ * The verifier is base64(SHA-256(the same 32 PBKDF2 bytes)) — byte-identical
+ * to computeVerifier(), so every household's stored argon2id(verifier) still
+ * matches and nobody is locked out. The difference is that the CryptoKey put
+ * in the store can no longer be exported, so a script that reaches the store
+ * cannot lift the raw key material.
+ */
+export async function deriveKeyAndVerifier(
+  password: string,
+  saltBase64: string,
+): Promise<{ key: CryptoKey; verifier: string }> {
+  const raw = await deriveKeyBits(password, saltBase64);
+  try {
+    const digest = await crypto.subtle.digest("SHA-256", raw);
+    const verifier = bufferToBase64(digest);
+    const key = await crypto.subtle.importKey(
+      "raw",
+      raw,
+      { name: "AES-GCM", length: 256 },
+      /* extractable */ false,
+      ["encrypt", "decrypt"],
+    );
+    return { key, verifier };
+  } finally {
+    raw.fill(0);
+  }
 }
 
 /**
@@ -167,7 +218,10 @@ export function generateIV(): string {
  * ever has to change, add a verifier version the API stores alongside it and
  * upgrade on unlock; see KB architecture/secrets-management.md.
  *
- * The key MUST be created with extractable=true (see deriveKey).
+ * computeVerifier needs an EXPORTABLE key and is kept for tests and tools.
+ * The app path is deriveKeyAndVerifier(), which hashes the same PBKDF2 bytes
+ * before importing a non-extractable AES key (#4575). Either way the value is
+ * base64(SHA-256(same 32 bytes)) — never change that.
  */
 export async function computeVerifier(key: CryptoKey): Promise<string> {
   const raw = await crypto.subtle.exportKey("raw", key);

@@ -24,7 +24,7 @@
 
 import { create } from "zustand";
 import { apiFetch, ApiError } from "@/lib/api";
-import { computeVerifier, deriveKey, generateSalt } from "@/lib/crypto";
+import { deriveKeyAndVerifier, generateSalt } from "@/lib/crypto";
 
 /** Default key version — bump when rotating keys. */
 export const DEFAULT_KEY_VERSION = 1;
@@ -123,8 +123,10 @@ interface SecretsActions {
   /**
    * Unlock an already-set-up secrets vault.
    * Fetches the stored salt, derives the key, sends the verifier to /verify.
-   * On 200, loads the CryptoKey. On 401, throws a wrong-password error. If
-   * no key is set up, throws a not-set-up error.
+   * On 200, loads the CryptoKey. A wrong password is 422 INVALID_MASTER_KEY,
+   * which becomes "Incorrect master password." (never 401 — a 401 is a lost
+   * session and takes the normal /login redirect, #4445/#4446). A 429 means
+   * too many wrong attempts. If no key is set up, throws a not-set-up error.
    */
   unlock: (password: string) => Promise<void>;
   /** Clear the CryptoKey from memory and lock the vault. */
@@ -156,8 +158,9 @@ export const useSecretsStore = create<SecretsStore>()((set) => ({
     set({ isProcessing: true, error: null });
     try {
       const salt = generateSalt();
-      const key = await deriveKey(password, salt);
-      const verifier = await computeVerifier(key);
+      // One KDF pass: the same PBKDF2 bytes give the verifier and a
+      // NON-EXTRACTABLE AES key, so nothing in the store can be exported.
+      const { key, verifier } = await deriveKeyAndVerifier(password, salt);
 
       await apiFetch("/api/v1/secrets/setup", {
         method: "POST",
@@ -190,9 +193,10 @@ export const useSecretsStore = create<SecretsStore>()((set) => ({
       }
       const keyVersion = keyInfo.key_version || DEFAULT_KEY_VERSION;
 
-      // 2. Derive the key locally from the password + stored salt.
-      const key = await deriveKey(password, keyInfo.key_salt);
-      const verifier = await computeVerifier(key);
+      // 2. Derive the key locally from the password + stored salt. One pass
+      //    gives the verifier and a NON-EXTRACTABLE key; the verifier value is
+      //    unchanged, so the stored argon2id(verifier) still matches.
+      const { key, verifier } = await deriveKeyAndVerifier(password, keyInfo.key_salt);
 
       // 3. Verify. 200 = correct password, 422 = wrong password, 429 = the
       //    household is locked out for a while. A 401 is a lost session and
