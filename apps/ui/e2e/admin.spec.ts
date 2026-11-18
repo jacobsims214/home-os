@@ -169,8 +169,6 @@ async function routeAdmin(page: Page, options: { admin: boolean }): Promise<Admi
   return api;
 }
 
-const adminPage = (page: Page) => page.getByTestId("admin-page");
-
 test.describe("instance admin at 390 px", () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
