@@ -1,9 +1,34 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Button, Card, Text, Loader } from "@mantine/core";
+import { Button, Loader } from "@mantine/core";
 import { DEFAULT_RETURN_PATH, returnPath } from "@/lib/auth/return-path";
 import { hasSessionRemnants, teardownSession } from "@/lib/session-teardown";
+
+/**
+ * /login, rebuilt to the approved settings/onboarding mockup (artifact #103
+ * v1, "standalone screens: auth" -> sign in) at phone width (#4562).
+ *
+ * THE AUTH PROTOCOL IS UNTOUCHED. This page never collects a password: it has
+ * one job and it kept it -- mount, sweep what an expired session left behind
+ * (#4648), then hand off to `/api/auth/login`, which sets the PKCE verifier
+ * cookie and 307s to Dex with code_challenge + S256 (#694, #531, #4540). The
+ * mockup draws an email/password form because a mockup cannot show a redirect;
+ * a real form here would be a second, credential-handling login path beside
+ * Dex, which is exactly what this ticket must not add. So the mockup's frame
+ * (the (auth) layout's brand row and `acard`, an h1 + sub, a 48 px full-width
+ * primary action) carries the two states the page actually has:
+ *
+ *  - signing in: a spinner and "Redirecting to login..." in a live region, so
+ *    a screen reader says what is happening and a slow Dex is obviously
+ *    working rather than broken;
+ *  - a callback that failed (`?error=`): the mockup's warning block, the same
+ *    message the page has always shown, and the 48 px "Try again". It does not
+ *    bounce straight back to Dex -- that loops.
+ *
+ * The `?redirect=` rule is unchanged and still applied here before the link is
+ * built: anyone can craft a /login?redirect= link (#4617).
+ */
 
 // Server route that creates the PKCE verifier (httpOnly cookie) and redirects
 // to Dex's authorize endpoint with code_challenge + S256.
@@ -17,12 +42,23 @@ function loginStartUrl(redirect: string | null): string {
   return path === DEFAULT_RETURN_PATH ? LOGIN_START : `${LOGIN_START}?redirect=${encodeURIComponent(path)}`;
 }
 
+// The mockup's auth type scale: 24 px heading, 15 px sub (`.acard h1`,
+// `.acard .sub`).
+const H1 = "m-0 text-[24px] font-semibold leading-tight tracking-[-0.015em] text-ink";
+const SUB = "mb-5 mt-1.5 text-[15px] leading-normal text-ink-2";
+
 export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [startUrl, setStartUrl] = useState(LOGIN_START);
+  // The artifact's sub-line names the hub ("at home.sims.family"). A signed-out
+  // page cannot know it at build time -- /login is prerendered -- so it is read
+  // off the address bar on mount. Empty until then, and the line falls back to
+  // the host-less wording rather than rendering "at ." for a frame.
+  const [host, setHost] = useState("");
 
   useEffect(() => {
     let cancelled = false;
+    setHost(window.location.host);
     const params = new URLSearchParams(window.location.search);
     const start = loginStartUrl(params.get("redirect"));
     setStartUrl(start);
@@ -35,8 +71,8 @@ export default function LoginPage() {
     // Session-expiry sweep (#4648). Every way a session ends lands here: the
     // middleware's 307 with no cookie, the dashboard layout's redirect, a /bff
     // 401 (lib/api.ts) and the logout route's 303. If this browser is still
-    // holding a signed-in person's leftovers — cached /bff responses from a
-    // worker built before #4648, or the persisted home-os-auth profile — drop
+    // holding a signed-in person's leftovers -- cached /bff responses from a
+    // worker built before #4648, or the persisted home-os-auth profile -- drop
     // them before signing anyone in, so an expired session can never serve
     // cached authenticated data. Nothing to do on a first visit, which is why
     // this asks first.
@@ -53,29 +89,64 @@ export default function LoginPage() {
     };
   }, []);
 
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-      <Card className="w-full max-w-md" padding="xl">
-        {error ? (
-          <div className="text-center">
-            <Text size="lg" fw={500}>Sign-in didn&apos;t complete</Text>
-            <Text size="sm" c="dimmed" mt="sm">
+  if (error) {
+    return (
+      <div data-auth-page="login">
+        {/* The mockup's failed sign-in keeps the screen's heading and puts the
+            warning under it (".acard h1" then the .err block), so the page
+            never loses its name just because the callback failed. */}
+        <h1 className={H1}>Sign in</h1>
+        <p className={SUB}>{host ? `To your family hub at ${host}` : "To your family hub."}</p>
+        <div
+          role="alert"
+          className="mb-5 flex items-start gap-3 rounded-token-md border border-warn-line bg-warn-bg p-3.5 text-warn-ink"
+        >
+          <svg
+            width={20}
+            height={20}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.75}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+            focusable="false"
+            className="mt-0.5 shrink-0"
+          >
+            <path d="M12 9v4M12 17v.01" />
+            <path d="M10.3 4.2 2.6 17.5A2 2 0 0 0 4.3 20.5h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0z" />
+          </svg>
+          <div className="min-w-0">
+            <p className="font-semibold">Sign-in didn&apos;t complete</p>
+            <p className="mt-0.5 text-[13px] leading-snug">
               Something went wrong while signing you in ({error}). Please try again.
-            </Text>
-            <Button component="a" href={startUrl} mt="lg">
-              Try again
-            </Button>
+            </p>
           </div>
-        ) : (
-          <div className="text-center">
-            <Loader size="lg" className="mx-auto" />
-            <Text size="lg" fw={500} mt="md">Redirecting to login...</Text>
-            <Text size="sm" c="dimmed" mt="sm">
-              You&apos;ll be redirected to the authentication page.
-            </Text>
-          </div>
-        )}
-      </Card>
+        </div>
+        <Button component="a" href={startUrl} size="md" fullWidth className="min-h-12 text-[15px]">
+          Try again
+        </Button>
+        {/* The mockup's `.acard .alt`. There is no self-serve registration:
+            an account arrives as an invite from a household admin. */}
+        <p className="mb-0 mt-5 text-center text-sm text-ink-2">
+          New here? Ask someone in your family for an invite link.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div data-auth-page="login" role="status" aria-live="polite">
+      <h1 className={H1}>Sign in</h1>
+      <p className={SUB}>{host ? `To your family hub at ${host}` : "To your family hub."}</p>
+      <div className="flex items-center gap-3">
+        <Loader size={20} aria-hidden />
+        <p className="m-0 text-sm font-medium text-ink">Redirecting to login...</p>
+      </div>
+      <p className="mb-0 mt-2 text-[13px] leading-snug text-ink-3">
+        You&apos;ll be redirected to the authentication page.
+      </p>
     </div>
   );
 }
