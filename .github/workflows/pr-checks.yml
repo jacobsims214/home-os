@@ -128,7 +128,7 @@ jobs:
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/homeos_test?sslmode=disable
       TYPESENSE_TEST_ADDR: 127.0.0.1:8108
       TYPESENSE_TEST_KEY: homeos-ci-test-key
-      TYPESENSE_TESTS: TestDocumentHybridSearch|TestGuideHybridSearchIntegration|TestTypesenseHybridIntegration|TestNoteHitsFollowParentIntegration
+      TYPESENSE_TESTS: TestDocumentHybridSearch|TestGuideHybridSearchIntegration|TestTypesenseHybridIntegration|TestNoteHitsFollowParentIntegration|TestSearchFindsEventsAndBillsIntegration|TestSweepBackfillsImmediatelyIntegration
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -187,7 +187,7 @@ jobs:
         working-directory: apps/api
         run: |
           set -o pipefail
-          go test -count=1 -v -run "^($TYPESENSE_TESTS)$" ./internal/file ./internal/guides ./internal/search | tee "$RUNNER_TEMP/typesense-tests.log"
+          go test -count=1 -v -run "^($TYPESENSE_TESTS)$" ./internal/file ./internal/guides ./internal/search ./internal/searchrecon ./internal/searchsweep | tee "$RUNNER_TEMP/typesense-tests.log"
           for t in ${TYPESENSE_TESTS//|/ }; do
             grep -q -- "--- PASS: $t " "$RUNNER_TEMP/typesense-tests.log" || { echo "::error::$t did not PASS (skipped or missing)"; exit 1; }
           done
