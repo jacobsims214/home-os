@@ -100,12 +100,17 @@ func family(t *testing.T, pool *pgxpool.Pool) string {
 	return id
 }
 
-// clearQueue drops this household's pending rows so a leftover from another
-// test cannot be drained here and counted as this test's document.
-func clearQueue(t *testing.T, pool *pgxpool.Pool, hid string) {
+// clearQueue empties the queue before a test starts. It is deliberately NOT
+// scoped to one household: Sweep claims globally — one queue, shared by every
+// worker, which is what production needs — so a row another test (or another
+// package sharing TEST_DATABASE_URL) left behind would be claimed by this
+// test's Sweep and eat into its batch. Nothing else in the test database needs
+// a queue row, so dropping them all is both simpler and honest about what the
+// drain does. Assertions are still per-document-id, so they cannot be fooled
+// by a neighbour's document.
+func clearQueue(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	if _, err := pool.Exec(context.Background(),
-		`DELETE FROM search_index_queue WHERE household_id = $1`, hid); err != nil {
+	if _, err := pool.Exec(context.Background(), `DELETE FROM search_index_queue`); err != nil {
 		t.Fatalf("clear queue: %v", err)
 	}
 }
@@ -117,7 +122,7 @@ func clearQueue(t *testing.T, pool *pgxpool.Pool, hid string) {
 func TestMCPWrittenNoteIsIndexed(t *testing.T) {
 	pool := testDB(t)
 	hid := family(t, pool)
-	clearQueue(t, pool, hid)
+	clearQueue(t, pool)
 
 	const body = "Bin day moved to Thursday because of the holiday."
 	const title = "Bin day"
@@ -173,7 +178,7 @@ func TestMCPWrittenNoteIsIndexed(t *testing.T) {
 func TestUpdateAndDeleteThroughTheQueue(t *testing.T) {
 	pool := testDB(t)
 	hid := family(t, pool)
-	clearQueue(t, pool, hid)
+	clearQueue(t, pool)
 
 	var noteID string
 	if err := pool.QueryRow(context.Background(), `
@@ -263,7 +268,7 @@ func TestBuildersCoverEveryQueuedType(t *testing.T) {
 func TestRejectedWriteIsParkedNotLost(t *testing.T) {
 	pool := testDB(t)
 	hid := family(t, pool)
-	clearQueue(t, pool, hid)
+	clearQueue(t, pool)
 
 	var noteID string
 	if err := pool.QueryRow(context.Background(), `
