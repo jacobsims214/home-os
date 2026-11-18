@@ -75,10 +75,15 @@ interface Pet {
 /** The editable fields, in form order. `date` is a date-only string. */
 const EDIT_FIELDS = ["name", "species", "breed", "date_of_birth", "notes"] as const;
 
-/** Edit-mode groups, so the form is not one long wall on a phone. */
-const FORM_GROUPS: { title: string; fields: readonly string[] }[] = [
+/**
+ * Edit-mode groups, so the form is not one long wall on a phone. A group with
+ * no title has nothing to add: the field's own label already says it (the
+ * notes field is labelled "Care notes", so a "Care notes" heading above it
+ * would print the same words twice).
+ */
+const FORM_GROUPS: { title?: string; fields: readonly string[] }[] = [
   { title: "The pet", fields: ["name", "species", "breed", "date_of_birth"] },
-  { title: "Care notes", fields: ["notes"] },
+  { fields: ["notes"] },
 ];
 
 const LABELS: Record<string, string> = {
@@ -301,8 +306,8 @@ export default function PetDetailPage() {
   const edit = (
     <Stack gap="md" className="max-md:[&_input]:min-h-11 max-md:[&_input]:text-base max-md:[&_textarea]:min-h-11 max-md:[&_textarea]:text-base">
         {FORM_GROUPS.map((group) => (
-          <div key={group.title} className="flex flex-col gap-3 max-md:rounded-token-md max-md:border max-md:border-line max-md:bg-surface max-md:p-4 max-md:shadow-token-sm">
-            <h3 className="text-sm font-semibold text-ink-2">{group.title}</h3>
+          <div key={group.title ?? "notes"} className="flex flex-col gap-3 max-md:rounded-token-md max-md:border max-md:border-line max-md:bg-surface max-md:p-4 max-md:shadow-token-sm">
+            {group.title && <h3 className="text-sm font-semibold text-ink-2">{group.title}</h3>}
             {group.fields.map((name) => {
               if (name === "notes") {
                 return (
