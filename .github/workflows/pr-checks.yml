@@ -181,6 +181,21 @@ jobs:
           echo "Embedding model ready in $(( $(date +%s) - start )) s"
       - run: go test -p 1 -skip "^($TYPESENSE_TESTS)$" ./...
         working-directory: apps/api
+      # packages/searchindex tests prove a write made outside the REST path is
+      # queued and indexed (#5314). They need the migrated database above, so
+      # they run here rather than in the matrix job (where they would SKIP).
+      # -v + the PASS check below means a lost TEST_DATABASE_URL cannot turn
+      # them into silent skips.
+      - name: Search index write-path tests (must PASS, not SKIP)
+        working-directory: packages/searchindex
+        run: |
+          set -o pipefail
+          go test -count=1 -v ./... | tee "$RUNNER_TEMP/searchindex-tests.log"
+          for t in TestMCPWrittenNoteIsIndexed TestUpdateAndDeleteThroughTheQueue \
+                   TestBuildersCoverEveryQueuedType TestRejectedWriteIsParkedNotLost; do
+            grep -q -- "--- PASS: $t " "$RUNNER_TEMP/searchindex-tests.log" \
+              || { echo "::error::$t did not PASS (skipped or missing)"; exit 1; }
+          done
       # Fails if any Typesense test does not PASS, so a lost env var or a
       # down Typesense cannot turn them into silent SKIPs.
       - name: Typesense search tests (must PASS, not SKIP)
