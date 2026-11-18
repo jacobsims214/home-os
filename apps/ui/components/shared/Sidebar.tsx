@@ -29,11 +29,10 @@
  * about which family you are in.
  */
 
-import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { Avatar, TextInput, UnstyledButton, VisuallyHidden } from "@mantine/core";
-import { IconChevronRight, IconLogout, IconSearch } from "@tabler/icons-react";
+import { usePathname } from "next/navigation";
+import { Avatar, UnstyledButton, VisuallyHidden } from "@mantine/core";
+import { IconChevronRight, IconLogout } from "@tabler/icons-react";
 import AccountMenu, { useAccountMenuState } from "@/components/account/AccountMenu";
 import LogoutForm from "@/components/shared/LogoutForm";
 import { useAccountIdentity } from "@/components/shared/use-account";
@@ -46,6 +45,7 @@ import {
 } from "@/components/shared/nav-config";
 import { useNavSections } from "@/components/shared/use-nav-role";
 import HomeMark from "@/components/shared/HomeMark";
+import SidebarSearch from "@/components/search/SidebarSearch";
 import classes from "./Sidebar.module.css";
 
 export type SidebarVariant = "sidebar" | "drawer";
@@ -114,59 +114,11 @@ export function Brand({ as: Tag = "div" }: { as?: "div" | "span" }) {
 
 // ─── Search ───────────────────────────────────────────────────
 
-function SidebarSearch({ variant }: { variant: SidebarVariant }) {
-  const router = useRouter();
-  const [query, setQuery] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-  const drawer = variant === "drawer";
-
-  // "/" focuses the sidebar search, unless the user is already typing.
-  useEffect(() => {
-    if (drawer) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-      const input = inputRef.current;
-      // Only when the sidebar is on screen (it's display:none below 62em).
-      if (!input || input.offsetParent === null) return;
-      e.preventDefault();
-      input.focus();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [drawer]);
-
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const q = query.trim();
-    if (!q) return;
-    router.push("/dashboard/search?q=" + encodeURIComponent(q));
-  };
-
-  return (
-    <form role="search" onSubmit={submit} className={classes.search}>
-      <TextInput
-        ref={inputRef}
-        type="search"
-        value={query}
-        onChange={(e) => setQuery(e.currentTarget.value)}
-        placeholder="Search"
-        aria-label="Search"
-        leftSection={<IconSearch size={drawer ? 18 : 16} stroke={NAV_ICON_STROKE} aria-hidden />}
-        rightSection={
-          drawer ? undefined : (
-            <kbd className={classes.kbd} aria-hidden>
-              /
-            </kbd>
-          )
-        }
-        rightSectionPointerEvents="none"
-        classNames={{ input: classes.searchInput }}
-      />
-    </form>
-  );
-}
+// The box lives in components/search/SidebarSearch.tsx (#5303): it was here as
+// a submit-only form, which on a phone was a box that did nothing while you
+// typed. It is a component of its own because it now runs the real search
+// (debounce, drop-down, empty/error states) through the same hook and the same
+// rows as the Search page, and because that is more than a nav file should own.
 
 // ─── Nav rows ─────────────────────────────────────────────────
 

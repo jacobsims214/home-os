@@ -94,8 +94,98 @@
 
 /* ---------- search ---------- */
 
+/* The box and its panel. `relative` is what the panel hangs from; the root is
+   not clipped, so a panel wider than the 44 px box still reads as its answer. */
+.searchRoot {
+  position: relative;
+}
+
 .search {
   margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The box grows; the submit button keeps its 44 px tap target (#5303: a phone
+   has no Enter key, so the button is how the full page is reached). */
+.search > :global(.mantine-TextInput-root) {
+  flex: 1;
+  min-width: 0;
+}
+
+.searchSubmit {
+  flex: none;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  padding: 0;
+}
+
+.root[data-variant="drawer"] .searchSubmit {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+}
+
+/* The answer, UNDER the box and in the flow — not a floating overlay.
+   A dropdown that floats over the nav steals the tap that was meant for a nav
+   row (#5303: the first tap only dismissed it), and in a drawer the nav is the
+   reason the drawer is open at all. In the flow, the panel pushes the rows down
+   and the drawer's own scroll area handles the rest; it is capped and scrolls
+   inside, so the rows below stay reachable. */
+.searchPanel {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(40dvh, 320px);
+  margin-top: 6px;
+  padding: 10px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--raised);
+  box-shadow: var(--shadow-sm);
+}
+
+.searchSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.searchGroups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* A group's card in the panel: no inner shadow, the panel already has one. */
+.searchGroups section > :global(.mantine-Card-root) {
+  box-shadow: none;
+}
+
+/* The idle / loading line under the box: one line, so the nav barely moves. */
+.searchHint {
+  margin: 6px 2px 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-3);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .searchInput {

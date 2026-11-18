@@ -30,6 +30,7 @@ import {
   idleCopy,
   narrowGroups,
   noResultsCopy,
+  searchHref,
   searchState,
   snippet,
   totalRows,
@@ -292,4 +293,21 @@ test("narrowing to one area shows only that area, and never hides a real answer"
     ["note", "bill"],
     "no rows in the filtered area: fall back to every group rather than showing nothing",
   );
+});
+
+// ── one URL for a query (#5303) ─────────────────────────────
+
+test("a query has one URL, spelled one way, wherever it was typed", () => {
+  // The drawer box, the desktop sidebar box and the Search page all link to the
+  // same place, so a query typed in the drawer can be reloaded and shared.
+  assert.equal(searchHref("electric"), "/dashboard/search?q=electric");
+  // Trimmed, so a stray space from a phone keyboard is not part of the query.
+  assert.equal(searchHref("  electric bill  "), "/dashboard/search?q=electric%20bill");
+  // Encoded, so a query with & or # is still one query (not a second param).
+  assert.equal(searchHref("salt & pepper"), "/dashboard/search?q=salt%20%26%20pepper");
+  // An empty query is not a search: the parameter is dropped, not left empty.
+  assert.equal(searchHref(""), "/dashboard/search");
+  assert.equal(searchHref("   "), "/dashboard/search");
+  assert.equal(searchHref(null), "/dashboard/search");
+  assert.equal(searchHref(undefined), "/dashboard/search");
 });
