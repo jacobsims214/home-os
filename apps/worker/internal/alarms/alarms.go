@@ -5,7 +5,7 @@
 // iCalendar text (calendar_objects.ical_raw, written by CalDAV since
 // migration 036), asks packages/icalx which alarms fired in the window
 // (now-Lookback, now], and inserts one `calendar_alarm` notification per
-// household member for each firing.
+// household member who may see the event for each firing.
 //
 // # Deduplication
 //
@@ -24,6 +24,20 @@
 //
 // Editing an event so its alarm fires at a new time produces a new key, and
 // so a new notification, which is what a user who moved a reminder expects.
+//
+// # Who is told
+//
+// A reminder is about the event, so it goes only to members whose role may
+// read that event: the same rule CalDAV (#4718), the API (#4807) and the MCP
+// apply on their read paths. It is asked of the database, not repeated here:
+// role_can_see_entity(role, kind) from migration 061 (the SQL copy of
+// auth.CanSeeEntity) on both the event's kind and its calendar's kind, so a
+// housesitter no longer receives a reminder for a bill (its name, amount and
+// due date) or for a maintenance task, and a vendor linked to a vendors row
+// (memberships.vendor_id, #4799) hears only about its own jobs. The kinds are
+// derived exactly as apps/calendar/internal/db/access.go and
+// apps/api/internal/calendar/access.go derive them (objectKindSQL,
+// calendarKindSQL); change the three together.
 //
 // # Time zones
 //
@@ -182,21 +196,59 @@ const candidatesSQL = `
 	  AND co.superseded_at IS NULL
 `
 
-// insertSQL writes one notification per household member for a firing,
-// about the event ($6), skipping members who already have a notification for
-// this firing key ($7). The partial unique index idx_notifications_dedupe
-// (migration 056) makes the skip race-free.
+// calendarKindSQL maps a calendars row (aliased c) to a role_can_see_entity
+// kind. Copied from apps/calendar/internal/db/access.go and
+// apps/api/internal/calendar/access.go; keep the three in step.
+const calendarKindSQL = `(CASE c.type::text
+		WHEN 'bills' THEN 'bill'
+		WHEN 'maintenance' THEN 'maintenance_task'
+		WHEN 'vehicles' THEN 'vehicle'
+		ELSE 'calendar_event' END)`
+
+// objectKindSQL maps a calendar_objects row (aliased o) to a
+// role_can_see_entity kind: an event is what it mirrors. Copied from
+// apps/calendar/internal/db/access.go and
+// apps/api/internal/calendar/access.go; keep the three in step.
+const objectKindSQL = `(CASE
+		WHEN o.event_type = 'bill' OR o.entity_type::text = 'bill' THEN 'bill'
+		WHEN o.event_type = 'maintenance' OR o.entity_type::text IN ('maintenance_task', 'maintenance') THEN 'maintenance_task'
+		ELSE 'calendar_event' END)`
+
+// insertSQL writes one notification per household member who may see the
+// event, for a firing about the event ($6), skipping members who already have
+// a notification for this firing key ($7). The partial unique index
+// idx_notifications_dedupe (migration 056) makes the skip race-free.
+//
+// The membership filter is the role policy (see the package doc):
+// role_can_see_entity on the event's kind and on its calendar's kind, plus
+// the vendor own-jobs narrowing of apps/calendar/internal/db/access.go
+// objectVisibleSQL. A member the policy hides the event from gets no
+// reminder: a housesitter is not told about a bill or a maintenance task,
+// and a linked vendor only about its own jobs.
 //
 // Only active users are notified: a deactivated account (users.active = false,
 // the flag auth and CalDAV already reject, migration 037) can no longer sign
-// in, so a reminder it cannot act on would only pile up unread. The JOIN also
-// covers the case of a membership left behind by a deactivated user.
+// in, so a reminder it cannot act on would only pile up unread. The users
+// JOIN also covers the case of a membership left behind by a deactivated user
+// (#4873). The role filter above is not a substitute: a deactivated member
+// whose role may see the event is still skipped, and a housesitter who is
+// active is still filtered out by the role policy.
 const insertSQL = `
 	INSERT INTO notifications (household_id, user_id, type, title, body, entity_type, entity_id, dedupe_key)
 	SELECT $1::uuid, m.user_id, $2::varchar, $3::varchar, $4::text, $5::varchar, $6::uuid, $7::text
 	FROM memberships m
 	JOIN users u ON u.id = m.user_id AND u.active
+	JOIN calendar_objects o ON o.id = $6::uuid
+	JOIN calendars c ON c.id = o.calendar_id
 	WHERE m.household_id = $1::uuid
+	  AND c.household_id = m.household_id
+	  AND role_can_see_entity(m.role::text, ` + objectKindSQL + `)
+	  AND role_can_see_entity(m.role::text, ` + calendarKindSQL + `)
+	  AND (m.role <> 'vendor' OR m.vendor_id IS NULL
+	       OR (o.entity_type::text = 'maintenance_task' AND EXISTS (
+	           SELECT 1 FROM maintenance_tasks t
+	            WHERE t.id = o.entity_id AND t.household_id = c.household_id
+	              AND t.vendor_id = m.vendor_id)))
 	ON CONFLICT (user_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
 `
 
