@@ -129,11 +129,17 @@ test.describe("desktop 1440px", () => {
     await page.keyboard.press("/");
     await expect(nav.getByRole("searchbox", { name: "Search" })).toBeFocused();
 
-    // The user button opens the account menu upward, with the logout form.
+    // The user button opens the account menu upward (#5198: a card popover with
+    // the identity header, Profile / Theme / Notification settings and Log out).
     await nav.getByRole("button", { name: /^Account menu for/ }).click();
-    await expect(page.getByRole("menuitem", { name: "Log out" })).toBeVisible();
-    await expect(page.locator('form[method="post"][action="/api/auth/logout"]').filter({ has: page.getByRole("menuitem", { name: "Log out" }) })).toHaveCount(1);
-    await expect(page.getByRole("radiogroup", { name: "Theme" })).toBeVisible();
+    const account = page.getByRole("dialog", { name: "Account menu" });
+    await expect(account).toBeVisible();
+    await expect(account.getByRole("button", { name: "Log out" })).toBeVisible();
+    // The native logout form is inside the menu, wrapped around its button.
+    await expect(account.locator('form[method="post"][action="/api/auth/logout"]')).toHaveCount(1);
+    await expect(account.getByRole("radiogroup", { name: "Theme" })).toBeVisible();
+    await expect(account.getByRole("link", { name: "Profile" })).toBeVisible();
+    await expect(account.getByRole("link", { name: "Notification settings" })).toBeVisible();
   });
 });
 

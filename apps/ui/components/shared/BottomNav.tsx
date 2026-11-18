@@ -35,7 +35,7 @@ import HouseholdSwitcher, {
   type HouseholdSwitcherControl,
 } from "@/components/shared/HouseholdSwitcher";
 import { useUnreadCount } from "@/components/notifications/use-notifications";
-import { useAuthStore } from "@/stores/auth";
+import { useAccountIdentity } from "@/components/shared/use-account";
 import {
   NAV_ICON_STROKE,
   NAV_SECTIONS,
@@ -166,19 +166,13 @@ function MoreSheet({
   const router = useRouter();
   const reduceMotion = useReducedMotion();
   const [query, setQuery] = useState("");
-  const user = useAuthStore((s) => s.user);
+  // The identity the account row shows (#5198): GET /auth/me, shared with the
+  // account menu and the drawer foot so all three name the same person.
+  const { user, name, initials } = useAccountIdentity();
 
   // The notifications query is the header bell's (#4563), so the pill here and
   // the bell's badge can never disagree.
   const unread = useUnreadCount();
-  const name = user?.name || "Account";
-  const initials =
-    (user?.name || user?.email || "U")
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((p) => p[0]!.toUpperCase())
-      .join("") || "U";
   const sections = useNavSections();
   const tiles = sections.filter((s) => s.group === "household");
   const settings = sections.find((s) => s.id === "settings") ?? NAV_SECTIONS.find((s) => s.id === "settings")!;
@@ -268,7 +262,9 @@ function MoreSheet({
           <IconChevronRight size={18} stroke={NAV_ICON_STROKE} className={classes.chevron} aria-hidden />
         </Link>
 
-        <UnstyledButton className={classes.row} onClick={onOpenAccount} aria-haspopup="menu">
+        {/* #5198: the account menu is a dialog (bottom sheet on phones, card
+            popover above 48em), not a Mantine menu. */}
+        <UnstyledButton className={classes.row} onClick={onOpenAccount} aria-haspopup="dialog">
           <Avatar size={32} radius="xl" color="cyan.9" variant="filled" src={user?.avatar_url ?? undefined}>
             {initials}
           </Avatar>
