@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import Modal from "@/components/ui/Modal";
-import { useAuthStore } from "@/stores/auth";
+import { bffPath } from "@/lib/api";
 import type { FileRecord } from "@/lib/types/api";
+import { describeFileText, textProvenance } from "@/components/files/file-display";
 
 interface FileViewerProps {
   /** The file metadata to preview. Null/undefined while closed is fine. */
@@ -12,40 +13,32 @@ interface FileViewerProps {
   onClose: () => void;
 }
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
-
 /**
  * Build the absolute content URL for a file.
  *
- * The API serves raw bytes at GET /api/v1/files/:id/content. Bearer-token auth
- * means a plain `<img src>` / `<iframe src>` would 401 (there is no cookie
- * auth), so callers must fetch with the Authorization header and turn the
- * response into a blob URL — see FileViewer.
+ * The API serves raw bytes at GET /api/v1/files/:id/content; the browser
+ * reaches it same-origin through the BFF (/bff/files/:id/content), which adds
+ * the bearer token from the session cookie. Callers still fetch the bytes and
+ * turn them into a blob URL (XSS hardening) — see FileViewer.
  */
 export function fileContentUrl(fileId: string): string {
   const origin =
     typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
-  return new URL(`${BASE_URL}/api/v1/files/${fileId}/content`, origin).toString();
+  return new URL(bffPath(`/api/v1/files/${fileId}/content`), origin).toString();
 }
 
-/** Fetch a file's content as a blob, attaching the bearer auth token. */
+/** Fetch a file's content as a blob via the BFF (cookie-authenticated). */
 async function fetchContentBlob(fileId: string): Promise<Blob> {
-  const token = useAuthStore.getState().token;
-  const res = await fetch(fileContentUrl(fileId), {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
+  const res = await fetch(fileContentUrl(fileId), { credentials: "same-origin" });
   if (!res.ok) {
     throw new Error(`Failed to load file content: ${res.status} ${res.statusText}`);
   }
   return res.blob();
 }
 
-/** Fetch a file's content as text, attaching the bearer auth token. */
+/** Fetch a file's content as text via the BFF (cookie-authenticated). */
 async function fetchContentText(fileId: string): Promise<string> {
-  const token = useAuthStore.getState().token;
-  const res = await fetch(fileContentUrl(fileId), {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
+  const res = await fetch(fileContentUrl(fileId), { credentials: "same-origin" });
   if (!res.ok) {
     throw new Error(`Failed to load file content: ${res.status} ${res.statusText}`);
   }
@@ -76,18 +69,39 @@ function classifyContentType(contentType: string): PreviewKind {
  * FileViewer — modal overlay that shows an inline preview of a single file.
  *
  * Preview strategy by content type:
- * - PDF: iframe rendered from a blob object URL (fetched with bearer auth).
+ * - PDF: iframe rendered from a blob object URL (fetched through the BFF).
  * - Image: img rendered from a blob object URL.
  * - Text: fetched as text and shown in a <pre>.
  * - Other: a "Download" button that fetches the blob and triggers a download.
  *
  * Why blob URLs instead of pointing `<img>`/`<iframe>` directly at
- * `/api/v1/files/:id/content`: the API uses bearer-token auth (no cookies), so
- * a browser-initiated navigation or media fetch would not include the
- * Authorization header and would 401. Fetching the bytes with the token and
- * creating an object URL is the documented pattern (see
+ * the content URL: fetching the bytes and rendering them from an object URL
+ * keeps untrusted content off the app origin's navigation path, which is the
+ * documented pattern (see
  * architecture/file-module.md — "GetFileContent XSS hardening").
  */
+/**
+ * The provenance sentence for the file being viewed. Renders nothing when the
+ * file has no text: there is nothing to claim either way.
+ */
+function FileTextNotice({ file }: { file: FileRecord }) {
+  const provenance = textProvenance(file);
+  if (provenance === "none") return null;
+  const tone =
+    provenance === "altered"
+      ? "border-warn-line bg-warn-bg text-warn-ink"
+      : "border-line bg-surface-2 text-ink-2";
+  return (
+    <p
+      data-testid="file-text-notice"
+      data-provenance={provenance}
+      className={`mb-3 rounded-token-sm border px-3 py-2 text-xs leading-relaxed ${tone}`}
+    >
+      {describeFileText(provenance)}
+    </p>
+  );
+}
+
 export default function FileViewer({ file, open, onClose }: FileViewerProps) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   // Tracks the live object URL outside of React state so that the load effect's
@@ -176,14 +190,19 @@ export default function FileViewer({ file, open, onClose }: FileViewerProps) {
       )}
 
       {file && (
-        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
-          <span className="font-medium text-gray-700">{file.content_type || "unknown type"}</span>
+        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-3">
+          <span className="font-medium text-ink-2">{file.content_type || "unknown type"}</span>
           <span>{formatBytes(file.size)}</span>
           {file.tags && file.tags.length > 0 && (
             <span>tags: {file.tags.join(", ")}</span>
           )}
         </div>
       )}
+
+      {/* What this file's text is (#4941, #4564). A derived or re-typed body
+          must not read as the original document, so the sentence is here in
+          full, not only in the row's tooltip. */}
+      {file && <FileTextNotice file={file} />}
 
       {loading && (
         <div className="flex items-center justify-center py-16 text-sm text-gray-500">

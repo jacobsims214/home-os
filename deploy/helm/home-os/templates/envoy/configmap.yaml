@@ -1,3 +1,8 @@
+{{- $rl := .Values.envoy.dexLoginRateLimit }}
+{{- $trusted := .Values.envoy.trustedProxies | default .Values.api.rateLimit.trustedProxies }}
+{{- if and $rl.enabled (not $trusted) }}
+{{- fail "envoy.dexLoginRateLimit needs envoy.trustedProxies or api.rateLimit.trustedProxies" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -17,6 +22,28 @@ data:
               "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
               stat_prefix: ingress_http
               codec_type: AUTO
+              # RFC 3986 normalization (dot segments, duplicate slashes) before
+              # route matching, so /dex//auth or /dex/x/../auth still hit the
+              # Dex login rate limit below.
+              normalize_path: true
+              merge_slashes: true
+              {{- if $rl.enabled }}
+              # Client address = rightmost X-Forwarded-For hop outside the
+              # trusted proxies (envoy.trustedProxies, default
+              # api.rateLimit.trustedProxies). Used only as the rate-limit key:
+              # use_remote_address stays false, so XFF and X-Forwarded-Proto
+              # still pass through to the upstreams unchanged.
+              original_ip_detection_extensions:
+              - name: envoy.extensions.http.original_ip_detection.xff
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.http.original_ip_detection.xff.v3.XffConfig
+                  xff_trusted_cidrs:
+                    cidrs:
+                    {{- range $trusted }}
+                    {{- $parts := split "/" . }}
+                    - { address_prefix: {{ $parts._0 | quote }}, prefix_len: {{ $parts._1 | default (ternary "128" "32" (contains ":" $parts._0)) }} }
+                    {{- end }}
+              {{- end }}
               route_config:
                 name: local_route
                 virtual_hosts:
@@ -44,50 +71,137 @@ data:
                       timeout: 0s
                   - match: { prefix: "/.well-known/" }
                     route: { cluster: calendar_cluster }
+                  # The MCP transport is stateless POST at exactly /mcp (no
+                  # SSE). A "/mcp/" prefix does not match the bare path, so it
+                  # needs its own exact route or it falls through to the UI.
+                  - match: { path: "/mcp" }
+                    route:
+                      cluster: mcp_cluster
+                      timeout: 0s
+                      idle_timeout: 0s
+                  # /mcp/health and /mcp/.well-known/oauth-protected-resource.
                   - match: { prefix: "/mcp/" }
                     route:
                       cluster: mcp_cluster
                       timeout: 0s
                       idle_timeout: 0s
+                  {{- if $rl.enabled }}
+                  # Dex login (authorize, /dex/auth/local, the password POST to
+                  # /dex/auth/local/login): per-client token bucket, 429 when
+                  # empty (#4686). Must come before the /dex/ catch-all. Token,
+                  # keys, userinfo and discovery stay on the unlimited route.
+                  - match: { prefix: "/dex/auth" }
+                    route:
+                      cluster: dex_cluster
+                      timeout: 0s
+                    typed_per_filter_config:
+                      envoy.filters.http.local_ratelimit:
+                        "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                        stat_prefix: dex_login
+                        filter_enabled:
+                          default_value: { numerator: 100, denominator: HUNDRED }
+                        filter_enforced:
+                          default_value: { numerator: 100, denominator: HUNDRED }
+                        # Only the per-client buckets limit. The route bucket is
+                        # required by Envoy, but it applies only to a request
+                        # that matched no descriptor, and every request has an
+                        # address.
+                        always_consume_default_token_bucket: false
+                        token_bucket:
+                          max_tokens: {{ mul (int $rl.burst) 100 }}
+                          tokens_per_fill: {{ mul (int $rl.requestsPerMinute) 100 }}
+                          fill_interval: 60s
+                        max_dynamic_descriptors: {{ int $rl.maxClients }}
+                        rate_limits:
+                        - actions:
+                          - masked_remote_address:
+                              v4_prefix_mask_len: 32
+                              v6_prefix_mask_len: {{ int $rl.ipv6PrefixLen }}
+                        descriptors:
+                        # No value: one bucket per distinct client address.
+                        - entries:
+                          - key: masked_remote_address
+                          token_bucket:
+                            max_tokens: {{ int $rl.burst }}
+                            tokens_per_fill: {{ int $rl.requestsPerMinute }}
+                            fill_interval: 60s
+                        response_headers_to_add:
+                        - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                          header: { key: retry-after, value: "60" }
+                  {{- end }}
                   - match: { prefix: "/dex/" }
                     route:
                       cluster: dex_cluster
                       timeout: 0s
-                  # OAuth2 authorize endpoint — proxied to the MCP metadata server
-                  # for openid scope injection before redirecting to Dex.
-                  # MCP clients (opencode) often omit the openid scope per RFC 8707,
-                  # but Dex requires it as an OIDC provider. The metadata server injects
-                  # it and issues a 302 redirect to /dex/auth.
-                  - match: { prefix: "/authorize" }
+                  # OAuth endpoints served by the MCP metadata server live under
+                  # /oauth/ so they never shadow UI pages (the UI owns /register).
+                  # The metadata server advertises these URLs in its RFC 8414
+                  # document; Envoy rewrites them to the server's handler paths.
+                  #
+                  # /oauth/authorize injects the openid scope (MCP clients often
+                  # omit it, Dex requires it) and 302s to /dex/auth.
+                  - match: { path: "/oauth/authorize" }
+                    route:
+                      prefix_rewrite: "/authorize"
+                      cluster: mcp_metadata_cluster
+                      timeout: 0s
+                  # /oauth/register is RFC 7591 dynamic client registration: MCP
+                  # clients POST their redirect URIs to obtain a client_id.
+                  - match: { path: "/oauth/register" }
+                    route:
+                      prefix_rewrite: "/register"
+                      cluster: mcp_metadata_cluster
+                      timeout: 0s
+                  # Legacy aliases for MCP images that still advertise the root
+                  # paths. Kept narrow so they cannot shadow UI pages: only an
+                  # exact /authorize (no UI page), and only a JSON POST to
+                  # /register (the UI page is a GET).
+                  - match: { path: "/authorize" }
                     route:
                       cluster: mcp_metadata_cluster
                       timeout: 0s
-                  - match: { prefix: "/token" }
+                  - match:
+                      path: "/register"
+                      headers:
+                      - name: ":method"
+                        string_match: { exact: "POST" }
+                      - name: "content-type"
+                        string_match: { prefix: "application/json" }
+                    route:
+                      cluster: mcp_metadata_cluster
+                      timeout: 0s
+                  # Root aliases for Dex endpoints. Exact paths, so they do not
+                  # swallow UI routes that merely start with these words.
+                  - match: { path: "/token" }
                     route:
                       prefix_rewrite: "/dex/token"
                       cluster: dex_cluster
-                  - match: { prefix: "/device/code" }
+                  - match: { path: "/device/code" }
                     route:
                       prefix_rewrite: "/dex/device/code"
                       cluster: dex_cluster
-                  - match: { prefix: "/keys" }
+                  - match: { path: "/keys" }
                     route:
                       prefix_rewrite: "/dex/keys"
                       cluster: dex_cluster
-                  - match: { prefix: "/userinfo" }
+                  - match: { path: "/userinfo" }
                     route:
                       prefix_rewrite: "/dex/userinfo"
                       cluster: dex_cluster
-                  # Dynamic Client Registration endpoint — proxied to the MCP metadata server
-                  # for RFC 7591 dynamic client registration. MCP clients (opencode) POST
-                  # their redirect URIs here to obtain a client_id for the OAuth flow.
-                  - match: { prefix: "/register" }
-                    route:
-                      cluster: mcp_metadata_cluster
-                      timeout: 0s
+                  # Next.js BFF route handlers (apps/ui/app/bff). Explicit so no
+                  # earlier rule can claim them.
+                  - match: { prefix: "/bff/" }
+                    route: { cluster: ui_cluster }
                   - match: { prefix: "/" }
                     route: { cluster: ui_cluster }
               http_filters:
+              {{- if $rl.enabled }}
+              # No-op unless a route enables it (only the Dex login route does).
+              - name: envoy.filters.http.local_ratelimit
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                  stat_prefix: http_local_rate_limiter
+              {{- end }}
               - name: envoy.filters.http.router
                 typed_config:
                   "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

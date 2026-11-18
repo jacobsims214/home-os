@@ -17,17 +17,20 @@ export interface PropertyResponse {
   purchase_date: string | null;
   current_value: string | null;
   down_payment: string | null;
-  mortgage_amount: string | null;
-  mortgage_rate: string | null;
-  mortgage_term_months: string | null;
-  mortgage_start_date: string | null;
-  mortgage_lender: string | null;
-  mortgage_account_number: string | null;
-  property_tax_annual: string | null;
-  property_tax_due_months: string | null;
-  insurance_annual: string | null;
-  insurance_provider: string | null;
-  hoa_fee_monthly: string | null;
+  // Read-only, derived by the API from the property's linked loan and bills
+  // (#4704, KB apis/property-vehicle-finance.md). The UI shows them and never
+  // sends them (#4706); change the loan or bill instead.
+  readonly mortgage_amount: string | null;
+  readonly mortgage_rate: string | null;
+  readonly mortgage_term_months: string | null;
+  readonly mortgage_start_date: string | null;
+  readonly mortgage_lender: string | null;
+  readonly mortgage_account_number: string | null;
+  readonly property_tax_annual: string | null;
+  readonly property_tax_due_months: string | null;
+  readonly insurance_annual: string | null;
+  readonly insurance_provider: string | null;
+  readonly hoa_fee_monthly: string | null;
   created_at: string;
   updated_at: string;
 }

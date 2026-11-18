@@ -32,7 +32,9 @@ func (h *Handler) ListCalendars(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	cals, err := h.repo.ListCalendars(r.Context(), hid)
+	// The role decides which calendars are visible (access.go): a housesitter
+	// does not get the Bills calendar at all.
+	cals, err := h.repo.ListCalendars(r.Context(), hid, claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -80,13 +82,76 @@ func (h *Handler) CreateCalendar(w http.ResponseWriter, r *http.Request) {
 	}
 	cal, err := h.repo.CreateCalendar(r.Context(), hid, req.Name, req.Type, req.Color, propertyID)
 	if err != nil {
-		apierr.InternalError(w, err)
+		// calendars.property_id is a same-family FK (migration 058): another
+		// family's or a missing property is a 23503, answered as 404.
+		apierr.DB(w, err)
 		return
 	}
 	apierr.JSON(w, http.StatusCreated, map[string]any{"data": cal})
 }
 
-// ListEvents GET /api/v1/calendars/:id/events
+// parseRange reads the optional start/end (RFC 3339) query parameters. With
+// both, recurring events are expanded into occurrences in [start, end), so
+// the window is bounded. It returns a client error message, or "".
+func parseRange(r *http.Request) (EventRange, string) {
+	var rg EventRange
+	for _, p := range []struct {
+		name string
+		dst  **time.Time
+	}{{"start", &rg.Start}, {"end", &rg.End}} {
+		v := r.URL.Query().Get(p.name)
+		if v == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return rg, "invalid " + p.name + ": use RFC 3339, e.g. 2026-11-15T00:00:00Z"
+		}
+		*p.dst = &t
+	}
+	if rg.expands() {
+		if !rg.End.After(*rg.Start) {
+			return rg, "end must be after start"
+		}
+		if rg.End.Sub(*rg.Start) > maxExpandRange {
+			return rg, "range too long: at most 3 years"
+		}
+	}
+	return rg, ""
+}
+
+// eventListResponse is a listing's body: the events (each carrying its
+// local_date, weekday and local_time, see localday.go) and, for a requested
+// range, the weekday of every day in it, so a calendar grid draws its column
+// headers from data instead of deriving a weekday from a date (#4550).
+//
+// `days` is omitted for an unbounded listing, which has no range to describe.
+func eventListResponse(events []Event, rg EventRange) map[string]any {
+	body := map[string]any{"data": events}
+	if rg.expands() {
+		body["days"] = rangeDays(*rg.Start, *rg.End, 0)
+	}
+	return body
+}
+
+// writeEventError answers a create/update error: 400 with the message for
+// invalid input (bad or unsupported RRULE, timezone, reminders), then
+// apierr.DB: an entity_type that is not a registered entity kind is 400
+// (calendar_objects.entity_type is entity_kind since migration 070), an
+// entity of another family or a missing one is 404. 500 otherwise.
+func writeEventError(w http.ResponseWriter, err error) {
+	if msg, ok := IsInvalidEvent(err); ok {
+		apierr.BadRequest(w, msg)
+		return
+	}
+	apierr.DB(w, err)
+}
+
+// ListEvents GET /api/v1/calendars/:id/events[?start=&end=]
+//
+// With both start and end, recurring events are returned as their
+// occurrences in [start, end) (overrides and EXDATEs applied), each with the
+// series id and a recurrence_id, sorted by start.
 func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())
 	if claims == nil {
@@ -103,10 +168,12 @@ func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "invalid calendar id")
 		return
 	}
-	// Verify the target calendar belongs to the caller's household before
-	// reading events. 404 (not 403) on mismatch so cross-tenant calendar
-	// existence is not leaked.
-	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid)
+	// Verify the target calendar belongs to the caller's household and is
+	// one the caller's role may see before reading events. 404 (not 403) on
+	// either, so neither cross-tenant nor hidden-calendar existence leaks: a
+	// housesitter asking for the Bills calendar gets the same answer as for a
+	// calendar that does not exist.
+	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid, claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -115,25 +182,17 @@ func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		apierr.NotFound(w, "calendar not found")
 		return
 	}
-	var start, end *time.Time
-	if s := r.URL.Query().Get("start"); s != "" {
-		t, err := time.Parse(time.RFC3339, s)
-		if err == nil {
-			start = &t
-		}
+	rg, msg := parseRange(r)
+	if msg != "" {
+		apierr.BadRequest(w, msg)
+		return
 	}
-	if e := r.URL.Query().Get("end"); e != "" {
-		t, err := time.Parse(time.RFC3339, e)
-		if err == nil {
-			end = &t
-		}
-	}
-	events, err := h.repo.ListEvents(r.Context(), calID, start, end)
+	events, err := h.repo.ListEvents(r.Context(), calID, rg, h.repo.HouseholdLocation(r.Context(), hid), claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
-	apierr.JSON(w, http.StatusOK, map[string]any{"data": events})
+	apierr.JSON(w, http.StatusOK, eventListResponse(events, rg))
 }
 
 // ListAllEvents GET /api/v1/calendars/events — all events for household
@@ -145,18 +204,10 @@ func (h *Handler) ListAllEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	hid, _ := uuid.Parse(claims.HouseholdID)
 
-	var start, end *time.Time
-	if s := r.URL.Query().Get("start"); s != "" {
-		t, err := time.Parse(time.RFC3339, s)
-		if err == nil {
-			start = &t
-		}
-	}
-	if e := r.URL.Query().Get("end"); e != "" {
-		t, err := time.Parse(time.RFC3339, e)
-		if err == nil {
-			end = &t
-		}
+	rg, msg := parseRange(r)
+	if msg != "" {
+		apierr.BadRequest(w, msg)
+		return
 	}
 	var propertyID *uuid.UUID
 	if pidStr := r.URL.Query().Get("property_id"); pidStr != "" {
@@ -165,12 +216,12 @@ func (h *Handler) ListAllEvents(w http.ResponseWriter, r *http.Request) {
 			propertyID = &pid
 		}
 	}
-	events, err := h.repo.ListAllEvents(r.Context(), hid, start, end, propertyID)
+	events, err := h.repo.ListAllEvents(r.Context(), hid, rg, propertyID, h.repo.HouseholdLocation(r.Context(), hid), claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
-	apierr.JSON(w, http.StatusOK, map[string]any{"data": events})
+	apierr.JSON(w, http.StatusOK, eventListResponse(events, rg))
 }
 
 // CreateEvent POST /api/v1/calendars/:id/events
@@ -192,8 +243,10 @@ func (h *Handler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	// Verify the target calendar belongs to the caller's household before
 	// writing into it. 404 (not 403) on mismatch so cross-tenant calendar
-	// existence is not leaked.
-	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid)
+	// existence is not leaked. Writes are family-only (ResCalendar write =
+	// rolesFamily), and every family role may see every calendar kind, so the
+	// role filter never hides a calendar from a writer here.
+	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid, claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -211,18 +264,83 @@ func (h *Handler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "title required")
 		return
 	}
-	if ev.End.IsZero() {
-		ev.End = ev.Start.Add(time.Hour)
-	}
 	if ev.EventType == "" {
 		ev.EventType = "custom"
 	}
-	created, err := h.repo.CreateEvent(r.Context(), calID, &ev)
+	// The linked record: both or neither, and the id a UUID. The kind is
+	// checked by the entity_kind domain and the family by the owner trigger
+	// (migration 070); writeEventError maps those to 400 and 404.
+	if (ev.EntityType == "") != (ev.EntityID == "") {
+		apierr.BadRequest(w, "entity_type and entity_id must be given together")
+		return
+	}
+	if ev.EntityID != "" {
+		if _, err := uuid.Parse(ev.EntityID); err != nil {
+			apierr.BadRequest(w, "invalid entity_id")
+			return
+		}
+	}
+	ev.remindersSet = true
+	created, err := h.repo.CreateEvent(r.Context(), calID, &ev, h.repo.HouseholdLocation(r.Context(), hid))
+	if err != nil {
+		writeEventError(w, err)
+		return
+	}
+	apierr.JSON(w, http.StatusCreated, map[string]any{"data": created})
+}
+
+// UpdateEvent PATCH /api/v1/calendars/:id/events/:eventId
+//
+// Partial update: omitted fields keep their value. "rrule": "" ends the
+// recurrence, "reminders": [] removes the reminders. ical_data, ical_raw and
+// rrule are rewritten together.
+func (h *Handler) UpdateEvent(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.ClaimsFromContext(r.Context())
+	if claims == nil {
+		apierr.Forbidden(w, "missing auth")
+		return
+	}
+	hid, err := uuid.Parse(claims.HouseholdID)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
-	apierr.JSON(w, http.StatusCreated, map[string]any{"data": created})
+	calID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		apierr.BadRequest(w, "invalid calendar id")
+		return
+	}
+	eventID, err := uuid.Parse(chi.URLParam(r, "eventId"))
+	if err != nil {
+		apierr.BadRequest(w, "invalid event id")
+		return
+	}
+	// 404 for a calendar of another household, and for an event that is
+	// not in this calendar, so neither existence leaks.
+	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid, claims.Role)
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	if cal == nil {
+		apierr.NotFound(w, "event not found")
+		return
+	}
+	var p EventPatch
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		apierr.BadRequest(w, "invalid body")
+		return
+	}
+	updated, err := h.repo.UpdateEvent(r.Context(), calID, eventID, p, h.repo.HouseholdLocation(r.Context(), hid))
+	if err != nil {
+		writeEventError(w, err)
+		return
+	}
+	if updated == nil {
+		apierr.NotFound(w, "event not found")
+		return
+	}
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": updated})
 }
 
 // DeleteEvent DELETE /api/v1/calendars/:id/events/:eventId
@@ -257,7 +375,7 @@ func (h *Handler) DeleteEvent(w http.ResponseWriter, r *http.Request) {
 		apierr.NotFound(w, "event not found")
 		return
 	}
-	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid)
+	cal, err := h.repo.GetCalendarByIDForHousehold(r.Context(), calID, hid, claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return

@@ -1,0 +1,312 @@
+/*
+ * Sidebar (desktop) and drawer (phone/tablet) content (#4543), per KB
+ * design/app-shell.md (artifact #75 v1). Tokens only (app/globals.css).
+ * The desktop column's padding (12 px) comes from DashboardShell .sidebar.
+ */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  gap: 8px;
+}
+
+/* ---------- brand ---------- */
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 6px;
+}
+
+.brandName {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+/* ---------- family card ---------- */
+
+.familyCard {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 52px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.root[data-variant="drawer"] .familyCard {
+  min-height: 60px;
+  background: var(--surface-2);
+  border-color: transparent;
+}
+
+.familyCard:hover {
+  background: var(--surface-2);
+}
+
+.familyMark {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.familyText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.familyName {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.familyMeta {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.familyIcon {
+  flex: none;
+  color: var(--ink-3);
+}
+
+/* ---------- search ---------- */
+
+.search {
+  margin: 0;
+}
+
+.searchInput {
+  height: 36px;
+  min-height: 36px;
+  border-color: var(--line);
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.searchInput::placeholder {
+  color: var(--ink-3);
+}
+
+/* Phones: 44 px tall and a 16 px font, so iOS doesn't zoom on focus. */
+.root[data-variant="drawer"] .searchInput {
+  height: 44px;
+  min-height: 44px;
+  font-size: 16px;
+}
+
+.kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink-3);
+  font-family: "Fira Code", var(--mantine-font-family-monospace);
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* ---------- nav ---------- */
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.group + .group {
+  margin-top: 4px;
+}
+
+.groupLabel {
+  padding: 8px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background-color 150ms ease-out;
+}
+
+.root[data-variant="drawer"] .row {
+  min-height: 48px;
+  font-size: 15px;
+}
+
+.row:hover {
+  background: var(--surface-2);
+}
+
+.row[data-active] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.row[aria-disabled="true"] {
+  color: var(--ink-2);
+  cursor: default;
+}
+
+.row[aria-disabled="true"]:hover {
+  background: transparent;
+}
+
+.rowIcon {
+  flex: none;
+  color: var(--ink-2);
+}
+
+.row[data-active] .rowIcon {
+  color: var(--accent);
+}
+
+.rowLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- foot ---------- */
+
+.foot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.userButton {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  color: var(--ink);
+}
+
+.userButton:hover {
+  background: var(--surface-2);
+}
+
+.userText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.userName,
+.userEmail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.userName {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.userEmail {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.userChevron {
+  flex: none;
+  color: var(--ink-3);
+  transform: rotate(-90deg);
+}
+
+.drawerAccount {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 2px 0;
+}
+
+.logout {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--danger);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.logout:hover {
+  background: var(--surface-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row {
+    transition: none;
+  }
+}

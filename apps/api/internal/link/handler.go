@@ -1,8 +1,10 @@
 package link
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -10,13 +12,55 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/middleware"
 	"home-os/api/pkg/apierr"
 )
 
+// FileChecker answers which of a household's file ids the caller may see;
+// *file.Repo satisfies it (VisibleFileIDs, the credential rule shared with
+// the files API and the MCP).
+type FileChecker interface {
+	VisibleFileIDs(ctx context.Context, householdID string, ids []string, includeSecretFiles bool) (map[string]bool, error)
+}
+
 // Handler holds the dependencies needed by link HTTP handlers.
 type Handler struct {
-	repo *Repo
+	repo  *Repo
+	files FileChecker // nil: file links are hidden from roles without secrets read
+}
+
+// WithFileChecker lets roles without secrets read see links to (and of) the
+// files they may see; without it they see none (fail closed).
+func (h *Handler) WithFileChecker(fc FileChecker) *Handler {
+	h.files = fc
+	return h
+}
+
+// visibleFiles returns which of ids the caller may see under the credential
+// rule (#4775): all of them for roles with secrets read; otherwise only
+// files not attached to or linked from a credential. A failed check hides
+// them all (fail closed).
+func (h *Handler) visibleFiles(r *http.Request, householdID string, ids []string) map[string]bool {
+	ok := map[string]bool{}
+	if len(ids) == 0 {
+		return ok
+	}
+	if middleware.Can(r, auth.ResSecrets, auth.ActRead) {
+		for _, id := range ids {
+			ok[id] = true
+		}
+		return ok
+	}
+	if h.files == nil {
+		return ok
+	}
+	ok, err := h.files.VisibleFileIDs(r.Context(), householdID, ids, false)
+	if err != nil {
+		slog.Warn("links: file visibility check failed, omitting file links", "error", err)
+		return map[string]bool{}
+	}
+	return ok
 }
 
 // NewHandler creates a new link handler.
@@ -87,6 +131,14 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "link_type is required")
 		return
 	}
+	if !LinkTypes[req.LinkType] {
+		apierr.BadRequest(w, "link_type must be file, secret or url")
+		return
+	}
+	if req.LinkType == "url" && (req.URL == nil || strings.TrimSpace(*req.URL) == "") {
+		apierr.BadRequest(w, "url is required for a url link")
+		return
+	}
 	if req.LinkID == "" {
 		apierr.BadRequest(w, "link_id is required")
 		return
@@ -120,17 +172,20 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	link := &Link{
-		EntityType: req.EntityType,
-		EntityID:   entityID,
-		LinkType:   req.LinkType,
-		LinkID:     req.LinkID,
-		Title:      req.Title,
-		URL:        req.URL,
+		EntityType:  req.EntityType,
+		EntityID:    entityID,
+		LinkType:    req.LinkType,
+		LinkID:      req.LinkID,
+		Title:       req.Title,
+		URL:         req.URL,
+		HouseholdID: householdID,
 	}
 
+	// The owner trigger rejects a file/secret link_id that is not a
+	// same-family row (foreign_key_violation → 404).
 	created, err := h.repo.CreateLink(r.Context(), link)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 
@@ -181,7 +236,8 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	if !owned {
+	if !owned || !auth.CanSeeEntity(claims.Role, entityType) ||
+		(entityType == "file" && !h.visibleFiles(r, claims.HouseholdID, []string{entityID.String()})[entityID.String()]) {
 		apierr.NotFound(w, "entity not found")
 		return
 	}
@@ -191,6 +247,15 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
+	// Links to a file attached to or linked from a credential are left out
+	// for roles without secrets read, like the file itself (#4775).
+	var fileIDs []string
+	for _, l := range links {
+		if l.LinkType == "file" {
+			fileIDs = append(fileIDs, l.LinkID)
+		}
+	}
+	seeFile := h.visibleFiles(r, claims.HouseholdID, fileIDs)
 
 	// All links are returned in a single generic "other" bucket. The link
 	// package no longer maintains typed buckets for specific integration
@@ -200,6 +265,14 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	// of being silently dropped.
 	grouped := linksGroupedResponse{}
 	for _, l := range links {
+		// Household role policy (#4689): links to records the role may not
+		// see (a credential, for a viewer) are left out.
+		if !auth.CanSeeEntity(claims.Role, l.LinkType) && l.LinkType != "url" {
+			continue
+		}
+		if l.LinkType == "file" && !seeFile[l.LinkID] {
+			continue
+		}
 		resp := linkToResponse(l)
 		grouped.Other = append(grouped.Other, resp)
 	}

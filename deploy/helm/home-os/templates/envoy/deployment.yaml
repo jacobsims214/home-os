@@ -15,16 +15,23 @@ spec:
       labels:
         app: home-os-envoy
     spec:
+      {{- include "home-os.podSecurityContext" (dict "uid" 101) | nindent 6 }}
       containers:
       - name: envoy
-        image: envoyproxy/envoy:v1.31-latest
+        image: "{{ .Values.envoy.image }}"
+        imagePullPolicy: {{ .Values.global.thirdPartyImagePullPolicy }}
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: 8080
+        resources:
+          {{- toYaml .Values.envoy.resources | nindent 10 }}
         volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         - name: config
           mountPath: /etc/envoy
           readOnly: true
       volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}
       - name: config
         configMap:
           name: envoy-config

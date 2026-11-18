@@ -2,12 +2,15 @@ package maintenance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/api/internal/subject"
 )
 
 // Repo provides read/write access to the maintenance_schedules and
@@ -22,9 +25,12 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 }
 
 // ListTasks returns all maintenance tasks for a household, optionally filtered by
-// status and/or property_id. Results are ordered by due_date ascending (nulls last)
-// followed by created_at.
-func (r *Repo) ListTasks(ctx context.Context, householdID uuid.UUID, status *TaskStatus, propertyID *uuid.UUID) ([]*Task, error) {
+// status and/or property_id. The property filter includes tasks about that
+// property's assets, because the database derives property_id from asset_id
+// (migration 038). Results are ordered by due_date ascending (nulls last)
+// followed by created_at. A non-nil vendorID (a linked vendor's scope, see
+// LinkedVendor) keeps only tasks assigned to that vendor.
+func (r *Repo) ListTasks(ctx context.Context, householdID uuid.UUID, status *TaskStatus, propertyID, vendorID *uuid.UUID) ([]*Task, error) {
 	var clauses []string
 	args := []any{householdID}
 	argIdx := 2
@@ -38,6 +44,12 @@ func (r *Repo) ListTasks(ctx context.Context, householdID uuid.UUID, status *Tas
 	if propertyID != nil {
 		clauses = append(clauses, fmt.Sprintf("AND property_id = $%d", argIdx))
 		args = append(args, *propertyID)
+		argIdx++
+	}
+
+	if vendorID != nil {
+		clauses = append(clauses, fmt.Sprintf("AND vendor_id = $%d", argIdx))
+		args = append(args, *vendorID)
 		argIdx++
 	}
 
@@ -113,8 +125,11 @@ func (r *Repo) CreateTask(ctx context.Context, t *Task) (*Task, error) {
 }
 
 // UpdateTask updates fields on an existing maintenance task identified by id.
-// Only non-nil fields in the provided task are applied. Returns the updated record.
-func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, updates *Task) (*Task, error) {
+// Only non-nil fields in the provided task are applied. When subj is non-nil
+// all three subject columns are written from it (NULLs included), so a task
+// can move from a property to a vehicle without ever holding both.
+// Returns the updated record.
+func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, updates *Task, subj *subject.Subject) (*Task, error) {
 	var sets []string
 	args := []any{id}
 	argIdx := 2
@@ -164,20 +179,10 @@ func (r *Repo) UpdateTask(ctx context.Context, id uuid.UUID, updates *Task) (*Ta
 		args = append(args, *updates.ScheduleID)
 		argIdx++
 	}
-	if updates.PropertyID != nil {
-		sets = append(sets, fmt.Sprintf("property_id = $%d", argIdx))
-		args = append(args, *updates.PropertyID)
-		argIdx++
-	}
-	if updates.AssetID != nil {
-		sets = append(sets, fmt.Sprintf("asset_id = $%d", argIdx))
-		args = append(args, *updates.AssetID)
-		argIdx++
-	}
-	if updates.VehicleID != nil {
-		sets = append(sets, fmt.Sprintf("vehicle_id = $%d", argIdx))
-		args = append(args, *updates.VehicleID)
-		argIdx++
+	if subj != nil {
+		sets = append(sets, fmt.Sprintf("property_id = $%d, asset_id = $%d, vehicle_id = $%d", argIdx, argIdx+1, argIdx+2))
+		args = append(args, subj.PropertyID, subj.AssetID, subj.VehicleID)
+		argIdx += 3
 	}
 
 	if len(sets) == 0 {
@@ -222,16 +227,17 @@ func (r *Repo) DeleteTask(ctx context.Context, id, householdID uuid.UUID) error 
 	return nil
 }
 
-// ListSchedules returns all maintenance schedules for a household.
-func (r *Repo) ListSchedules(ctx context.Context, householdID uuid.UUID) ([]*Schedule, error) {
+// ListSchedules returns all maintenance schedules for a household; a
+// non-nil vendorID (a linked vendor's scope) keeps only that vendor's.
+func (r *Repo) ListSchedules(ctx context.Context, householdID uuid.UUID, vendorID *uuid.UUID) ([]*Schedule, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT id, household_id, property_id, asset_id, vehicle_id,
 		        name, description, rrule, estimated_cost, vendor_id,
 		        created_at, updated_at
 		 FROM maintenance_schedules
-		 WHERE household_id = $1
+		 WHERE household_id = $1 AND ($2::uuid IS NULL OR vendor_id = $2)
 		 ORDER BY name ASC`,
-		householdID,
+		householdID, vendorID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list schedules: %w", err)
@@ -268,3 +274,29 @@ func (r *Repo) CreateSchedule(ctx context.Context, s *Schedule) (*Schedule, erro
 	}
 	return schedule, nil
 }
+
+// LinkedVendor returns the vendors row userID's vendor membership in
+// householdID is linked to (memberships.vendor_id, #4799), or nil when the
+// member is not a vendor or is an unlinked vendor. A linked vendor sees and
+// updates only maintenance tasks and schedules with that vendor_id; an
+// unlinked one keeps seeing every job (role policy decision, KB
+// decisions/2026-11-15-role-policy.md). ErrNotMember when userID has no
+// membership there, so callers fail closed.
+func (r *Repo) LinkedVendor(ctx context.Context, householdID, userID uuid.UUID) (*uuid.UUID, error) {
+	var vendorID *uuid.UUID
+	err := r.pool.QueryRow(ctx,
+		`SELECT CASE WHEN role = 'vendor' THEN vendor_id END
+		 FROM memberships WHERE household_id = $1 AND user_id = $2`,
+		householdID, userID,
+	).Scan(&vendorID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotMember
+	}
+	if err != nil {
+		return nil, fmt.Errorf("linked vendor: %w", err)
+	}
+	return vendorID, nil
+}
+
+// ErrNotMember is returned by LinkedVendor for a user without a membership.
+var ErrNotMember = errors.New("not a member of this household")

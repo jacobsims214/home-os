@@ -1,7 +1,11 @@
 global:
   imageRegistry: "host.docker.internal:5001/home-os"
   imageTag: latest
+  # Local registry images are rebuilt in place as `latest`.
+  allowLatestImageTag: true
   imagePullPolicy: Always
+  # Local docker-desktop: publicUrl stays empty = http://localhost:8000 (Envoy).
+  allowLocalPublicUrl: true
 
 namespace: home-os
 
@@ -61,7 +65,6 @@ ui:
 
 typesense:
   replicas: 1
-  image: typesense/typesense:27.1
   port: 8108
   persistence:
     size: 5Gi
@@ -71,7 +74,6 @@ typesense:
 
 tika:
   replicas: 1
-  image: apache/tika:latest-full
   port: 9998
   resources:
     requests: { cpu: 200m, memory: 512Mi }
@@ -80,11 +82,21 @@ tika:
 dex:
   uiRedirectURI: "http://localhost:8000/api/auth/callback"
   replicas: 1
-  image: dex
   port: 5556
   grpcPort: 5557
-  # Matches the value currently provisioned in the dev postgres.
-  dbPassword: "wCGVeROLHi1br16yJ5QjRloXH815VrFEbkinBnw1CSygf3DJEtKsGJJjFYFlZsy4"
+  # Dex reads its DB password from home-os-db-secret (secrets.dbPassword below).
+  #
+  # Leave the chart default (grpcTLS.enabled=true) if the cluster has
+  # cert-manager: the chart then issues a private CA and both certificates and
+  # the gRPC admin API is mTLS-only (#697). docker-desktop needs cert-manager
+  # installed for that (helm install cert-manager jetstack/cert-manager).
+  #
+  # Without cert-manager, set grpcTLS.enabled=false. The gRPC admin API is then
+  # plaintext, and dex.networkPolicy (on by default) is the only thing limiting
+  # port 5557 to the api and mcp pods — which is why the chart refuses to render
+  # with both of them off.
+  grpcTLS:
+    enabled: true
 
 database:
   mode: managed
@@ -95,12 +107,10 @@ database:
       enabled: false
 
 secrets:
-  jwtSecret: "local-dev-jwt-secret"
   calendarSecret: "local-dev-calendar-secret"
   typesenseApiKey: "local-dev-typesense-key"
   encryptionKey: "local-dev-encryption-key-32-chars"
   # Matches the 'app' user password provisioned in the dev CNPG cluster.
-  dbPassword: "wCGVeROLHi1br16yJ5QjRloXH815VrFEbkinBnw1CSygf3DJEtKsGJJjFYFlZsy4"
   dbPassword: "wCGVeROLHi1br16yJ5QjRloXH815VrFEbkinBnw1CSygf3DJEtKsGJJjFYFlZsy4"
   adminEmail: "admin@homeos.demo"
   adminPassword: "demo1234"

@@ -2,20 +2,35 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/asynkron/protoactor-go/actor"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/api/pkg/smtp"
+	"home-os/worker/internal/alarms"
+	"home-os/worker/internal/billmirror"
 	"home-os/worker/internal/config"
+	"home-os/worker/internal/fileprocessor"
+	"home-os/worker/internal/files"
+	"home-os/worker/internal/search"
+	"home-os/worker/internal/tika"
 )
+
+// shutdownTimeout bounds how long main waits for the background jobs to
+// return after SIGINT/SIGTERM. All jobs watch ctx, and in-flight Tika and
+// DB calls are bound to the same ctx, so they normally stop within
+// milliseconds; the bound only matters if something ignores cancellation.
+// It sits below Kubernetes' default 30s terminationGracePeriodSeconds so the
+// pool is closed and the process exits before SIGKILL.
+const shutdownTimeout = 20 * time.Second
 
 func main() {
 	cfg, err := config.Load()
@@ -32,9 +47,6 @@ func main() {
 	}
 	defer pool.Close()
 
-	actorSys := actor.NewActorSystem()
-	_ = actorSys // will be used when actors are registered in future tasks
-
 	// SMTP client is optional — if SMTP_HOST is empty, no email is sent
 	var smtpClient *smtp.Client
 	if cfg.SMTPHost != "" {
@@ -50,18 +62,85 @@ func main() {
 		slog.Info("SMTP_HOST not set; notification emails disabled")
 	}
 
+	// File OCR processor: Tika extraction + Typesense `files` indexing.
+	// InitCollection never fails hard (it logs and returns nil when
+	// Typesense is unreachable), so a search outage never stops OCR.
+	searchClient := search.NewClient(cfg.TypesenseHost, cfg.TypesensePort, cfg.TypesenseAPIKey)
+	if err := searchClient.InitCollection(ctx); err != nil {
+		slog.Warn("typesense files collection init failed; indexing may fail until it exists", "error", err)
+	}
+	processor := fileprocessor.New(
+		files.NewRepo(pool),
+		tika.NewClient(tika.WithBaseURL(cfg.TikaURL)),
+		fileprocessor.WithInterval(cfg.FileProcessorPollInterval),
+		fileprocessor.WithSearchClient(searchClient),
+	)
+	slog.Info("file processor configured", "tika_url", cfg.TikaURL, "interval", cfg.FileProcessorPollInterval)
+
+	// Calendar alarms: VALARMs in calendar_objects.ical_raw become in-app
+	// notifications, one per household member per firing (deduped in DB).
+	alarmJob := alarms.New(pool)
+
+	// Bills calendar backfill (#4716): bills with no mirror event on the
+	// Bills calendar get one, at startup and then hourly. Idempotent.
+	billMirrorJob := billmirror.New(pool, billmirror.DefaultInterval)
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		runNotificationLoop(ctx, pool, smtpClient, cfg.PollInterval)
+	}()
+	go func() {
+		defer wg.Done()
+		if err := processor.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("file processor exited", "error", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := alarmJob.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("alarm job exited", "error", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := billMirrorJob.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("bill calendar backfill exited", "error", err)
+		}
+	}()
+
+	<-ctx.Done()
+	slog.Info("worker shutting down")
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		slog.Info("worker stopped")
+	case <-time.After(shutdownTimeout):
+		slog.Warn("worker jobs did not stop in time; exiting anyway", "timeout", shutdownTimeout)
+	}
+}
+
+// runNotificationLoop polls for due bills / maintenance tasks every interval
+// and inserts notifications (plus best-effort emails) until ctx is cancelled.
+func runNotificationLoop(ctx context.Context, pool *pgxpool.Pool, smtpClient *smtp.Client, interval time.Duration) {
 	log.Println("worker started, polling outbox...")
 
-	ticker := time.NewTicker(cfg.PollInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("worker shutting down")
+			log.Println("notification loop stopped")
 			return
 		case <-ticker.C:
-			if err := generateNotifications(ctx, pool, smtpClient); err != nil {
+			if err := generateNotifications(ctx, pool, smtpClient, time.Now()); err != nil {
 				log.Printf("failed to generate notifications: %v", err)
 			}
 			log.Println("polling outbox...")
@@ -78,68 +157,260 @@ type notif struct {
 	Body        string
 }
 
-func generateNotifications(ctx context.Context, pool *pgxpool.Pool, smtpClient *smtp.Client) error {
-	var allNotifs []notif
+// billDueWindowDays and maintenanceDueWindowDays are how far ahead (in whole
+// days, inclusive of today) a bill or maintenance task triggers a notification.
+const (
+	billDueWindowDays        = 3
+	maintenanceDueWindowDays = 7
+)
 
-	// Bills due within 3 days
-	rows, err := pool.Query(ctx, `
-		INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
-		SELECT b.household_id, 'bill_due', b.name || ' due soon',
-		       'Payment of $' || b.amount || ' due on day ' || b.due_day,
-		       'bill', b.id::text
-		FROM bills b
-		WHERE NOT EXISTS (
-			SELECT 1 FROM notifications n
-			WHERE n.entity_id = b.id::text AND n.type = 'bill_due'
-			AND n.created_at > NOW() - INTERVAL '24 hours'
-		)
-		AND b.due_day BETWEEN EXTRACT(DAY FROM NOW())::int AND EXTRACT(DAY FROM NOW() + INTERVAL '3 days')::int
-		RETURNING id, household_id, type, title, body
-	`)
-	if err != nil {
-		return fmt.Errorf("bill notifications: %w", err)
-	}
-	billNotifs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[notif])
-	rows.Close()
-	if err != nil {
-		return fmt.Errorf("bill notifications collect: %w", err)
-	}
-	allNotifs = append(allNotifs, billNotifs...)
+// billCandidatesSQL lists every bill with a usable schedule (a monthly bill
+// with due_day 1-31, or a quarterly/semiannual/annual/once bill with a
+// due_date, migration 044, #4468) and no bill_due notification in the last
+// 24 hours, with what the due-date rule needs: the household's timezone (for
+// "today"), frequency, due_day, due_date, paid_date and paid_for_due_date
+// (migration 052, #4655). $1 is now's UTC date: a once bill due more than a
+// day before it can never be in any household's window (every local date is
+// within a day of UTC), so it is not fetched. Which of them
+// are due within the window is decided in Go by nextUnpaidDue (billdue.go),
+// the same rule as the MCP bill tools (apps/mcp/internal/bill.BillDue and
+// coveredDueDate), so a bill marked paid with bill_pay is not notified for
+// the due date it paid. Doing it in SQL would mean a second copy of
+// paidForDueDate in another language, and AT TIME ZONE fails the whole
+// query on a bad households.timezone where the MCP tools fall back to UTC.
+const billCandidatesSQL = `
+	SELECT b.id::text, h.timezone, b.frequency, b.due_day, b.due_date, b.paid_date, b.paid_for_due_date
+	FROM bills b
+	JOIN households h ON h.id = b.household_id
+	WHERE ((b.frequency = 'monthly' AND b.due_day BETWEEN 1 AND 31)
+	    OR (b.frequency <> 'monthly' AND b.due_date IS NOT NULL))
+	AND NOT (b.frequency = 'once' AND b.due_date < $1::date - 1)
+	AND NOT EXISTS (
+		SELECT 1 FROM notifications n
+		WHERE n.entity_id = b.id AND n.type = 'bill_due'
+		AND n.created_at > NOW() - INTERVAL '24 hours'
+	)
+`
 
-	// Maintenance tasks due within 7 days
-	rows, err = pool.Query(ctx, `
-		INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
-		SELECT mt.household_id, 'maintenance_due', mt.name || ' due soon',
-		       COALESCE(mt.description, ''),
-		       'maintenance_task', mt.id::text
-		FROM maintenance_tasks mt
-		WHERE mt.status = 'pending'
-		AND mt.due_date BETWEEN NOW() AND NOW() + INTERVAL '7 days'
-		AND NOT EXISTS (
-			SELECT 1 FROM notifications n
-			WHERE n.entity_id = mt.id::text AND n.type = 'maintenance_due'
-			AND n.created_at > NOW() - INTERVAL '24 hours'
-		)
-		RETURNING id, household_id, type, title, body
-	`)
-	if err != nil {
-		return fmt.Errorf("maintenance notifications: %w", err)
-	}
-	maintNotifs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[notif])
-	rows.Close()
-	if err != nil {
-		return fmt.Errorf("maintenance notifications collect: %w", err)
-	}
-	allNotifs = append(allNotifs, maintNotifs...)
+// billDueSQL inserts a bill_due notification for each ($1[i], $2[i]) pair of
+// bill id and due date chosen by dueBills. notifications.entity_id is UUID,
+// so bill ids are passed and compared as UUIDs (casting them to text fails
+// with "operator does not exist: uuid = text"). The NOT EXISTS is repeated
+// so two overlapping runs still keep one bill_due per bill per 24 hours.
+const billDueSQL = `
+	INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
+	SELECT b.household_id, 'bill_due', b.name || ' due soon',
+	       CASE WHEN b.amount IS NULL THEN 'Payment due on ' ELSE 'Payment of $' || b.amount || ' due on ' END
+	           || to_char(d.due_date, 'Mon FMDD'),
+	       'bill', b.id
+	FROM unnest($1::uuid[], $2::date[]) AS d(bill_id, due_date)
+	JOIN bills b ON b.id = d.bill_id
+	WHERE NOT EXISTS (
+		SELECT 1 FROM notifications n
+		WHERE n.entity_id = b.id AND n.type = 'bill_due'
+		AND n.created_at > NOW() - INTERVAL '24 hours'
+	)
+	RETURNING id, household_id, type, title, body
+`
 
-	if len(allNotifs) == 0 {
+// billCandidate is one row of billCandidatesSQL.
+type billCandidate struct {
+	ID        string
+	Timezone  string
+	Frequency string
+	DueDay    *int
+	DueDate   *time.Time
+	PaidDate  *time.Time
+	PaidFor   *time.Time
+}
+
+// dueBills returns the ids and next unpaid due dates of the candidates whose
+// due date falls within [today, today + windowDays], where today is now's
+// date in each bill's household timezone.
+//
+// A monthly bill's due_day is a day of the month (1-31), so the next due
+// date can be in this month or the next one: on Nov 29 a bill due on the 1st
+// is due Dec 1. The day is clamped to the month's length, so due_day 31 is
+// due Feb 28 (or 29), and Apr 30. A quarterly, semiannual or annual bill is
+// due every 3/6/12 months on its due_date's day; a once bill on due_date
+// only. A payment that covers that due date moves the bill on to the
+// following one, which is at least 28 days away and so never notifies (a
+// paid once bill has none). An unpaid once bill whose date has passed is
+// overdue, not due soon, so it is not notified again.
+func dueBills(now time.Time, candidates []billCandidate, windowDays int) (ids []string, dueDates []time.Time) {
+	for _, c := range candidates {
+		today := householdToday(now, c.Timezone)
+		s := schedule{frequency: c.Frequency, dueDay: c.DueDay, dueDate: c.DueDate}
+		next, ok := nextUnpaidDue(today, s, c.PaidDate, c.PaidFor)
+		if ok && !next.Before(today) && !next.After(today.AddDate(0, 0, windowDays)) {
+			ids = append(ids, c.ID)
+			dueDates = append(dueDates, next)
+		}
+	}
+	return ids, dueDates
+}
+
+// maintenanceCandidatesSQL lists pending maintenance tasks with no
+// maintenance_due notification in the last 24 hours, with their household's
+// timezone. Which of them are due within the window is decided in Go by
+// dueTasks, with today from households.timezone and the same fallback to UTC
+// as bill_due (AT TIME ZONE in SQL would fail the whole query on a bad
+// timezone). $1 is now's UTC date and $2 the window: every timezone's local
+// date is within a day of the UTC date, so due dates outside
+// [$1 - 1, $1 + $2 + 1] can never be in any household's window and are not
+// fetched.
+const maintenanceCandidatesSQL = `
+	SELECT mt.id::text, h.timezone, mt.due_date
+	FROM maintenance_tasks mt
+	JOIN households h ON h.id = mt.household_id
+	WHERE mt.status = 'pending'
+	AND mt.due_date BETWEEN $1::date - 1 AND $1::date + $2::int + 1
+	AND NOT EXISTS (
+		SELECT 1 FROM notifications n
+		WHERE n.entity_id = mt.id AND n.type = 'maintenance_due'
+		AND n.created_at > NOW() - INTERVAL '24 hours'
+	)
+`
+
+// maintenanceDueSQL inserts a maintenance_due notification for each task id
+// in $1 chosen by dueTasks. The status and NOT EXISTS checks are repeated so
+// a task completed meanwhile is skipped and two overlapping runs still keep
+// one maintenance_due per task per 24 hours.
+const maintenanceDueSQL = `
+	INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
+	SELECT mt.household_id, 'maintenance_due', mt.name || ' due soon',
+	       COALESCE(mt.description, ''),
+	       'maintenance_task', mt.id
+	FROM unnest($1::uuid[]) AS d(task_id)
+	JOIN maintenance_tasks mt ON mt.id = d.task_id
+	WHERE mt.status = 'pending'
+	AND NOT EXISTS (
+		SELECT 1 FROM notifications n
+		WHERE n.entity_id = mt.id AND n.type = 'maintenance_due'
+		AND n.created_at > NOW() - INTERVAL '24 hours'
+	)
+	RETURNING id, household_id, type, title, body
+`
+
+// maintenanceCandidate is one row of maintenanceCandidatesSQL.
+type maintenanceCandidate struct {
+	ID       string
+	Timezone string
+	DueDate  time.Time
+}
+
+// dueTasks returns the ids of the candidates whose due_date falls within
+// [today, today + windowDays], where today is now's date in each task's
+// household timezone (householdToday, UTC for an unknown zone). due_date is a
+// DATE, so the window is in whole dates and a task due today is included.
+func dueTasks(now time.Time, candidates []maintenanceCandidate, windowDays int) []string {
+	var ids []string
+	for _, c := range candidates {
+		today := householdToday(now, c.Timezone)
+		y, m, d := c.DueDate.Date()
+		due := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+		if !due.Before(today) && !due.After(today.AddDate(0, 0, windowDays)) {
+			ids = append(ids, c.ID)
+		}
+	}
+	return ids
+}
+
+// generateNotifications inserts due-soon notifications for bills and
+// maintenance tasks as of now (see insertDueNotifications), then emails them.
+func generateNotifications(ctx context.Context, pool *pgxpool.Pool, smtpClient *smtp.Client, now time.Time) error {
+	notifs, err := insertDueNotifications(ctx, pool, now)
+	if err != nil {
+		return err
+	}
+	if len(notifs) == 0 {
 		return nil
 	}
 
 	// Best-effort email delivery — never block on send failures.
-	sendNotificationEmails(ctx, pool, smtpClient, allNotifs)
-
+	sendNotificationEmails(ctx, pool, smtpClient, notifs)
 	return nil
+}
+
+// insertDueNotifications inserts bill_due notifications (see dueBills) and
+// maintenance_due notifications (see dueTasks), both with today taken from
+// now in each household's timezone (households.timezone, UTC when unknown),
+// and returns the inserted rows.
+func insertDueNotifications(ctx context.Context, pool *pgxpool.Pool, now time.Time) ([]notif, error) {
+	rows, err := pool.Query(ctx, billCandidatesSQL, now.UTC().Format(time.DateOnly))
+	if err != nil {
+		return nil, fmt.Errorf("bill notifications: %w", err)
+	}
+	candidates, err := pgx.CollectRows(rows, pgx.RowToStructByPos[billCandidate])
+	if err != nil {
+		return nil, fmt.Errorf("bill notifications: %w", err)
+	}
+
+	var allNotifs []notif
+	if ids, dueDates := dueBills(now, candidates, billDueWindowDays); len(ids) > 0 {
+		rows, err = pool.Query(ctx, billDueSQL, ids, dueDates)
+		if err != nil {
+			return nil, fmt.Errorf("bill notifications: %w", err)
+		}
+		allNotifs, err = pgx.CollectRows(rows, pgx.RowToStructByPos[notif])
+		if err != nil {
+			return nil, fmt.Errorf("bill notifications: %w", err)
+		}
+	}
+
+	rows, err = pool.Query(ctx, maintenanceCandidatesSQL,
+		now.UTC().Format(time.DateOnly), maintenanceDueWindowDays)
+	if err != nil {
+		return nil, fmt.Errorf("maintenance notifications: %w", err)
+	}
+	tasks, err := pgx.CollectRows(rows, pgx.RowToStructByPos[maintenanceCandidate])
+	if err != nil {
+		return nil, fmt.Errorf("maintenance notifications: %w", err)
+	}
+	ids := dueTasks(now, tasks, maintenanceDueWindowDays)
+	if len(ids) == 0 {
+		return allNotifs, nil
+	}
+	rows, err = pool.Query(ctx, maintenanceDueSQL, ids)
+	if err != nil {
+		return nil, fmt.Errorf("maintenance notifications: %w", err)
+	}
+	maintNotifs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[notif])
+	if err != nil {
+		return nil, fmt.Errorf("maintenance notifications: %w", err)
+	}
+	return append(allNotifs, maintNotifs...), nil
+}
+
+// recipient is one household member a notification email can go to.
+type recipient struct {
+	Email string
+	Name  string
+}
+
+// householdMembers returns the active members of a household: the people who
+// can still sign in and act on a notification. A deactivated account
+// (users.active = false, the flag auth and CalDAV already reject, migration
+// 037) keeps its membership row, so it has to be filtered here rather than by
+// the membership alone; the in-app notification is suppressed for them on the
+// same grounds (alarms.insertSQL).
+func householdMembers(ctx context.Context, pool *pgxpool.Pool, householdID string) ([]recipient, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT u.email, u.name
+		FROM memberships m
+		JOIN users u ON u.id = m.user_id
+		WHERE m.household_id = $1
+		  AND u.active
+	`, householdID)
+	if err != nil {
+		return nil, err
+	}
+	members, err := pgx.CollectRows(rows, pgx.RowToStructByPos[recipient])
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	return members, nil
 }
 
 // sendNotificationEmails sends HTML email notifications to all household members.
@@ -161,27 +432,11 @@ func sendNotificationEmails(ctx context.Context, pool *pgxpool.Pool, smtpClient 
 	}
 
 	// Pre-load member emails for all affected households.
-	type member struct {
-		Email string
-		Name  string
-	}
-	hhMembers := make(map[string][]member, len(hhIDs))
+	hhMembers := make(map[string][]recipient, len(hhIDs))
 	for _, hhID := range hhIDs {
-		mRows, err := pool.Query(ctx, `
-			SELECT u.email, u.name
-			FROM memberships m
-			JOIN users u ON u.id = m.user_id
-			WHERE m.household_id = $1
-		`, hhID)
+		members, err := householdMembers(ctx, pool, hhID)
 		if err != nil {
 			slog.Error("notification: failed to query household members",
-				"household_id", hhID, "error", err)
-			continue
-		}
-		members, err := pgx.CollectRows(mRows, pgx.RowToStructByPos[member])
-		mRows.Close()
-		if err != nil {
-			slog.Error("notification: failed to collect household members",
 				"household_id", hhID, "error", err)
 			continue
 		}

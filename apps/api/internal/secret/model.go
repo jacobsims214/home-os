@@ -1,13 +1,16 @@
 // Package secret manages the native Home OS secrets manager — a zero-knowledge
 // store where the API holds only encrypted blobs and the browser derives the
 // AES-256-GCM key from the user's master password via the Web Crypto API
-// (PBKDF2, 100K iterations). Plaintext never touches the server.
+// (PBKDF2, 100K iterations). Plaintext never touches the server, with one
+// opt-in exception: an owner or family_manager may share a single credential
+// with agents, and the API then keeps a server-sealed copy of it in
+// secrets.agent_ciphertext (agentkey.go, agentshare.go, #4446).
 //
 // The secrets table holds the encrypted payload plus plaintext metadata
 // (name, secret_type) for listing/search. The secret_keys table holds the
-// master-password verification material (key_hash + key_salt, both BYTEA) so
-// the /unlock endpoint can confirm a derived key without ever storing the key
-// itself. Key rotation is supported via key_version on both tables.
+// master-password verification material (an argon2id verifier, or the legacy
+// key_hash until the row upgrades, plus key_salt) so /verify can confirm a
+// derived key without ever storing the key itself. Key rotation is supported via key_version on both tables.
 //
 // BYTEA columns (encrypted_data, iv, key_hash, key_salt) are modeled as []byte
 // in Go. encoding/json marshals []byte as a standard base64 string by default,
@@ -49,8 +52,11 @@ const (
 	EntityTypeBill        = "bill"
 	EntityTypeNote        = "note"
 	EntityTypeAsset       = "asset"
-	EntityTypeMaintenance = "maintenance"
+	EntityTypeMaintenance = "maintenance_task"
 	EntityTypeVendor      = "vendor"
+	// EntityTypeHousehold marks a family-level secret: entity_id is the
+	// household's own id. It is the default when no entity is given.
+	EntityTypeHousehold = "household"
 )
 
 // Secret represents a row from the secrets table — an encrypted blob plus the
@@ -73,6 +79,11 @@ type Secret struct {
 	SecretType    string    `json:"secret_type"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	// SharedWithAgents is true when an owner or family_manager has shared this
+	// credential with the family's agents (#4446): a server-encrypted copy
+	// exists in secrets.agent_ciphertext. That copy is never serialized.
+	SharedWithAgents bool       `json:"shared_with_agents"`
+	AgentSharedAt    *time.Time `json:"agent_shared_at,omitempty"`
 }
 
 // SecretListItem is the metadata-only view of a secret (no encrypted_data/iv).
@@ -87,13 +98,24 @@ type SecretListItem struct {
 	SecretType  string    `json:"secret_type"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// See Secret.SharedWithAgents.
+	SharedWithAgents bool       `json:"shared_with_agents"`
+	AgentSharedAt    *time.Time `json:"agent_shared_at,omitempty"`
 }
 
 // SecretKey represents a row from the secret_keys table — the material used to
 // verify a user's master password / derived key without ever storing the key
-// itself. KeyHash is a verifier (e.g. HMAC or hash of a known plaintext under
-// the derived key) and KeySalt is the per-household PBKDF2 salt. Both are
-// BYTEA and surface as base64 strings in JSON for the browser.
+// itself. KeySalt is the per-household PBKDF2 salt the browser needs to
+// re-derive the key, and surfaces as base64 in JSON.
+//
+// Since migration 051 (#4440) a row holds exactly one of:
+//   - Verifier: an argon2id PHC string over the client-sent verifier (salted
+//     per row, slow). Every new setup and every upgraded row.
+//   - KeyHash: the LEGACY unsalted SHA-256 of the derived key. Cleared and
+//     replaced by Verifier on the household's next successful unlock.
+//
+// Neither is ever serialized: both carry json:"-" so no response can leak
+// verifier material, even if a handler returns the whole struct.
 //
 // key_version ties a verifier to a specific key version so rotation can be
 // staged: a new row is inserted with the next version, then secrets are
@@ -101,7 +123,8 @@ type SecretListItem struct {
 type SecretKey struct {
 	ID          uuid.UUID `json:"id"`
 	HouseholdID uuid.UUID `json:"household_id"`
-	KeyHash     []byte    `json:"key_hash"` // base64 on the wire; verifier for the derived key
+	KeyHash     []byte    `json:"-"`        // legacy (pre-051) verifier; nil once upgraded
+	Verifier    *string   `json:"-"`        // argon2id PHC string; nil on legacy rows
 	KeySalt     []byte    `json:"key_salt"` // base64 on the wire; PBKDF2 salt
 	KeyVersion  int       `json:"key_version"`
 	CreatedAt   time.Time `json:"created_at"`

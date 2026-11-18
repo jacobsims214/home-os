@@ -6,6 +6,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Sentinel errors that domain code can return and handlers can check with errors.Is.
@@ -57,6 +59,30 @@ func Conflict(w http.ResponseWriter, msg string) {
 func InternalError(w http.ResponseWriter, err error) {
 	slog.Error("internal server error", "error", err)
 	writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error")
+}
+
+// DB writes the response for an error returned by a database write. The
+// domain v2 ownership triggers (migration 038) raise foreign_key_violation
+// when a request points at a row that is missing or belongs to another
+// family; that is reported as 404 so a caller cannot probe other families.
+// A check_violation is a 400. Anything else is a 500.
+func DB(w http.ResponseWriter, err error) {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23503":
+			NotFound(w, "referenced record not found")
+			return
+		case "23514":
+			if pgErr.DataTypeName == "entity_kind" {
+				BadRequest(w, "invalid entity_type")
+				return
+			}
+			BadRequest(w, "invalid combination of fields")
+			return
+		}
+	}
+	InternalError(w, err)
 }
 
 // JSON writes a JSON response with the given status code and body.

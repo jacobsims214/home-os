@@ -19,13 +19,13 @@ export default function Switch({
   className,
 }: SwitchProps) {
   return (
-    <div className={`flex items-center gap-3 ${className}`}>
+    <div className={`flex items-center gap-3 ${className ?? ""}`}>
       <MantineSwitch
         checked={checked}
         onChange={(e) => onChange?.(e.currentTarget.checked)}
         disabled={disabled}
       />
-      {label && <span className="text-sm font-medium text-gray-900">{label}</span>}
+      {label && <span className="text-sm font-medium text-ink">{label}</span>}
     </div>
   );
 }

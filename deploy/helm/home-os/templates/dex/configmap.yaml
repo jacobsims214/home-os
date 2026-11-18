@@ -1,3 +1,31 @@
+{{- include "home-os.validate" . }}
+{{- if .Values.dex.dbPassword }}
+{{- fail "dex.dbPassword was removed: Dex reads its DB password from a Secret. Put it in a Secret and set dex.existingSecret (and dex.existingSecretPasswordKey), or leave both unset to use home-os-db-secret." }}
+{{- end }}
+{{- /*
+Refuse to name a password connector that will not exist at runtime. Dex starts
+happily with oauth2.passwordConnector set to an unknown id and only fails the
+grant later, per request, with a 400 "Requested connector does not exist" -
+indistinguishable at the caller from a dozen other misconfigurations. Valid ids
+here are the id of each dex.connectors entry plus "local", which Dex registers
+itself when enablePasswordDB is true (rendered further down).
+*/}}
+{{- $connectorIDs := list "local" }}
+{{- range .Values.dex.connectors }}
+{{- $connectorIDs = append $connectorIDs (required "each dex.connectors entry needs an id" .id) }}
+{{- end }}
+{{- with .Values.dex.passwordConnector }}
+{{- if not (has . $connectorIDs) }}
+{{- fail (printf "dex.passwordConnector=%q is not a connector this chart provides (have: %s). Use \"local\" for the Dex password DB, or declare one under dex.connectors." . (join ", " $connectorIDs)) }}
+{{- end }}
+{{- end }}
+{{- /*
+Dex storage uses the same server, port, user and SSL mode as the API
+(home-os.dbHost/dbPort/dbUser/dbSslMode). Managed mode creates the `dex`
+database at CNPG initdb (postgres/cnpg-cluster.yaml); with database.mode=external
+the operator must create a `dex` database owned by database.external.user first.
+The ssl comment below describes managed mode; external uses database.external.sslmode.
+*/}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -5,44 +33,125 @@ metadata:
   namespace: {{ .Values.namespace }}
 data:
   config.yaml: |
-    issuer: http://localhost:{{ .Values.envoy.port }}/dex
+    issuer: {{ include "home-os.dexIssuer" . }}
     
     storage:
       type: postgres
       config:
-        host: home-os-postgres-rw
-        port: 5432
+        host: {{ include "home-os.dbHost" . }}
+        port: {{ include "home-os.dbPort" . }}
         database: dex
-        user: app
-        # Password supplied at deploy time via .Values.dex.dbPassword.
-        # Set via --set dex.dbPassword=<password> or a secure values file.
-        password: {{ .Values.dex.dbPassword }}
+        user: {{ include "home-os.dbUser" . }}
+        # Expanded by Dex at startup from the DEX_DB_PASSWORD env var, which the
+        # Deployment sources from a Secret (dex.existingSecret). Never inline it here.
+        password: $DEX_DB_PASSWORD
         ssl:
           # SSL mode is "disable" because the CNPG cluster does not currently
           # configure TLS for client connections. Revisit if TLS is enabled
           # in the postgres cluster spec.
-          mode: disable
+          mode: {{ include "home-os.dbSslMode" . }}
     
     web:
       http: 0.0.0.0:5556
     
+    {{- /*
+    mTLS on the gRPC admin API (#697). Dex's gRPC surface (CreatePassword,
+    CreateClient, RevokeRefresh, …) authenticates nothing at the application
+    layer, so this listener must not be reachable without a client certificate.
+    tlsClientCA makes Dex demand one signed by our private CA
+    (tls.RequireAndVerifyClientCert, cmd/dex/serve.go loadTLSConfig), and
+    tlsCert/tlsKey are the server half. The files are the cert-manager
+    Certificates in templates/dex-grpc-tls/certificates.yaml, mounted by
+    dex/deployment.yaml.
+    */}}
     grpc:
       addr: 0.0.0.0:5557
+      {{- if .Values.dex.grpcTLS.enabled }}
+      tlsCert: {{ include "home-os.dexGrpcTLSDir" . }}/tls.crt
+      tlsKey: {{ include "home-os.dexGrpcTLSDir" . }}/tls.key
+      tlsClientCA: {{ include "home-os.dexGrpcTLSDir" . }}/ca.crt
+      # TLS 1.2 floor; Dex defaults to 1.2 already, stated so a future
+      # "just make it 1.1 compatible" change has to be deliberate.
+      tlsMinVersion: "1.2"
+      {{- end }}
     
     oauth2:
       skipApprovalScreen: true
       alwaysShowLoginScreen: false
+      # Every Home OS client is public (no client secret), so PKCE is what stops a
+      # stolen authorization code from being redeemed. Enforce it and refuse the
+      # weaker "plain" method: Dex otherwise accepts an authorize request that
+      # carries no challenge at all (see KB architecture/ui-login-pkce.md).
+      pkce:
+        enforce: true
+        codeChallengeMethodsSupported: ["S256"]
+      {{- with .Values.dex.passwordConnector }}
+      # RETIRED (#4540). This block only renders when dex.passwordConnector is
+      # set, which the DEPLOYED values do not do (it is ""). Setting it turns the
+      # OAuth2 password grant back on: grant_type=password at /dex/token and its
+      # root /token alias, trading a member's Dex password for an id_token.
+      #
+      # LOCAL DEV ONLY. That grant was an INTERIM stopgap (#4886) so a headless
+      # caller had some way in before per-member agent tokens existed; #4535
+      # issued those to every family agent, so nothing needs it. A password grant
+      # means any valid Dex password becomes an UNSCOPED bearer token for the MCP
+      # audience, with no per-agent revocation, and /dex/token is deliberately NOT
+      # rate limited at Envoy (Envoy cannot tell a password grant from a refresh
+      # without reading the body). See KB architecture/dex-password-grant-interim.md.
+      #
+      # It is a CHART VALUE and must stay one: the war game originally added it
+      # by hand to the live ConfigMap, and the next sync from a chart without it
+      # erased the patch, silently leaving every agent with no headless auth
+      # (#4357). That is also why the deployed values keep the key with "".
+      passwordConnector: {{ . | quote }}
+      {{- end }}
     
+    {{- with .Values.dex.connectors }}
+    # Connectors besides the password DB. Each entry is Dex's own connector
+    # config verbatim: {id, type, name, config}.
+    connectors:
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+
     staticClients:
     - id: home-os-ui
       name: Home OS UI
       redirectURIs:
-      - {{ .Values.dex.uiRedirectURI }}
+      - {{ include "home-os.uiRedirectURI" . | quote }}
       public: true
     - id: home-os-mcp
       name: Home OS MCP
       public: true
       redirectURIs:
-      - http://127.0.0.1:19876/mcp/oauth/callback
+      {{- range .Values.dex.mcpRedirectURIs }}
+      - {{ tpl . $ | quote }}
+      {{- end }}
     
+    # Registers Dex's built-in "local" connector (id "local"), which is what
+    # INTERACTIVE password login uses (the login form POSTs to /dex/auth/local).
+    # It is NOT part of the retired password grant (#4540) and must stay on:
+    # turning it off removes the only way a family member signs in to the UI.
+    #
+    # It is also the connector a local-dev password grant would name
+    # (oauth2.passwordConnector: "local"). With the grant retired (#4540) the
+    # deployed config has no passwordConnector at all; setting one on a
+    # deployed instance would re-open the grant, so it stays a local-dev-only
+    # escape hatch (see dex.passwordConnector in values.yaml).
     enablePasswordDB: true
+    {{- if or .Values.dex.idTokenExpiry .Values.dex.refreshTokenReuseInterval }}
+
+    expiry:
+      {{- with .Values.dex.idTokenExpiry }}
+      # id_token lifetime. Dex keeps ONE refresh token per user per client, so a
+      # login on a second browser revokes the first browser's refresh token; the
+      # first browser stays signed in only until its id_token expires (#4649).
+      idTokens: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.dex.refreshTokenReuseInterval }}
+      # Refresh tokens rotate on use. Within this window Dex hands the current
+      # token to a request presenting the just-rotated one, so the UI replicas
+      # (whose BFFs single-flight per process only) can refresh concurrently.
+      refreshTokens:
+        reuseInterval: {{ . | quote }}
+      {{- end }}
+    {{- end }}

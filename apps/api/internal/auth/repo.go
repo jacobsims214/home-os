@@ -10,6 +10,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// userColumns is every column of users that auth.User carries, in the order
+// pgx.RowToAddrOfStructByPos fills its fields. Add a struct field and its
+// column here together: a short list would leave the new field at its zero
+// value on every read (a silently false flag), a long one would fail the scan.
+const userColumns = "id, email, name, password_hash, caldav_password_hash, avatar_url, created_at, updated_at, " +
+	"is_instance_admin"
+
 // Repo provides read/write access to the users and memberships tables
 // using a pgx connection pool.
 type Repo struct {
@@ -24,7 +31,7 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 // GetUserByEmail returns the user with the given email, or nil if no such user exists.
 func (r *Repo) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, email, name, password_hash, caldav_password_hash, avatar_url, created_at, updated_at
+		`SELECT `+userColumns+`
 		 FROM users WHERE email = $1`,
 		email,
 	)
@@ -46,7 +53,7 @@ func (r *Repo) GetUserByEmail(ctx context.Context, email string) (*User, error) 
 // GetUserByID returns the user with the given ID, or nil if no such user exists.
 func (r *Repo) GetUserByID(ctx context.Context, userID string) (*User, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, email, name, password_hash, caldav_password_hash, avatar_url, created_at, updated_at
+		`SELECT `+userColumns+`
 		 FROM users WHERE id = $1`,
 		userID,
 	)
@@ -71,7 +78,7 @@ func (r *Repo) CreateUser(ctx context.Context, email, name, passwordHash string)
 	rows, err := r.pool.Query(ctx,
 		`INSERT INTO users (email, name, password_hash)
 		 VALUES ($1, $2, $3)
-		 RETURNING id, email, name, password_hash, caldav_password_hash, avatar_url, created_at, updated_at`,
+		 RETURNING `+userColumns,
 		email, name, passwordHash,
 	)
 	if err != nil {

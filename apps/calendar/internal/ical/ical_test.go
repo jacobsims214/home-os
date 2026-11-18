@@ -317,10 +317,10 @@ func TestUnescapeText_Direct(t *testing.T) {
 		escaped string
 		want    string
 	}{
-		{`a\\nb`, `a\nb`},       // escaped backslash + letter n → literal \n
-		{`a\\;b`, `a\;b`},        // escaped backslash + semicolon → literal \;
-		{`a\\,b`, `a\,b`},        // escaped backslash + comma → literal \,
-		{`a\\Nb`, `a\Nb`},        // escaped backslash + letter N → literal \N
+		{`a\\nb`, `a\nb`},                // escaped backslash + letter n → literal \n
+		{`a\\;b`, `a\;b`},                // escaped backslash + semicolon → literal \;
+		{`a\\,b`, `a\,b`},                // escaped backslash + comma → literal \,
+		{`a\\Nb`, `a\Nb`},                // escaped backslash + letter N → literal \N
 		{`line1\nline2`, "line1\nline2"}, // \n escape → newline
 		{`line1\nLine2`, "line1\nLine2"}, // \N escape → newline (case-insensitive)
 		{`semi\;colon`, `semi;colon`},    // \; escape → semicolon
@@ -1030,5 +1030,282 @@ func TestCalEvent_JSON_ColorRoundTrip(t *testing.T) {
 	}
 	if loaded.EventType != "event" {
 		t.Errorf("EventType lost in round trip: got %q, want %q", loaded.EventType, "event")
+	}
+}
+
+// TestParseEvent_VAlarmDoesNotOverrideEventProperties locks in the fix for
+// #4616: properties of components nested in the VEVENT (here VALARM) must not
+// replace the event's own DESCRIPTION/SUMMARY in the parsed event or its JSON.
+func TestParseEvent_VAlarmDoesNotOverrideEventProperties(t *testing.T) {
+	cases := []struct {
+		name      string
+		ics       string
+		wantTitle string
+		wantDesc  string
+	}{
+		{
+			name: "event description kept, alarm after it",
+			ics: "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:alarm-1@homeos\r\n" +
+				"DTSTART:20260607T100000Z\r\nDTEND:20260607T110000Z\r\nSUMMARY:Dentist\r\n" +
+				"DESCRIPTION:Bring insurance card\r\n" +
+				"BEGIN:VALARM\r\nACTION:DISPLAY\r\nSUMMARY:Alarm summary\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n" +
+				"END:VEVENT\r\nEND:VCALENDAR\r\n",
+			wantTitle: "Dentist",
+			wantDesc:  "Bring insurance card",
+		},
+		{
+			name: "event description after alarm still read",
+			ics: "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:alarm-2@homeos\r\nDTSTART:20260607T100000Z\r\n" +
+				"BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n" +
+				"SUMMARY:Dentist\r\nDESCRIPTION:Bring insurance card\r\n" +
+				"END:VEVENT\r\nEND:VCALENDAR\r\n",
+			wantTitle: "Dentist",
+			wantDesc:  "Bring insurance card",
+		},
+		{
+			name: "only alarm has a description",
+			ics: "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:alarm-3@homeos\r\nDTSTART:20260607T100000Z\r\nSUMMARY:Dentist\r\n" +
+				"BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n" +
+				"END:VEVENT\r\nEND:VCALENDAR\r\n",
+			wantTitle: "Dentist",
+			wantDesc:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, err := ParseEvent(tc.ics)
+			if err != nil {
+				t.Fatalf("ParseEvent: %v", err)
+			}
+			if ev.Title != tc.wantTitle {
+				t.Errorf("Title = %q, want %q", ev.Title, tc.wantTitle)
+			}
+			if ev.Description != tc.wantDesc {
+				t.Errorf("Description = %q, want %q", ev.Description, tc.wantDesc)
+			}
+			b, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			if strings.Contains(string(b), "Reminder") {
+				t.Errorf("stored JSON contains alarm text: %s", b)
+			}
+			var back CalEvent
+			if err := json.Unmarshal(b, &back); err != nil {
+				t.Fatalf("json.Unmarshal: %v", err)
+			}
+			if back.Description != tc.wantDesc {
+				t.Errorf("JSON description = %q, want %q", back.Description, tc.wantDesc)
+			}
+		})
+	}
+}
+
+// Recurring-series fixtures for TestParseEvent_MasterWithOverrides (#4639).
+// The master is a weekly piano lesson with a VALARM whose DESCRIPTION must
+// never leak; the override moves the 2026-11-16 instance to Tuesday evening.
+const (
+	recurMaster = "BEGIN:VEVENT\r\n" +
+		"UID:piano-series\r\n" +
+		"SUMMARY:Piano lesson\r\n" +
+		"DESCRIPTION:Bring the yellow book\r\n" +
+		"LOCATION:Music room\r\n" +
+		"DTSTART;TZID=America/Chicago:20261102T160000\r\n" +
+		"DTEND;TZID=America/Chicago:20261102T170000\r\n" +
+		"RRULE:FREQ=WEEKLY;COUNT=8\r\n" +
+		"BEGIN:VALARM\r\n" +
+		"ACTION:DISPLAY\r\n" +
+		"DESCRIPTION:Alarm text\r\n" +
+		"TRIGGER:-PT15M\r\n" +
+		"END:VALARM\r\n" +
+		"END:VEVENT\r\n"
+	recurOverride = "BEGIN:VEVENT\r\n" +
+		"UID:piano-series\r\n" +
+		"RECURRENCE-ID;TZID=America/Chicago:20261116T160000\r\n" +
+		"SUMMARY:Piano lesson (moved)\r\n" +
+		"DESCRIPTION:Moved to Tuesday evening\r\n" +
+		"LOCATION:Teacher's house\r\n" +
+		"DTSTART;TZID=America/Chicago:20261117T180000\r\n" +
+		"DTEND;TZID=America/Chicago:20261117T190000\r\n" +
+		"BEGIN:VALARM\r\n" +
+		"ACTION:DISPLAY\r\n" +
+		"DESCRIPTION:Override alarm text\r\n" +
+		"TRIGGER:-PT30M\r\n" +
+		"END:VALARM\r\n" +
+		"END:VEVENT\r\n"
+)
+
+func recurCalendar(vevents ...string) string {
+	return "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\n" +
+		strings.Join(vevents, "") + "END:VCALENDAR\r\n"
+}
+
+// TestParseEvent_MasterWithOverrides locks in #4639: with a recurring master
+// plus RECURRENCE-ID overrides in one resource, the parsed event (and so the
+// stored ical_data JSON) describes the master, whatever the VEVENT order.
+// An override-only resource falls back to the first VEVENT.
+func TestParseEvent_MasterWithOverrides(t *testing.T) {
+	type want struct {
+		title, desc, loc string
+		start, end       time.Time
+	}
+	// 16:00 CST (UTC-6) on 2026-11-02 is 22:00 UTC.
+	master := want{
+		title: "Piano lesson",
+		desc:  "Bring the yellow book",
+		loc:   "Music room",
+		start: time.Date(2026, 11, 2, 22, 0, 0, 0, time.UTC),
+		end:   time.Date(2026, 11, 2, 23, 0, 0, 0, time.UTC),
+	}
+	override := want{
+		title: "Piano lesson (moved)",
+		desc:  "Moved to Tuesday evening",
+		loc:   "Teacher's house",
+		start: time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC),
+		end:   time.Date(2026, 11, 18, 1, 0, 0, 0, time.UTC),
+	}
+	secondOverride := strings.NewReplacer(
+		"20261116T160000", "20261123T160000",
+		"Piano lesson (moved)", "Piano lesson (second move)",
+	).Replace(recurOverride)
+
+	tests := []struct {
+		name string
+		data string
+		want want
+	}{
+		{"master then override", recurCalendar(recurMaster, recurOverride), master},
+		{"override then master", recurCalendar(recurOverride, recurMaster), master},
+		{"master between overrides", recurCalendar(recurOverride, recurMaster, secondOverride), master},
+		{"master only", recurCalendar(recurMaster), master},
+		// Override-only: no series to describe, so the first VEVENT (the
+		// moved instance itself) is stored rather than failing the PUT.
+		{"override only falls back to first VEVENT", recurCalendar(recurOverride, secondOverride), override},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, err := ParseEvent(tc.data)
+			if err != nil {
+				t.Fatalf("ParseEvent: %v", err)
+			}
+			if ev.UID != "piano-series" {
+				t.Errorf("UID = %q, want piano-series", ev.UID)
+			}
+			if ev.Title != tc.want.title {
+				t.Errorf("Title = %q, want %q", ev.Title, tc.want.title)
+			}
+			if ev.Description != tc.want.desc {
+				t.Errorf("Description = %q, want %q (alarm text must not leak)", ev.Description, tc.want.desc)
+			}
+			if ev.Location != tc.want.loc {
+				t.Errorf("Location = %q, want %q", ev.Location, tc.want.loc)
+			}
+			if !ev.Start.Equal(tc.want.start) {
+				t.Errorf("Start = %v, want %v", ev.Start, tc.want.start)
+			}
+			if !ev.End.Equal(tc.want.end) {
+				t.Errorf("End = %v, want %v", ev.End, tc.want.end)
+			}
+			if ev.Timezone != "America/Chicago" {
+				t.Errorf("Timezone = %q, want America/Chicago", ev.Timezone)
+			}
+		})
+	}
+}
+
+func TestUnfoldLines_Semantics(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"CRLF space fold", "A:1\r\nB:2\r\n 3\r\nC:4\r\n", []string{"A:1", "B:23", "C:4"}},
+		{"LF tab fold", "A:1\nB:2\n\t3\n\t4\nC:5", []string{"A:1", "B:234", "C:5"}},
+		{"only the first whitespace char is dropped", "A:x\r\n  y\r\n", []string{"A:x y"}},
+		{"empty lines skipped, fold joins across them", "A:1\r\n\r\n 2\r\n\r\nB:3", []string{"A:12", "B:3"}},
+		{"leading continuation dropped", " orphan\r\nA:1\r\n", []string{"A:1"}},
+		{"fold on last line without newline", "A:1\r\n 2", []string{"A:12"}},
+		{"lone CR line is empty", "A:1\r\n\r\r\n 2", []string{"A:12"}},
+		{"empty input", "", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := UnfoldLines(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("UnfoldLines(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("UnfoldLines(%q) = %q, want %q", tc.in, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// foldedBody returns a ~size-byte VCALENDAR whose DESCRIPTION is one logical
+// line folded into "\r\n a" continuations: the input that made the old
+// unfold quadratic.
+func foldedBody(size int) string {
+	var b strings.Builder
+	b.WriteString("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:big@homeos\r\n" +
+		"DTSTART:20260101T100000Z\r\nDTEND:20260101T110000Z\r\nSUMMARY:big\r\nDESCRIPTION:x\r\n")
+	for b.Len() < size {
+		b.WriteString(" a\r\n")
+	}
+	b.WriteString("END:VEVENT\r\nEND:VCALENDAR\r\n")
+	return b.String()
+}
+
+// TestUnfoldLines_Linear guards against the O(n^2) unfold: a 1 MB body of
+// continuation lines (the BodyLimitMiddleware cap) took 6.6 s before the fix.
+func TestUnfoldLines_Linear(t *testing.T) {
+	body := foldedBody(1 << 20)
+
+	start := time.Now()
+	lines := UnfoldLines(body)
+	if d := time.Since(start); d > 200*time.Millisecond {
+		t.Errorf("UnfoldLines(1 MB folded) took %v, want < 200ms", d)
+	}
+	var desc string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "DESCRIPTION:") {
+			desc = l
+		}
+	}
+	if want := (len(body) - 140) / 4; len(desc) < want {
+		t.Errorf("DESCRIPTION unfolded to %d bytes, want >= %d", len(desc), want)
+	}
+
+	start = time.Now()
+	ev, err := ParseEvent(body)
+	if d := time.Since(start); d > 200*time.Millisecond {
+		t.Errorf("ParseEvent(1 MB folded) took %v, want < 200ms", d)
+	}
+	if err != nil {
+		t.Fatalf("ParseEvent: %v", err)
+	}
+	if ev.UID != "big@homeos" || !strings.HasPrefix(ev.Description, "xaaa") {
+		t.Errorf("ParseEvent: UID=%q Description prefix=%.8q", ev.UID, ev.Description)
+	}
+}
+
+func BenchmarkUnfoldLines1MB(b *testing.B) {
+	body := foldedBody(1 << 20)
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		UnfoldLines(body)
+	}
+}
+
+func BenchmarkParseEvent1MB(b *testing.B) {
+	body := foldedBody(1 << 20)
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := ParseEvent(body); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

@@ -3,6 +3,7 @@ package asset
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -11,7 +12,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/config"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
@@ -100,6 +103,40 @@ type updateAssetRequest struct {
 	Notes          *string `json:"notes"`
 }
 
+// assetMoney is every money field of an asset response, in one struct, so that
+// hiding it from a role is one decision (assetToResponse) rather than a check
+// per field or per handler: the #4806 pattern, applied to the asset half of
+// the money policy (#4912). It is embedded in assetResponse, so the fields
+// still serialize at the top level next to name and category and the JSON
+// shape stays the shape the UI already types.
+//
+// ResAssets read is rolesEveryone, so a housesitter and a vendor may list the
+// family's things. Until #4912 the same response also told them what each one
+// cost and is worth, which is money they cannot open the bills or loans for: a
+// side door around the money policy. A field added to this struct is hidden
+// from those roles by default, which is why the money lives here and nowhere
+// else in the response.
+//
+// The JSON tags keep this endpoint's existing null-vs-absent contract exactly
+// as it was (decisions/2026-11-16-money-redaction.md: "the JSON shape is
+// unchanged"): purchase_date and purchase_price are omitempty and were already
+// left out when null, current_value has no omitempty and was already present as
+// null. A role without money therefore sees the same shape any role sees for an
+// asset with no such value, and no existing client changes.
+//
+// This is deliberately not the MCP shape. There (#4808) hidden money is absent
+// rather than null, because a model reads that JSON and "purchase_price": null
+// is a value it can quote; here the API keeps null for the UI's string | null.
+// The policy is the same one (auth.CanSeeMoney); only the serialization
+// convention differs.
+type assetMoney struct {
+	PurchaseDate  *string `json:"purchase_date,omitempty"`
+	PurchasePrice *string `json:"purchase_price,omitempty"`
+	CurrentValue  *string `json:"current_value"`
+}
+
+// assetResponse is an asset as a caller may see it: the record itself, plus the
+// embedded money fields assetToResponse fills only for a role with money read.
 type assetResponse struct {
 	ID             string  `json:"id"`
 	HouseholdID    string  `json:"household_id"`
@@ -110,13 +147,12 @@ type assetResponse struct {
 	Manufacturer   *string `json:"manufacturer,omitempty"`
 	Model          *string `json:"model,omitempty"`
 	SerialNumber   *string `json:"serial_number,omitempty"`
-	PurchaseDate   *string `json:"purchase_date,omitempty"`
-	PurchasePrice  *string `json:"purchase_price,omitempty"`
-	CurrentValue   *string `json:"current_value"`
 	WarrantyExpiry *string `json:"warranty_expiry,omitempty"`
 	Notes          *string `json:"notes,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
+
+	assetMoney
 }
 
 // List returns all assets for the authenticated household.
@@ -150,9 +186,10 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	role := middleware.Role(r)
 	resp := make([]assetResponse, 0, len(assets))
 	for _, a := range assets {
-		resp = append(resp, assetToResponse(a))
+		resp = append(resp, assetToResponse(a, role))
 	}
 
 	apierr.JSON(w, http.StatusOK, map[string]any{"data": resp})
@@ -201,15 +238,18 @@ asset := &Asset{
 		Notes:         req.Notes,
 	}
 
+	// Property is optional (a family-level asset has neither property nor
+	// room). With a room, the database derives property_id from it; another
+	// family's room or property is a foreign_key_violation → 404.
 	created, err := h.repo.Create(r.Context(), asset)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 
 	h.indexAsset(r.Context(), created)
 
-	apierr.JSON(w, http.StatusCreated, map[string]any{"data": assetToResponse(created)})
+	apierr.JSON(w, http.StatusCreated, map[string]any{"data": assetToResponse(created, middleware.Role(r))})
 }
 
 // Get returns a single asset by ID, scoped to the authenticated household.
@@ -243,7 +283,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apierr.JSON(w, http.StatusOK, map[string]any{"data": assetToResponse(asset)})
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": assetToResponse(asset, middleware.Role(r))})
 }
 
 // Update modifies an existing asset, scoped to the authenticated household.
@@ -274,9 +314,10 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 // Build partial update — only fields that are present in the request.
+	// An empty property_id or room_id clears it (uuid.Nil marks the clear).
 	updates := &Asset{
-		PropertyID:    parseUUIDPtr(req.PropertyID),
-		RoomID:        parseUUIDPtr(req.RoomID),
+		PropertyID:    parseUUIDOrClear(req.PropertyID),
+		RoomID:        parseUUIDOrClear(req.RoomID),
 		Category:      req.Category,
 		Manufacturer:  req.Manufacturer,
 		Model:         req.Model,
@@ -298,13 +339,17 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := h.repo.Update(r.Context(), assetID, householdID, updates)
 	if err != nil {
-		apierr.InternalError(w, err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			apierr.NotFound(w, "asset not found")
+			return
+		}
+		apierr.DB(w, err)
 		return
 	}
 
 	h.indexAsset(r.Context(), updated)
 
-	apierr.JSON(w, http.StatusOK, map[string]any{"data": assetToResponse(updated)})
+	apierr.JSON(w, http.StatusOK, map[string]any{"data": assetToResponse(updated, middleware.Role(r))})
 }
 
 // Delete removes an asset by ID, scoped to the authenticated household.
@@ -340,8 +385,20 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers ---
 
-func assetToResponse(a *Asset) assetResponse {
-	return assetResponse{
+// assetToResponse is the one place an asset becomes JSON, and therefore the one
+// place the caller's role decides which fields it carries. Money is filled only
+// when auth.CanSeeMoney(role); otherwise assetMoney stays zero and the amount
+// fields are null or absent. Every handler that returns an asset goes through
+// here, so a new endpoint cannot forget, and a money field added to assetMoney
+// is hidden by default (#4806, #4912).
+//
+// The repo still selects purchase_date, purchase_price and current_value for
+// every caller. Unlike a property's mortgage (#4806) these are columns of the
+// asset row itself, not values derived from loans or bills, so there is no join
+// to skip and nothing to gain from a second SQL form: one decision, here, is
+// what keeps a new caller from leaking.
+func assetToResponse(a *Asset, role string) assetResponse {
+	resp := assetResponse{
 		ID:             a.ID.String(),
 		HouseholdID:    a.HouseholdID.String(),
 		PropertyID:     uuidPtrToString(a.PropertyID),
@@ -351,14 +408,28 @@ func assetToResponse(a *Asset) assetResponse {
 		Manufacturer:   a.Manufacturer,
 		Model:          a.Model,
 		SerialNumber:   a.SerialNumber,
-		PurchaseDate:   datePtrToString(a.PurchaseDate),
-		PurchasePrice:  floatPtrToString(a.PurchasePrice),
-		CurrentValue:   floatPtrToString(a.CurrentValue),
 		WarrantyExpiry: datePtrToString(a.WarrantyExpiry),
 		Notes:          a.Notes,
 		CreatedAt:      a.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:      a.UpdatedAt.Format(time.RFC3339),
 	}
+	if auth.CanSeeMoney(role) {
+		resp.assetMoney = assetMoney{
+			PurchaseDate:  datePtrToString(a.PurchaseDate),
+			PurchasePrice: floatPtrToString(a.PurchasePrice),
+			CurrentValue:  floatPtrToString(a.CurrentValue),
+		}
+	}
+	return resp
+}
+
+// parseUUIDOrClear is parseUUIDPtr for partial updates: an empty string
+// returns a pointer to uuid.Nil, which the repo treats as "set to NULL".
+func parseUUIDOrClear(s *string) *uuid.UUID {
+	if s != nil && *s == "" {
+		return &uuid.Nil
+	}
+	return parseUUIDPtr(s)
 }
 
 func parseUUIDPtr(s *string) *uuid.UUID {

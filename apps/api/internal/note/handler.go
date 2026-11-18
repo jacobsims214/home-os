@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
@@ -20,10 +22,65 @@ type searchIndexer interface {
 	DeleteDocument(ctx context.Context, id string) error
 }
 
+// FileChecker answers which of a household's file ids the caller may see;
+// *file.Repo satisfies it (VisibleFileIDs, the credential rule shared with
+// the files API and the MCP).
+type FileChecker interface {
+	VisibleFileIDs(ctx context.Context, householdID string, ids []string, includeSecretFiles bool) (map[string]bool, error)
+}
+
 // Handler holds dependencies for note HTTP handlers.
 type Handler struct {
 	repo   *Repo
 	search searchIndexer
+	files  FileChecker // nil: notes on files are hidden from roles without secrets read
+}
+
+// WithFileChecker lets roles without secrets read see notes on the files
+// they may see; without it they see no notes on files at all (fail closed).
+func (h *Handler) WithFileChecker(fc FileChecker) *Handler {
+	h.files = fc
+	return h
+}
+
+// hideSecretFileNotes drops, for a role without secrets read (viewer),
+// notes on a file attached to or linked from a credential (#4775): the file
+// is hidden from that role, so are its notes. A failed check drops every
+// note on a file (fail closed).
+func (h *Handler) hideSecretFileNotes(r *http.Request, hid uuid.UUID, notes []*Note) []*Note {
+	if middleware.Can(r, auth.ResSecrets, auth.ActRead) {
+		return notes
+	}
+	var ids []string
+	for _, n := range notes {
+		if n.EntityType == "file" {
+			ids = append(ids, n.EntityID.String())
+		}
+	}
+	if len(ids) == 0 {
+		return notes
+	}
+	ok := map[string]bool{}
+	if h.files != nil {
+		var err error
+		if ok, err = h.files.VisibleFileIDs(r.Context(), hid.String(), ids, false); err != nil {
+			slog.Warn("notes: file visibility check failed, omitting notes on files", "error", err)
+			ok = map[string]bool{}
+		}
+	}
+	out := notes[:0:0]
+	for _, n := range notes {
+		if n.EntityType != "file" || ok[n.EntityID.String()] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// noteVisible is CanSeeEntity plus the credential-file rule for one note.
+func (h *Handler) noteVisible(r *http.Request, hid uuid.UUID, n *Note) bool {
+	return auth.CanSeeEntity(middleware.Role(r), n.EntityType) &&
+		len(h.hideSecretFileNotes(r, hid, []*Note{n})) == 1
 }
 
 // NewHandler creates a new note handler.
@@ -37,10 +94,18 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexNote(ctx context.Context, n *Note) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("note: panic during search indexing", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("note: panic during search indexing", "panic", r)
+		}
+	}()
 	title := ""
-	if n.Title != nil { title = *n.Title }
+	if n.Title != nil {
+		title = *n.Title
+	}
 	doc := search.SearchDocument{
 		ID: "note-" + n.ID.String(), HouseholdID: n.HouseholdID.String(),
 		EntityType: "note", EntityID: n.ID.String(),
@@ -53,8 +118,14 @@ func (h *Handler) indexNote(ctx context.Context, n *Note) {
 }
 
 func (h *Handler) deleteNoteIndex(ctx context.Context, id string) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("note: panic during search deletion", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("note: panic during search deletion", "panic", r)
+		}
+	}()
 	if err := h.search.DeleteDocument(context.Background(), "note-"+id); err != nil {
 		slog.Warn("note: failed to delete from search", "id", id, "error", err)
 	}
@@ -108,6 +179,16 @@ func toNoteResponse(n *Note) noteResponse {
 	return resp
 }
 
+// noteWriteResponse is what a note write returns: the note, plus the existing
+// notes its title may be a rewrite of (#4564, the API half of #4945). The
+// note is always written; possible_duplicates is a prompt, never a gate.
+// `data` is the note itself, unchanged, so a client that only reads `data`
+// keeps working.
+type noteWriteResponse struct {
+	Data               noteResponse         `json:"data"`
+	PossibleDuplicates []DuplicateCandidate `json:"possible_duplicates"`
+}
+
 func toNoteResponses(notes []*Note) []noteResponse {
 	out := make([]noteResponse, 0, len(notes))
 	for _, n := range notes {
@@ -143,11 +224,17 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			apierr.BadRequest(w, "invalid entity_id")
 			return
 		}
-		notes, err := h.repo.ListByEntity(r.Context(), hid, entityType, entityID)
-		if err != nil {
-			apierr.InternalError(w, err)
+		// A record the role may not see has no notes it can see (#4689).
+		if !auth.CanSeeEntity(middleware.Role(r), entityType) {
+			apierr.NotFound(w, "entity not found")
 			return
 		}
+		notes, err := h.repo.ListByEntity(r.Context(), hid, entityType, entityID)
+		if err != nil {
+			apierr.DB(w, err)
+			return
+		}
+		notes = h.hideSecretFileNotes(r, hid, notes)
 		apierr.JSON(w, http.StatusOK, map[string]any{"data": toNoteResponses(notes)})
 		return
 	}
@@ -157,6 +244,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
+	notes = h.hideSecretFileNotes(r, hid, visibleNotes(middleware.Role(r), notes))
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
 		"data": toNoteResponses(notes),
@@ -183,7 +271,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	if note == nil {
+	if note == nil || !h.noteVisible(r, hid, note) {
 		apierr.NotFound(w, "note not found")
 		return
 	}
@@ -208,6 +296,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A family-level note is about the family itself: ('household', <its id>).
+	if req.EntityType == "household" && req.EntityID == "" {
+		req.EntityID = hid.String()
+	}
 	if req.EntityType == "" {
 		apierr.BadRequest(w, "entity_type is required")
 		return
@@ -224,6 +316,18 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	entityID, err := uuid.Parse(req.EntityID)
 	if err != nil {
 		apierr.BadRequest(w, "invalid entity_id")
+		return
+	}
+
+	// Household role policy (#4689): family roles note anything they can
+	// see; a housesitter only pets. A record the role cannot see is 404.
+	role := middleware.Role(r)
+	if !auth.CanSeeEntity(role, req.EntityType) {
+		apierr.NotFound(w, "entity not found")
+		return
+	}
+	if !auth.CanAnnotateEntity(role, req.EntityType) {
+		apierr.Forbidden(w, "the "+role+" role cannot add notes on "+req.EntityType+" records")
 		return
 	}
 
@@ -244,16 +348,30 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		AuthorID:    authorID,
 	}
 
+	// The owner trigger (migration 038) rejects an entity that is missing or
+	// belongs to another family; apierr.DB turns that into a 404.
 	created, err := h.repo.Create(r.Context(), n)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 
 	h.indexNote(r.Context(), created)
 
-	apierr.JSON(w, http.StatusCreated, map[string]any{
-		"data": toNoteResponse(created),
+	// #4564: a note whose title is close to an existing one says so, so the
+	// person writing it can make it an update instead of a contradictory twin
+	// (#4945's war-game failure, now visible in the web UI too). The scan
+	// follows the role policy and never fails the write.
+	// The scan runs after the insert, so the note must exclude itself: it is
+	// already in the table and would otherwise match its own title at 1.0.
+	duplicates := []DuplicateCandidate{}
+	if created.Title != nil && strings.TrimSpace(*created.Title) != "" {
+		duplicates = h.repo.NearDuplicates(r.Context(), hid, role, *created.Title, created.ID)
+	}
+
+	apierr.JSON(w, http.StatusCreated, noteWriteResponse{
+		Data:               toNoteResponse(created),
+		PossibleDuplicates: duplicates,
 	})
 }
 
@@ -284,8 +402,12 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	if existing == nil {
+	if existing == nil || !h.noteVisible(r, hid, existing) {
 		apierr.NotFound(w, "note not found")
+		return
+	}
+	if !middleware.Can(r, auth.ResNotes, auth.ActWrite) {
+		apierr.Forbidden(w, middleware.DenyMessage(middleware.Role(r), auth.ResNotes, auth.ActWrite))
 		return
 	}
 
@@ -307,8 +429,17 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apierr.JSON(w, http.StatusOK, map[string]any{
-		"data": toNoteResponse(updated),
+	// Only a supplied title is checked (#4945): a rename is the only change
+	// that can introduce a new collision, and re-warning on every body edit is
+	// the noise that teaches a reader to skip the prompt.
+	duplicates := []DuplicateCandidate{}
+	if req.Title != nil && updated.Title != nil && strings.TrimSpace(*updated.Title) != "" {
+		duplicates = h.repo.NearDuplicates(r.Context(), hid, middleware.Role(r), *updated.Title, id)
+	}
+
+	apierr.JSON(w, http.StatusOK, noteWriteResponse{
+		Data:               toNoteResponse(updated),
+		PossibleDuplicates: duplicates,
 	})
 }
 
@@ -335,4 +466,17 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	h.deleteNoteIndex(r.Context(), id.String())
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// visibleNotes drops notes on records the role may not see (#4689): a
+// viewer sees no notes on secrets, a housesitter only notes on pets,
+// properties, rooms, assets, vendors, calendar, lists, meals and guides.
+func visibleNotes(role string, notes []*Note) []*Note {
+	out := notes[:0:0]
+	for _, n := range notes {
+		if auth.CanSeeEntity(role, n.EntityType) {
+			out = append(out, n)
+		}
+	}
+	return out
 }

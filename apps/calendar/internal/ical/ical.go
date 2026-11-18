@@ -100,6 +100,12 @@ const (
 // It extracts UID, DTSTART, DTEND, SUMMARY, DESCRIPTION, LOCATION, and RRULE.
 // DTSTART with VALUE=DATE is parsed as an all-day event.
 //
+// When the VCALENDAR holds several VEVENTs (a recurring master plus
+// RECURRENCE-ID overrides), the fields come from the master: the first VEVENT
+// without a RECURRENCE-ID, wherever it sits in the input. An override-only
+// resource falls back to the first VEVENT. Only depth-0 VEVENT properties are
+// read; nested components such as VALARM never contribute fields.
+//
 // VTIMEZONE blocks in the VCALENDAR are parsed first so that DTSTART;TZID=...
 // values can be resolved against the timezone definitions. For IANA TZIDs
 // (e.g. "America/New_York") the system zoneinfo is used via time.LoadLocation;
@@ -113,29 +119,70 @@ func ParseEvent(icalData string) (*CalEvent, error) {
 	// First pass: collect VTIMEZONE definitions so DTSTART;TZID=... can resolve.
 	timezones := parseVTimezones(lines)
 
-	var inCalendar, inEvent bool
+	// A resource can hold several VEVENTs sharing one UID: the master (the
+	// series, no RECURRENCE-ID) plus RECURRENCE-ID overrides for individual
+	// instances (RFC 5545 §3.8.4.4, RFC 4791 §4.1). The stored JSON describes
+	// the master; overrides are served from ical_raw. So each VEVENT's
+	// depth-0 property lines are buffered and the master is chosen after the
+	// whole input is read, whatever order the VEVENTs appear in. If every
+	// VEVENT is an override (a client sent only the moved instances), the
+	// first VEVENT is used so the resource still stores something sensible.
+	type vevent struct {
+		props         []string
+		hasRecurrence bool
+	}
+	var events []*vevent
+	var cur *vevent
+	// nested counts components open inside the VEVENT (VALARM, etc.). Their
+	// properties (an alarm's DESCRIPTION or SUMMARY) belong to them, not the
+	// event, so only depth-0 VEVENT properties are read.
+	nested := 0
 
 	for _, line := range lines {
 		line = strings.TrimRight(line, "\r")
 
 		switch {
-		case strings.HasPrefix(line, "BEGIN:VCALENDAR"):
-			inCalendar = true
-		case strings.HasPrefix(line, "END:VCALENDAR"):
-			inCalendar = false
-		case strings.HasPrefix(line, "BEGIN:VEVENT"):
-			inEvent = true
-		case strings.HasPrefix(line, "END:VEVENT"):
-			inEvent = false
-		}
-
-		if !inEvent && !inCalendar {
+		case cur == nil && strings.HasPrefix(line, "BEGIN:VEVENT"):
+			cur = &vevent{}
+			events = append(events, cur)
+			nested = 0
+			continue
+		case cur != nil && nested == 0 && strings.HasPrefix(line, "END:VEVENT"):
+			cur = nil
+			continue
+		case cur != nil && strings.HasPrefix(line, "BEGIN:"):
+			nested++
+			continue
+		case cur != nil && nested > 0 && strings.HasPrefix(line, "END:"):
+			nested--
 			continue
 		}
-		if !inEvent {
+
+		if cur == nil || nested > 0 {
 			continue
 		}
+		if prop, _, _ := parsePropertyLine(line); prop == "RECURRENCE-ID" {
+			cur.hasRecurrence = true
+		}
+		cur.props = append(cur.props, line)
+	}
 
+	var master *vevent
+	for _, e := range events {
+		if !e.hasRecurrence {
+			master = e
+			break
+		}
+	}
+	if master == nil && len(events) > 0 {
+		master = events[0]
+	}
+	var masterProps []string
+	if master != nil {
+		masterProps = master.props
+	}
+
+	for _, line := range masterProps {
 		prop, params, value := parsePropertyLine(line)
 		if prop == "" {
 			continue
@@ -296,26 +343,69 @@ func generateEventBody(ev *CalEvent) string {
 	return b.String()
 }
 
-// unfoldLines joins continuation lines (RFC 5545 §3.1).
-// Lines starting with space or tab are continuations of the previous line.
-func unfoldLines(data string) []string {
-	raw := strings.Split(data, "\n")
-	var unfolded []string
-	for _, line := range raw {
+// UnfoldLines splits an iCalendar text into logical content lines, joining
+// continuation lines (RFC 5545 §3.1). Lines may end in CRLF or LF; a line
+// starting with a space or tab continues the previous line (the leading
+// whitespace character is dropped). Empty lines are skipped, and a
+// continuation line with no preceding line is dropped.
+//
+// It runs in time linear in len(data): a line with no continuations is
+// returned as a substring of data without copying, and a folded line's pieces
+// are accumulated in a strings.Builder and materialised once. (Appending each
+// piece to the previous string re-copied the whole logical line per fold,
+// which made a 1 MB body of folds take seconds.)
+func UnfoldLines(data string) []string {
+	var (
+		unfolded []string
+		head     string          // first physical line of the logical line
+		haveHead bool            // a logical line is pending
+		folded   strings.Builder // head + continuations, once a fold is seen
+		isFolded bool
+	)
+	flush := func() {
+		if !haveHead {
+			return
+		}
+		if isFolded {
+			unfolded = append(unfolded, folded.String())
+			folded = strings.Builder{}
+			isFolded = false
+		} else {
+			unfolded = append(unfolded, head)
+		}
+		haveHead = false
+	}
+	for len(data) > 0 {
+		var line string
+		if i := strings.IndexByte(data, '\n'); i >= 0 {
+			line, data = data[:i], data[i+1:]
+		} else {
+			line, data = data, ""
+		}
 		line = strings.TrimRight(line, "\r")
 		if len(line) == 0 {
 			continue
 		}
 		if line[0] == ' ' || line[0] == '\t' {
-			if len(unfolded) > 0 {
-				unfolded[len(unfolded)-1] += line[1:]
+			if !haveHead {
+				continue
 			}
-		} else {
-			unfolded = append(unfolded, line)
+			if !isFolded {
+				folded.WriteString(head)
+				isFolded = true
+			}
+			folded.WriteString(line[1:])
+			continue
 		}
+		flush()
+		head, haveHead = line, true
 	}
+	flush()
 	return unfolded
 }
+
+// unfoldLines is the package-internal name for UnfoldLines.
+func unfoldLines(data string) []string { return UnfoldLines(data) }
 
 // parsePropertyLine splits a line into property name, parameters, and value.
 // Format: PROPNAME[;PARAM1=VALUE1;PARAM2=VALUE2]:VALUE

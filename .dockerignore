@@ -1,0 +1,44 @@
+# Build context for root-context images (apps/api, apps/worker,
+# apps/calendar, apps/mcp; see release.yml and deploy/docker-compose.yml). Allowlist: exclude everything,
+# then re-include only the modules those Dockerfiles COPY. This keeps
+# .worktrees/, .git, .env*, node_modules, .next, tools/ and every other
+# local artefact out of the context by default.
+#
+# ui builds from its own directory (context apps/ui) and
+# packages/db from packages/db; those builds read their own .dockerignore,
+# not this one.
+#
+# Adding a root-context image that needs another directory? Re-include it
+# here, or the COPY fails with "not found".
+
+*
+
+!packages/allergen/
+!packages/icalx/
+!packages/billcal/
+!packages/billdue/
+!apps/api/
+!apps/worker/
+!apps/calendar/
+!apps/mcp/
+
+# Re-exclude local artefacts inside the re-included modules.
+**/.git
+**/.env
+**/.env.*
+**/node_modules
+**/coverage
+**/tmp
+**/*.log
+**/*.test
+**/*.out
+**/bin
+**/.DS_Store
+
+# Per-module Go binaries left by `go build` (untracked in #2786); images
+# compile their own binary in-container.
+apps/api/api
+apps/api/home-os
+apps/calendar/calendar
+apps/worker/worker
+apps/mcp/mcp

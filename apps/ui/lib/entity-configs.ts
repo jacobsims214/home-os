@@ -145,22 +145,13 @@ export const vehicleConfig = {
     { name: "color", label: "Color", type: "text" },
     { name: "purchase_price", label: "Purchase Price", type: "currency" },
     { name: "purchase_date", label: "Purchase Date", type: "date" },
-    { name: "lender", label: "Lender", type: "text" },
-    { name: "loan_amount", label: "Loan Amount", type: "currency" },
-    { name: "loan_term_months", label: "Loan Term (months)", type: "number" },
-    { name: "monthly_payment", label: "Monthly Payment", type: "currency" },
-    { name: "registration_renewal_month", label: "Registration Renewal Month", type: "number" },
-    { name: "registration_cost", label: "Registration Cost", type: "currency" },
-    { name: "insurance_provider", label: "Insurance Provider", type: "text" },
-    { name: "insurance_cost", label: "Insurance Cost", type: "currency" },
+    // The loan, registration and insurance are the vehicle's linked loan and
+    // bills (#4704/#4706), never vehicle fields.
     { name: "notes", label: "Notes", type: "textarea" },
   ] as FieldConfig[],
   sections: [
     { title: "Vehicle Details", fields: ["year", "make", "model", "vin", "license_plate", "color"] },
     { title: "Purchase Info", fields: ["purchase_price", "purchase_date"] },
-    { title: "Financing", fields: ["lender", "loan_amount", "loan_term_months", "monthly_payment"] },
-    { title: "Registration", fields: ["registration_renewal_month", "registration_cost"] },
-    { title: "Insurance", fields: ["insurance_provider", "insurance_cost"] },
     { title: "Additional Info", fields: ["notes"] },
   ] as SectionConfig[],
   listColumns: [
@@ -185,8 +176,9 @@ export const petConfig = {
     ] },
     { name: "breed", label: "Breed", type: "text" },
     { name: "date_of_birth", label: "Date of Birth", type: "date" },
-    { name: "vet_name", label: "Veterinarian", type: "text" },
-    { name: "vet_phone", label: "Vet Phone", type: "text" },
+    // A family contact tagged "vet" (pets.vet_vendor_id, #4703); the API's
+    // vet_name / vet_phone are read-only and never sent.
+    { name: "vet_vendor_id", label: "Veterinarian", type: "select", options: [] },
     { name: "microchip_id", label: "Microchip ID", type: "text" },
     { name: "insurance_provider", label: "Insurance Provider", type: "text" },
     { name: "insurance_policy", label: "Insurance Policy", type: "text" },
@@ -195,7 +187,7 @@ export const petConfig = {
   ] as FieldConfig[],
   sections: [
     { title: "Pet Details", fields: ["name", "species", "breed", "date_of_birth"] },
-    { title: "Veterinary Info", fields: ["vet_name", "vet_phone"] },
+    { title: "Veterinary Info", fields: ["vet_vendor_id"] },
     { title: "Identification", fields: ["microchip_id", "registration_id"] },
     { title: "Insurance", fields: ["insurance_provider", "insurance_policy"] },
     { title: "Additional Info", fields: ["notes"] },
@@ -224,12 +216,12 @@ export const propertyConfig = {
     { name: "purchase_price", label: "Purchase Price", type: "currency" },
     { name: "purchase_date", label: "Purchase Date", type: "date" },
     { name: "current_value", label: "Current Value", type: "currency" },
-    { name: "mortgage_amount", label: "Mortgage Amount", type: "currency" },
+    // The mortgage, tax, insurance and HOA are the property's linked loan and bills (#4706).
     { name: "notes", label: "Notes", type: "textarea" },
   ] as FieldConfig[],
   sections: [
     { title: "Basic Information", fields: ["name", "address", "property_type"] },
-    { title: "Financial Details", fields: ["purchase_price", "purchase_date", "current_value", "mortgage_amount"] },
+    { title: "Financial Details", fields: ["purchase_price", "purchase_date", "current_value"] },
     { title: "Additional Info", fields: ["notes"] },
   ] as SectionConfig[],
   listColumns: [

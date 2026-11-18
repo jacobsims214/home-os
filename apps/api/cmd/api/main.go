@@ -13,34 +13,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
-	"home-os/api/internal/asset"
+	"home-os/api/internal/admin"
 	"home-os/api/internal/auth"
-	"home-os/api/internal/bill"
-	"home-os/api/internal/calendar"
 	"home-os/api/internal/config"
+	"home-os/api/internal/db"
 	"home-os/api/internal/dex"
-	"home-os/api/internal/file"
 	"home-os/api/internal/household"
-	"home-os/api/internal/integration"
-"home-os/api/internal/invite"
-	"home-os/api/internal/link"
-	"home-os/api/internal/loan"
-	"home-os/api/internal/maintenance"
+	"home-os/api/internal/invite"
 	"home-os/api/internal/middleware"
-	"home-os/api/internal/note"
-	"home-os/api/internal/notification"
-	"home-os/api/internal/pet"
-	"home-os/api/internal/property"
 	"home-os/api/internal/search"
-	"home-os/api/internal/secret"
 	"home-os/api/internal/seed"
-	"home-os/api/internal/vehicle"
-	"home-os/api/internal/vendors"
 	"home-os/api/pkg/apierr"
 	"home-os/api/pkg/smtp"
 )
@@ -53,9 +37,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create the pgx connection pool.
+	// Create the pgx connection pool. db.NewPool sets app.user_id /
+	// app.household_id on each connection from the acquiring context, so
+	// writes made for an authenticated request (middleware.RequireAuth puts
+	// the member on the context) are attributed by the 050 authorship
+	// triggers; startup seeds and other context-less writes stay anonymous.
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("failed to create database pool", "error", err)
 		os.Exit(1)
@@ -72,7 +60,7 @@ func main() {
 	// Must be created before SeedDemo and authHandler which may use it.
 	var dexClient *dex.Client
 	if cfg.DexGRPCAddr != "" {
-		dexClient, err = dex.NewClient(cfg.DexGRPCAddr)
+		dexClient, err = dex.NewClient(cfg.DexGRPCAddr, dex.TLSConfigFromEnv())
 		if err != nil {
 			slog.Warn("dex: failed to connect, password sync disabled", "addr", cfg.DexGRPCAddr, "error", err)
 		} else {
@@ -90,9 +78,20 @@ func main() {
 	}
 
 	// Bootstrap admin user if this is a fresh installation with no users.
-	if err := seed.BootstrapAdmin(ctx, pool, cfg, dexClient); err != nil {
+	var bootstrapDex dex.PasswordSetter
+	if dexClient != nil { // a nil *dex.Client must not become a non-nil interface
+		bootstrapDex = dexClient
+	}
+	if err := seed.BootstrapAdmin(ctx, pool, cfg, bootstrapDex); err != nil {
 		slog.Error("failed to bootstrap admin", "error", err)
 		os.Exit(1)
+	}
+
+	// Give every existing family the starter list templates it lacks
+	// (idempotent; a no-op once all are seeded).
+	// A failure only means templates are missing, so the api still starts.
+	if err := seed.BackfillStarterLists(ctx, pool); err != nil {
+		slog.Warn("failed to backfill starter lists", "error", err)
 	}
 
 	// Create OIDC token verifier using Dex JWKS endpoint.
@@ -106,6 +105,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer oidcVerifier.Close()
+	// Resolve Dex identities to Home OS users/households: users.dex_sub first,
+	// then email (backfilling dex_sub). Multi-household users pick one per
+	// request with X-Household-ID (must be a membership, else 403); without it
+	// the oldest membership wins.
+	oidcVerifier.WithResolver(auth.NewMemberResolver(pool))
 
 	// Initialize the search client and create the Typesense collection if needed.
 	searchClient := search.NewClient(cfg)
@@ -117,7 +121,34 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
-	r.Use(middleware.CORS(true, "")) // dev mode: allow all origins
+	// CORS: only the public origin (PUBLIC_URL). The UI is served from that
+	// same origin through Envoy, so browsers on any other site get no CORS
+	// headers. localhost origins are added only with LOCAL_DEV=true.
+	r.Use(middleware.CORSFor(middleware.OriginOf(cfg.PublicURL), cfg.LocalDev))
+
+	// Per-client-IP rate limit for the unauthenticated routes below (#4685).
+	// In memory per pod (see middleware/ratelimit.go): with 2 replicas a
+	// client can get up to twice the budget, which is acceptable here.
+	trustedProxies, err := middleware.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		slog.Error("invalid API_TRUSTED_PROXIES", "error", err)
+		os.Exit(1)
+	}
+	publicLimiter := middleware.NewRateLimiter(cfg.PublicRatePerMinute, cfg.PublicRateBurst, trustedProxies)
+	limiterCtx, stopLimiter := context.WithCancel(ctx)
+	defer stopLimiter()
+	go publicLimiter.Run(limiterCtx)
+	limited := func(h http.HandlerFunc) http.Handler { return publicLimiter.Middleware(h) }
+
+	// Change-password gets its own limiter instance rather than sharing the
+	// public one: it is authenticated, so keying it per client IP alongside
+	// signup and forgot-password would let one password change spend the
+	// household's signup budget. The handler adds a per-account budget from the
+	// same instance, so a stolen session cannot outrun the IP budget by moving
+	// between addresses (#4822).
+	changePasswordLimiter := middleware.NewRateLimiter(
+		cfg.ChangePasswordRatePerMinute, cfg.ChangePasswordRateBurst, trustedProxies)
+	go changePasswordLimiter.Run(limiterCtx)
 
 	// Health endpoint — returns service status.
 	r.Get("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
@@ -146,173 +177,57 @@ func main() {
 		slog.Info("SMTP not configured; password reset emails will be skipped")
 	}
 
-	authHandler := auth.NewHandler(authRepo, &householdAdapter{repo: householdRepo}, cfg, smtpClient, dexClient, oidcVerifier)
+	authHandler := auth.NewHandler(authRepo, cfg, smtpClient, dexClient, oidcVerifier).
+		WithChangePasswordLimiter(changePasswordLimiter)
 
 	r.Get("/api/v1/auth/me", authHandler.Me)
 	r.Post("/api/v1/auth/caldav-password", authHandler.GenerateCaldavPassword)
-	r.Post("/api/v1/auth/forgot-password", authHandler.ForgotPassword)
-	r.Post("/api/v1/auth/reset-password", authHandler.ResetPassword)
+	r.Method(http.MethodPost, "/api/v1/auth/forgot-password", limited(authHandler.ForgotPassword))
+	r.Method(http.MethodPost, "/api/v1/auth/reset-password", limited(authHandler.ResetPassword))
+
+	// Invites. Accept is outside RequireAuth: the invitee is usually not a
+	// household member yet (RequireAuth answers 403 for that), so the handler
+	// verifies the Dex token itself.
+	inviteHandler := invite.NewHandler(invite.NewRepo(pool), cfg, smtpClient).WithVerifier(oidcVerifier)
+	if dexClient != nil { // a nil *dex.Client must not become a non-nil interface
+		inviteHandler.WithDex(dexClient)
+	}
+	r.Method(http.MethodPost, "/api/v1/invites/accept", limited(inviteHandler.AcceptInvite))
+
+	// Household handler. Create (onboarding) is outside RequireAuth for the
+	// same reason as invite accept: a new Dex user has no membership yet, so
+	// the handler verifies the token itself. The /me routes stay protected.
+	householdHandler := household.NewHandler(householdRepo).WithVerifier(oidcVerifier)
+	r.Method(http.MethodPost, "/api/v1/households", limited(householdHandler.Create))
+
+	// Instance admin endpoints (families, users, deactivation). Outside
+	// RequireAuth: an instance admin need not be a household member. The
+	// handler's RequireInstanceAdmin verifies the Dex token and reads
+	// users.is_instance_admin and users.active from the DB on every request.
+	adminHandler := admin.NewHandler(admin.NewRepo(pool), oidcVerifier)
+	if dexClient != nil { // a nil *dex.Client must not become a non-nil interface
+		adminHandler.WithDex(dexClient)
+	}
+	adminHandler.RegisterRoutes(r)
 
 	// Protected endpoints (require valid JWT).
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(oidcVerifier))
 
-		// Household
-		householdHandler := household.NewHandler(householdRepo)
-		r.Get("/api/v1/households/me", householdHandler.GetMe)
-		r.Get("/api/v1/households/me/members", householdHandler.ListMembers)
-		r.Patch("/api/v1/households/me/members/{userId}", householdHandler.UpdateMemberRole)
-		r.Delete("/api/v1/households/me/members/{userId}", householdHandler.RemoveMember)
-
-		// Asset CRUD
-		assetRepo := asset.NewRepo(pool)
-		assetHandler := asset.NewHandler(assetRepo, cfg).WithSearchClient(searchClient)
-		r.Get("/api/v1/assets", assetHandler.List)
-		r.Post("/api/v1/assets", assetHandler.Create)
-		r.Get("/api/v1/assets/{id}", assetHandler.Get)
-		r.Put("/api/v1/assets/{id}", assetHandler.Update)
-		r.Delete("/api/v1/assets/{id}", assetHandler.Delete)
-
-		// Loan CRUD
-		loanRepo := loan.NewRepo(pool)
-		loanHandler := loan.NewHandler(loanRepo)
-		r.Get("/api/v1/loans", loanHandler.List)
-		r.Post("/api/v1/loans", loanHandler.Create)
-		r.Get("/api/v1/loans/{id}", loanHandler.Get)
-		r.Put("/api/v1/loans/{id}", loanHandler.Update)
-		r.Delete("/api/v1/loans/{id}", loanHandler.Delete)
-
-		// Vehicle CRUD
-		vehicleRepo := vehicle.NewRepo(pool)
-		vehicleHandler := vehicle.NewHandler(vehicleRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/vehicles", vehicleHandler.List)
-		r.Post("/api/v1/vehicles", vehicleHandler.Create)
-		r.Get("/api/v1/vehicles/{id}", vehicleHandler.Get)
-		r.Put("/api/v1/vehicles/{id}", vehicleHandler.Update)
-		r.Delete("/api/v1/vehicles/{id}", vehicleHandler.Delete)
-
-		// Pet CRUD
-		petRepo := pet.NewRepo(pool)
-		petHandler := pet.NewHandler(petRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/pets", petHandler.List)
-		r.Post("/api/v1/pets", petHandler.Create)
-		r.Get("/api/v1/pets/{id}", petHandler.Get)
-		r.Put("/api/v1/pets/{id}", petHandler.Update)
-		r.Delete("/api/v1/pets/{id}", petHandler.Delete)
-
-		// Vendor CRUD
-		vendorRepo := vendors.NewRepo(pool)
-		vendorHandler := vendors.NewHandler(vendorRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/vendors", vendorHandler.List)
-		r.Post("/api/v1/vendors", vendorHandler.Create)
-		r.Get("/api/v1/vendors/{id}", vendorHandler.Get)
-		r.Put("/api/v1/vendors/{id}", vendorHandler.Update)
-		r.Delete("/api/v1/vendors/{id}", vendorHandler.Delete)
-
-		// Calendar CRUD (must be before maintenance — maintenance handler needs calendarRepo)
-		calendarRepo := calendar.NewRepo(pool)
-		calendarHandler := calendar.NewHandler(calendarRepo)
-		r.Get("/api/v1/calendars", calendarHandler.ListCalendars)
-		r.Post("/api/v1/calendars", calendarHandler.CreateCalendar)
-		r.Get("/api/v1/calendars/events", calendarHandler.ListAllEvents)
-		r.Get("/api/v1/calendars/{id}/events", calendarHandler.ListEvents)
-		r.Post("/api/v1/calendars/{id}/events", calendarHandler.CreateEvent)
-		r.Delete("/api/v1/calendars/{id}/events/{eventId}", calendarHandler.DeleteEvent)
-
-		// Maintenance CRUD (with bidirectional calendar sync)
-		maintenanceRepo := maintenance.NewRepo(pool)
-		maintenanceHandler := maintenance.NewHandler(maintenanceRepo).WithCalendarRepo(calendarRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/maintenance/tasks", maintenanceHandler.ListTasks)
-		r.Post("/api/v1/maintenance/tasks", maintenanceHandler.CreateTask)
-		r.Patch("/api/v1/maintenance/tasks/{id}", maintenanceHandler.UpdateTask)
-		r.Delete("/api/v1/maintenance/tasks/{id}", maintenanceHandler.DeleteTask)
-		r.Get("/api/v1/maintenance/schedules", maintenanceHandler.ListSchedules)
-		r.Post("/api/v1/maintenance/schedules", maintenanceHandler.CreateSchedule)
-
-		// Property and Room CRUD
-		propertyRepo := property.NewRepo(pool)
-		propertyHandler := property.NewHandler(propertyRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/properties", propertyHandler.ListProperties)
-		r.Post("/api/v1/properties", propertyHandler.CreateProperty)
-		r.Get("/api/v1/properties/{id}", propertyHandler.GetProperty)
-		r.Put("/api/v1/properties/{id}", propertyHandler.UpdateProperty)
-		r.Delete("/api/v1/properties/{id}", propertyHandler.DeleteProperty)
-		r.Get("/api/v1/properties/{id}/rooms", propertyHandler.ListRooms)
-		r.Post("/api/v1/properties/{id}/rooms", propertyHandler.CreateRoom)
-
-		// Bill CRUD
-		billRepo := bill.NewRepo(pool)
-		billHandler := bill.NewHandler(billRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/bills", billHandler.List)
-		r.Post("/api/v1/bills", billHandler.Create)
-		r.Get("/api/v1/bills/{id}", billHandler.Get)
-		r.Put("/api/v1/bills/{id}", billHandler.Update)
-		r.Delete("/api/v1/bills/{id}", billHandler.Delete)
-
-		// Search
-		searchHandler := search.NewHandler(searchClient)
-		r.Get("/api/v1/search", searchHandler.Search)
-
-		// Note CRUD (polymorphic)
-		noteRepo := note.NewRepo(pool)
-		noteHandler := note.NewHandler(noteRepo).WithSearchClient(searchClient)
-		r.Get("/api/v1/notes", noteHandler.List)
-		r.Post("/api/v1/notes", noteHandler.Create)
-		r.Delete("/api/v1/notes/{id}", noteHandler.Delete)
-
-		// Notification CRUD
-		notificationRepo := notification.NewRepo(pool)
-		notificationHandler := notification.NewHandler(notificationRepo, smtpClient)
-		r.Get("/api/v1/notifications", notificationHandler.List)
-		r.Post("/api/v1/notifications", notificationHandler.Create)
-		r.Patch("/api/v1/notifications/{id}/read", notificationHandler.MarkRead)
-
-		// File storage (polymorphic, bytea in Postgres)
-		fileRepo := file.NewRepo(pool)
-		fileHandler := file.NewHandler(fileRepo)
-		r.Post("/api/v1/files/upload", fileHandler.UploadFile)
-		r.Get("/api/v1/files", fileHandler.ListFiles)
-		r.Get("/api/v1/files/{id}", fileHandler.GetFile)
-		r.Get("/api/v1/files/{id}/content", fileHandler.GetFileContent)
-		r.Patch("/api/v1/files/{id}", fileHandler.UpdateFile)
-		r.Delete("/api/v1/files/{id}", fileHandler.DeleteFile)
-
-		// Secret storage (zero-knowledge, encrypted client-side)
-		secretRepo := secret.NewRepo(pool)
-		secretHandler := secret.NewHandler(secretRepo).WithSearchClient(searchClient)
-		r.Post("/api/v1/secrets", secretHandler.CreateSecret)
-		r.Get("/api/v1/secrets", secretHandler.ListSecrets)
-		r.Get("/api/v1/secrets/{id}", secretHandler.GetSecret)
-		r.Patch("/api/v1/secrets/{id}", secretHandler.UpdateSecret)
-		r.Delete("/api/v1/secrets/{id}", secretHandler.DeleteSecret)
-		r.Post("/api/v1/secrets/setup", secretHandler.SetupKey)
-		r.Post("/api/v1/secrets/verify", secretHandler.VerifyKey)
-		r.Get("/api/v1/secrets/key", secretHandler.GetKeyInfo)
-
-		// Link CRUD (polymorphic)
-		linkRepo := link.NewRepo(pool)
-		linkHandler := link.NewHandler(linkRepo)
-		r.Post("/api/v1/links", linkHandler.Create)
-		r.Get("/api/v1/links", linkHandler.List)
-		r.Delete("/api/v1/links/{id}", linkHandler.Delete)
-
-		// Integration CRUD
-		integrationRepo := integration.NewRepo(pool)
-		integrationHandler := integration.NewHandler(integrationRepo, cfg)
-		r.Get("/api/v1/integrations", integrationHandler.List)
-		r.Post("/api/v1/integrations/{type}/connect", integrationHandler.Connect)
-		r.Post("/api/v1/integrations/{type}/test", integrationHandler.Test)
-		r.Delete("/api/v1/integrations/{type}", integrationHandler.Disconnect)
-
-		// Invite routes
-		inviteRepo := invite.NewRepo(pool)
-		inviteHandler := invite.NewHandler(inviteRepo, cfg, smtpClient)
-		r.Post("/api/v1/invites", inviteHandler.CreateInvite)
-		r.Get("/api/v1/invites", inviteHandler.ListInvites)
-		r.Post("/api/v1/invites/accept", inviteHandler.AcceptInvite)
-
-		// Admin routes (require owner role — enforced in handler).
-		r.Post("/api/v1/admin/users", authHandler.AdminCreateUser)
+		// Household role policy (#4689): every route below names the
+		// resource and action it needs (middleware/roles.go), checked against
+		// the one policy table in auth/roles.go. Unmapped routes answer 403.
+		r.Use(middleware.RequirePolicy)
+		registerProtectedRoutes(r, protectedDeps{
+			pool:                  pool,
+			cfg:                   cfg,
+			search:                searchClient,
+			smtp:                  smtpClient,
+			householdHandler:      householdHandler,
+			inviteHandler:         inviteHandler,
+			authHandler:           authHandler,
+			changePasswordLimiter: changePasswordLimiter,
+		})
 	})
 
 	// Start the HTTP server.
@@ -341,30 +256,4 @@ func main() {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}
-}
-
-// householdAdapter wraps household.Repo to satisfy auth.HouseholdCreator
-// without creating an import cycle (auth → household → auth).
-type householdAdapter struct {
-	repo *household.Repo
-}
-
-func (a *householdAdapter) CreateHousehold(ctx context.Context, name string) (string, error) {
-	hh, err := a.repo.CreateHousehold(ctx, name)
-	if err != nil {
-		return "", err
-	}
-	return hh.ID.String(), nil
-}
-
-func (a *householdAdapter) CreateMembership(ctx context.Context, householdID, userID, role string) error {
-	hhUUID, err := uuid.Parse(householdID)
-	if err != nil {
-		return fmt.Errorf("parse household id: %w", err)
-	}
-	userUUID, err := uuid.Parse(userID)
-	if err != nil {
-		return fmt.Errorf("parse user id: %w", err)
-	}
-	return a.repo.CreateMembership(ctx, hhUUID, userUUID, role)
 }

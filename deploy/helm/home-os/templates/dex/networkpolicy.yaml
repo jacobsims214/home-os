@@ -1,0 +1,49 @@
+{{- if .Values.dex.networkPolicy.enabled }}
+{{- /*
+Ingress-only policy for Dex (#4682). The gRPC admin API (grpcPort, 5557) has no
+auth until #697 adds mTLS: it can create passwords and clients and revoke
+refresh tokens, so only the pods that call it may reach it (api: CreatePassword;
+mcp: DCR CreateClient). HTTP/OIDC (port, 5556) stays open to every pod in the
+namespace: envoy (/dex route, which is also how Traefik and issuer/discovery
+fetches reach Dex), the UI BFF (direct /dex/token calls), api and mcp.
+No egress rules: selecting only Ingress leaves Dex egress unrestricted, and no
+other pod is selected, so Typesense's model download etc. are unaffected.
+*/}}
+{{- $grpcApps := compact (.Values.dex.networkPolicy.grpcClientApps | default list) }}
+{{- if not $grpcApps }}
+{{- fail "dex.networkPolicy.grpcClientApps is empty: an ingress rule with no peers allows every source, which would expose the unauthenticated Dex gRPC API. List the client app labels or set dex.networkPolicy.enabled=false." }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: home-os-dex
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "home-os.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: home-os-dex
+  policyTypes:
+  - Ingress
+  ingress:
+  # HTTP/OIDC: any pod in this namespace (+ optional extra peers).
+  - ports:
+    - protocol: TCP
+      port: {{ .Values.dex.port }}
+    from:
+    - podSelector: {}
+    {{- with .Values.dex.networkPolicy.httpExtraFrom }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  # gRPC admin API: only the listed pods in this namespace.
+  - ports:
+    - protocol: TCP
+      port: {{ .Values.dex.grpcPort }}
+    from:
+    {{- range $grpcApps }}
+    - podSelector:
+        matchLabels:
+          app: {{ . }}
+    {{- end }}
+{{- end }}

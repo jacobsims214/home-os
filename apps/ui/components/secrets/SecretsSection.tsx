@@ -33,7 +33,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "@/lib/api";
 import { secretKeys } from "@/lib/query-keys";
 import type { SecretListItem, SecretListResponse, SecretType } from "@/lib/types/api";
-import { useSecretsStore } from "@/stores/secrets";
+import { probeNeedsSetup, useSecretsStore } from "@/stores/secrets";
 import type { MasterPasswordPromptMode } from "@/components/secrets/MasterPasswordPrompt";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import MasterPasswordPrompt from "@/components/secrets/MasterPasswordPrompt";
@@ -47,44 +47,7 @@ interface SecretsSectionProps {
   entityId: string;
 }
 
-// ─── Constants ───────────────────────────────────────────────
-
-/** Default master-key version — mirrors `secrets.ts` DEFAULT_KEY_VERSION. */
-const DEFAULT_KEY_VERSION = 1;
-
 // ─── Helpers ──────────────────────────────────────────────────
-
-/**
- * Probe whether the household has configured a master password yet.
- *
- * Mirrors the salt-fetch step in `secrets.ts` `unlock()` (lines 121-134):
- * POSTs `/api/v1/secrets/verify` with just `key_version` and no `key_hash`.
- * The API returns 200 (with the stored salt) when a key is configured and
- * 404 when no key has been set up yet. We do NOT inspect the response body —
- * only the status — because we just need to pick setup vs unlock mode.
- *
- * Returns true when the vault needs setup (no master password configured),
- * false when it is already set up and the user should be prompted to unlock.
- */
-async function probeNeedsSetup(): Promise<boolean> {
-  try {
-    await apiFetch("/api/v1/secrets/verify", {
-      method: "POST",
-      body: { key_version: DEFAULT_KEY_VERSION },
-    });
-    // 200 — a key is configured. The user should unlock.
-    return false;
-  } catch (err) {
-    if (err instanceof ApiError && err.status === 404) {
-      // 404 — no master password configured yet. Offer setup.
-      return true;
-    }
-    // Any other error (network, 401, 500...) — fall back to unlock mode so
-    // the existing error-handling in MasterPasswordPrompt / the store can
-    // surface it, rather than guessing setup vs unlock here.
-    return false;
-  }
-}
 
 /** Short locale-formatted date (e.g. "Jun 5, 2026"). Falls back to the raw ISO. */
 function formatDate(iso: string): string {
@@ -283,8 +246,9 @@ export default function SecretsSection({ entityType, entityId }: SecretsSectionP
   // The secrets store does NOT surface a "needs setup" flag — `isUnlocked`
   // only reflects whether a key is loaded in this session. To decide whether
   // to render MasterPasswordPrompt in "setup" (first-time) or "unlock"
-  // (returning user) mode, we probe POST /api/v1/secrets/verify once on the
-  // first unlock click. See `probeNeedsSetup` above and the contract in
+  // (returning user) mode, we probe GET /api/v1/secrets/key once on the
+  // first unlock click (404 = not set up). See `probeNeedsSetup` in
+  // stores/secrets.ts and the contract in
   // architecture/secrets-ui.md ("Why the parent picks the mode").
   //
   // `needsSetup` is tri-state: null = not yet probed, true = no master
@@ -297,7 +261,7 @@ export default function SecretsSection({ entityType, entityId }: SecretsSectionP
 
   /**
    * Open the master-password prompt, picking setup vs unlock mode by probing
-   * `/api/v1/secrets/verify`. The probe is cached in `needsSetup` so we only
+   * GET `/api/v1/secrets/key`. The probe is cached in `needsSetup` so we only
    * hit the API once per mount (a successful setup or unlock flips
    * `isUnlocked` and the prompt closes; on the next click `isUnlocked` is
    * already true and the locked panel is gone entirely).
@@ -477,7 +441,7 @@ export default function SecretsSection({ entityType, entityId }: SecretsSectionP
       )}
 
       {/* ── Master password prompt (setup OR unlock flow) ─────
-          SecretsSection decides the mode by probing /api/v1/secrets/verify
+          SecretsSection decides the mode by probing GET /api/v1/secrets/key
           on the first unlock click — 404 → setup (first-time master password
           creation), 200 → unlock (returning user). See `handleUnlockClick`
           and architecture/secrets-ui.md "Why the parent picks the mode". */}

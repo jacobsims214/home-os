@@ -8,7 +8,7 @@
  * to edit mode with a Mantine Form. Supports save (PUT) and delete (with confirmation).
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { apiFetch } from "@/lib/api";
@@ -16,15 +16,30 @@ import { Card, Text, Group, Stack, Button, Modal, Alert, Skeleton, Box, Textarea
 import { notifications } from "@mantine/notifications";
 import { TextInput, Select } from "@/components/ui";
 import DetailPageLayout from "@/components/layout/DetailPageLayout";
+import { BOOLEAN_OPTIONS, booleanToOption, optionToBoolean } from "./boolean-field";
 
 // ─── Types ────────────────────────────────────────────────────
 
 export interface FieldConfig {
   name: string;
   label: string;
-  type: "text" | "textarea" | "select" | "number" | "date" | "boolean";
+  type: "text" | "textarea" | "select" | "number" | "date" | "boolean" | "custom";
   options?: { value: string; label: string }[];
   required?: boolean;
+  /**
+   * Shown, never edited or sent: it stays out of the form values and the PUT
+   * body, and edit mode shows renderView (e.g. a vehicle's linked loans and
+   * bills, #4706).
+   */
+  readOnly?: boolean;
+  /** type "custom": the read-only value (default: the raw value as text). */
+  renderView?: (entity: Record<string, unknown>) => ReactNode;
+  /** type "custom": the edit control for this field's value (for example the pet's VetPicker, #4703). */
+  renderEdit?: (args: {
+    value: unknown;
+    onChange: (value: unknown) => void;
+    entity: Record<string, unknown>;
+  }) => ReactNode;
 }
 
 export interface SectionConfig {
@@ -188,6 +203,7 @@ export default function EntityDetail({
     if (entity && Object.keys(entity).length > 0 && Object.keys(formValues).length === 0 && !isEditing) {
       const initialValues: Record<string, unknown> = {};
       (fields ?? []).forEach((field) => {
+        if (field.readOnly) return;
         initialValues[field.name] = getFieldValue(entity, field.name);
       });
       setFormValues(initialValues);
@@ -245,12 +261,28 @@ export default function EntityDetail({
 
   // Render field value in read-only mode
   const renderFieldValue = (fieldName: string) => {
+    const custom = getFieldConfig(fieldName)?.renderView;
+    if (custom) return custom(entity);
     const value = getFieldValue(entity, fieldName);
-    return <Text size="sm" c="gray.9">{formatDisplayValue(value)}</Text>;
+    return formatDisplayValue(value);
   };
 
   // Render field input in edit mode
   const renderFieldInput = (field: FieldConfig) => {
+    if (field.readOnly) {
+      return <div key={field.name}>{renderFieldValue(field.name)}</div>;
+    }
+    if (field.type === "custom" && field.renderEdit) {
+      return (
+        <div key={field.name}>
+          {field.renderEdit({
+            value: formValues[field.name] ?? null,
+            onChange: (v) => handleFormChange(field.name, v),
+            entity,
+          })}
+        </div>
+      );
+    }
     const value = formValues[field.name] ?? "";
     const baseProps = {
       label: field.label,
@@ -309,16 +341,20 @@ export default function EntityDetail({
         );
       case "boolean":
         return (
+          // #4728: the record holds a boolean, the Select strings; map both
+          // ways so the saved value shows and a choice is sent as a boolean.
+          // No deselect: an untouched unset value stays unset (not sent).
           <Select
             key={field.name}
             {...baseProps}
-            onChange={(value: string | null) =>
-              handleFormChange(field.name, value ?? "")
-            }
-            data={[
-              { value: "true", label: "Yes" },
-              { value: "false", label: "No" },
-            ]}
+            value={booleanToOption(formValues[field.name])}
+            placeholder="Not set"
+            allowDeselect={false}
+            onChange={(value: string | null) => {
+              const next = optionToBoolean(value);
+              if (next !== undefined) handleFormChange(field.name, next);
+            }}
+            data={BOOLEAN_OPTIONS}
           />
         );
       case "text":
@@ -349,10 +385,11 @@ export default function EntityDetail({
     >
       {isEditing ? (
         // edit form content
-        <Stack>
+        // Below md, inputs grow to a 44 px touch target with 16 px text (no iOS zoom).
+        <Stack className="max-md:[&_.mantine-Input-input]:min-h-11 max-md:[&_.mantine-Input-input]:text-base">
           {(sections ?? []).map((section) => (
             <Box key={section.title} mb="md">
-              <Text size="sm" fw={600} mb="sm" c="gray.7">
+              <Text size="sm" fw={600} mb="sm" className="text-ink-2">
                 {section.title}
               </Text>
               <Stack>
@@ -369,22 +406,34 @@ export default function EntityDetail({
         // view content - sections with fields
         <>
           {(sections ?? []).map((section) => (
-            <div key={section.title} className="flex flex-col gap-4 mb-6">
-              <Text size="sm" fw={600} c="gray.7">
+            <div key={section.title} className="flex flex-col gap-2 mb-6">
+              <Text size="sm" fw={600} className="text-ink-2">
                 {section.title}
               </Text>
-              <Stack>
+              {/* Phone: label above value. md+: label/value grid. */}
+              <dl className="m-0 divide-y divide-line">
                 {section.fields.map((fieldName) => {
                   const field = getFieldConfig(fieldName);
                   if (!field) return null;
+                  // A read-only block (readOnly) is full width; the section title labels it.
                   return (
-                    <div key={fieldName} className="flex justify-between py-2">
-                      <span className="font-medium text-sm text-gray-500">{field.label}</span>
-                      {renderFieldValue(fieldName)}
+                    <div
+                      key={fieldName}
+                      data-field={fieldName}
+                      className={
+                        field.readOnly
+                          ? "py-2.5"
+                          : "flex flex-col gap-1 py-2.5 md:grid md:grid-cols-[minmax(7rem,1fr)_minmax(0,2fr)] md:gap-x-6"
+                      }
+                    >
+                      <dt className={field.readOnly ? "sr-only" : "text-sm font-medium text-ink-3"}>{field.label}</dt>
+                      <dd className="m-0 text-sm text-ink break-words [overflow-wrap:anywhere] whitespace-pre-line">
+                        {renderFieldValue(fieldName)}
+                      </dd>
                     </div>
                   );
                 })}
-              </Stack>
+              </dl>
             </div>
           ))}
         </>

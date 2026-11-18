@@ -1,162 +1,392 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { useRouter, usePathname } from "next/navigation";
-import { useAuthStore } from "@/stores/auth";
-import { AppShell, NavLink, ScrollArea, TextInput, Group, Avatar, Text, Button, ActionIcon } from "@mantine/core";
-import { IconSearch, IconHome, IconBuilding, IconTool, IconCalendar, IconCar, IconPaw, IconBuildingStore, IconCash, IconUsers, IconSettings, IconMoon, IconSun, IconBell, IconCreditCard, IconShield } from "@tabler/icons-react";
-import { useLocalStorage } from "@mantine/hooks";
-import { useMantineColorScheme } from "@mantine/core";
-import NotificationBell from "@/components/notifications/NotificationBell";
+/**
+ * Sidebar and drawer content (#4543), rendered from nav-config so the
+ * desktop sidebar, the phone/tablet drawer, the rail and the tab bar show
+ * the same sections. Built to the approved shell spec (KB
+ * design/app-shell.md, artifact #75 v1).
+ *
+ * - variant "sidebar" (desktop >= 992 px, 260 px column): brand, family card,
+ *   search with a "/" shortcut, 40 px nav rows, the "Household" group, and a
+ *   foot with Settings and the user button. The user button opens the
+ *   account menu upward (theme picker, log out).
+ * - variant "drawer" (phone and tablet, inside DashboardShell's Drawer, which
+ *   draws the brand row and close button): family card, 16 px search, 48 px
+ *   rows grouped "Household" and "You", and a foot with the avatar, name,
+ *   email and a Log out button.
+ *
+ * Sections are filtered by the user's household role (useNavSections). The
+ * UI only hides; the API enforces the role policy.
+ *
+ * Notifications live on the header bell at every breakpoint (spec), so the
+ * old in-sidebar bell is gone. Log out is a native POST to /api/auth/logout
+ * (#4424) in both variants.
+ *
+ * `familySlot` IS the family card: the shell passes the family switcher (#4574)
+ * so the name, the role and the "5 members" line come from the same household
+ * the whole app is scoped to. There is no fallback card on purpose — a second
+ * implementation reading GET /households/me would be a second source of truth
+ * about which family you are in.
+ */
 
-interface NavItem {
-  name: string;
-  href: string;
-  icon: React.ReactNode;
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
+import { Avatar, Box, Menu, Text, TextInput, UnstyledButton, VisuallyHidden } from "@mantine/core";
+import { IconChevronRight, IconLogout, IconSearch, IconSettings } from "@tabler/icons-react";
+import ColorSchemeControl from "@/components/ui/ColorSchemeControl";
+import { teardownSession } from "@/lib/session-teardown";
+import { useAuthStore } from "@/stores/auth";
+import {
+  NAV_GROUP_LABELS,
+  NAV_ICON_STROKE,
+  activeSection,
+  type NavGroup,
+  type NavSection,
+} from "@/components/shared/nav-config";
+import { useNavSections } from "@/components/shared/use-nav-role";
+import HomeMark from "@/components/shared/HomeMark";
+import classes from "./Sidebar.module.css";
+
+export type SidebarVariant = "sidebar" | "drawer";
+
+interface SidebarProps {
+  variant?: SidebarVariant;
+  /** The family card: the family switcher (#4574), supplied by the shell. */
+  familySlot: React.ReactNode;
 }
 
-const navItems: NavItem[] = [
-  { name: "Home", href: "/dashboard", icon: <IconHome size={20} /> },
-  { name: "Properties", href: "/dashboard/properties", icon: <IconBuilding size={20} /> },
-  { name: "Assets", href: "/dashboard/assets", icon: <IconTool size={20} /> },
-  { name: "Maintenance", href: "/dashboard/maintenance", icon: <IconTool size={20} /> },
-  { name: "Calendar", href: "/dashboard/calendar", icon: <IconCalendar size={20} /> },
-  { name: "Vehicles", href: "/dashboard/vehicles", icon: <IconCar size={20} /> },
-  { name: "Pets", href: "/dashboard/pets", icon: <IconPaw size={20} /> },
-  { name: "Vendors", href: "/dashboard/vendors", icon: <IconBuildingStore size={20} /> },
-  { name: "Bills", href: "/dashboard/bills", icon: <IconCash size={20} /> },
-  { name: "Loans", href: "/dashboard/loans", icon: <IconCreditCard size={20} /> },
-  { name: "Members", href: "/dashboard/members", icon: <IconUsers size={20} /> },
-  { name: "Settings", href: "/dashboard/settings", icon: <IconSettings size={20} /> },
-  { name: "Admin", href: "/dashboard/admin", icon: <IconShield size={20} /> },
-];
-
-export default function Sidebar() {
+export default function Sidebar({ variant = "sidebar", familySlot }: SidebarProps) {
   const pathname = usePathname();
-  const router = useRouter();
-  const user = useAuthStore((s) => s.user);
-  const [searchQuery, setSearchQuery] = useState("");
-  const { colorScheme, toggleColorScheme } = useMantineColorScheme();
-  const [darkMode, setDarkMode] = useLocalStorage({
-    key: "mantine-color-scheme",
-    defaultValue: "light",
-  });
+  const current = activeSection(pathname)?.id;
+  const sections = useNavSections();
+  const inGroup = (g: NavGroup) => sections.filter((s) => s.group === g);
+  const drawer = variant === "drawer";
 
-  const handleSearch = useCallback(
-    (e?: React.FormEvent) => {
-      e?.preventDefault();
-      const trimmed = searchQuery.trim();
-      if (!trimmed) return;
-      router.push("/dashboard/search?q=" + encodeURIComponent(trimmed));
-    },
-    [searchQuery, router],
+  const main = inGroup("main");
+  const household = inGroup("household");
+  const you = inGroup("you");
+
+  return (
+    <div className={classes.root} data-variant={variant} data-testid={`nav-${variant}`}>
+      {!drawer && <Brand />}
+
+      <div className={classes.family}>{familySlot}</div>
+
+      <SidebarSearch variant={variant} />
+
+      <div className={classes.nav}>
+        <NavList sections={main} current={current} />
+        {household.length > 0 && (
+          <NavList label={NAV_GROUP_LABELS.household} sections={household} current={current} />
+        )}
+        {/* "You" is a group in the drawer; the sidebar pins it to its foot. */}
+        {drawer && you.length > 0 && <NavList label={NAV_GROUP_LABELS.you} sections={you} current={current} />}
+      </div>
+
+      <div className={classes.foot}>
+        {!drawer && you.length > 0 && <NavList sections={you} current={current} />}
+        {drawer ? <DrawerAccount /> : <SidebarAccount />}
+      </div>
+    </div>
   );
+}
 
-  const handleLogout = async () => {
-    await useAuthStore.getState().logout();
-    router.push("/login");
-  };
+// ─── Brand ────────────────────────────────────────────────────
 
-  const isActive = (href: string) => {
-    if (href === "/dashboard") return pathname === "/dashboard";
-    return pathname.startsWith(href);
-  };
+/**
+ * The accent logo tile and wordmark (also the drawer's title).
+ *
+ * The mark is `HomeMark` (#5200): the approved shell mockup's house glyph on
+ * the 28 px accent tile, transcribed from artifact #75 v1. It used to be a
+ * letter "H", which read as a placeholder for the product's only piece of
+ * brand. The tile's geometry now lives in that component, so the mark is
+ * identical wherever it is used; this row only supplies the wordmark.
+ */
+export function Brand({ as: Tag = "div" }: { as?: "div" | "span" }) {
+  return (
+    <Tag className={classes.brand}>
+      <HomeMark size={28} />
+      <span className={classes.brandName}>Home OS</span>
+    </Tag>
+  );
+}
 
-  const getNavLinkProps = (href: string) => {
-    const active = isActive(href);
-    return {
-      active: active,
-      styles: {
-        label: { color: active ? "#0891B2" : "#333" },
-        icon: { color: active ? "#0891B2" : "#999" },
-        body: {
-          backgroundColor: active ? "#e0f7fa" : "transparent",
-        },
-      },
+// ─── Search ───────────────────────────────────────────────────
+
+function SidebarSearch({ variant }: { variant: SidebarVariant }) {
+  const router = useRouter();
+  const [query, setQuery] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const drawer = variant === "drawer";
+
+  // "/" focuses the sidebar search, unless the user is already typing.
+  useEffect(() => {
+    if (drawer) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      const input = inputRef.current;
+      // Only when the sidebar is on screen (it's display:none below 62em).
+      if (!input || input.offsetParent === null) return;
+      e.preventDefault();
+      input.focus();
     };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawer]);
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = query.trim();
+    if (!q) return;
+    router.push("/dashboard/search?q=" + encodeURIComponent(q));
   };
 
   return (
-    <div>
-      <AppShell.Section grow component={ScrollArea}>
-        {/* Logo */}
-        <div className="flex h-16 items-center border-b border-gray-200 px-0">
-          <span className="text-lg font-bold text-cyan-600">Home OS</span>
-        </div>
+    <form role="search" onSubmit={submit} className={classes.search}>
+      <TextInput
+        ref={inputRef}
+        type="search"
+        value={query}
+        onChange={(e) => setQuery(e.currentTarget.value)}
+        placeholder="Search"
+        aria-label="Search"
+        leftSection={<IconSearch size={drawer ? 18 : 16} stroke={NAV_ICON_STROKE} aria-hidden />}
+        rightSection={
+          drawer ? undefined : (
+            <kbd className={classes.kbd} aria-hidden>
+              /
+            </kbd>
+          )
+        }
+        rightSectionPointerEvents="none"
+        classNames={{ input: classes.searchInput }}
+      />
+    </form>
+  );
+}
 
-        {/* Search */}
-        <div className="py-3">
-          <form onSubmit={handleSearch}>
-            <TextInput
-              placeholder="Search..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              leftSection={<IconSearch size={16} />}
-              size="xs"
-              radius="md"
-            />
-          </form>
-        </div>
+// ─── Nav rows ─────────────────────────────────────────────────
 
-        {/* Notification Bell */}
-        <div className="py-2">
-          <NotificationBell />
+function NavList({
+  label,
+  sections,
+  current,
+}: {
+  label?: string | null;
+  sections: NavSection[];
+  current: string | undefined;
+}) {
+  return (
+    <div className={classes.group}>
+      {label && (
+        <div className={classes.groupLabel} aria-hidden>
+          {label}
         </div>
+      )}
+      <ul className={classes.list} aria-label={label ?? undefined}>
+        {sections.map((s) => (
+          <li key={s.id}>
+            <NavRow section={s} active={current === s.id} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
-        {/* Nav items */}
-        <div className="space-y-1">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.name}
-              href={item.href}
-              label={item.name}
-              leftSection={item.icon}
-              onClick={() => router.push(item.href)}
-              {...getNavLinkProps(item.href)}
-            />
-          ))}
-        </div>
-      </AppShell.Section>
+function NavRow({ section, active }: { section: NavSection; active: boolean }) {
+  const Icon = section.icon;
+  const inner = (
+    <>
+      <Icon size={20} stroke={NAV_ICON_STROKE} className={classes.rowIcon} aria-hidden />
+      <span className={classes.rowLabel}>{section.label}</span>
+    </>
+  );
 
-      {/* User info and dark mode toggle */}
-      <AppShell.Section>
-        <div className="flex items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-3">
-            <Avatar size="sm" radius="xl">
-              {user?.name?.[0]?.toUpperCase() || "U"}
-            </Avatar>
-            <div className="min-w-0 flex-1">
-              <Text size="sm" fw={500} truncate="end">
-                {user?.name || "User"}
-              </Text>
-              <Text size="xs" c="dimmed" truncate="end">
-                {user?.email}
-              </Text>
-            </div>
-          </div>
-          <Button
-            variant="subtle"
-            size="xs"
-            onClick={handleLogout}
-            color="red"
-          >
-            Logout
-          </Button>
-        </div>
-        <div className="flex items-center justify-center px-4 py-2 border-t border-gray-200">
-          <ActionIcon
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              const newScheme = colorScheme === "dark" ? "light" : "dark";
-              setDarkMode(newScheme);
-              toggleColorScheme();
-            }}
-          >
-            {colorScheme === "dark" ? <IconSun size={18} /> : <IconMoon size={18} />}
-          </ActionIcon>
-        </div>
-      </AppShell.Section>
+  // Every section in nav-config is a real page (#5199): a destination with no
+  // page is not in the list at all, so a row is always a link.
+  return (
+    <Link
+      href={section.href}
+      className={classes.row}
+      aria-current={active ? "page" : undefined}
+      data-active={active || undefined}
+    >
+      {inner}
+    </Link>
+  );
+}
+
+// ─── Account ──────────────────────────────────────────────────
+
+function useAccount() {
+  const user = useAuthStore((s) => s.user);
+  const name = user?.name || "Account";
+  const initials =
+    (user?.name || user?.email || "U")
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((p) => p[0]!.toUpperCase())
+      .join("") || "U";
+  return { user, name, initials };
+}
+
+/**
+ * Native POST to /api/auth/logout (#4424): the route expires the session
+ * cookies and 303s to /login, and the full page load drops the React Query
+ * cache.
+ *
+ * Before that (#4648) the page purges what the session left in the browser —
+ * Cache Storage (the pre-#4648 worker cached authenticated `/bff/*` responses
+ * there), localStorage (`home-os-auth` profile, `home-os-recent` titles,
+ * `home-os-property`), sessionStorage, IndexedDB — and clears the in-memory
+ * user. A shared family device must not serve one person's household data to
+ * the next one after this button is pressed.
+ *
+ * The submit is held back for that purge, but never for long: teardownSession()
+ * bounds each step (2 s) and the form is submitted from `finally`, so a wedged
+ * browser cannot trap the person on the page still holding a session. The
+ * route's own `Clear-Site-Data` header then clears the rest anyway.
+ */
+function LogoutForm({ children, className }: { children: React.ReactNode; className?: string }) {
+  const submitting = useRef(false);
+  return (
+    <form
+      method="post"
+      action="/api/auth/logout"
+      className={className}
+      onSubmit={(event) => {
+        // A double submit while the purge is running must not queue a second one.
+        if (submitting.current) {
+          event.preventDefault();
+          return;
+        }
+        const form = event.currentTarget;
+        // No JS? The form posts and the route's Clear-Site-Data does the work.
+        if (typeof window === "undefined") return;
+        event.preventDefault();
+        submitting.current = true;
+        void purgeThenSubmit(form);
+      }}
+    >
+      {children}
+    </form>
+  );
+}
+
+/**
+ * Runs the teardown, then submits the native form (so the cookies still go).
+ *
+ * Order matters: dropping the in-memory user FIRST makes zustand's persist
+ * middleware write `home-os-auth` one last time (with `user: null`), and the
+ * purge that follows removes the key outright. The other way round leaves an
+ * empty-looking key behind.
+ */
+async function purgeThenSubmit(form: HTMLFormElement): Promise<void> {
+  try {
+    useAuthStore.getState().setUser(null);
+    await teardownSession({ unregister: true });
+  } finally {
+    form.submit();
+  }
+}
+
+/**
+ * The account menu's rows: name and email, Settings, the Theme picker and
+ * Log out. Shared by the header avatar menu (phone/tablet) and the sidebar
+ * user button (desktop).
+ */
+export function AccountMenuItems() {
+  const { user, name } = useAccount();
+  return (
+    <>
+      <Box px="sm" py="xs">
+        <Text size="sm" fw={600} truncate="end">
+          {name}
+        </Text>
+        {user?.email && (
+          <Text size="xs" c="var(--ink-3)" truncate="end">
+            {user.email}
+          </Text>
+        )}
+      </Box>
+      <Menu.Divider />
+      <Menu.Item component={Link} href="/dashboard/settings" leftSection={<IconSettings size={18} stroke={NAV_ICON_STROKE} />}>
+        Settings
+      </Menu.Item>
+      <Menu.Divider />
+      <Box px="sm" py="xs">
+        <Text size="xs" fw={500} c="var(--ink-2)" mb={6}>
+          Theme
+        </Text>
+        <ColorSchemeControl />
+      </Box>
+      <Menu.Divider />
+      <LogoutForm>
+        <Menu.Item
+          component="button"
+          type="submit"
+          color="red.9"
+          closeMenuOnClick={false}
+          leftSection={<IconLogout size={18} stroke={NAV_ICON_STROKE} />}
+          style={{ color: "var(--danger)" }}
+        >
+          Log out
+        </Menu.Item>
+      </LogoutForm>
+    </>
+  );
+}
+
+/** Desktop foot: the user button opens the account menu upward. */
+function SidebarAccount() {
+  const { user, name, initials } = useAccount();
+  return (
+    <Menu position="top-start" width={236} shadow="lg" radius="md" withinPortal offset={6}>
+      <Menu.Target>
+        {/* Named by its content, not aria-label, so the visible name and email are part of
+            the accessible name (WCAG 2.5.3, axe label-content-name-mismatch, #4752). */}
+        <UnstyledButton className={classes.userButton} aria-haspopup="menu">
+          <Avatar size={32} radius="xl" color="cyan.9" variant="filled" src={user?.avatar_url ?? undefined} aria-hidden>
+            {initials}
+          </Avatar>
+          <span className={classes.userText}>
+            <VisuallyHidden>Account menu for </VisuallyHidden>
+            <span className={classes.userName}>{name}</span>
+            {user?.email && <span className={classes.userEmail}>{user.email}</span>}
+          </span>
+          <IconChevronRight size={16} stroke={NAV_ICON_STROKE} className={classes.userChevron} aria-hidden />
+        </UnstyledButton>
+      </Menu.Target>
+      <Menu.Dropdown>
+        <AccountMenuItems />
+      </Menu.Dropdown>
+    </Menu>
+  );
+}
+
+/** Drawer foot: avatar, name, email and a Log out button. */
+function DrawerAccount() {
+  const { user, name, initials } = useAccount();
+  return (
+    <div className={classes.drawerAccount}>
+      <Avatar size={36} radius="xl" color="cyan.9" variant="filled" src={user?.avatar_url ?? undefined}>
+        {initials}
+      </Avatar>
+      <span className={classes.userText}>
+        <span className={classes.userName}>{name}</span>
+        {user?.email && <span className={classes.userEmail}>{user.email}</span>}
+      </span>
+      <LogoutForm>
+        <button type="submit" className={classes.logout}>
+          <IconLogout size={18} stroke={NAV_ICON_STROKE} aria-hidden />
+          Log out
+        </button>
+      </LogoutForm>
     </div>
   );
 }

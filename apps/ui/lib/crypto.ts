@@ -9,7 +9,8 @@
  * Algorithm choices (see architecture/secrets-manager-research.md):
  *   - Key derivation: PBKDF2, 100,000 iterations, SHA-256
  *   - Encryption:     AES-256-GCM (authenticated, 12-byte IV)
- *   - Key verification: SHA-256 hash of the exported key material
+ *   - Key verification: base64(SHA-256(exported key)) sent as `verifier`;
+ *     the API stores only argon2id(verifier). See computeVerifier.
  */
 
 // --- base64 helpers (binary-safe) --------------------------------------------
@@ -64,7 +65,7 @@ const IV_LENGTH = 12; // bytes (AES-GCM standard nonce)
  * @param password   The user's master password (UTF-8).
  * @param saltBase64 Base64-encoded salt (from generateSalt or the API).
  * @returns An extractable CryptoKey usable for AES-GCM encrypt/decrypt.
- *          Extractable so hashKey() can export + hash it for verification.
+ *          Extractable so computeVerifier() can export + hash it.
  */
 export async function deriveKey(
   password: string,
@@ -154,14 +155,21 @@ export function generateIV(): string {
 }
 
 /**
- * Hash a CryptoKey for verification. Exports the raw key material, computes
- * SHA-256, and returns the base64-encoded digest. The API stores this hash
- * and compares it on unlock to verify the user entered the correct password
- * without ever receiving the key itself.
+ * Compute the key verifier sent to POST /api/v1/secrets/setup and /verify as
+ * `verifier`: base64(SHA-256(raw key bytes)). The API never stores it as is;
+ * it keeps only argon2id(verifier) (migration 051, #4440) and compares in
+ * constant time, so the server never receives the key or the password.
+ *
+ * DO NOT CHANGE THIS COMPUTATION. Every household that has already set up a
+ * master password has argon2id(this exact value) (or, before its first unlock
+ * after 051, this exact value) stored server-side. A different derivation
+ * (HMAC, domain separation, another hash) would lock all of them out. If it
+ * ever has to change, add a verifier version the API stores alongside it and
+ * upgrade on unlock; see KB architecture/secrets-management.md.
  *
  * The key MUST be created with extractable=true (see deriveKey).
  */
-export async function hashKey(key: CryptoKey): Promise<string> {
+export async function computeVerifier(key: CryptoKey): Promise<string> {
   const raw = await crypto.subtle.exportKey("raw", key);
   const digest = await crypto.subtle.digest("SHA-256", raw);
   return bufferToBase64(digest);

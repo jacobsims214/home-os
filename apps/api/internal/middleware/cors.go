@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -14,18 +15,52 @@ import (
 // In dev mode (allowAll=true) any origin is accepted.
 // In production (allowAll=false) only the configured allowedOrigin is accepted.
 func CORS(allowAll bool, allowedOrigin string) func(http.Handler) http.Handler {
+	return corsWith(func(origin string) bool {
+		return allowAll || (allowedOrigin != "" && matchOrigin(origin, allowedOrigin))
+	})
+}
+
+// CORSFor allows only publicOrigin (the scheme://host[:port] of PUBLIC_URL)
+// and, when allowLocalhost is set (local dev only), any http(s) origin on
+// localhost, 127.0.0.1 or [::1]. Every other origin gets no CORS headers, so
+// browsers refuse cross-origin reads (#4685).
+func CORSFor(publicOrigin string, allowLocalhost bool) func(http.Handler) http.Handler {
+	return corsWith(func(origin string) bool {
+		if publicOrigin != "" && origin == publicOrigin {
+			return true
+		}
+		return allowLocalhost && isLocalhostOrigin(origin)
+	})
+}
+
+// OriginOf returns the scheme://host[:port] origin of rawURL, or "" if it is
+// not an absolute http(s) URL.
+func OriginOf(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+}
+
+func isLocalhostOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	switch u.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
+}
+
+func corsWith(isAllowed func(origin string) bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 
-			allowed := false
-			if origin != "" {
-				if allowAll {
-					allowed = true
-				} else if allowedOrigin != "" && matchOrigin(origin, allowedOrigin) {
-					allowed = true
-				}
-			}
+			allowed := origin != "" && isAllowed(origin)
 
 			if allowed {
 				// Echo the exact origin back — required when credentials: 'include' is used.
@@ -33,7 +68,7 @@ func CORS(allowAll bool, allowedOrigin string) func(http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, X-Household-ID")
 				w.Header().Set("Access-Control-Max-Age", "86400")
 				// Vary header tells caches the response differs by Origin
 				w.Header().Add("Vary", "Origin")

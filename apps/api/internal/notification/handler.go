@@ -2,6 +2,7 @@ package notification
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -34,26 +35,26 @@ type createNotificationRequest struct {
 }
 
 type notificationResponse struct {
-	ID           string     `json:"id"`
-	HouseholdID  string     `json:"household_id"`
-	Type         string     `json:"type"`
-	Title        string     `json:"title"`
-	Body         string     `json:"body"`
-	EntityType   *string    `json:"entity_type,omitempty"`
-	EntityID     *string    `json:"entity_id,omitempty"`
-	ReadAt       *string    `json:"read_at,omitempty"`
-	CreatedAt    string     `json:"created_at"`
+	ID          string  `json:"id"`
+	HouseholdID string  `json:"household_id"`
+	Type        string  `json:"type"`
+	Title       string  `json:"title"`
+	Body        string  `json:"body"`
+	EntityType  *string `json:"entity_type,omitempty"`
+	EntityID    *string `json:"entity_id,omitempty"`
+	ReadAt      *string `json:"read_at,omitempty"`
+	CreatedAt   string  `json:"created_at"`
 }
 
 // toNotificationResponse converts a Notification domain model to a response DTO.
 func toNotificationResponse(n *Notification) notificationResponse {
 	resp := notificationResponse{
-		ID:           n.ID,
-		HouseholdID:  n.HouseholdID,
-		Type:         n.Type,
-		Title:        n.Title,
-		Body:         n.Body,
-		CreatedAt:    n.CreatedAt.Format(http.TimeFormat),
+		ID:          n.ID,
+		HouseholdID: n.HouseholdID,
+		Type:        n.Type,
+		Title:       n.Title,
+		Body:        n.Body,
+		CreatedAt:   n.CreatedAt.Format(http.TimeFormat),
 	}
 	if n.EntityType != nil {
 		resp.EntityType = n.EntityType
@@ -68,7 +69,8 @@ func toNotificationResponse(n *Notification) notificationResponse {
 	return resp
 }
 
-// List returns all unread notifications for the authenticated household.
+// List returns the caller's unread notifications: family-wide ones and their
+// own personal ones, limited to what their current role may see.
 // GET /api/v1/notifications
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())
@@ -77,7 +79,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	notifications, err := h.repo.ListUnread(r.Context(), claims.HouseholdID)
+	notifications, err := h.repo.ListUnread(r.Context(), claims.HouseholdID, callerUser(claims.UserID), claims.Role)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -111,9 +113,19 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.EntityID != nil {
+		if _, err := uuid.Parse(*req.EntityID); err != nil {
+			apierr.BadRequest(w, "invalid entity_id")
+			return
+		}
+	}
+
 	n, err := h.repo.Create(r.Context(), claims.HouseholdID, req.Type, req.Title, req.Body, req.EntityType, req.EntityID)
 	if err != nil {
-		apierr.InternalError(w, err)
+		// notifications.entity_type is entity_kind with an owner check
+		// (migration 070): an unknown kind is 400, a record of another
+		// family (or a missing one) 404.
+		apierr.DB(w, err)
 		return
 	}
 
@@ -146,9 +158,14 @@ func (h *Handler) MarkRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the notification belongs to the authenticated household
-	// by checking if it exists and updating it
-	if err := h.repo.MarkRead(r.Context(), id.String(), claims.HouseholdID); err != nil {
+	// Only a notification the caller may see is marked; any other id is 404,
+	// whether it is missing, another family's or member's, or hidden from
+	// their current role.
+	if err := h.repo.MarkRead(r.Context(), id.String(), claims.HouseholdID, callerUser(claims.UserID), claims.Role); err != nil {
+		if errors.Is(err, apierr.ErrNotFound) {
+			apierr.NotFound(w, "notification not found")
+			return
+		}
 		apierr.InternalError(w, err)
 		return
 	}

@@ -174,12 +174,19 @@ func (r *Repo) Update(ctx context.Context, assetID, householdID uuid.UUID, updat
 		return nil, fmt.Errorf("update asset: %w", pgx.ErrNoRows)
 	}
 
-	// Apply non-nil updates.
+	// Apply non-nil updates. A pointer to uuid.Nil clears the column.
+	// Moving an asset to another property without naming a room takes it out
+	// of its old room; otherwise the database would derive the old property
+	// back from that room. Clearing the property makes the asset family-level.
 	if updates.PropertyID != nil {
-		existing.PropertyID = updates.PropertyID
+		newProp := nilIfZero(updates.PropertyID)
+		if updates.RoomID == nil && !sameUUID(existing.PropertyID, newProp) {
+			existing.RoomID = nil
+		}
+		existing.PropertyID = newProp
 	}
 	if updates.RoomID != nil {
-		existing.RoomID = updates.RoomID
+		existing.RoomID = nilIfZero(updates.RoomID)
 	}
 	if updates.Name != "" {
 		existing.Name = updates.Name
@@ -212,20 +219,22 @@ func (r *Repo) Update(ctx context.Context, assetID, householdID uuid.UUID, updat
 		existing.Notes = updates.Notes
 	}
 
-_, err = tx.Exec(ctx,
+// RETURNING property_id: the database may derive it from the room.
+	err = tx.QueryRow(ctx,
 		`UPDATE assets SET
 		    property_id = $3, room_id = $4,
 		    name = $5, category = $6, manufacturer = $7, model = $8,
 		    serial_number = $9, purchase_date = $10, purchase_price = $11,
 		    current_value = $12, warranty_expiry = $13, notes = $14,
 		    updated_at = NOW()
-		 WHERE id = $1 AND household_id = $2`,
+		 WHERE id = $1 AND household_id = $2
+		 RETURNING property_id, updated_at`,
 		assetID, householdID,
 		existing.PropertyID, existing.RoomID,
 		existing.Name, existing.Category, existing.Manufacturer, existing.Model,
 		existing.SerialNumber, existing.PurchaseDate, existing.PurchasePrice,
 		existing.CurrentValue, existing.WarrantyExpiry, existing.Notes,
-	)
+	).Scan(&existing.PropertyID, &existing.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("update asset: exec: %w", err)
 	}
@@ -297,4 +306,18 @@ func (r *Repo) getInTx(ctx context.Context, tx pgx.Tx, assetID, householdID uuid
 		return nil, fmt.Errorf("collect asset in tx: %w", err)
 	}
 	return asset, nil
+}
+
+func nilIfZero(id *uuid.UUID) *uuid.UUID {
+	if id == nil || *id == uuid.Nil {
+		return nil
+	}
+	return id
+}
+
+func sameUUID(a, b *uuid.UUID) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }

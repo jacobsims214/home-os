@@ -1,4 +1,8 @@
-// Package calendar provides MCP tools for calendar operations.
+// Package calendar provides the MCP calendar tools (v2 catalog: calendar_find,
+// calendar_create, event_find, event_create, event_update, event_delete,
+// calendar_find_free_time, agenda_get). Results are built with
+// internal/respond.
+//
 // Each tool function accepts a *pgxpool.Pool and returns a tool definition
 // plus handler function. Handlers extract JWT claims from context to scope
 // all queries by household_id.
@@ -7,43 +11,81 @@ package calendar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/bill"
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 )
 
-// Calendar represents a calendar collection returned by list_calendars.
+// Calendar is one of the family's calendars, returned by calendar_find.
 type Calendar struct {
-	ID         string  `json:"id"`
+	ID         string  `json:"id" jsonschema_description:"Calendar id; pass it (or the name) as calendar_id."`
 	Name       string  `json:"name"`
-	Type       string  `json:"type"`
+	Type       string  `json:"type" jsonschema_description:"family, bills, maintenance, vehicles, properties or custom."`
 	Color      *string `json:"color,omitempty"`
-	PropertyID *string `json:"property_id,omitempty"`
+	PropertyID *string `json:"property_id,omitempty" jsonschema_description:"The property this calendar belongs to, if any."`
 }
 
-// Event represents a calendar event parsed from calendar_objects + ical_data JSON.
+// Event is a calendar event parsed from calendar_objects + ical_data JSON.
+// Start and End are RFC 3339 in the family timezone's offset; an all-day
+// event runs from local midnight of its first day to local midnight after
+// its last day.
 type Event struct {
-	ID          string `json:"id"`
-	CalendarID  string `json:"calendar_id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Start       string `json:"start"`
-	End         string `json:"end"`
-	AllDay      bool   `json:"all_day"`
-	Location    string `json:"location"`
-	Color       string `json:"color"`
-	EventType   string `json:"event_type"`
+	ID           string `json:"id" jsonschema_description:"Event id; pass it as event_id to event_update or event_delete."`
+	CalendarID   string `json:"calendar_id"`
 	CalendarName string `json:"calendar_name,omitempty"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	Start        string `json:"start" jsonschema_description:"Start, RFC 3339 in the family timezone."`
+	End          string `json:"end" jsonschema_description:"End (exclusive), RFC 3339 in the family timezone."`
+	AllDay       bool   `json:"all_day"`
+	Location     string `json:"location"`
+	Color        string `json:"color"`
+	EventType    string `json:"event_type"`
+	// LocalDate (YYYY-MM-DD) and Weekday ("Wednesday") are the event's
+	// start day in the household timezone, computed so callers never have
+	// to derive the weekday themselves. Empty when start is unreadable.
+	LocalDate string `json:"local_date" jsonschema_description:"Start day in the family timezone (YYYY-MM-DD)."`
+	Weekday   string `json:"weekday" jsonschema_description:"Weekday of local_date, e.g. Wednesday."`
+	Recurring bool   `json:"recurring" jsonschema_description:"true for a repeating series; edit it with scope this, following or all."`
+	// Recurrence, reminders and people (#4465), read from ical_raw while it
+	// is current for the JSON (the rule CalDAV serves by).
+	Repeat          *Repeat       `json:"repeat,omitempty" jsonschema_description:"How the event repeats; absent for one-off events."`
+	RRule           string        `json:"rrule,omitempty" jsonschema_description:"The RFC 5545 RRULE phones see."`
+	ExceptDates     []string      `json:"except_dates,omitempty" jsonschema_description:"Skipped occurrence dates (YYYY-MM-DD)."`
+	ReminderMinutes []int         `json:"reminder_minutes,omitempty" jsonschema_description:"Phone alerts, minutes before the start."`
+	People          []EventPerson `json:"people,omitempty" jsonschema_description:"Family members the event is for."`
+	RecurrenceID    string        `json:"recurrence_id,omitempty" jsonschema_description:"For one occurrence: its original start; pass it as occurrence_date."`
+
+	// EntityType is calendar_objects.entity_type: what the event is a mirror
+	// of ('bill', 'maintenance_task', a person or pet link, or nothing). It is
+	// never serialized; the role rule uses it to classify an event by what it
+	// mirrors (#4807), because a bill-linked event on the Family calendar still
+	// carries the bill's name.
+	EntityType string `json:"-"`
+
+	// billLike marks an entry that MAKES A CLAIM ABOUT MONEY and is not the
+	// bills module's record of that money (#4943): no entity link, not a
+	// bill's mirror, and either a stated amount or a place on a Bills calendar.
+	// Such an entry is what a briefing read as "the bill is due"; the
+	// briefings leave it out of the events list and report it as a bill-like
+	// entry instead (see billlook.go). A title that only says the word "bill"
+	// ("Electric bill" as a person's own note) stays an ordinary event: it
+	// claims no amount and no due date, and bill_like_entries names it anyway.
+	// Never serialized.
+	billLike bool
 }
 
 // eventJSON is the JSON structure stored in ical_data column.
@@ -58,20 +100,52 @@ type eventJSON struct {
 	EventType   string `json:"event_type"`
 }
 
-// AvailableSlot represents a free time slot returned by find_available_slots.
+// AvailableSlot is a free time slot returned by calendar_find_free_time.
+// Start and End are RFC 3339 in the household's offset.
 type AvailableSlot struct {
-	Start string `json:"start"`
-	End   string `json:"end"`
+	LocalDate string `json:"local_date" jsonschema_description:"Day of the slot in the family timezone (YYYY-MM-DD)."`
+	Weekday   string `json:"weekday"`
+	Start     string `json:"start"`
+	End       string `json:"end"`
 }
 
-// ConflictEvent represents a conflicting event returned by check_conflicts.
+// ConflictEvent is an existing event that overlaps a new or moved one.
 type ConflictEvent struct {
 	ID           string `json:"id"`
 	CalendarID   string `json:"calendar_id"`
+	CalendarName string `json:"calendar_name,omitempty"`
 	Title        string `json:"title"`
 	Start        string `json:"start"`
 	End          string `json:"end"`
-	CalendarName string `json:"calendar_name,omitempty"`
+	AllDay       bool   `json:"all_day"`
+	LocalDate    string `json:"local_date"`
+	Weekday      string `json:"weekday"`
+}
+
+// eventWriteResult is event_create's and event_update's data: the event as
+// stored and the other events it overlaps (never null; empty when none, and
+// always empty for an update that did not change the event's time).
+type eventWriteResult struct {
+	Event          Event           `json:"event"`
+	Conflicts      []ConflictEvent `json:"conflicts" jsonschema_description:"Other events overlapping this one. The event is saved either way; tell the user."`
+	ConflictsError string          `json:"conflicts_error,omitempty" jsonschema_description:"Set when the overlap check failed; check with event_find."`
+	Duplicate      bool            `json:"duplicate,omitempty" jsonschema_description:"true when an identical event made in the last 10 minutes was returned instead of a new one."`
+	// Scope is set for an edit of a repeating event.
+	Scope string `json:"scope,omitempty" jsonschema_description:"Which occurrences changed: this, following or all."`
+	// OriginalEventID is set for scope following: the series was split and
+	// event is the new part.
+	OriginalEventID string `json:"original_event_id,omitempty" jsonschema_description:"scope following: the event that keeps the earlier occurrences."`
+	Note            string `json:"note,omitempty"`
+}
+
+// eventDeleteResult is event_delete's data: the event that was deleted, or
+// for one occurrence (or the following ones) the series as it now stands.
+type eventDeleteResult struct {
+	Event          Event  `json:"event"`
+	SeriesDeleted  bool   `json:"series_deleted" jsonschema_description:"true when a whole repeating series was deleted."`
+	Scope          string `json:"scope,omitempty" jsonschema_description:"this, following or all for a repeating event."`
+	OccurrenceDate string `json:"occurrence_date,omitempty" jsonschema_description:"The occurrence removed (scope this) or where the series now ends (following)."`
+	Note           string `json:"note,omitempty"`
 }
 
 // ─────────────────────────────────────────────
@@ -154,15 +228,43 @@ type eventRow struct {
 	CalendarID   string
 	IcalData     string
 	EventType    string
+	EntityType   *string
 	CalendarName string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	Rrule        *string
+	IcalRaw      *string
+	// CalendarType is calendars.type ('family', 'bills', 'maintenance',
+	// 'vehicles', 'properties', 'custom'): the calendar's kind, which together
+	// with EntityType (the record the event mirrors, #4807) says what kind of
+	// record the event is for the role view (#4808).
+	CalendarType string
+	// SupersededAt is when Home OS retired this entry in place because a bill
+	// with the same name and amount is the record for it (#4943, migration
+	// 073). A superseded entry is not deleted — its text, notes and people
+	// survive — but every live read skips it, so the Bills calendar shows the
+	// bill's own projection once and no briefing can read a stale "due".
+	SupersededAt     *time.Time
+	SupersededReason *string
+	SupersededBy     *string
 }
 
-func parseEventFromRow(row eventRow) (*Event, error) {
+// parseEventFromRow decodes a calendar_objects row. All-day events come back
+// as household-local midnights (see localizeAllDay) and timed events in the
+// household's offset, so every tool shows the same local times.
+func parseEventFromRow(row eventRow, loc *time.Location) (*Event, error) {
+	ev, _, err := parseRow(row, loc)
+	return ev, err
+}
+
+// parseRow is parseEventFromRow plus the stored object the event was read
+// from (nil obj for rows without rrule/ical_raw), so range reads can expand
+// a series into its occurrences without parsing the raw twice.
+func parseRow(row eventRow, loc *time.Location) (*Event, storedSeries, error) {
+	var series storedSeries
 	var ej eventJSON
 	if err := json.Unmarshal([]byte(row.IcalData), &ej); err != nil {
-		return nil, fmt.Errorf("parse ical_data: %w", err)
+		return nil, series, fmt.Errorf("parse ical_data: %w", err)
 	}
 	ev := &Event{
 		ID:           row.ID,
@@ -177,7 +279,39 @@ func parseEventFromRow(row eventRow) (*Event, error) {
 		EventType:    row.EventType,
 		CalendarName: row.CalendarName,
 	}
-	return ev, nil
+	if row.EntityType != nil {
+		ev.EntityType = *row.EntityType
+	}
+	// A money claim nobody keeps up to date (#4943): nothing is the record for
+	// it, it is not a bill's own mirror, and it states an amount or sits on a
+	// Bills calendar. See billlook.go.
+	ev.billLike = row.SupersededAt == nil && row.EntityType == nil &&
+		row.EventType != bill.CalendarEventType &&
+		claimsMoney(ej.Title, row.CalendarType)
+	if row.Rrule != nil || row.IcalRaw != nil {
+		series = loadSeries(ej, row.ID, row.Rrule, row.IcalRaw)
+		ev.Recurring = series.recurring() || (series.locked && isRecurringEvent(row.Rrule, row.IcalRaw))
+		var doc map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(row.IcalData), &doc)
+		attachSeries(ev, series, doc, loc)
+	} else if strings.Contains(row.IcalData, `"people"`) {
+		var doc struct {
+			People []EventPerson `json:"people"`
+		}
+		if json.Unmarshal([]byte(row.IcalData), &doc) == nil {
+			ev.People = doc.People
+		}
+	}
+	localizeAllDay(ev, loc)
+	if !ev.AllDay {
+		for _, p := range []*string{&ev.Start, &ev.End} {
+			if t, err := time.Parse(time.RFC3339, *p); err == nil {
+				*p = t.In(loc).Format(time.RFC3339)
+			}
+		}
+	}
+	setLocalDay(ev, loc)
+	return ev, series, nil
 }
 
 // ─────────────────────────────────────────────
@@ -200,73 +334,165 @@ func marshalEventFields(title, description, start, end, location string, allDay 
 	return string(b), nil
 }
 
-// mergeEventFields merges non-empty optional fields into an existing ical_data JSON.
+// mergeEventFields merges the provided (non-nil) fields into an existing
+// ical_data JSON document. It works on the raw key/value map rather than
+// eventJSON so keys this package does not model survive the round-trip —
+// the CalDAV service persists `sequence` there, and dropping it would make
+// Apple Calendar miss revisions. When `sequence` is present it is
+// incremented, as the CalDAV PUT handler does (RFC 5545 §3.8.7.4).
 func mergeEventFields(existingIcalData string, title, description, start, end, location *string, allDay *bool) (string, error) {
-	var ej eventJSON
-	if err := json.Unmarshal([]byte(existingIcalData), &ej); err != nil {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(existingIcalData), &doc); err != nil {
 		return "", fmt.Errorf("parse existing ical_data: %w", err)
 	}
-	if title != nil {
-		ej.Title = *title
+	if doc == nil {
+		doc = map[string]json.RawMessage{}
 	}
-	if description != nil {
-		ej.Description = *description
+	set := func(key string, v any) error {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("marshal %s: %w", key, err)
+		}
+		doc[key] = b
+		return nil
 	}
-	if start != nil {
-		ej.Start = *start
-	}
-	if end != nil {
-		ej.End = *end
-	}
-	if location != nil {
-		ej.Location = *location
+	for _, f := range []struct {
+		key string
+		val *string
+	}{
+		{"title", title},
+		{"description", description},
+		{"start", start},
+		{"end", end},
+		{"location", location},
+	} {
+		if f.val != nil {
+			if err := set(f.key, *f.val); err != nil {
+				return "", err
+			}
+		}
 	}
 	if allDay != nil {
-		ej.AllDay = *allDay
+		if err := set("all_day", *allDay); err != nil {
+			return "", err
+		}
 	}
-	b, err := json.Marshal(ej)
+	if raw, ok := doc["sequence"]; ok {
+		var seq int
+		if err := json.Unmarshal(raw, &seq); err == nil {
+			if err := set("sequence", seq+1); err != nil {
+				return "", err
+			}
+		}
+	}
+	b, err := json.Marshal(doc)
 	if err != nil {
 		return "", fmt.Errorf("marshal merged event: %w", err)
 	}
 	return string(b), nil
 }
 
-// ─────────────────────────────────────────────
-// Helper: verify a calendar belongs to the household
-// ─────────────────────────────────────────────
+// resolveUpdatedTimes works out an event's new start and end from its stored
+// times and the optional new values passed to event_update:
+//
+//   - both given: stored as given;
+//   - only start given: end moves with it, keeping the original duration;
+//   - only end given: start is unchanged;
+//   - neither: unchanged.
+//
+// The result must have end after start. Times are returned in UTC; callers
+// store them as RFC 3339, the convention the API and CalDAV service share.
+func resolveUpdatedTimes(oldStart, oldEnd string, newStart, newEnd *string) (time.Time, time.Time, error) {
+	var start, end time.Time
+	var err error
 
-func verifyCalendarOwnership(ctx context.Context, pool *pgxpool.Pool, calendarID, householdID string) error {
-	var exists bool
-	err := pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM calendars WHERE id = $1 AND household_id = $2)`,
-		calendarID, householdID,
-	).Scan(&exists)
-	if err != nil {
-		return fmt.Errorf("verify calendar: %w", err)
+	if newStart != nil {
+		if start, err = time.Parse(time.RFC3339, *newStart); err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid start format (use ISO 8601 with an offset, e.g. 2026-08-03T14:00:00-05:00): %w", err)
+		}
 	}
-	if !exists {
-		return fmt.Errorf("calendar not found")
+	if newEnd != nil {
+		if end, err = time.Parse(time.RFC3339, *newEnd); err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid end format (use ISO 8601 with an offset, e.g. 2026-08-03T15:00:00-05:00): %w", err)
+		}
 	}
-	return nil
+
+	if newStart == nil || newEnd == nil {
+		storedStart, errS := time.Parse(time.RFC3339, oldStart)
+		storedEnd, errE := time.Parse(time.RFC3339, oldEnd)
+		switch {
+		case newStart == nil && newEnd == nil:
+			if errS != nil || errE != nil {
+				return time.Time{}, time.Time{}, fmt.Errorf("stored event has unreadable start/end; pass start and end")
+			}
+			start, end = storedStart, storedEnd
+		case newStart == nil: // end only
+			if errS != nil {
+				return time.Time{}, time.Time{}, fmt.Errorf("stored event has an unreadable start; pass start too")
+			}
+			start = storedStart
+		default: // start only: keep the original duration
+			if errS != nil || errE != nil || !storedEnd.After(storedStart) {
+				return time.Time{}, time.Time{}, fmt.Errorf("cannot keep the event's duration (stored start/end unreadable); pass end too")
+			}
+			end = start.Add(storedEnd.Sub(storedStart))
+		}
+	}
+
+	if !end.After(start) {
+		return time.Time{}, time.Time{}, fmt.Errorf("end must be after start")
+	}
+	return start.UTC(), end.UTC(), nil
 }
 
-// ─────────────────────────────────────────────
-// Helper: get calendar_id for an event and verify household ownership
-// ─────────────────────────────────────────────
-
-func getEventCalendarID(ctx context.Context, pool *pgxpool.Pool, eventID string) (string, error) {
-	var calendarID string
-	err := pool.QueryRow(ctx,
-		`SELECT calendar_id FROM calendar_objects WHERE id = $1`,
-		eventID,
-	).Scan(&calendarID)
-	if err == pgx.ErrNoRows {
-		return "", fmt.Errorf("event not found")
+// resolveUpdatedAllDay works out the stored start/end of an event that is
+// all-day after event_update, from its stored times and the optional new
+// values:
+//
+//   - end given: the new (or stored) start through that end;
+//   - only start given: the event moves, keeping its number of days;
+//   - neither: the stored times snapped to whole days (used when all_day is
+//     switched on for a timed event, or to repair a non-normalised one).
+//
+// A timed event's stored UTC instants are read in the household timezone
+// first, so 9pm on 11/18 in New York (02:00Z on 11/19) becomes 11/18.
+func resolveUpdatedAllDay(existing eventJSON, loc *time.Location, newStart, newEnd *string) (string, string, error) {
+	if !existing.AllDay {
+		for _, p := range []*string{&existing.Start, &existing.End} {
+			if t, err := time.Parse(time.RFC3339, *p); err == nil {
+				*p = t.In(loc).Format(time.RFC3339)
+			}
+		}
+	}
+	start := existing.Start
+	if newStart != nil {
+		start = *newStart
+	}
+	var first, endExcl time.Time
+	var err error
+	switch {
+	case newEnd != nil:
+		first, endExcl, err = allDayRange(start, *newEnd)
+	case newStart != nil:
+		days := 1
+		if oldFirst, oldEndExcl, oerr := allDayRange(existing.Start, existing.End); oerr == nil {
+			days = int(oldEndExcl.Sub(oldFirst).Hours()/24 + 0.5)
+		}
+		if first, _, err = civilDate(start); err != nil {
+			err = fmt.Errorf("invalid start: %w", err)
+		} else {
+			endExcl = first.AddDate(0, 0, days)
+		}
+	default:
+		if first, endExcl, err = allDayRange(existing.Start, existing.End); err != nil {
+			err = fmt.Errorf("stored event has unreadable start/end; pass start and end")
+		}
 	}
 	if err != nil {
-		return "", fmt.Errorf("get event calendar: %w", err)
+		return "", "", err
 	}
-	return calendarID, nil
+	s, e := storeAllDay(first, endExcl)
+	return s, e, nil
 }
 
 // ─────────────────────────────────────────────
@@ -287,15 +513,6 @@ func recordChangeAndBumpCtag(ctx context.Context, tx pgx.Tx, calendarID, eventUI
 		return fmt.Errorf("bump ctag: %w", err)
 	}
 	return nil
-}
-
-// ─────────────────────────────────────────────
-// Helper: build a time.Time from a YYYY-MM-DD string at the start of day
-// in the given location (e.g. the household's configured timezone).
-// ─────────────────────────────────────────────
-
-func parseDate(dateStr string, loc *time.Location) (time.Time, error) {
-	return time.ParseInLocation("2006-01-02", dateStr, loc)
 }
 
 // ─────────────────────────────────────────────
@@ -326,14 +543,60 @@ func loadHouseholdLocation(ctx context.Context, pool *pgxpool.Pool, householdID 
 
 // ─────────────────────────────────────────────
 // Helper: query events for a household, optionally filtered by calendar IDs
-// and date range. Date filtering is done in SQL via JSONB extraction of
-// ical_data.start/end timestamps. Callers may still use eventOverlapsRange
-// as a correctness backstop.
+// and date range. Date filtering is done in SQL on calendar_objects.starts_at
+// / ends_at (035). Callers may still use eventOverlapsRange as a correctness
+// backstop.
 // ─────────────────────────────────────────────
 
-func queryEvents(ctx context.Context, pool *pgxpool.Pool, householdID string, calendarIDs []string, startDate, endDate time.Time) ([]Event, error) {
+// eventColumns selects an eventRow from calendar_objects co JOIN calendars c;
+// scanEventRow reads it.
+// eventColumns selects an eventRow from calendar_objects co JOIN calendars c.
+// c.type is the calendar's kind ('family', 'bills', 'maintenance', 'vehicles',
+// 'properties', 'custom'), which the role view needs to decide whether the
+// caller may see this event at all (#4808); co.entity_type is the record the
+// event mirrors (#4807).
+const eventColumns = `co.id::text, co.calendar_id::text, co.ical_data, co.event_type, co.entity_type::text, c.name, co.created_at, co.updated_at, co.rrule, co.ical_raw, c.type::text, co.superseded_at, co.superseded_reason, co.superseded_by::text`
+
+func scanEventRow(row pgx.Row) (eventRow, error) {
+	var r eventRow
+	err := row.Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.EntityType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt,
+		&r.Rrule, &r.IcalRaw, &r.CalendarType, &r.SupersededAt, &r.SupersededReason, &r.SupersededBy)
+	return r, err
+}
+
+// queryEvents returns the household's events in [startDate, endDate) with
+// repeating series expanded into their occurrences (see expandSeries); see
+// queryOccurrences.
+func queryEvents(ctx context.Context, pool querier, householdID string, loc *time.Location, calendarIDs []string, startDate, endDate time.Time) ([]Event, error) {
+	events, _, err := queryOccurrences(ctx, pool, householdID, loc, calendarIDs, startDate, endDate)
+	return events, err
+}
+
+// queryOccurrences reads the events that may overlap [startDate, endDate)
+// and expands every repeating series into one Event per occurrence in that
+// range (skipped dates left out, moved occurrences at their new time). The
+// SQL window is a superset: callers keep eventOverlapsRange as the exact
+// check. truncated names the series that had more than maxSeriesOccurrences
+// occurrences in the range, of which only the first ones are returned. With
+// a zero range, series come back unexpanded.
+func queryOccurrences(ctx context.Context, pool querier, householdID string, loc *time.Location, calendarIDs []string, startDate, endDate time.Time) (events []Event, truncated []string, err error) {
+	return queryOccurrencesAs(ctx, pool, eventView{role: roleFamily}, householdID, loc, calendarIDs, startDate, endDate)
+}
+
+// roleFamily is the role that sees every event, used by the reads that serve a
+// family-only write (event_create's read-back, event_update's, event_delete's)
+// or an internal caller whose caller already passed the policy (the API's
+// RequirePolicy is per route). It is a role name from the policy table, not a
+// bypass: a read that serves a caller goes through queryOccurrencesAs with that
+// caller's view.
+const roleFamily = "family_member"
+
+// queryOccurrencesAs is queryOccurrences for one role: rows the role may not
+// see are dropped before parsing, so a bill mirror's amount never even reaches
+// the process, and every occurrence of a hidden series goes with its row.
+func queryOccurrencesAs(ctx context.Context, pool querier, view eventView, householdID string, loc *time.Location, calendarIDs []string, startDate, endDate time.Time) (events []Event, truncated []string, err error) {
 	// Base query: join calendar_objects with calendars for household scoping
-	query := `SELECT co.id, co.calendar_id, co.ical_data, co.event_type, c.name AS calendar_name, co.created_at, co.updated_at
+	query := `SELECT ` + eventColumns + `
 		FROM calendar_objects co
 		JOIN calendars c ON c.id = co.calendar_id
 		WHERE c.household_id = $1`
@@ -351,15 +614,26 @@ func queryEvents(ctx context.Context, pool *pgxpool.Pool, householdID string, ca
 		query += fmt.Sprintf(" AND co.calendar_id IN (%s)", strings.Join(placeholders, ","))
 	}
 
-	// Filter by date range using JSONB extraction from ical_data.
+	// Filter by date range on the stored instants (migration 035:
+	// starts_at/ends_at, trigger-maintained from ical_data's start/end, NULL
+	// when unparseable), served by idx_calendar_objects_calendar_starts.
 	// Overlap condition: event start < range end AND event end > range start.
-	// This narrows the result set in SQL; callers keep Go-side filtering as a backstop.
+	// This narrows the result set in SQL; callers keep Go-side filtering as
+	// the exact check. The window is widened by allDaySlack because all-day
+	// events are stored as UTC midnights but compared as local days. A
+	// recurring series is kept whenever it starts before the range end:
+	// starts_at is the series start, and its later occurrences can fall in
+	// the range even though the first one ended long ago. A series recurs
+	// either through the rrule column or through an RDATE list, which lives
+	// in ical_raw and nowhere else -- an RDATE-only series has rrule NULL --
+	// so the raw is tested too (#4871). Property names are case-insensitive
+	// in RFC 5545, hence ILIKE.
 	if !startDate.IsZero() && !endDate.IsZero() {
-		query += fmt.Sprintf(" AND (co.ical_data::jsonb->>'start')::timestamptz < $%d", argIdx)
-		args = append(args, endDate)
+		query += fmt.Sprintf(" AND co.starts_at < $%d", argIdx)
+		args = append(args, endDate.Add(allDaySlack))
 		argIdx++
-		query += fmt.Sprintf(" AND (co.ical_data::jsonb->>'end')::timestamptz > $%d", argIdx)
-		args = append(args, startDate)
+		query += fmt.Sprintf(" AND (co.ends_at > $%d OR co.rrule IS NOT NULL OR co.ical_raw ILIKE '%%RDATE%%')", argIdx)
+		args = append(args, startDate.Add(-allDaySlack))
 		argIdx++
 	}
 
@@ -367,30 +641,157 @@ func queryEvents(ctx context.Context, pool *pgxpool.Pool, householdID string, ca
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query events: %w", err)
+		return nil, nil, fmt.Errorf("query events: %w", err)
 	}
 	defer rows.Close()
 
-	var events []Event
+	return scanEventRows(rows, view, loc, startDate, endDate)
+}
+
+// maxSearchRows bounds how many stored calendar objects one text search reads,
+// the same order as search_all's eventScanLimit. A family's calendar holds
+// thousands of entries at most; the cap is only there so a pathological
+// household cannot pull an unbounded result into memory, and a search that
+// hits it says so (may_have_more) instead of passing for a complete one.
+const maxSearchRows = 5000
+
+// queryEveryEventAs returns every event the role may see, on any date, one
+// Event per stored row: a repeating series comes back as its master row with
+// its repeat rule rather than expanded, because there is no window to expand
+// over. It is event_find's read for a bare text query, where the caller is
+// looking an entry up rather than scanning a range (#4944). cut is true when
+// the household holds more rows than maxSearchRows, so the search is not
+// exhaustive and the caller has to be told.
+func queryEveryEventAs(ctx context.Context, pool querier, view eventView, householdID string, loc *time.Location, calendarIDs []string) (events []Event, cut bool, err error) {
+	query := `SELECT ` + eventColumns + `
+		FROM calendar_objects co
+		JOIN calendars c ON c.id = co.calendar_id
+		WHERE c.household_id = $1`
+	args := []any{householdID}
+	argIdx := 2
+	if len(calendarIDs) > 0 {
+		placeholders := make([]string, len(calendarIDs))
+		for i, calID := range calendarIDs {
+			placeholders[i] = fmt.Sprintf("$%d", argIdx)
+			args = append(args, calID)
+			argIdx++
+		}
+		query += fmt.Sprintf(" AND co.calendar_id IN (%s)", strings.Join(placeholders, ","))
+	}
+	// One row past the cap tells a cut search from a complete one.
+	query += fmt.Sprintf(" ORDER BY co.created_at LIMIT %d", maxSearchRows+1)
+
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("query events: %w", err)
+	}
+	defer rows.Close()
+
+	events, _, err = scanEventRows(rows, view, loc, time.Time{}, time.Time{})
+	if err != nil {
+		return nil, false, err
+	}
+	if len(events) > maxSearchRows {
+		return events[:maxSearchRows], true, nil
+	}
+	return events, false, nil
+}
+
+// scanEventRows turns calendar_objects rows into Events, dropping retired and
+// role-hidden rows before anything is parsed and expanding repeating series
+// over [expandFrom, expandTo). A zero window leaves a series unexpanded.
+func scanEventRows(rows pgx.Rows, view eventView, loc *time.Location, expandFrom, expandTo time.Time) (events []Event, truncated []string, err error) {
+	expand := !expandFrom.IsZero() && !expandTo.IsZero()
 	for rows.Next() {
-		var row eventRow
-		if err := rows.Scan(&row.ID, &row.CalendarID, &row.IcalData, &row.EventType, &row.CalendarName, &row.CreatedAt, &row.UpdatedAt); err != nil {
+		row, err := scanEventRow(rows)
+		if err != nil {
 			slog.Warn("calendar: query events: scan error", "error", err)
 			continue
 		}
-		ev, err := parseEventFromRow(row)
+		// A superseded entry is retired: a bill with the same name and amount
+		// is the record for it (#4943, migration 073). It is not deleted, so
+		// its notes, people and text survive and an undo is one UPDATE, but no
+		// live read shows it — that is what keeps a stale "Electric bill due —
+		// $180" out of a briefing after the bill was paid.
+		if row.SupersededAt != nil {
+			continue
+		}
+		// The role view drops the row before it is parsed: a bill mirror's
+		// amount, category, autopay flag and payment URL never enter the
+		// process for a role that may not see money (#4808).
+		if !view.rowVisible(row) {
+			continue
+		}
+		ev, series, err := parseRow(row, loc)
 		if err != nil {
 			slog.Warn("calendar: query events: parse error", "event_id", row.ID, "error", err)
 			continue
 		}
-		events = append(events, *ev)
+		if !expand || !series.recurring() {
+			events = append(events, *ev)
+			continue
+		}
+		occs, cut := expandSeries(*ev, series, expandFrom, expandTo, loc)
+		events = append(events, occs...)
+		if cut {
+			truncated = append(truncated, ev.Title)
+		}
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate events: %w", err)
+		return nil, nil, fmt.Errorf("iterate events: %w", err)
+	}
+	return events, truncated, nil
+}
+
+// findConflicts returns the household's events (optionally limited to
+// calendarIDs) whose [start, end) overlaps [start, end), sorted by start
+// instant. excludeID skips one event (event_create passes the event it just
+// made). It is shared by event_find and event_create so both agree on
+// what a conflict is. All-day events come back from queryEvents as
+// household-local days, so one on 11/18 conflicts with any range touching
+// 11/18 household time and none on 11/19. Always returns a non-nil slice.
+func findConflicts(ctx context.Context, pool querier, householdID string, loc *time.Location, calendarIDs []string, start, end time.Time, excludeID string) ([]ConflictEvent, error) {
+	return findConflictsAs(ctx, pool, eventView{role: roleFamily}, householdID, loc, calendarIDs, start, end, excludeID)
+}
+
+// findConflictsAs is findConflicts for one role: a bill's or an upkeep job's
+// mirror event is not a scheduling conflict, and it must not be named to a role
+// that may not see it either.
+func findConflictsAs(ctx context.Context, pool querier, view eventView, householdID string, loc *time.Location, calendarIDs []string, start, end time.Time, excludeID string) ([]ConflictEvent, error) {
+	events, _, err := queryOccurrencesAs(ctx, pool, view, householdID, loc, calendarIDs, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("query events: %w", err)
 	}
 
-	return events, nil
+	conflicts := make([]ConflictEvent, 0)
+	for _, ev := range events {
+		if ev.ID == excludeID || isBillEvent(ev) || ev.billLike || !eventOverlapsRange(ev, start, end) {
+			continue
+		}
+		conflicts = append(conflicts, ConflictEvent{
+			ID:           ev.ID,
+			CalendarID:   ev.CalendarID,
+			Title:        ev.Title,
+			Start:        ev.Start,
+			End:          ev.End,
+			AllDay:       ev.AllDay,
+			CalendarName: ev.CalendarName,
+			LocalDate:    ev.LocalDate,
+			Weekday:      ev.Weekday,
+		})
+	}
+
+	slices.SortStableFunc(conflicts, func(a, b ConflictEvent) int {
+		switch {
+		case startsBefore(a.Start, b.Start):
+			return -1
+		case startsBefore(b.Start, a.Start):
+			return 1
+		}
+		return 0
+	})
+	return conflicts, nil
 }
 
 // ─────────────────────────────────────────────
@@ -423,907 +824,852 @@ func parseEventTime(ev Event) (time.Time, time.Time, error) {
 }
 
 // ─────────────────────────────────────────────
-// 1. list_calendars
+// Helper: all-day events
+// ─────────────────────────────────────────────
+//
+// All-day events are stored the way the CalDAV service stores
+// DTSTART;VALUE=DATE: the calendar date at 00:00 UTC, with an exclusive end
+// at 00:00 UTC of the day after the last day, e.g.
+//
+//	{"all_day":true,"start":"2026-11-18T00:00:00Z","end":"2026-11-19T00:00:00Z"}
+//
+// The CalDAV service writes VALUE=DATE from the date written in the stored
+// string, so a phone shows the event on 11/18 whatever the household's
+// timezone. Storing local midnight as an instant instead would shift the
+// date for households east of UTC.
+//
+// The tools read the date as written (ignoring clock and offset) and treat
+// it as a household-local day: [local 00:00, local 00:00 of the end date).
+
+const dateLayout = "2006-01-02"
+
+// civilDate reads the calendar date exactly as written in s, accepting
+// RFC 3339, a naive local datetime or a bare YYYY-MM-DD. The offset, when
+// present, is ignored for the date: "2026-11-18T00:00:00Z" is 11/18, not
+// 11/17 evening in New York. midnight reports whether s spells out a
+// 00:00:00 clock time (a bare date does not).
+func civilDate(s string) (date time.Time, midnight bool, err error) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05", "2006-01-02T15:04", dateLayout} {
+		t, perr := time.Parse(layout, s)
+		if perr != nil {
+			continue
+		}
+		h, m, sec := t.Clock()
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC),
+			layout != dateLayout && h == 0 && m == 0 && sec == 0 && t.Nanosecond() == 0, nil
+	}
+	return time.Time{}, false, fmt.Errorf("%q is not a date (YYYY-MM-DD) or ISO 8601 time", s)
+}
+
+// allDayRange normalises an all-day event's start and end to whole days.
+// The returned dates are UTC midnights: first is the first day and
+// endExcl the day after the last day.
+//
+// The end is exclusive when it is a 00:00 time after the start date, as in
+// iCalendar and in what is stored ("2026-11-19T00:00:00Z"). Otherwise it
+// names the last day: a bare date "2026-12-05" or any other clock time
+// includes 12/5, so 09:00–23:59 on 11/18, or 11/18–11/18, is the single
+// day 11/18. An empty end means one day.
+func allDayRange(start, end string) (first, endExcl time.Time, err error) {
+	first, _, err = civilDate(start)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid start: %w", err)
+	}
+	if end == "" {
+		return first, first.AddDate(0, 0, 1), nil
+	}
+	last, midnight, err := civilDate(end)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid end: %w", err)
+	}
+	if last.Before(first) {
+		return time.Time{}, time.Time{}, fmt.Errorf("end must not be before start")
+	}
+	if midnight && last.After(first) {
+		return first, last, nil
+	}
+	return first, last.AddDate(0, 0, 1), nil
+}
+
+// storeAllDay formats normalised all-day dates as stored in ical_data.
+func storeAllDay(first, endExcl time.Time) (string, string) {
+	return first.Format(time.RFC3339), endExcl.Format(time.RFC3339)
+}
+
+// localizeAllDay rewrites an all-day event's start/end as household-local
+// midnights (e.g. 2026-11-18T00:00:00-05:00 to 2026-11-19T00:00:00-05:00)
+// so date filtering and callers see the right day. Timed events and
+// unreadable dates are left as stored.
+func localizeAllDay(ev *Event, loc *time.Location) {
+	if !ev.AllDay {
+		return
+	}
+	first, endExcl, err := allDayRange(ev.Start, ev.End)
+	if err != nil {
+		return
+	}
+	ev.Start = time.Date(first.Year(), first.Month(), first.Day(), 0, 0, 0, 0, loc).Format(time.RFC3339)
+	ev.End = time.Date(endExcl.Year(), endExcl.Month(), endExcl.Day(), 0, 0, 0, 0, loc).Format(time.RFC3339)
+}
+
+// setLocalDay fills ev.LocalDate and ev.Weekday from the start instant in
+// the household timezone. Call it after localizeAllDay, so an all-day event's
+// start is already the household-local midnight of its first day. A timed
+// event at 23:30 New York (04:30Z the next day) is dated by the New York day.
+func setLocalDay(ev *Event, loc *time.Location) {
+	ev.LocalDate, ev.Weekday = "", ""
+	start, err := time.Parse(time.RFC3339, ev.Start)
+	if err != nil {
+		return
+	}
+	local := start.In(loc)
+	ev.LocalDate = local.Format("2006-01-02")
+	ev.Weekday = local.Weekday().String()
+}
+
+// LoadHouseholdLocation returns the household's configured timezone, or UTC
+// when it is empty, "UTC", invalid or unreadable. Exported for other event
+// surfaces (search) so they resolve the zone exactly as the calendar tools.
+func LoadHouseholdLocation(ctx context.Context, pool *pgxpool.Pool, householdID string) *time.Location {
+	return loadHouseholdLocation(ctx, pool, householdID)
+}
+
+// LocalDay places a stored event start in the household timezone, using the
+// same rules as the calendar tools: an all-day event is dated by the date as
+// written in start and returned as local midnight of its first day; a timed
+// event's instant is formatted in loc (RFC 3339 with loc's offset).
+// localDate (YYYY-MM-DD) and weekday ("Wednesday") are the household-local
+// day of that start. An unparseable start comes back unchanged with empty
+// localDate and weekday.
+func LocalDay(start, end string, allDay bool, loc *time.Location) (localStart, localDate, weekday string) {
+	ev := &Event{Start: start, End: end, AllDay: allDay}
+	localizeAllDay(ev, loc)
+	setLocalDay(ev, loc)
+	if ev.LocalDate == "" {
+		return start, "", ""
+	}
+	if !allDay {
+		if t, err := time.Parse(time.RFC3339, ev.Start); err == nil {
+			ev.Start = t.In(loc).Format(time.RFC3339)
+		}
+	}
+	return ev.Start, ev.LocalDate, ev.Weekday
+}
+
+// EventsBetween returns the household's events overlapping [start, end),
+// sorted by start instant, exactly as agenda_get lists them (all-day events
+// read as household-local days in loc). Exported for family_overview's
+// next_days (#4385) so both tools agree. Bills' own calendar events are
+// left out (isBillEvent), and so is every record the role may not see:
+// family_overview passes the caller's role through (#4808).
+func EventsBetween(ctx context.Context, pool *pgxpool.Pool, role, householdID string, loc *time.Location, start, end time.Time) ([]Event, error) {
+	events, _, err := queryOccurrencesAs(ctx, pool, eventView{role: role}, householdID, loc, nil, start, end)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Event, 0, len(events))
+	for _, ev := range events {
+		// A bill-like entry (#4943) is not an appointment: it claims a bill,
+		// and family_overview reports it under the bills guard instead
+		// (BillLikeEntriesBetween). Leaving it here is exactly how a briefing
+		// came to say a paid bill was "still unpaid" (war game R1 G2).
+		if !isBillEvent(ev) && !ev.billLike && eventOverlapsRange(ev, start, end) {
+			out = append(out, ev)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return startsBefore(out[i].Start, out[j].Start) })
+	return out, nil
+}
+
+// isBillEvent reports whether ev is a bill's mirror event on the Bills
+// calendar (#4485, bill.syncBillEvent). agenda_get and family_overview list
+// bills in their own bills sections (with paid state), and an all-day due
+// date is not a scheduling conflict, so those leave these events out;
+// event_find still shows them.
+func isBillEvent(ev Event) bool { return ev.EventType == bill.CalendarEventType }
+
+// startsBefore orders RFC 3339 start times by instant. Stored times mix
+// offsets (timed events in UTC, all-day events as local midnights), so a
+// string comparison is wrong; unparseable values fall back to it.
+func startsBefore(a, b string) bool {
+	ta, errA := time.Parse(time.RFC3339, a)
+	tb, errB := time.Parse(time.RFC3339, b)
+	if errA != nil || errB != nil {
+		return a < b
+	}
+	return ta.Before(tb)
+}
+
+// allDaySlack widens the SQL date window so all-day events, stored as UTC
+// midnights but read as local days, are not cut off by the timestamptz
+// comparison. UTC offsets reach ±14h; eventOverlapsRange does the exact check.
+const allDaySlack = 48 * time.Hour
+
+// handlerFunc is the mcp-go tool handler signature.
+type handlerFunc = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)
+
+// ─────────────────────────────────────────────
+// calendar_find
 // ─────────────────────────────────────────────
 
-// NewListCalendarsTool creates the list_calendars tool and its handler.
-func NewListCalendarsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("list_calendars",
-		mcp.WithDescription("List all calendars for the current household"),
-	)
+// NewCalendarFindTool creates calendar_find (replaces list_calendars).
+func NewCalendarFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
+	tool := mcp.NewTool("calendar_find", toolOptions(classR, "Find calendars",
+		mcp.WithDescription("List the family's calendars (id, name, color, whose it is). You can also pass a calendar name wherever calendar_id is asked for."),
+		respond.ListSchema[Calendar](),
+	)...)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		claims := server.ClaimsFromContext(ctx)
 		if claims == nil {
-			return mcp.NewToolResultError("authentication required"), nil
+			return authRequired(), nil
 		}
-
-		rows, err := pool.Query(ctx,
-			`SELECT id, name, type, color, property_id
-			 FROM calendars WHERE household_id = $1 ORDER BY name`,
-			claims.HouseholdID,
-		)
+		// A calendar is listed only when the role may see its kind: the Bills
+		// calendar is money and is not a sitter's business (#4808).
+		view, bad := eventViewFor(ctx, pool, claims)
+		if bad != nil {
+			return bad, nil
+		}
+		cals, err := scanCalendars(ctx, pool,
+			`SELECT id::text, name, type::text, color, property_id::text
+			   FROM calendars WHERE household_id = $1 ORDER BY name`, claims.HouseholdID)
 		if err != nil {
-			slog.Error("list_calendars: query error", "error", err)
-			return mcp.NewToolResultError(fmt.Sprintf("query error: %v", err)), nil
+			slog.Error("calendar_find: query error", "error", err)
+			return respond.Failed("list calendars", err), nil
 		}
-		defer rows.Close()
-
-		calendars := make([]Calendar, 0)
-		for rows.Next() {
-			var cal Calendar
-			if err := rows.Scan(&cal.ID, &cal.Name, &cal.Type, &cal.Color, &cal.PropertyID); err != nil {
-				slog.Error("list_calendars: scan error", "error", err)
-				continue
-			}
-			calendars = append(calendars, cal)
+		cals = view.keepCalendars(cals)
+		if len(cals) == 0 {
+			return respond.List("The family has no calendars yet.", cals, respond.Page{}), nil
 		}
-
-		if err := rows.Err(); err != nil {
-			slog.Error("list_calendars: iterate error", "error", err)
-			return mcp.NewToolResultError(fmt.Sprintf("iterate calendars: %v", err)), nil
+		names := make([]string, len(cals))
+		for i, c := range cals {
+			names[i] = c.Name
 		}
-
-		data, err := json.Marshal(calendars)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
-		}
-		return mcp.NewToolResultText(string(data)), nil
+		return respond.List(fmt.Sprintf("Found %d calendars: %s.", len(cals), strings.Join(names, ", ")), cals, respond.Page{},
+			fmt.Sprintf("Pass a calendar name (e.g. %q) or id as calendar_id to event_create or event_find.", cals[0].Name)), nil
 	}
-
 	return tool, handler
 }
 
 // ─────────────────────────────────────────────
-// 2. list_events
+// event_find
 // ─────────────────────────────────────────────
 
-// NewListEventsTool creates the list_events tool and its handler.
-func NewListEventsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("list_events",
-		mcp.WithDescription("List events across calendars, optionally filtered by calendar, start date, and end date"),
-		mcp.WithString("calendar_id", mcp.Description("Optional calendar ID to filter by")),
-		mcp.WithString("start_date", mcp.Description("Start date (YYYY-MM-DD). Defaults to beginning of current month.")),
-		mcp.WithString("end_date", mcp.Description("End date (YYYY-MM-DD). Defaults to start_date + 1 month.")),
-	)
+const maxFindRangeDays = 366
+
+// NewEventFindTool creates event_find (replaces list_events and
+// check_conflicts: from/to = a proposed time lists what it overlaps).
+func NewEventFindTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
+	tool := mcp.NewTool("event_find", toolOptions(classR, "Find events",
+		mcp.WithDescription("Find events by text or calendar on any date, or overlapping a range with from/to. Pass id for one event. Times are in the family timezone."),
+		mcp.WithString("id", mcp.Description("One event's id; the other filters are ignored")),
+		mcp.WithString("from", mcp.Description("Range start: a date or a time with offset. Default today; every date with query")),
+		mcp.WithString("to", mcp.Description("Range end: a date is inclusive, a time exclusive. With query: every date")),
+		mcp.WithString("query", mcp.Description("Words to match in title, description, location or calendar, on every date")),
+		mcp.WithString("calendar_id", mcp.Description("Calendar name or id, e.g. Family")),
+		mcp.WithNumber("limit", mcp.Description("Max events to return (default 25, max 100)"), mcp.Min(1), mcp.Max(maxLimit)),
+		mcp.WithString("cursor", mcp.Description("Cursor from the previous result for the next page")),
+		respond.ListSchema[Event](),
+	)...)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		claims := server.ClaimsFromContext(ctx)
 		if claims == nil {
-			return mcp.NewToolResultError("authentication required"), nil
+			return authRequired(), nil
 		}
-
+		// The caller's role, re-read from memberships per call, decides which
+		// records are visible: a bill's mirror event carries the bill's name and
+		// "Amount: $X" and is not shown to a role that may not see money (#4808).
+		view, bad := eventViewFor(ctx, pool, claims)
+		if bad != nil {
+			return bad, nil
+		}
 		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
-
 		args := req.GetArguments()
-		calendarID := getStringArg(args, "calendar_id")
 
-		// Determine date range in the household's timezone
-		now := time.Now().In(loc)
-		startDateStr := getStringArg(args, "start_date")
-		var startDate time.Time
-		if startDateStr != "" {
-			var err error
-			startDate, err = parseDate(startDateStr, loc)
+		if id := strings.TrimSpace(getStringArg(args, "id")); id != "" {
+			if bad := checkUUID("id", id, "event_find"); bad != nil {
+				return bad, nil
+			}
+			r, err := scanEventRow(pool.QueryRow(ctx,
+				`SELECT `+eventColumns+` FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
+				  WHERE c.household_id = $1 AND co.id = $2`, claims.HouseholdID, id))
+			if errors.Is(err, pgx.ErrNoRows) {
+				return respond.NotFound("event", id, "Call event_find with from/to or query to find the event_id."), nil
+			}
 			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("invalid start_date format (use YYYY-MM-DD): %v", err)), nil
+				return respond.Failed("read the event", err), nil
+			}
+			// A retired entry (#4943) is absent here too, with the same fix a
+			// deleted one gets: it is not bill state and not an appointment.
+			if r.SupersededAt != nil {
+				return respond.NotFound("event", id,
+					"That calendar entry was retired because a bill is the record for it; use bill_find for the bill."), nil
+			}
+			// A record the role may not see is treated as absent, like a
+			// calendar of another household (#4807's denial semantics).
+			if !view.rowVisible(r) {
+				return respond.NotFound("event", id, "Call event_find with from/to or query to find the event_id."), nil
+			}
+			ev, err := parseEventFromRow(r, loc)
+			if err != nil {
+				return respond.Failed("read the event", err), nil
+			}
+			return respond.List(fmt.Sprintf("Found %q, %s.", ev.Title, describeWhen(*ev, loc)), []Event{*ev}, respond.Page{},
+				eventHints(*ev)...), nil
+		}
+
+		limit, offset, bad := pageArgs(args)
+		if bad != nil {
+			return bad, nil
+		}
+		// A text query is a lookup, not a range scan (#4944). Defaulting it to
+		// the next 7 days made "is the Christmas thing on the calendar?"
+		// answer "no" for a December event while the event existed: a
+		// confident wrong absence, the worst answer a read tool can give. So
+		// a bare query searches every date; from/to still narrow it when the
+		// caller gives them.
+		query := strings.TrimSpace(getStringArg(args, "query"))
+		fromArg, toArg := strings.TrimSpace(getStringArg(args, "from")), strings.TrimSpace(getStringArg(args, "to"))
+		openEnded := query != "" && fromArg == "" && toArg == ""
+		from := todayIn(loc)
+		if fromArg != "" {
+			if from, bad = parseBound("from", fromArg, false, loc); bad != nil {
+				return bad, nil
+			}
+		}
+		to := from.AddDate(0, 0, 7)
+		if toArg != "" {
+			if to, bad = parseBound("to", toArg, true, loc); bad != nil {
+				return bad, nil
+			}
+		}
+		if !to.After(from) {
+			return respond.Invalid("to", "to must be after from.",
+				"Pass a later to. A date-only to includes the whole day, so from=to=2026-11-18 is one day.",
+				map[string]any{"from": from.In(loc).Format(dateLayout), "to": from.In(loc).Format(dateLayout)}), nil
+		}
+		// An open-ended query reads every date, so the range cap does not
+		// apply to it; an explicit range stays bounded as before.
+		if !openEnded && to.Sub(from) > maxFindRangeDays*24*time.Hour {
+			return respond.Invalid("to", fmt.Sprintf("The range is longer than %d days.", maxFindRangeDays),
+				"Search a shorter range, or use query to find a specific event.",
+				map[string]any{"from": from.In(loc).Format(dateLayout), "to": from.AddDate(0, 1, 0).In(loc).Format(dateLayout)}), nil
+		}
+
+		var calendarIDs []string
+		calRef := strings.TrimSpace(getStringArg(args, "calendar_id"))
+		if calRef != "" {
+			cal, bad := resolveCalendar(ctx, pool, claims.HouseholdID, "calendar_id", calRef)
+			if bad != nil {
+				return bad, nil
+			}
+			calendarIDs = []string{cal.ID}
+		}
+
+		// defaulted: the tool chose part of the window, because the caller
+		// gave neither end or only one. That is the case that can make a
+		// caller believe an event does not exist, so it is reported loudly
+		// and in the structured range alike (#4944). A window the caller
+		// spelled out in full is theirs: an empty result in it is an answer,
+		// not a secret.
+		defaulted := !openEnded && (fromArg == "" || toArg == "")
+
+		var events []Event
+		var truncated []string
+		var searched *respond.Range
+		if openEnded {
+			all, cut, err := queryEveryEventAs(ctx, pool, view, claims.HouseholdID, loc, calendarIDs)
+			if err != nil {
+				slog.Error("event_find: query error", "error", err)
+				return respond.Failed("find events", err), nil
+			}
+			events = all
+			searched = respond.AllDatesRange("Searched every date, so an empty result means no event matches.")
+			if cut {
+				searched = respond.DaysRange("", "", true, fmt.Sprintf(
+					"Searched every date, but the household holds more than %d calendar entries and only %d were read; more may match.",
+					maxSearchRows, maxSearchRows))
 			}
 		} else {
-			// Default to beginning of current month in household timezone
-			startDate = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
-		}
-
-		endDateStr := getStringArg(args, "end_date")
-		var endDate time.Time
-		if endDateStr != "" {
-			var err error
-			endDate, err = parseDate(endDateStr, loc)
+			all, cut, err := queryOccurrencesAs(ctx, pool, view, claims.HouseholdID, loc, calendarIDs, from, to)
 			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("invalid end_date format (use YYYY-MM-DD): %v", err)), nil
+				slog.Error("event_find: query error", "error", err)
+				return respond.Failed("find events", err), nil
 			}
-			// End date is inclusive, add 1 day so events on the end date are included
-			endDate = endDate.Add(24 * time.Hour)
-		} else {
-			// Default to start_date + 1 month
-			endDate = startDate.AddDate(0, 1, 0)
-		}
-
-		// Build query: start with household-scoped calendars
-		query := `SELECT co.id, co.calendar_id, co.ical_data, co.event_type, c.name AS calendar_name, co.created_at, co.updated_at
-			FROM calendar_objects co
-			JOIN calendars c ON c.id = co.calendar_id
-			WHERE c.household_id = $1`
-		queryArgs := []any{claims.HouseholdID}
-
-		if calendarID != "" {
-			query += " AND co.calendar_id = $2"
-			queryArgs = append(queryArgs, calendarID)
-		}
-
-		query += " ORDER BY co.created_at"
-
-		rows, err := pool.Query(ctx, query, queryArgs...)
-		if err != nil {
-			slog.Error("list_events: query error", "error", err)
-			return mcp.NewToolResultError(fmt.Sprintf("query error: %v", err)), nil
-		}
-		defer rows.Close()
-
-		events := make([]Event, 0)
-		for rows.Next() {
-			var row eventRow
-			if err := rows.Scan(&row.ID, &row.CalendarID, &row.IcalData, &row.EventType, &row.CalendarName, &row.CreatedAt, &row.UpdatedAt); err != nil {
-				slog.Error("list_events: scan error", "error", err)
-				continue
-			}
-			ev, err := parseEventFromRow(row)
-			if err != nil {
-				slog.Warn("list_events: parse error", "event_id", row.ID, "error", err)
-				continue
-			}
-			// Filter by date range in Go
-			if eventOverlapsRange(*ev, startDate, endDate) {
-				events = append(events, *ev)
+			events, truncated = all, cut
+			first, last := from.In(loc).Format(dateLayout), to.Add(-time.Nanosecond).In(loc).Format(dateLayout)
+			switch {
+			case defaulted:
+				searched = respond.DaysRange(first, last, true, fmt.Sprintf(
+					"Searched %s only; more may match outside it. Leave from/to off, or widen them, to search other dates.", describeRange(from, to, loc)))
+			case len(truncated) > 0:
+				searched = respond.DaysRange(first, last, true,
+					"Searched this range only, and long series were cut at this size; ask for a shorter range to see the rest.")
+			default:
+				searched = respond.DaysRange(first, last, false, "Searched exactly this range.")
 			}
 		}
-
-		if err := rows.Err(); err != nil {
-			slog.Error("list_events: iterate error", "error", err)
-			return mcp.NewToolResultError(fmt.Sprintf("iterate events: %v", err)), nil
-		}
-
-		data, err := json.Marshal(events)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
-		}
-		return mcp.NewToolResultText(string(data)), nil
-	}
-
-	return tool, handler
-}
-
-// ─────────────────────────────────────────────
-// 3. create_event
-// ─────────────────────────────────────────────
-
-// NewCreateEventTool creates the create_event tool and its handler.
-func NewCreateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("create_event",
-		mcp.WithDescription("Create a new calendar event. Records a calendar_changes entry and bumps the calendar's ctag for CalDAV sync."),
-		mcp.WithString("calendar_id", mcp.Description("Calendar ID to create the event in"), mcp.Required()),
-		mcp.WithString("title", mcp.Description("Event title"), mcp.Required()),
-		mcp.WithString("start_time", mcp.Description("Start time (ISO 8601, e.g. 2026-08-03T14:00:00Z)"), mcp.Required()),
-		mcp.WithString("end_time", mcp.Description("End time (ISO 8601, e.g. 2026-08-03T15:00:00Z)"), mcp.Required()),
-		mcp.WithBoolean("all_day", mcp.Description("Whether this is an all-day event (default false)")),
-		mcp.WithString("description", mcp.Description("Optional description")),
-		mcp.WithString("location", mcp.Description("Optional location")),
-		mcp.WithString("event_type", mcp.Description("Optional event type (default 'event')")),
-	)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return mcp.NewToolResultError("authentication required"), nil
-		}
-
-		args := req.GetArguments()
-		calendarID := getStringArg(args, "calendar_id")
-		title := getStringArg(args, "title")
-		startTime := getStringArg(args, "start_time")
-		endTime := getStringArg(args, "end_time")
-		allDay := getBoolArg(args, "all_day", false)
-		description := getStringArg(args, "description")
-		location := getStringArg(args, "location")
-		eventType := getStringArg(args, "event_type")
-		if eventType == "" {
-			eventType = "event"
-		}
-
-		// Validate required fields
-		if calendarID == "" {
-			return mcp.NewToolResultError("calendar_id is required"), nil
-		}
-		if title == "" {
-			return mcp.NewToolResultError("title is required"), nil
-		}
-		if startTime == "" {
-			return mcp.NewToolResultError("start_time is required"), nil
-		}
-		if endTime == "" {
-			return mcp.NewToolResultError("end_time is required"), nil
-		}
-
-		// Validate the calendar belongs to the household
-		if err := verifyCalendarOwnership(ctx, pool, calendarID, claims.HouseholdID); err != nil {
-			return mcp.NewToolResultError("calendar not found"), nil
-		}
-
-		// Validate time formats and ordering
-		startT, err := time.Parse(time.RFC3339, startTime)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid start_time format (use ISO 8601): %v", err)), nil
-		}
-		endT, err := time.Parse(time.RFC3339, endTime)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid end_time format (use ISO 8601): %v", err)), nil
-		}
-		if !endT.After(startT) {
-			return mcp.NewToolResultError("end_time must be after start_time"), nil
-		}
-
-		// Generate IDs
-		eventID := uuid.New().String()
-		uid := eventID
-		etag := uuid.New().String()
-
-		// Build ical_data JSON
-		icalData, err := marshalEventFields(title, description, startTime, endTime, location, allDay)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
-		}
-
-		// Execute in transaction
-		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("begin transaction: %v", err)), nil
-		}
-		defer tx.Rollback(ctx)
-
-		_, err = tx.Exec(ctx,
-			`INSERT INTO calendar_objects (id, calendar_id, uid, ical_data, etag, event_type)
-			 VALUES ($1, $2, $3, $4, $5, $6)`,
-			eventID, calendarID, uid, icalData, etag, eventType,
-		)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("insert event: %v", err)), nil
-		}
-
-		if err := recordChangeAndBumpCtag(ctx, tx, calendarID, uid, "create"); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("record change: %v", err)), nil
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("commit: %v", err)), nil
-		}
-
-		slog.Info("create_event: created", "event_id", eventID, "calendar_id", calendarID)
-		return mcp.NewToolResultText(fmt.Sprintf(`{"id":"%s"}`, eventID)), nil
-	}
-
-	return tool, handler
-}
-
-// ─────────────────────────────────────────────
-// 4. update_event
-// ─────────────────────────────────────────────
-
-// NewUpdateEventTool creates the update_event tool and its handler.
-func NewUpdateEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("update_event",
-		mcp.WithDescription("Update an existing calendar event. All fields except event_id are optional — only provided fields are updated."),
-		mcp.WithString("event_id", mcp.Description("Event ID to update"), mcp.Required()),
-		mcp.WithString("title", mcp.Description("New title")),
-		mcp.WithString("start_time", mcp.Description("New start time (ISO 8601)")),
-		mcp.WithString("end_time", mcp.Description("New end time (ISO 8601)")),
-		mcp.WithBoolean("all_day", mcp.Description("Whether this is an all-day event")),
-		mcp.WithString("description", mcp.Description("New description")),
-		mcp.WithString("location", mcp.Description("New location")),
-		mcp.WithString("event_type", mcp.Description("New event type")),
-	)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return mcp.NewToolResultError("authentication required"), nil
-		}
-
-		args := req.GetArguments()
-		eventID := getStringArg(args, "event_id")
-		if eventID == "" {
-			return mcp.NewToolResultError("event_id is required"), nil
-		}
-
-		// Get the event's calendar and verify household ownership
-		calendarID, err := getEventCalendarID(ctx, pool, eventID)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		if err := verifyCalendarOwnership(ctx, pool, calendarID, claims.HouseholdID); err != nil {
-			// Return not found rather than "not your calendar" to avoid leaking info
-			return mcp.NewToolResultError("event not found"), nil
-		}
-
-		// Load existing ical_data
-		var existingIcalData string
-		var existingEventType string
-		err = pool.QueryRow(ctx,
-			`SELECT ical_data, event_type FROM calendar_objects WHERE id = $1`,
-			eventID,
-		).Scan(&existingIcalData, &existingEventType)
-		if err != nil {
-			return mcp.NewToolResultError("event not found"), nil
-		}
-
-		// Collect optional field pointers
-		var titlePtr, descPtr, startPtr, endPtr, locPtr *string
-		var allDayPtr *bool
-
-		if v := getStringArg(args, "title"); v != "" {
-			titlePtr = &v
-		}
-		if v := getStringArg(args, "description"); v != "" || args["description"] != nil {
-			v := getStringArg(args, "description")
-			descPtr = &v
-		}
-		if v := getStringArg(args, "start_time"); v != "" {
-			startPtr = &v
-		}
-		if v := getStringArg(args, "end_time"); v != "" {
-			endPtr = &v
-		}
-		if v := getStringArg(args, "location"); v != "" || args["location"] != nil {
-			v := getStringArg(args, "location")
-			locPtr = &v
-		}
-		if v, ok := args["all_day"]; ok && v != nil {
-			if b, ok := v.(bool); ok {
-				allDayPtr = &b
-			}
-		}
-
-		// Validate time formats if provided
-		if startPtr != nil {
-			if _, err := time.Parse(time.RFC3339, *startPtr); err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("invalid start_time format (use ISO 8601): %v", err)), nil
-			}
-		}
-		if endPtr != nil {
-			if _, err := time.Parse(time.RFC3339, *endPtr); err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("invalid end_time format (use ISO 8601): %v", err)), nil
-			}
-		}
-
-		// Merge existing ical_data with new fields
-		mergedIcalData, err := mergeEventFields(existingIcalData, titlePtr, descPtr, startPtr, endPtr, locPtr, allDayPtr)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("merge event data: %v", err)), nil
-		}
-
-		// Validate merged start/end ordering
-		var mergedEj eventJSON
-		if err := json.Unmarshal([]byte(mergedIcalData), &mergedEj); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("parse merged event: %v", err)), nil
-		}
-		mergedStart, err := time.Parse(time.RFC3339, mergedEj.Start)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid start_time in merged data (use ISO 8601): %v", err)), nil
-		}
-		mergedEnd, err := time.Parse(time.RFC3339, mergedEj.End)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid end_time in merged data (use ISO 8601): %v", err)), nil
-		}
-		if !mergedEnd.After(mergedStart) {
-			return mcp.NewToolResultError("end_time must be after start_time"), nil
-		}
-
-		newEtag := uuid.New().String()
-
-		// Execute in transaction
-		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("begin transaction: %v", err)), nil
-		}
-		defer tx.Rollback(ctx)
-
-		// Update event_type if provided
-		eventType := getStringArg(args, "event_type")
-		if eventType != "" {
-			_, err = tx.Exec(ctx,
-				`UPDATE calendar_objects SET ical_data = $1, etag = $2, event_type = $3, updated_at = NOW() WHERE id = $4`,
-				mergedIcalData, newEtag, eventType, eventID,
-			)
-		} else {
-			_, err = tx.Exec(ctx,
-				`UPDATE calendar_objects SET ical_data = $1, etag = $2, updated_at = NOW() WHERE id = $3`,
-				mergedIcalData, newEtag, eventID,
-			)
-		}
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("update event: %v", err)), nil
-		}
-
-		// Record change and bump ctag
-		if err := recordChangeAndBumpCtag(ctx, tx, calendarID, eventID, "update"); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("record change: %v", err)), nil
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("commit: %v", err)), nil
-		}
-
-		slog.Info("update_event: updated", "event_id", eventID)
-		return mcp.NewToolResultText(`{"success":true}`), nil
-	}
-
-	return tool, handler
-}
-
-// ─────────────────────────────────────────────
-// 5. delete_event
-// ─────────────────────────────────────────────
-
-// NewDeleteEventTool creates the delete_event tool and its handler.
-func NewDeleteEventTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("delete_event",
-		mcp.WithDescription("Delete a calendar event. Records a calendar_changes entry (action='delete') and bumps the calendar's ctag for CalDAV sync."),
-		mcp.WithString("event_id", mcp.Description("Event ID to delete"), mcp.Required()),
-	)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return mcp.NewToolResultError("authentication required"), nil
-		}
-
-		args := req.GetArguments()
-		eventID := getStringArg(args, "event_id")
-		if eventID == "" {
-			return mcp.NewToolResultError("event_id is required"), nil
-		}
-
-		// Get the event's calendar and verify household ownership
-		calendarID, err := getEventCalendarID(ctx, pool, eventID)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		if err := verifyCalendarOwnership(ctx, pool, calendarID, claims.HouseholdID); err != nil {
-			return mcp.NewToolResultError("event not found"), nil
-		}
-
-		// Execute in transaction
-		tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("begin transaction: %v", err)), nil
-		}
-		defer tx.Rollback(ctx)
-
-		// Delete the event and get the uid for the change record
-		var eventUID string
-		err = tx.QueryRow(ctx,
-			`DELETE FROM calendar_objects WHERE id = $1 RETURNING uid`,
-			eventID,
-		).Scan(&eventUID)
-		if err == pgx.ErrNoRows {
-			return mcp.NewToolResultError("event not found"), nil
-		}
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("delete event: %v", err)), nil
-		}
-
-		// Record the delete change (DB constraint allows 'create', 'update', 'delete')
-		if err := recordChangeAndBumpCtag(ctx, tx, calendarID, eventUID, "delete"); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("record change: %v", err)), nil
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("commit: %v", err)), nil
-		}
-
-		slog.Info("delete_event: deleted", "event_id", eventID)
-		return mcp.NewToolResultText(`{"success":true}`), nil
-	}
-
-	return tool, handler
-}
-
-// ─────────────────────────────────────────────
-// 6. find_available_slots
-// ─────────────────────────────────────────────
-
-// NewFindAvailableSlotsTool creates the find_available_slots tool and its handler.
-func NewFindAvailableSlotsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("find_available_slots",
-		mcp.WithDescription("Find available time slots on a given date. Default available hours are 8am-8pm. Checks events across specified calendars."),
-		mcp.WithString("date", mcp.Description("Date to check (YYYY-MM-DD)"), mcp.Required()),
-		mcp.WithNumber("duration_minutes", mcp.Description("Minimum slot duration in minutes"), mcp.Required()),
-		mcp.WithArray("calendar_ids", mcp.Description("Optional list of calendar IDs to check (checks all calendars if omitted)")),
-	)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return mcp.NewToolResultError("authentication required"), nil
-		}
-
-		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
-
-		args := req.GetArguments()
-		dateStr := getStringArg(args, "date")
-		if dateStr == "" {
-			return mcp.NewToolResultError("date is required (YYYY-MM-DD)"), nil
-		}
-
-		date, err := parseDate(dateStr, loc)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid date format (use YYYY-MM-DD): %v", err)), nil
-		}
-
-		durationMin := getFloat64Arg(args, "duration_minutes", 30)
-		if durationMin <= 0 {
-			return mcp.NewToolResultError("duration_minutes must be positive"), nil
-		}
-		duration := time.Duration(durationMin) * time.Minute
-
-		calendarIDs := getStringSliceArg(args, "calendar_ids")
-
-		// Define the available window: 8am to 8pm in the household's timezone
-		dayStart := time.Date(date.Year(), date.Month(), date.Day(), 8, 0, 0, 0, loc)
-		dayEnd := time.Date(date.Year(), date.Month(), date.Day(), 20, 0, 0, 0, loc)
-
-		// Query events for the day (from midnight to midnight in household timezone)
-		queryStart := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, loc)
-		queryEnd := queryStart.Add(24 * time.Hour)
-
-		events, err := queryEvents(ctx, pool, claims.HouseholdID, calendarIDs, queryStart, queryEnd)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("query events: %v", err)), nil
-		}
-
-		// Filter events that overlap the day and collect busy intervals
-		type busyInterval struct {
-			start time.Time
-			end   time.Time
-		}
-		busy := make([]busyInterval, 0)
-
+		matched := make([]Event, 0, len(events))
 		for _, ev := range events {
-			evStart, evEnd, err := parseEventTime(ev)
-			if err != nil {
-				continue
-			}
-			// Clip event to the day window
-			if evStart.Before(dayStart) {
-				evStart = dayStart
-			}
-			if evEnd.After(dayEnd) {
-				evEnd = dayEnd
-			}
-			// Skip if completely outside the day window
-			if !evStart.Before(dayEnd) || !evEnd.After(dayStart) {
-				continue
-			}
-			busy = append(busy, busyInterval{start: evStart, end: evEnd})
-		}
-
-		// Sort busy intervals by start time
-		sort.Slice(busy, func(i, j int) bool {
-			return busy[i].start.Before(busy[j].start)
-		})
-
-		// Merge overlapping busy intervals
-		merged := make([]busyInterval, 0)
-		for _, b := range busy {
-			if len(merged) == 0 {
-				merged = append(merged, b)
-				continue
-			}
-			last := &merged[len(merged)-1]
-			if b.start.Before(last.end) || b.start.Equal(last.end) {
-				// Overlapping or adjacent: extend last interval
-				if b.end.After(last.end) {
-					last.end = b.end
-				}
-			} else {
-				merged = append(merged, b)
+			// An open-ended search has no window to test against: every row
+			// that came back matches the text query.
+			if (openEnded || eventOverlapsRange(ev, from, to)) && matchesQuery(ev, query) {
+				matched = append(matched, ev)
 			}
 		}
-
-		// Find gaps between merged busy intervals within the day window
-		slots := make([]AvailableSlot, 0)
-		cursor := dayStart
-
-		for _, b := range merged {
-			// Gap from cursor to start of busy interval
-			if b.start.After(cursor) {
-				gapEnd := b.start
-				if gapEnd.Sub(cursor) >= duration {
-					slots = append(slots, AvailableSlot{
-						Start: cursor.Format(time.RFC3339),
-						End:   gapEnd.Format(time.RFC3339),
-					})
-				}
-			}
-			// Move cursor past this busy interval
-			if b.end.After(cursor) {
-				cursor = b.end
-			}
-		}
-
-		// Gap from cursor to end of day
-		if dayEnd.After(cursor) {
-			if dayEnd.Sub(cursor) >= duration {
-				slots = append(slots, AvailableSlot{
-					Start: cursor.Format(time.RFC3339),
-					End:   dayEnd.Format(time.RFC3339),
-				})
-			}
-		}
-
-		data, err := json.Marshal(slots)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
-		}
-		return mcp.NewToolResultText(string(data)), nil
-	}
-
-	return tool, handler
-}
-
-// ─────────────────────────────────────────────
-// 7. get_daily_briefing
-// ─────────────────────────────────────────────
-
-// NewGetDailyBriefingTool creates the get_daily_briefing tool and its handler.
-func NewGetDailyBriefingTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("get_daily_briefing",
-		mcp.WithDescription("Get a formatted daily briefing with events, maintenance tasks due, and bills due for a given date"),
-		mcp.WithString("date", mcp.Description("Date (YYYY-MM-DD). Defaults to today.")),
-	)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return mcp.NewToolResultError("authentication required"), nil
-		}
-
-		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
-
-		args := req.GetArguments()
-		dateStr := getStringArg(args, "date")
-		var date time.Time
-		if dateStr != "" {
-			var err error
-			date, err = parseDate(dateStr, loc)
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("invalid date format (use YYYY-MM-DD): %v", err)), nil
-			}
-		} else {
-			now := time.Now().In(loc)
-			date = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
-		}
-
-		dayStart := date
-		dayEnd := date.Add(24 * time.Hour)
-		dateDisplay := date.Format("Monday, January 2, 2006")
-
-		var briefing strings.Builder
-		briefing.WriteString(fmt.Sprintf("# Daily Briefing — %s\n\n", dateDisplay))
-
-		// ── Events ──
-		events, eventsErr := queryEvents(ctx, pool, claims.HouseholdID, nil, dayStart, dayEnd)
-		if eventsErr != nil {
-			slog.Error("get_daily_briefing: query events error", "error", eventsErr)
-		}
-
-		// Filter events to this date
-		todaysEvents := make([]Event, 0)
-		if eventsErr == nil {
-			for _, ev := range events {
-				if eventOverlapsRange(ev, dayStart, dayEnd) {
-					todaysEvents = append(todaysEvents, ev)
-				}
-			}
-		}
-
-		// Sort events by start time
-		sort.Slice(todaysEvents, func(i, j int) bool {
-			return todaysEvents[i].Start < todaysEvents[j].Start
-		})
-
-		briefing.WriteString(fmt.Sprintf("## 📅 Events (%d)\n\n", len(todaysEvents)))
-		if eventsErr != nil {
-			briefing.WriteString("⚠️ Could not load events (database error) — do not assume the day is free.\n\n")
-		} else if len(todaysEvents) == 0 {
-			briefing.WriteString("No events scheduled for today.\n\n")
-		} else {
-			for _, ev := range todaysEvents {
-				startT, err := time.Parse(time.RFC3339, ev.Start)
-				timeStr := ev.Start
-				if err == nil {
-					timeStr = startT.Format("3:04 PM")
-				}
-				if ev.AllDay {
-					timeStr = "All day"
-				}
-				calInfo := ""
-				if ev.CalendarName != "" {
-					calInfo = fmt.Sprintf(" [%s]", ev.CalendarName)
-				}
-				briefing.WriteString(fmt.Sprintf("- **%s** — %s%s\n", timeStr, ev.Title, calInfo))
-				if ev.Description != "" {
-					briefing.WriteString(fmt.Sprintf("  %s\n", ev.Description))
-				}
-				if ev.Location != "" {
-					briefing.WriteString(fmt.Sprintf("  📍 %s\n", ev.Location))
-				}
-			}
-			briefing.WriteString("\n")
-		}
-
-		// ── Maintenance Tasks Due ──
-		briefing.WriteString("## 🔧 Maintenance Tasks Due\n\n")
-		mtRows, mtErr := pool.Query(ctx,
-			`SELECT name, description, status, property_id
-			 FROM maintenance_tasks
-			 WHERE household_id = $1 AND due_date = $2
-			 ORDER BY name`,
-			claims.HouseholdID, date,
-		)
-		if mtErr != nil {
-			slog.Error("get_daily_briefing: query maintenance error", "error", mtErr)
-		}
-
-		mtCount := 0
-		if mtRows != nil {
-			defer mtRows.Close()
-			for mtRows.Next() {
-				mtCount++
-				var name, status string
-				var description, propertyID *string
-				if err := mtRows.Scan(&name, &description, &status, &propertyID); err != nil {
-					slog.Error("get_daily_briefing: scan maintenance error", "error", err)
-					continue
-				}
-				briefing.WriteString(fmt.Sprintf("- **%s** [%s]", name, status))
-				if description != nil && *description != "" {
-					briefing.WriteString(fmt.Sprintf(" — %s", *description))
-				}
-				briefing.WriteString("\n")
-			}
-			if err := mtRows.Err(); err != nil {
-				slog.Error("get_daily_briefing: iterate maintenance error", "error", err)
-			}
-		}
-
-		if mtErr != nil {
-			briefing.WriteString("⚠️ Could not load maintenance tasks (database error) — do not assume no tasks are due.\n\n")
-		} else if mtCount == 0 {
-			briefing.WriteString("No maintenance tasks due today.\n\n")
-		} else {
-			briefing.WriteString("\n")
-		}
-
-		// ── Bills Due ──
-		briefing.WriteString("## 💰 Bills Due\n\n")
-		dueDay := date.Day()
-		// Use COALESCE for entity_type to handle NULL values
-		billRows, billErr := pool.Query(ctx,
-			`SELECT name, COALESCE(amount, 0), category
-			 FROM bills
-			 WHERE household_id = $1 AND due_day = $2 AND paid_date IS NULL
-			 ORDER BY name`,
-			claims.HouseholdID, dueDay,
-		)
-		if billErr != nil {
-			slog.Error("get_daily_briefing: query bills error", "error", billErr)
-		}
-
-		billCount := 0
-		if billRows != nil {
-			defer billRows.Close()
-			for billRows.Next() {
-				billCount++
-				var name, category string
-				var amount float64
-				if err := billRows.Scan(&name, &amount, &category); err != nil {
-					slog.Error("get_daily_briefing: scan bill error", "error", err)
-					continue
-				}
-				catInfo := ""
-				if category != "" {
-					catInfo = fmt.Sprintf(" [%s]", category)
-				}
-				briefing.WriteString(fmt.Sprintf("- **%s** — $%.2f%s\n", name, amount, catInfo))
-			}
-			if err := billRows.Err(); err != nil {
-				slog.Error("get_daily_briefing: iterate bills error", "error", err)
-			}
-		}
-
-		if billErr != nil {
-			briefing.WriteString("⚠️ Could not load bills (database error) — do not assume no bills are due.\n")
-		} else if billCount == 0 {
-			briefing.WriteString("No bills due today.\n")
-		}
-
-		return mcp.NewToolResultText(briefing.String()), nil
-	}
-
-	return tool, handler
-}
-
-// ─────────────────────────────────────────────
-// 8. check_conflicts
-// ─────────────────────────────────────────────
-
-// NewCheckConflictsTool creates the check_conflicts tool and its handler.
-func NewCheckConflictsTool(pool *pgxpool.Pool) (mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
-	tool := mcp.NewTool("check_conflicts",
-		mcp.WithDescription("Check for conflicting events in a given time range. Returns events that overlap the proposed time."),
-		mcp.WithString("start_time", mcp.Description("Proposed start time (ISO 8601)"), mcp.Required()),
-		mcp.WithString("end_time", mcp.Description("Proposed end time (ISO 8601)"), mcp.Required()),
-		mcp.WithArray("calendar_ids", mcp.Description("Optional list of calendar IDs to check (checks all calendars if omitted)")),
-	)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		claims := server.ClaimsFromContext(ctx)
-		if claims == nil {
-			return mcp.NewToolResultError("authentication required"), nil
-		}
-
-		args := req.GetArguments()
-		startTimeStr := getStringArg(args, "start_time")
-		endTimeStr := getStringArg(args, "end_time")
-
-		if startTimeStr == "" {
-			return mcp.NewToolResultError("start_time is required"), nil
-		}
-		if endTimeStr == "" {
-			return mcp.NewToolResultError("end_time is required"), nil
-		}
-
-		proposedStart, err := time.Parse(time.RFC3339, startTimeStr)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid start_time format (use ISO 8601): %v", err)), nil
-		}
-		proposedEnd, err := time.Parse(time.RFC3339, endTimeStr)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid end_time format (use ISO 8601): %v", err)), nil
-		}
-		if !proposedEnd.After(proposedStart) {
-			return mcp.NewToolResultError("end_time must be after start_time"), nil
-		}
-
-		calendarIDs := getStringSliceArg(args, "calendar_ids")
-
-		// Query all events for the household (or filtered calendars)
-		events, err := queryEvents(ctx, pool, claims.HouseholdID, calendarIDs, proposedStart, proposedEnd)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("query events: %v", err)), nil
-		}
-
-		// Filter to events that overlap the proposed time range
-		conflicts := make([]ConflictEvent, 0)
-		for _, ev := range events {
-			if eventOverlapsRange(ev, proposedStart, proposedEnd) {
-				conflicts = append(conflicts, ConflictEvent{
-					ID:           ev.ID,
-					CalendarID:   ev.CalendarID,
-					Title:        ev.Title,
-					Start:        ev.Start,
-					End:          ev.End,
-					CalendarName: ev.CalendarName,
-				})
-			}
-		}
-
-		// Sort by start time
-		slices.SortFunc(conflicts, func(a, b ConflictEvent) int {
-			if a.Start < b.Start {
+		slices.SortStableFunc(matched, func(a, b Event) int {
+			switch {
+			case startsBefore(a.Start, b.Start):
 				return -1
-			}
-			if a.Start > b.Start {
+			case startsBefore(b.Start, a.Start):
 				return 1
 			}
 			return 0
 		})
 
-		data, err := json.Marshal(conflicts)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
+		total := len(matched)
+		lo := min(offset, total)
+		hi := min(lo+limit, total)
+		page := matched[lo:hi]
+
+		// The summary has to answer "did you look everywhere?" before it
+		// answers "what did you find?", because a caller reads the first line
+		// and stops (#4944).
+		where := describeRange(from, to, loc)
+		if openEnded {
+			where = "on any date"
 		}
-		return mcp.NewToolResultText(string(data)), nil
+		if query != "" {
+			where += fmt.Sprintf(" matching %q", query)
+		}
+		summary := foundSummary(where, total, lo, hi, defaulted, searched)
+		// Page.Total counts this page plus what is left after it, so the
+		// last page is not marked truncated.
+		p := respond.Page{Total: total - lo}
+		var next []string
+		if hi < total {
+			p.NextCursor = respond.EncodeCursor(hi)
+			p.Narrow = fmt.Sprintf("%d more. Pass next_cursor as cursor with the same filters, or narrow from/to, query or calendar_id.", total-hi)
+		}
+		if len(truncated) > 0 {
+			summary += " " + truncatedNote(truncated)
+		}
+		if len(page) > 0 {
+			next = append(next, eventHints(page[0])...)
+		} else if searched.AllDates {
+			next = append(next, "No match on any date. Add one with event_create, or try search_all to look in notes and other areas too.")
+		} else {
+			next = append(next, "Nothing in this range. Call event_find without from/to to search every date, or add one with event_create.")
+		}
+		if searched.MayHaveMore && total > 0 {
+			next = append(next, "More matches may exist outside the range searched; leave from/to off to search every date.")
+		}
+		return respond.ListIn(summary, page, p, searched, next...), nil
+	}
+	return tool, handler
+}
+
+// foundSummary words an event_find result. Its one hard rule is that a zero
+// result never reads as "it does not exist" when the truth is "it is outside
+// what I searched" (#4944): every empty answer names which of the two it is,
+// before a caller can act on it. An exhaustive search says so; a window the
+// tool chose itself shouts that nothing outside it was checked; a search cut
+// short by a size cap refuses to be read as proof of absence.
+func foundSummary(where string, total, lo, hi int, defaulted bool, searched *respond.Range) string {
+	switch {
+	case total == 0 && searched.AllDates:
+		return fmt.Sprintf("No events %s — every date was searched, so no event matches.", where)
+	case total == 0 && defaulted:
+		return fmt.Sprintf("No events %s — SEARCHED THAT RANGE ONLY, so nothing outside it was checked; pass from/to, or leave them off, to search other dates.", where)
+	case total == 0 && searched.MayHaveMore:
+		return fmt.Sprintf("No events %s — the search stopped short (%s), so this is not proof the event does not exist.", where, searched.Note)
+	case total == 0:
+		return fmt.Sprintf("No events %s.", where)
+	case hi == total:
+		return fmt.Sprintf("Found %d %s %s.", total, plural(total, "event", "events"), where)
+	default:
+		return fmt.Sprintf("Showing events %d–%d of %d %s.", lo+1, hi, total, where)
+	}
+}
+
+// truncatedNote tells the caller which series were cut at
+// maxSeriesOccurrences occurrences.
+func truncatedNote(titles []string) string {
+	quoted := make([]string, len(titles))
+	for i, t := range titles {
+		quoted[i] = strconv.Quote(t)
+	}
+	return fmt.Sprintf("%s %s more than %d times in this range; only the first %d are listed, so ask for a shorter range to see the rest.",
+		strings.Join(quoted, ", "), plural(len(titles), "repeats", "repeat"), maxSeriesOccurrences, maxSeriesOccurrences)
+}
+
+// matchesQuery reports whether every word of q appears (case-insensitive)
+// in the event's title, description, location or calendar name.
+func matchesQuery(ev Event, q string) bool {
+	words := strings.Fields(strings.ToLower(q))
+	if len(words) == 0 {
+		return true
+	}
+	hay := strings.ToLower(strings.Join([]string{ev.Title, ev.Description, ev.Location, ev.CalendarName}, " "))
+	for _, w := range words {
+		if !strings.Contains(hay, w) {
+			return false
+		}
+	}
+	return true
+}
+
+// describeRange words a [from, to) range for summaries: "on Wed Nov 18",
+// "from Wed Nov 18 to Tue Nov 24", or exact times when not whole days.
+func describeRange(from, to time.Time, loc *time.Location) string {
+	f, t := from.In(loc), to.In(loc)
+	isMidnight := func(x time.Time) bool { return x.Hour() == 0 && x.Minute() == 0 && x.Second() == 0 }
+	if isMidnight(f) && isMidnight(t) {
+		last := t.AddDate(0, 0, -1)
+		if !last.After(f) {
+			return "on " + f.Format("Mon Jan 2")
+		}
+		return "from " + f.Format("Mon Jan 2") + " to " + last.Format("Mon Jan 2")
+	}
+	return "between " + f.Format("Mon Jan 2 3:04 PM") + " and " + t.Format("Mon Jan 2 3:04 PM")
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// eventHints are the next steps for one event.
+func eventHints(ev Event) []string {
+	if ev.Recurring {
+		day := ev.LocalDate
+		if ev.RecurrenceID != "" {
+			day = ev.RecurrenceID
+		}
+		return []string{
+			fmt.Sprintf("Change one occurrence with event_update event_id=%s scope=this occurrence_date=%s; scope=all changes every one.", ev.ID, day),
+			fmt.Sprintf("Skip one with event_delete event_id=%s scope=this occurrence_date=%s; scope=all deletes the series.", ev.ID, day),
+		}
+	}
+	return []string{
+		fmt.Sprintf("Change it with event_update event_id=%s.", ev.ID),
+		fmt.Sprintf("Remove it with event_delete event_id=%s.", ev.ID),
+	}
+}
+
+// conflictHints are the next steps after a create or a move: one per
+// conflict (at most 2), or the plain event hints when there are none.
+func conflictHints(ev Event, conflicts []ConflictEvent, loc *time.Location) []string {
+	if len(conflicts) == 0 {
+		return eventHints(ev)
+	}
+	var out []string
+	for i, c := range conflicts {
+		if i == 2 {
+			break
+		}
+		when := describeWhen(Event{Start: c.Start, End: c.End, AllDay: c.AllDay}, loc)
+		out = append(out, fmt.Sprintf("Overlaps %q %s; move it with event_update event_id=%s.", c.Title, when, ev.ID))
+	}
+	return append(out, "Tell the user about the overlap; the event was saved.")
+}
+
+// eventRange is the [start, end) span an event occupies, for conflict checks.
+func eventRange(ev Event) (time.Time, time.Time, bool) {
+	s, e, err := parseEventTime(ev)
+	return s, e, err == nil && e.After(s)
+}
+
+// event_create, event_update and event_delete are in events_write.go.
+
+func exampleTimePlus(loc *time.Location, d time.Duration) string {
+	t, _ := time.Parse(time.RFC3339, exampleTime(loc))
+	return t.Add(d).In(loc).Format(time.RFC3339)
+}
+
+// conflictsFor runs findConflicts over every household calendar and turns a
+// failure into an empty list plus a conflicts_error message.
+func conflictsFor(ctx context.Context, q querier, householdID string, loc *time.Location, start, end time.Time, excludeID string) ([]ConflictEvent, string) {
+	conflicts, err := findConflicts(ctx, q, householdID, loc, nil, start, end, excludeID)
+	if err != nil {
+		slog.Warn("calendar: conflict check failed", "event_id", excludeID, "error", err)
+		return []ConflictEvent{}, "The overlap check failed; check with event_find from/to."
+	}
+	return conflicts, ""
+}
+
+// recentDuplicate finds an event on calendarID with the same title, times
+// and all-day flag created within duplicateWindow. Errors only disable the
+// guard.
+func recentDuplicate(ctx context.Context, q querier, calendarID, title, start, end string, allDay bool) (eventRow, bool) {
+	row, err := scanEventRow(q.QueryRow(ctx,
+		`SELECT `+eventColumns+` FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
+		  WHERE co.calendar_id = $1
+		    AND co.created_at > NOW() - $6::interval
+		    AND co.ical_data::jsonb->>'title' = $2
+		    AND co.starts_at = $3::timestamptz
+		    AND co.ends_at = $4::timestamptz
+		    AND COALESCE((co.ical_data::jsonb->>'all_day')::boolean, false) = $5
+		  ORDER BY co.created_at DESC LIMIT 1`,
+		calendarID, title, start, end, allDay, duplicateWindow))
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("event_create: duplicate check failed", "error", err)
+		}
+		return eventRow{}, false
+	}
+	return row, true
+}
+
+// isRecurringEvent reports whether a calendar_objects row is part of a
+// recurring series: its rrule column is set, or its raw iCalendar carries an
+// RRULE, RDATE or RECURRENCE-ID property (an override of one occurrence).
+// Both columns are NULL for rows written before migration 036.
+func isRecurringEvent(rrule, icalRaw *string) bool {
+	if rrule != nil && strings.TrimSpace(*rrule) != "" {
+		return true
+	}
+	if icalRaw == nil || *icalRaw == "" {
+		return false
+	}
+	for _, line := range strings.Split(*icalRaw, "\n") {
+		// A line starting with a space or tab continues a folded line
+		// (RFC 5545 3.1), e.g. a DESCRIPTION mentioning "RRULE:"; skip it.
+		if line == "" || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		name := strings.ToUpper(strings.TrimRight(line, "\r"))
+		// Property name ends at ':' (value) or ';' (parameters).
+		if i := strings.IndexAny(name, ":;"); i >= 0 {
+			name = name[:i]
+		}
+		switch name {
+		case "RRULE", "RDATE", "RECURRENCE-ID":
+			return true
+		}
+	}
+	return false
+}
+
+// ─────────────────────────────────────────────
+// calendar_find_free_time
+// ─────────────────────────────────────────────
+
+const (
+	defaultSlotStartHour = 8
+	defaultSlotEndHour   = 20
+	maxSlotRangeDays     = 31
+)
+
+// NewCalendarFindFreeTimeTool creates calendar_find_free_time (replaces
+// find_available_slots).
+//
+// Every day's window and query bounds are built with time.Date in the
+// household's timezone, so a DST day is 23 or 25 hours long, and every
+// returned time carries the household's offset.
+func NewCalendarFindFreeTimeTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
+	tool := mcp.NewTool("calendar_find_free_time", toolOptions(classR, "Find free time",
+		mcp.WithDescription("Find free time slots across a date range in the family timezone, e.g. a 2-hour gap any evening next week. One call covers the whole range. All-day events don't block."),
+		mcp.WithString("from", mcp.Description("First day, YYYY-MM-DD, e.g. 2026-11-18"), mcp.Required()),
+		mcp.WithNumber("duration_minutes", mcp.Description("Minimum free minutes, e.g. 120"), mcp.Required(), mcp.Min(1)),
+		mcp.WithString("to", mcp.Description(fmt.Sprintf("Last day, inclusive (default from; at most %d days)", maxSlotRangeDays))),
+		mcp.WithNumber("start_hour", mcp.Description(fmt.Sprintf("Local hour the day opens, 0-23 (default %d)", defaultSlotStartHour)), mcp.Min(0), mcp.Max(23)),
+		mcp.WithNumber("end_hour", mcp.Description(fmt.Sprintf("Local hour the day closes, 1-24 (default %d)", defaultSlotEndHour)), mcp.Min(1), mcp.Max(24)),
+		mcp.WithArray("calendar_ids", mcp.Description("Only these calendars (names or ids); default all"), mcp.WithStringItems()),
+		respond.ListSchema[AvailableSlot](),
+	)...)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		claims := server.ClaimsFromContext(ctx)
+		if claims == nil {
+			return authRequired(), nil
+		}
+		loc := loadHouseholdLocation(ctx, pool, claims.HouseholdID)
+		args := req.GetArguments()
+
+		fromArg := getStringArg(args, "from")
+		if strings.TrimSpace(fromArg) == "" {
+			return respond.Invalid("from", "from is required.", "Pass the first day as YYYY-MM-DD.",
+				map[string]any{"from": exampleDate(loc), "duration_minutes": 60}), nil
+		}
+		firstDay, bad := parseDay("from", fromArg, loc)
+		if bad != nil {
+			return bad, nil
+		}
+		lastDay := firstDay
+		if toArg := getStringArg(args, "to"); strings.TrimSpace(toArg) != "" {
+			if lastDay, bad = parseDay("to", toArg, loc); bad != nil {
+				return bad, nil
+			}
+		}
+		days := daysInRange(firstDay, lastDay, loc)
+		if len(days) == 0 {
+			return respond.Invalid("to", "to must not be before from.", "Pass to on or after from (both YYYY-MM-DD).",
+				map[string]any{"from": fromArg, "to": fromArg, "duration_minutes": 60}), nil
+		}
+		if len(days) > maxSlotRangeDays {
+			return respond.Invalid("to", fmt.Sprintf("The range is %d days; at most %d are allowed.", len(days), maxSlotRangeDays),
+				"Search a shorter range.", map[string]any{"from": fromArg, "to": firstDay.AddDate(0, 0, 6).Format(dateLayout), "duration_minutes": 60}), nil
+		}
+
+		durationMin := getFloat64Arg(args, "duration_minutes", 0)
+		if durationMin <= 0 {
+			return respond.Invalid("duration_minutes", "duration_minutes must be a positive number of minutes.",
+				"Pass how long the free slot must be, e.g. 60.", map[string]any{"from": fromArg, "duration_minutes": 60}), nil
+		}
+		duration := time.Duration(durationMin * float64(time.Minute))
+
+		startHour, endHour, err := slotHours(args)
+		if err != nil {
+			return respond.Invalid("start_hour", err.Error(), "Pass whole local hours with start_hour < end_hour, e.g. 17 and 21.",
+				map[string]any{"from": fromArg, "duration_minutes": 60, "start_hour": 17, "end_hour": 21}), nil
+		}
+
+		calendarIDs, bad := resolveCalendars(ctx, pool, claims.HouseholdID, "calendar_ids", getStringSliceArg(args, "calendar_ids"))
+		if bad != nil {
+			return bad, nil
+		}
+
+		// Query from local midnight of the first day to local midnight after
+		// the last day. time.Date normalises day+1, so DST days are covered
+		// exactly (no midnight+24h drift).
+		queryStart := days[0]
+		last := days[len(days)-1]
+		queryEnd := time.Date(last.Year(), last.Month(), last.Day()+1, 0, 0, 0, 0, loc)
+
+		role, _, bad := callerRoleOf(ctx, pool, claims)
+		if bad != nil {
+			return bad, nil
+		}
+		events, _, err := queryOccurrencesAs(ctx, pool, eventView{role: role}, claims.HouseholdID, loc, calendarIDs, queryStart, queryEnd)
+		if err != nil {
+			return respond.Failed("read the calendar", err), nil
+		}
+		busy := make([]timeInterval, 0, len(events))
+		for _, ev := range events {
+			// All-day events (bills, birthdays, trips) are free time, as in
+			// calendar apps. Only free-time search skips them: event_find
+			// and event_create's conflicts (findConflicts) still report them.
+			if ev.AllDay {
+				continue
+			}
+			evStart, evEnd, err := parseEventTime(ev)
+			if err != nil || !evEnd.After(evStart) {
+				continue
+			}
+			busy = append(busy, timeInterval{start: evStart, end: evEnd})
+		}
+
+		slots := make([]AvailableSlot, 0)
+		for _, day := range days {
+			windowStart := time.Date(day.Year(), day.Month(), day.Day(), startHour, 0, 0, 0, loc)
+			windowEnd := time.Date(day.Year(), day.Month(), day.Day(), endHour, 0, 0, 0, loc)
+			slots = append(slots, freeSlots(busy, windowStart, windowEnd, duration, day, loc)...)
+		}
+
+		where := describeRange(days[0], queryEnd, loc)
+		window := fmt.Sprintf("between %02d:00 and %02d:00", startHour, endHour)
+		if len(slots) == 0 {
+			return respond.List(fmt.Sprintf("No free %v-minute slot %s %s.", durationMin, where, window), slots, respond.Page{},
+				"Try a wider from/to, a shorter duration_minutes or other start_hour/end_hour."), nil
+		}
+		first := slots[0]
+		bookStart, _ := time.Parse(time.RFC3339, first.Start)
+		return respond.List(fmt.Sprintf("Found %d free %s of at least %v minutes %s %s.", len(slots), plural(len(slots), "slot", "slots"), durationMin, where, window),
+			slots, respond.Page{},
+			fmt.Sprintf("Book one with event_create start=%s end=%s.", first.Start, bookStart.Add(duration).In(loc).Format(time.RFC3339))), nil
+	}
+	return tool, handler
+}
+
+// timeInterval is a half-open [start, end) busy interval.
+type timeInterval struct {
+	start time.Time
+	end   time.Time
+}
+
+// slotHours reads and validates the optional start_hour/end_hour args.
+func slotHours(args map[string]any) (int, int, error) {
+	startF := getFloat64Arg(args, "start_hour", defaultSlotStartHour)
+	endF := getFloat64Arg(args, "end_hour", defaultSlotEndHour)
+	if startF != float64(int(startF)) || endF != float64(int(endF)) {
+		return 0, 0, fmt.Errorf("start_hour and end_hour must be whole hours")
+	}
+	start, end := int(startF), int(endF)
+	if start < 0 || start > 23 {
+		return 0, 0, fmt.Errorf("start_hour must be between 0 and 23")
+	}
+	if end < 1 || end > 24 {
+		return 0, 0, fmt.Errorf("end_hour must be between 1 and 24")
+	}
+	if end <= start {
+		return 0, 0, fmt.Errorf("end_hour must be after start_hour")
+	}
+	return start, end, nil
+}
+
+// daysInRange returns local midnight of every calendar day from first to
+// last inclusive (both already at local midnight in loc). It steps by
+// calendar day via time.Date, never by 24h, so DST transitions don't skip
+// or repeat a day. Returns nil when last is before first.
+func daysInRange(first, last time.Time, loc *time.Location) []time.Time {
+	var days []time.Time
+	for d := first; !d.After(last); d = time.Date(d.Year(), d.Month(), d.Day()+1, 0, 0, 0, 0, loc) {
+		days = append(days, d)
+		if len(days) > maxSlotRangeDays {
+			break // caller rejects; stop early on huge ranges
+		}
+	}
+	return days
+}
+
+// freeSlots returns the gaps of at least duration inside [windowStart,
+// windowEnd) that no busy interval covers, dated by day. Every time is
+// formatted in loc, so slot offsets are consistent whatever offset the
+// events were stored in.
+func freeSlots(busy []timeInterval, windowStart, windowEnd time.Time, duration time.Duration, day time.Time, loc *time.Location) []AvailableSlot {
+	clipped := make([]timeInterval, 0, len(busy))
+	for _, b := range busy {
+		s, e := b.start, b.end
+		if s.Before(windowStart) {
+			s = windowStart
+		}
+		if e.After(windowEnd) {
+			e = windowEnd
+		}
+		if !s.Before(e) {
+			continue // outside the window
+		}
+		clipped = append(clipped, timeInterval{start: s, end: e})
+	}
+	sort.Slice(clipped, func(i, j int) bool { return clipped[i].start.Before(clipped[j].start) })
+
+	slots := make([]AvailableSlot, 0)
+	emit := func(from, to time.Time) {
+		if to.Sub(from) >= duration {
+			slots = append(slots, AvailableSlot{
+				LocalDate: day.Format(dateLayout),
+				Weekday:   day.Weekday().String(),
+				Start:     from.In(loc).Format(time.RFC3339),
+				End:       to.In(loc).Format(time.RFC3339),
+			})
+		}
 	}
 
-	return tool, handler
+	cursor := windowStart
+	for _, b := range clipped {
+		if b.start.After(cursor) {
+			emit(cursor, b.start)
+		}
+		if b.end.After(cursor) {
+			cursor = b.end
+		}
+	}
+	if windowEnd.After(cursor) {
+		emit(cursor, windowEnd)
+	}
+	return slots
 }

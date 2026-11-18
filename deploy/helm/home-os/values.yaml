@@ -1,15 +1,71 @@
 global:
   imageRegistry: ghcr.io/jacobsims214/home-os
+  # One tag for every home-os app image (api, ui, mcp, worker, calendar,
+  # migrations): the immutable sha-<short> tag of one release.yml run.
+  # `latest` (or empty) fails the render unless allowLatestImageTag, because
+  # release.yml only moves `latest` on releases/main (templates/_helpers.tpl,
+  # home-os.imageTag).
   imageTag: latest
+  # Local docker-desktop only: allow imageTag `latest`/empty. Never set this on
+  # a real deployment.
+  allowLatestImageTag: false
+  # Pull policy for the home-os app images. Always suits a moving tag; use
+  # IfNotPresent with an immutable sha-<short> tag.
   imagePullPolicy: Always
+  # Pull policy for the pinned third-party images below (envoy, dex, typesense,
+  # tika, CNPG postgres). Their tags are exact versions, so the node cache is safe.
+  thirdPartyImagePullPolicy: IfNotPresent
+  # Public origin of Home OS as browsers and OAuth clients see it
+  # (scheme://host[:port], no trailing slash), e.g. https://homeos.example.com.
+  # Drives the Dex issuer (<publicUrl>/dex), the home-os-ui redirect URI, the
+  # MCP protected-resource URL (<publicUrl>/mcp) and the API/UI/MCP env.
+  # Required: empty, localhost or the Argo placeholder fails the render
+  # (templates/_helpers.tpl, home-os.publicUrl) unless allowLocalPublicUrl.
+  publicUrl: ""
+  # Local docker-desktop only: allow an empty/localhost publicUrl (empty =
+  # http://localhost:<envoy.port>). Never set this on a real deployment.
+  allowLocalPublicUrl: false
 
 namespace: home-os
 
 envoy:
   enabled: true
+  # Pinned: runs as uid 101 (the image's envoy user), see templates/envoy.
+  # >= 1.34 is required for the per-IP Dex login limit below (dynamic
+  # descriptors, XffConfig.xff_trusted_cidrs).
+  image: envoyproxy/envoy:v1.39.6
   port: 8000
   https:
     enabled: false
+  # Per-client-IP brute-force throttle on Dex's login pages (#4686). Dex has no
+  # login throttling of its own. This covers every request under /dex/auth: the
+  # authorize endpoint, /dex/auth/local and the password form POST at
+  # /dex/auth/local/login. It's keyed on the whole prefix so that a re-encoded
+  # connector segment can't slip past it. Past the budget, Envoy answers 429.
+  # /dex/token, /dex/keys, /dex/userinfo and openid-configuration are not
+  # limited, so token refresh is unaffected. A normal login is about 4 requests
+  # (authorize, redirect, form, POST); a wrong password re-posts the form.
+  # Envoy runs one replica and buckets are in memory, so the budget is exact
+  # (it resets when the pod restarts).
+  dexLoginRateLimit:
+    enabled: true
+    # Sustained requests per client per minute.
+    requestsPerMinute: 10
+    # Bucket size: requests a client may make at once before the rate applies.
+    burst: 20
+    # IPv6 clients are keyed per prefix of this length, because one host
+    # usually owns a whole /64. IPv4 clients are keyed per address.
+    ipv6PrefixLen: 64
+    # Number of client buckets Envoy keeps (least recently used are evicted).
+    maxClients: 10000
+  # Networks of the reverse proxies in front of Envoy. The client is the
+  # rightmost X-Forwarded-For hop outside these, so it's the same rule as the
+  # API's limiter. Empty = reuse api.rateLimit.trustedProxies (pod CIDR plus
+  # Cloudflare ranges) so the two limiters key on the same address. Don't add
+  # LAN ranges: a client inside a trusted range could pick its own key.
+  # Behind Cloudflare, Traefik must also trust Cloudflare's ranges
+  # (forwardedHeaders.trustedIPs) or every client is keyed as a Cloudflare edge.
+  trustedProxies: []
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 256Mi }
@@ -18,10 +74,62 @@ api:
   replicas: 2
   image: api
   port: 8080
-  publicUrl: "http://localhost:3000"
+  # Override for PUBLIC_URL; empty = global.publicUrl.
+  publicUrl: ""
   allowRegistration: "false"
-  adminEmail: ""
-  adminPassword: ""
+  # Admin bootstrap credentials live in secrets.adminEmail / secrets.adminPassword.
+  # Per-client-IP rate limit on the unauthenticated routes (invite accept,
+  # household create, forgot/reset password; apps/api/internal/middleware/
+  # ratelimit.go). Past the budget they answer 429 + Retry-After. In memory per
+  # pod, so with N replicas a client can get up to N x the budget.
+  rateLimit:
+    # Requests per client IP per minute.
+    perMinute: 10
+    # Requests a client may make at once before the per-minute rate applies.
+    burst: 5
+    # Networks of the reverse proxies in front of the API. X-Forwarded-For is
+    # only believed when the TCP peer is in one of these, and then the
+    # rightmost hop outside them is the client; otherwise the TCP peer is.
+    # Chain: client -> Cloudflare -> Traefik -> Envoy -> api. The pod CIDR
+    # (Talos default 10.244.0.0/16) covers Envoy and Traefik; Cloudflare's
+    # published edge ranges (https://www.cloudflare.com/ips/, re-check when
+    # they change) make the address Cloudflare saw the client. Don't add LAN
+    # ranges: a client in a trusted range could pick its own rate-limit key.
+    trustedProxies:
+      - 10.244.0.0/16
+      - 173.245.48.0/20
+      - 103.21.244.0/22
+      - 103.22.200.0/22
+      - 103.31.4.0/22
+      - 141.101.64.0/18
+      - 108.162.192.0/18
+      - 190.93.240.0/20
+      - 188.114.96.0/20
+      - 197.234.240.0/22
+      - 198.41.128.0/17
+      - 162.158.0.0/15
+      - 104.16.0.0/13
+      - 104.24.0.0/14
+      - 172.64.0.0/13
+      - 131.0.72.0/22
+      - 2400:cb00::/32
+      - 2606:4700::/32
+      - 2803:f800::/32
+      - 2405:b500::/32
+      - 2405:8100::/32
+      - 2a06:98c0::/29
+      - 2c0f:f248::/32
+  # POST /auth/change-password takes the caller's current password, so it is a
+  # password-guessing surface for anyone holding a live session (#4822). It gets
+  # its own limiter instance (not the public one above) and is enforced twice:
+  # per client IP, and per account in the handler, so a stolen session cannot
+  # outrun the IP budget by moving between addresses. Past the budget: 429 with
+  # Retry-After, before bcrypt or Dex runs. In memory per pod, like rateLimit.
+  changePasswordRateLimit:
+    # Requests per client IP (and per account) per minute.
+    perMinute: 5
+    # Attempts allowed at once before the per-minute rate applies.
+    burst: 3
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
@@ -30,6 +138,23 @@ calendar:
   replicas: 1
   image: calendar
   port: 8081
+  # CalDAV Basic-auth rate limiting (apps/calendar/internal/auth/ratelimit.go).
+  # Limited requests get 429 + Retry-After before any bcrypt work.
+  auth:
+    # Networks of the reverse proxies in front of calendar. X-Forwarded-For is
+    # only believed when the TCP peer is in one of these, and then the
+    # rightmost hop outside them is the client. Must cover Envoy and the
+    # ingress controller (Traefik), i.e. the cluster pod CIDR (Talos default
+    # 10.244.0.0/16). Don't add LAN ranges: a client in a trusted range could
+    # then pick its own rate-limit key. Empty list = use the TCP peer only.
+    trustedProxies:
+      - 10.244.0.0/16
+    # Requests per client IP per minute through the credential check (burst = half).
+    requestsPerMinute: 120
+    # Failed password checks per client IP per minute (burst = same).
+    failuresPerMinute: 10
+    # Failed password checks per account email per hour, across IPs (burst = same).
+    accountFailuresPerHour: 30
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
@@ -37,6 +162,13 @@ calendar:
 worker:
   replicas: 1
   image: worker
+  # Optional email for worker-generated bill_due / maintenance_due
+  # notifications. Off by default: notifications are in-app either way and the
+  # worker logs once at startup that email is disabled. When enabled, uses
+  # smtp.host/port/from/username; if smtp.username is set the password is read
+  # from smtp.existingSecret (or secrets.existingSecret), never from values.
+  smtp:
+    enabled: false
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
@@ -46,6 +178,27 @@ mcp:
   image: mcp
   port: 8082
   metadataPort: 8083
+  # Extra Dex client ids whose tokens /mcp accepts (MCP_ACCEPTED_AUDIENCES, #4692).
+  # Empty = the binary default, home-os-mcp. The resource URL and mcp-<uuid>
+  # dynamically registered clients are always accepted; hos_ agent tokens don't
+  # use this. List only clients that exist to call the MCP. home-os-ui is
+  # refused at render time: UI tokens are for the API, and the MCP spec forbids
+  # accepting tokens issued for another service. When set, include home-os-mcp
+  # too if it should stay accepted (the list replaces the default).
+  acceptedClientIDs: []
+  # Limits on public dynamic client registration (/oauth/register; apps/mcp/
+  # internal/metadata/ratelimit.go, #4691). Past either budget it answers
+  # 429 + Retry-After before anything reaches Dex. In memory per pod.
+  registerRateLimit:
+    # Registrations per client IP per minute (burst the same).
+    perMinute: 5
+    # Registrations per hour across all clients, per pod (burst the same).
+    # Each one creates a permanent Dex client.
+    perHour: 60
+    # Proxies whose X-Forwarded-For is believed (rightmost untrusted hop is
+    # the client). Leave empty to use api.rateLimit.trustedProxies (pod CIDR
+    # + Cloudflare edge ranges), so the API and MCP agree on client IPs.
+    trustedProxies: []
   resources:
     requests: { cpu: 100m, memory: 64Mi }
     limits: { cpu: 500m, memory: 256Mi }
@@ -58,75 +211,276 @@ ui:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: 500m, memory: 512Mi }
 
+# Schema migrations Job (templates/migrations/job.yaml): golang-migrate, short-lived.
+migrations:
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
 typesense:
   replicas: 1
-  image: typesense/typesense:27.1
+  # Pinned. 30.x supports built-in auto-embedding (embed fields with ts/* models)
+  # for semantic search. The image has no USER; the chart runs it as uid 10000.
+  image: typesense/typesense:30.2
   port: 8108
   persistence:
     size: 10Gi
+  # One-time ownership fix for an existing /data volume. Typesense runs as uid
+  # 10000, but NFS volumes ignore fsGroup, so data left by an older root-run
+  # Typesense (<= 27.1) stays root-owned and 30.x can't write it. When true, an
+  # init container chowns /data to 10000:10000 (only if something under it
+  # isn't already). It runs as root with CHOWN/FOWNER, which PodSecurity
+  # "restricted" forbids: the namespace must allow "baseline" while it is on.
+  # Turn it back off after the first successful start.
+  fixDataOwnership: false
+  fixDataOwnershipImage: busybox:1.37.0
+  # Init container above: a find + chown over /data, so it needs very little.
+  fixDataOwnershipResources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { memory: 64Mi }
+  # Typesense keeps its whole index in RAM and also loads the local embedding
+  # model ts/all-MiniLM-L12-v2 (#4438: ~128 MB of weights plus ONNX inference
+  # buffers). It re-embeds every document when a collection's schema changes,
+  # which is CPU-heavy and spikes memory. So: a 512Mi request to cover the model
+  # plus a household-sized index, a 2Gi memory limit for re-embed headroom, and
+  # no CPU limit (CFS throttling would stall embedding; the 250m request still
+  # guarantees a fair share). Raise memory if the index grows past ~1Gi.
   resources:
-    requests: { cpu: 100m, memory: 256Mi }
-    limits: { cpu: 500m, memory: 1Gi }
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 2Gi }
 
 tika:
   replicas: 1
-  image: apache/tika:latest-full
+  # Pinned to the exact build (4.2.0-1-full == latest-full as of 2026-11-15).
+  # The image runs as uid 35002.
+  image: apache/tika:4.2.0-1-full
   port: 9998
   resources:
     requests: { cpu: 200m, memory: 512Mi }
     limits: { cpu: 1, memory: 2Gi }
 
 dex:
-  uiRedirectURI: "http://localhost:8000/api/auth/callback"
+  # Override for the home-os-ui redirect URI; empty = <global.publicUrl>/api/auth/callback.
+  uiRedirectURI: ""
+  # Redirect URIs for the home-os-mcp client. Each entry is rendered with tpl,
+  # so it may reference the public origin, e.g.
+  # '{{ include "home-os.publicUrl" . }}/mcp/oauth/callback'.
+  mcpRedirectURIs:
+    - "http://127.0.0.1:19876/mcp/oauth/callback"
   replicas: 1
-  image: dex
+  # Pinned. The image runs as uid 1001.
+  #
+  # Keep this at >= v2.46.0. The `oauth2.pkce` block in
+  # templates/dex/configmap.yaml only exists from v2.46.0 (dexidp/dex#4638);
+  # older images drop the unknown key silently and enforce nothing (#694).
+  # v2.46.1 is the patch release of that line.
+  #
+  # Upgrading across this pin needs no config or storage change on our side:
+  #   - Storage: Dex applies its own SQL migrations at startup. v2.42.0 ->
+  #     v2.46.1 adds columns with defaults plus the auth_session and
+  #     user_identity tables (auth sessions and MFA sit behind
+  #     DEX_SESSIONS_ENABLED and stay off). Nothing existing is rewritten, so
+  #     passwords, clients and signing keys survive.
+  #   - Signer: leave `signer` unset. v2.46 falls back to the local signer keyed
+  #     off expiry.signingKeys (still 6h when unset), RS256, with the same
+  #     `keys` table layout as v2.42, so the existing signing key keeps
+  #     validating already-issued tokens.
+  #   - oauth2 / staticClients / expiry: every field we render still exists and
+  #     keeps its meaning; nothing we set was removed or renamed.
+  # See KB architecture/dex-image-and-pkce.md for the audit behind this.
+  image: ghcr.io/dexidp/dex:v2.46.1
   port: 5556
   grpcPort: 5557
-  # Database password for Dex's Postgres storage backend.
-  # Must be set at deploy time. For production, use --set or a secure values file.
-  # WARNING: The original password was committed to git; rotate it as part of this fix.
-  dbPassword: ""
+  # Ingress NetworkPolicy on the Dex pods (#4682). The gRPC admin API on grpcPort
+  # has no authentication (mTLS is #697) and can mint passwords and OAuth
+  # clients, so without this any pod in the cluster (e.g. the Moltis agents)
+  # could call it. Enforced by any CNI that implements NetworkPolicy (Cilium on
+  # Talos); a no-op on a CNI that does not.
+  #   grpcPort: only pods whose `app` label is in grpcClientApps (same namespace).
+  #   port (HTTP/OIDC): every pod in the namespace (envoy, ui BFF, api, mcp) plus
+  #     httpExtraFrom (raw NetworkPolicy peers, e.g. a namespaceSelector).
+  # Ingress only: no egress rules and no namespace default-deny are added.
+  networkPolicy:
+    enabled: true
+    # api: CreatePassword (DEX_GRPC_ADDR); mcp: DCR CreateClient. Add any new
+    # gRPC caller here or it will be refused.
+    grpcClientApps:
+      - home-os-api
+      - home-os-mcp
+    httpExtraFrom: []
+  # mTLS on the Dex gRPC admin API (#697). Dex's gRPC listener (grpcPort) can
+  # CreatePassword for any user, CreateClient and revoke refresh tokens, and it
+  # authenticates nothing at the application layer — the transport is the only
+  # control. When enabled, the chart issues a private CA and two certificates
+  # with cert-manager (templates/dex-grpc-tls/), Dex requires a client cert
+  # (grpc.tlsCert/tlsKey/tlsClientCA), and the api and mcp pods mount the client
+  # cert. There is no plaintext fallback in either Go client.
+  #
+  # enabled=false is the documented opt-out. The gRPC service is then
+  # plaintext again, and dex.networkPolicy (below) is the ONLY thing restricting
+  # 5557 — which is why that policy is not optional. Setting this to false also
+  # makes the api and mcp Deployments render DEX_GRPC_INSECURE=true.
+  #
+  # Requires cert-manager in the cluster (Talos homelab: v1.17.4). Not the
+  # letsencrypt-cloudflare ClusterIssuer: these are in-cluster service names
+  # Let's Encrypt cannot validate.
+  grpcTLS:
+    enabled: true
+    # Secret names. caSecretName holds the CA keypair; the two leaf Secrets are
+    # what the pods actually mount.
+    caSecretName: home-os-dex-grpc-ca
+    serverSecretName: home-os-dex-grpc-server-tls
+    clientSecretName: home-os-dex-grpc-client-tls
+    # Leaf lifetime, and the CA's (longer: rotating the CA invalidates every
+    # leaf, so it should outlive several leaf renewals).
+    duration: 2160h # 90d
+    caDuration: 8760h # 365d
+  # Dex's Postgres password is never rendered into the ConfigMap: the Deployment
+  # reads it from a Secret into DEX_DB_PASSWORD and Dex expands it at startup.
+  # existingSecret: Secret holding the password; empty = the database Secret
+  #   (database.managed.existingSecret, else the chart's home-os-db-secret).
+  # existingSecretPasswordKey: key in dex.existingSecret; empty = "password".
+  # (dex.dbPassword was removed; setting it fails the render.)
+  existingSecret: ""
+  existingSecretPasswordKey: password
+  # expiry.refreshTokens.reuseInterval: how long Dex still accepts a refresh
+  # token after rotating it, returning the current token instead of rejecting.
+  # Needed when ui.replicas > 1: each BFF single-flights refreshes per process
+  # only, so two pods can redeem the same token at once. Empty = Dex default (0,
+  # no reuse; the losing pod logs the user out).
+  refreshTokenReuseInterval: "10s"
+  # expiry.idTokens: id_token lifetime (Dex default 24h). Dex keeps one refresh
+  # token per user per client and every browser uses the single client
+  # home-os-ui, so signing in on a second device revokes the first device's
+  # refresh token. The first device keeps working until its id_token expires,
+  # then the BFF refresh fails and it is sent to /login once. Longer = fewer
+  # forced re-logins on multi-device users, but a stolen id_token stays valid
+  # longer. Empty = Dex default (24h).
+  idTokenExpiry: "24h"
+  # oauth2.passwordConnector: the connector the OAuth2 *password grant*
+  # (grant_type=password at /dex/token, plus its root /token alias) authenticates
+  # against. Empty = no password grant; every request answers
+  # unsupported_grant_type.
+  #
+  # RETIRED (#4540, 2026-11-17): the deployed instance sets "" and the grant is
+  # off in production. It was an INTERIM stopgap (#4886) so a headless caller had
+  # some way in before per-member agent tokens (#4535) existed; #4535 issued one
+  # to each family agent, so nothing depends on the grant any more. Do not build
+  # on it and do not extend it. History: KB architecture/dex-password-grant-interim.md.
+  #
+  # Why the key is still here at all: the war game turned the password grant on
+  # by hand in the live ConfigMap, so it was never part of this chart, and the
+  # first sync from the chart deleted it and left every moltis family agent with
+  # no headless auth (#4357). A setting that must survive a sync has to live in
+  # the chart, and a hand-patch has to be visible in the diff.
+  #
+  # LOCAL DEV ONLY. Setting this on a deployed instance re-opens a password
+  # grant: any valid Dex password becomes an unscoped bearer token for the MCP
+  # audience, with no per-agent revocation, and /dex/token is deliberately NOT
+  # rate limited at Envoy (Envoy cannot tell a password grant from a refresh
+  # without reading the body). Leave it empty in production.
+  #
+  # "local" is Dex's built-in password DB (enablePasswordDB below), which is what
+  # the members' Dex passwords live in. The id must be "local" or the id of an
+  # entry in dex.connectors; the render FAILS otherwise, because Dex accepts a
+  # bad id at startup and only 400s per request, which reads like any other
+  # misconfiguration. That guard stays.
+  passwordConnector: ""
+  # connectors: extra Dex connectors, verbatim Dex config, e.g.
+  #   - id: ldap
+  #     type: ldap
+  #     name: LDAP
+  #     config: { host: ldap.example.com:636, bindDN: ..., bindPW: ..., ... }
+  # Empty = none. The password DB ("local") is registered by enablePasswordDB and
+  # is not listed here. Any id used by dex.passwordConnector must appear here.
+  connectors: []
+  # Dex is a small Go binary serving OIDC for a handful of users.
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 250m, memory: 256Mi }
 
+# Workloads get DB_PASSWORD from a Secret (secretKeyRef) and DATABASE_URL is
+# assembled from parts with $(DB_PASSWORD), so no password is rendered into env.
+# The password must be URL-safe (or percent-encoded in the Secret).
 database:
   mode: managed
   managed:
+    # kubernetes.io/basic-auth Secret (keys username=app, password) for the CNPG
+    # `app` owner; also read by every workload. Empty = chart renders
+    # home-os-db-secret from secrets.dbPassword.
+    existingSecret: ""
     instances: 2
     storage: 10Gi
+    # CNPG operand image, pinned to an immutable build tag (PostgreSQL 16.16,
+    # "system" flavour so barman-cloud backups keep working). Stay on major 16:
+    # a major bump needs a CNPG major upgrade, not just a tag change.
+    imageName: ghcr.io/cloudnative-pg/postgresql:16.16-202611122305-system-bookworm
     backup:
       enabled: true
       schedule: "0 2 * * *"
   external:
+    # Dex connects to the same host/port/user/sslmode but uses its own database
+    # named `dex`. Managed mode creates it; in external mode create it yourself
+    # (e.g. CREATE DATABASE dex OWNER <user>) before installing.
     host: ""
     port: 5432
     database: homeos
     user: homeos
+    sslmode: disable
+    # Plain password, only used when existingSecret is empty (rendered into
+    # home-os-db-secret). Prefer existingSecret.
     password: ""
     existingSecret: ""
+    existingSecretPasswordKey: password
 
 secrets:
-  jwtSecret: ""
+  # Name of a pre-created Secret with keys calendarSecret, typesenseApiKey,
+  # encryptionKey, adminEmail, adminPassword (and smtpPassword unless
+  # smtp.existingSecret is set). When set, home-os-secrets is not rendered and
+  # the plain values below are ignored. There is deliberately no jwtSecret:
+  # authentication is Dex-issued OIDC only (#531).
+  existingSecret: ""
   calendarSecret: ""
   typesenseApiKey: ""
   encryptionKey: ""
-  # Password for the 'app' Postgres user. Must match what is provisioned in the
-  # database. For managed mode, the CNPG cluster is bootstrapped with this secret.
-  # WARNING: The original password was committed to git; rotate it as part of this fix.
-  dbPassword: ""
+  # Password for the 'app' Postgres user (managed mode), rendered into
+  # home-os-db-secret only when database.managed.existingSecret is empty.
   dbPassword: ""
   adminEmail: ""
   adminPassword: ""
+
+# Credentials "shared with agents" (#4446). The API seals a shared
+# credential with a per-household key derived from this master key, and the
+# MCP's credential_reveal opens it. Base64 of 32 random bytes
+# (openssl rand -base64 32). Empty everywhere = sharing off (the share endpoint
+# answers 503); zero-knowledge credentials are unaffected either way. Changing
+# or losing the key makes every shared copy unreadable until it is shared
+# again, so generate it once and keep it.
+agentCredentials:
+  # Secret holding the key; empty = home-os.secretsName.
+  existingSecret: ""
+  existingSecretKey: agentCredentialsKey
+  # Plain key, rendered into home-os-secrets (key agentCredentialsKey) only
+  # when neither existingSecret above nor secrets.existingSecret is set.
+  key: ""
 
 smtp:
   host: ""
   port: "587"
   username: ""
+  # Plain password, stored in home-os-secrets (key smtpPassword) when neither
+  # smtp.existingSecret nor secrets.existingSecret is set.
   password: ""
+  # Secret holding the SMTP password; empty = home-os.secretsName, key smtpPassword.
+  existingSecret: ""
+  existingSecretPasswordKey: password
   from: "noreply@homeos.local"
 
 ingress:
   enabled: false
   className: traefik
-  host: homeos.simstech.cloud
+  # Empty = the host of global.publicUrl.
+  host: ""
   tlsEnabled: true
   tlsSecret: simstech-wildcard-tls
   annotations: {}

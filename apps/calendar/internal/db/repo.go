@@ -5,6 +5,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -43,42 +44,115 @@ type CalDAVUser struct {
 	ID                 string
 	Email              string
 	CalDAVPasswordHash *string
+	// Active mirrors users.active. A deactivated user (Active=false) must be
+	// rejected by CalDAV auth even with a valid app password. The zero value
+	// is false so a CalDAVUser built without it fails closed.
+	Active bool
 }
 
 // GetUserByEmailForCalDAV looks up a user by email for CalDAV Basic Auth.
 // Returns nil, nil if the user is not found.
+//
+// The match is case-insensitive (lower(email) = lower($1)), like the API's
+// member resolver (apps/api/internal/auth/resolve.go): users.email keeps the
+// capitalisation the account was created with, and phone clients send
+// whatever the member typed. users.email's UNIQUE constraint is
+// case-sensitive, so two rows could differ only by case. If one of them is an
+// exact match it is used. If none is exact, the login is ambiguous and is
+// refused (nil, nil, the same as an unknown email) rather than picking one.
 func (r *Repo) GetUserByEmailForCalDAV(ctx context.Context, email string) (*CalDAVUser, error) {
-	row := r.pool.QueryRow(ctx, `
-		SELECT id, email, caldav_password_hash
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, email, caldav_password_hash, active
 		FROM users
-		WHERE email = $1
+		WHERE lower(email) = lower($1)
+		ORDER BY (email = $1) DESC, id
+		LIMIT 2
 	`, email)
-
-	var u CalDAVUser
-	err := row.Scan(&u.ID, &u.Email, &u.CalDAVPasswordHash)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("db: get user by email for caldav: %w", err)
 	}
-	return &u, nil
+	defer rows.Close()
+
+	var found []CalDAVUser
+	for rows.Next() {
+		var u CalDAVUser
+		if err := rows.Scan(&u.ID, &u.Email, &u.CalDAVPasswordHash, &u.Active); err != nil {
+			return nil, fmt.Errorf("db: get user by email for caldav: %w", err)
+		}
+		found = append(found, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("db: get user by email for caldav: %w", err)
+	}
+
+	switch {
+	case len(found) == 0:
+		return nil, nil
+	case found[0].Email == email || len(found) == 1:
+		return &found[0], nil
+	default:
+		// Two or more accounts differ only by case and none matches exactly.
+		return nil, nil
+	}
 }
 
-// GetHouseholdIDForUser returns the household_id for a user's first membership.
-// Returns empty string if the user has no memberships.
+// GetHouseholdIDForUser returns the user's default household: the one from
+// their oldest membership (ties broken by household_id so the choice is
+// stable). Returns empty string if the user has no memberships.
 func (r *Repo) GetHouseholdIDForUser(ctx context.Context, userID string) (string, error) {
-	row := r.pool.QueryRow(ctx, `
-		SELECT household_id FROM memberships WHERE user_id = $1 LIMIT 1
-	`, userID)
+	ids, err := r.ListHouseholdIDsForUser(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if len(ids) == 0 {
+		return "", nil
+	}
+	return ids[0], nil
+}
 
+// ListHouseholdIDsForUser returns every household the user belongs to, in a
+// deterministic order: oldest membership first, ties broken by household_id.
+// The first element is the user's default CalDAV household. Returns an empty
+// slice if the user has no memberships.
+func (r *Repo) ListHouseholdIDsForUser(ctx context.Context, userID string) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT household_id::text FROM memberships
+		WHERE user_id = $1
+		ORDER BY created_at ASC, household_id ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("db: list households for user: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("db: scan household id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("db: rows iteration: %w", err)
+	}
+	return ids, nil
+}
+
+// GetCalendarHouseholdID returns the household that owns the calendar with the
+// given CalDAV UID (caldav_uid is globally unique). Returns empty string if no
+// such calendar exists. Callers must check the result against the
+// authenticated user's memberships before trusting it.
+func (r *Repo) GetCalendarHouseholdID(ctx context.Context, caldavUID string) (string, error) {
 	var householdID string
-	err := row.Scan(&householdID)
+	err := r.pool.QueryRow(ctx, `
+		SELECT household_id::text FROM calendars WHERE caldav_uid = $1
+	`, caldavUID).Scan(&householdID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return "", nil
 		}
-		return "", fmt.Errorf("db: get household for user: %w", err)
+		return "", fmt.Errorf("db: get calendar household: %w", err)
 	}
 	return householdID, nil
 }
@@ -94,6 +168,10 @@ type Calendar struct {
 	CTag        string    `json:"ctag"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// Writable is whether the caller's role may change this calendar and
+	// its events (Access.CanWrite). It drives the advertised
+	// current-user-privilege-set, so phones show read-only calendars as such.
+	Writable bool `json:"-"`
 }
 
 // CalendarObject represents a row from the calendar_objects table.
@@ -107,6 +185,14 @@ type CalendarObject struct {
 	EntityID   *string   `json:"entity_id,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+	// ICALRaw is the complete VCALENDAR text as received by CalDAV PUT
+	// (migration 036). NULL for rows written before 036, and for rows written
+	// by JSON-only writers (the API and MCP tools), which do not know about
+	// it. When set and still in step with ICALData, CalDAV serves it verbatim
+	// so RRULE, EXDATE, VALARM and other properties survive the round trip.
+	ICALRaw *string `json:"ical_raw,omitempty"`
+	// RRule is the event's RRULE value, extracted from ICALRaw at PUT time.
+	RRule *string `json:"rrule,omitempty"`
 }
 
 // CalendarChangeAction is the type of mutation recorded against a calendar
@@ -130,12 +216,12 @@ const (
 // globally-monotonic revision. The sync-collection REPORT (RFC 6578) uses
 // these rows to compute the delta since a client's last sync-token.
 type CalendarChange struct {
-	ID         int64               `json:"id"`
-	CalendarID string              `json:"calendar_id"`
-	EventUID   string              `json:"event_uid"`
+	ID         int64                `json:"id"`
+	CalendarID string               `json:"calendar_id"`
+	EventUID   string               `json:"event_uid"`
 	Action     CalendarChangeAction `json:"action"`
-	Revision   int64               `json:"revision"`
-	CreatedAt  time.Time           `json:"created_at"`
+	Revision   int64                `json:"revision"`
+	CreatedAt  time.Time            `json:"created_at"`
 }
 
 // Repo provides database operations for the calendar service.
@@ -176,13 +262,16 @@ func (r *Repo) Ping(ctx context.Context) error {
 // by it so a CalDAV credential from one household can never see another's
 // calendars. An empty householdID returns no rows (defensive — should never
 // happen because auth middleware rejects unauthenticated requests).
-func (r *Repo) ListCalendars(ctx context.Context, householdID string) ([]Calendar, error) {
+//
+// Only calendars acc's role may read are returned (see access.go); the rest
+// are absent from discovery.
+func (r *Repo) ListCalendars(ctx context.Context, householdID string, acc Access) ([]Calendar, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, household_id, name, type, color, caldav_uid, ctag, created_at, updated_at
-		FROM calendars
-		WHERE household_id = $1
+		FROM calendars c
+		WHERE household_id = $1 AND `+calendarVisibleSQL("$2")+`
 		ORDER BY created_at ASC
-	`, householdID)
+	`, householdID, acc.Role)
 	if err != nil {
 		return nil, fmt.Errorf("db: list calendars: %w", err)
 	}
@@ -194,6 +283,7 @@ func (r *Repo) ListCalendars(ctx context.Context, householdID string) ([]Calenda
 		if err := rows.Scan(&c.ID, &c.HouseholdID, &c.Name, &c.Type, &c.Color, &c.CalDAVUID, &c.CTag, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("db: scan calendar: %w", err)
 		}
+		c.Writable = acc.CanWrite()
 		calendars = append(calendars, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -208,13 +298,14 @@ func (r *Repo) ListCalendars(ctx context.Context, householdID string) ([]Calenda
 // a calendar owned by household B.
 // Returns nil, nil if not found OR if the calendar belongs to a different
 // household — callers treat both the same (404), which avoids leaking the
-// existence of cross-tenant calendars.
-func (r *Repo) GetCalendarByCalDAVUID(ctx context.Context, householdID string, uid string) (*Calendar, error) {
+// existence of cross-tenant calendars. A calendar acc's role may not read is
+// likewise nil, nil (absent, not forbidden).
+func (r *Repo) GetCalendarByCalDAVUID(ctx context.Context, householdID string, uid string, acc Access) (*Calendar, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, household_id, name, type, color, caldav_uid, ctag, created_at, updated_at
-		FROM calendars
-		WHERE caldav_uid = $1 AND household_id = $2
-	`, uid, householdID)
+		FROM calendars c
+		WHERE caldav_uid = $1 AND household_id = $2 AND `+calendarVisibleSQL("$3")+`
+	`, uid, householdID, acc.Role)
 
 	var c Calendar
 	err := row.Scan(&c.ID, &c.HouseholdID, &c.Name, &c.Type, &c.Color, &c.CalDAVUID, &c.CTag, &c.CreatedAt, &c.UpdatedAt)
@@ -224,21 +315,25 @@ func (r *Repo) GetCalendarByCalDAVUID(ctx context.Context, householdID string, u
 		}
 		return nil, fmt.Errorf("db: get calendar by uid: %w", err)
 	}
+	c.Writable = acc.CanWrite()
 	return &c, nil
 }
 
 // ListCalendarObjects returns all calendar objects for a given calendar ID,
 // but only if that calendar belongs to the given household. The household
 // check is enforced via an INNER JOIN with calendars — if the calendar is
-// owned by a different household, the join yields no rows.
-func (r *Repo) ListCalendarObjects(ctx context.Context, householdID string, calendarID string) ([]CalendarObject, error) {
+// owned by a different household, the join yields no rows. Events acc may not
+// read are left out (see access.go).
+func (r *Repo) ListCalendarObjects(ctx context.Context, householdID string, calendarID string, acc Access) ([]CalendarObject, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at
+		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at, o.ical_raw, o.rrule
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND c.household_id = $2
+		  AND o.superseded_at IS NULL
+		  AND `+calendarVisibleSQL("$3")+` AND `+objectVisibleSQL("$3", "$4")+`
 		ORDER BY o.created_at ASC
-	`, calendarID, householdID)
+	`, calendarID, householdID, acc.Role, acc.vendorArg())
 	if err != nil {
 		return nil, fmt.Errorf("db: list calendar objects: %w", err)
 	}
@@ -247,7 +342,7 @@ func (r *Repo) ListCalendarObjects(ctx context.Context, householdID string, cale
 	var objects []CalendarObject
 	for rows.Next() {
 		var o CalendarObject
-		if err := rows.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule); err != nil {
 			return nil, fmt.Errorf("db: scan calendar object: %w", err)
 		}
 		objects = append(objects, o)
@@ -262,17 +357,19 @@ func (r *Repo) ListCalendarObjects(ctx context.Context, householdID string, cale
 // and UID, but only if the calendar belongs to the given household. The
 // household check is enforced via an INNER JOIN with calendars.
 // Returns nil, nil if not found OR if the calendar belongs to a different
-// household.
-func (r *Repo) GetCalendarObjectByUID(ctx context.Context, householdID string, calendarID string, uid string) (*CalendarObject, error) {
+// household, or if acc may not read the event (see access.go).
+func (r *Repo) GetCalendarObjectByUID(ctx context.Context, householdID string, calendarID string, uid string, acc Access) (*CalendarObject, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at
+		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at, o.ical_raw, o.rrule
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND o.uid = $2 AND c.household_id = $3
-	`, calendarID, uid, householdID)
+		  AND o.superseded_at IS NULL
+		  AND `+calendarVisibleSQL("$4")+` AND `+objectVisibleSQL("$4", "$5")+`
+	`, calendarID, uid, householdID, acc.Role, acc.vendorArg())
 
 	var o CalendarObject
-	err := row.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt)
+	err := row.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -298,7 +395,7 @@ func (r *Repo) GetCalendarObjectByUID(ctx context.Context, householdID string, c
 // a pgx.Tx, or call the high-level UpsertCalendarObjectWithCTag wrapper which
 // performs the upsert + CTag bump atomically.
 func (r *Repo) UpsertCalendarObject(ctx context.Context, householdID string, calendarID string, uid string, icalData string, etag string) (*CalendarObject, error) {
-	return upsertCalendarObjectQ(ctx, r.pool, householdID, calendarID, uid, icalData, etag)
+	return upsertCalendarObjectQ(ctx, r.pool, householdID, calendarID, uid, icalData, etag, nil, nil)
 }
 
 // UpsertCalendarObjectTx inserts or updates a calendar object within the given
@@ -310,28 +407,32 @@ func (r *Repo) UpsertCalendarObject(ctx context.Context, householdID string, cal
 // variant; if the calendar is not owned by the household the function returns
 // nil, nil (and the caller should rollback and return 404).
 func (r *Repo) UpsertCalendarObjectTx(ctx context.Context, tx pgx.Tx, householdID string, calendarID string, uid string, icalData string, etag string) (*CalendarObject, error) {
-	return upsertCalendarObjectQ(ctx, tx, householdID, calendarID, uid, icalData, etag)
+	return upsertCalendarObjectQ(ctx, tx, householdID, calendarID, uid, icalData, etag, nil, nil)
 }
 
 // upsertCalendarObjectQ is the single implementation of the upsert SQL shared
 // by the pool and tx variants. The querier may be either *pgxpool.Pool or pgx.Tx.
 // Returns (nil, nil) when the calendar is not owned by the household — callers
 // must handle this (rollback the tx and return 404).
-func upsertCalendarObjectQ(ctx context.Context, q querier, householdID string, calendarID string, uid string, icalData string, etag string) (*CalendarObject, error) {
+//
+// icalRaw and rrule are written as given on both insert and update, so a nil
+// value clears them: a writer that only has the JSON must not leave a stale
+// raw VCALENDAR behind for CalDAV to serve.
+func upsertCalendarObjectQ(ctx context.Context, q querier, householdID string, calendarID string, uid string, icalData string, etag string, icalRaw *string, rrule *string) (*CalendarObject, error) {
 	row := q.QueryRow(ctx, `
 		WITH owned AS (
 			SELECT id FROM calendars WHERE id = $1 AND household_id = $5
 		)
-		INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag)
-		SELECT $1, $2, $3, $4 FROM owned
+		INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, ical_raw, rrule)
+		SELECT $1, $2, $3, $4, $6, $7 FROM owned
 		ON CONFLICT (calendar_id, uid)
-		DO UPDATE SET ical_data = $3, etag = $4, updated_at = NOW()
+		DO UPDATE SET ical_data = $3, etag = $4, ical_raw = $6, rrule = $7, updated_at = NOW()
 		WHERE EXISTS (SELECT 1 FROM owned)
-		RETURNING id, calendar_id, uid, ical_data, etag, entity_type, entity_id, created_at, updated_at
-	`, calendarID, uid, icalData, etag, householdID)
+		RETURNING id, calendar_id, uid, ical_data, etag, entity_type, entity_id, created_at, updated_at, ical_raw, rrule
+	`, calendarID, uid, icalData, etag, householdID, icalRaw, rrule)
 
 	var o CalendarObject
-	err := row.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt)
+	err := row.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -423,8 +524,9 @@ func incrementCalendarCTagQ(ctx context.Context, q querier, calendarID string) e
 // UpsertCalendarObjectWithCTag upserts the calendar object, records a
 // calendar_changes row, and bumps the calendar CTag inside a single pgx
 // transaction. If any operation fails the whole transaction is rolled back
-// and the error is returned. This is the operation CalDAV PUT and API
-// CreateEvent should use: a stale CTag (event written but CTag not bumped)
+// and the error is returned. It writes unconditionally: CalDAV PUT, which
+// must honour If-Match / If-None-Match, uses PutCalendarObject instead. A
+// stale CTag (event written but CTag not bumped)
 // would cause Apple Calendar to silently miss the change forever, and a
 // missing calendar_changes row would cause sync-collection to never
 // deliver the change to incremental-sync clients.
@@ -436,7 +538,10 @@ func incrementCalendarCTagQ(ctx context.Context, q querier, calendarID string) e
 //
 // If the calendar is not owned by the given household, returns (nil, nil) and
 // the transaction is rolled back — callers should treat this as 404.
-func (r *Repo) UpsertCalendarObjectWithCTag(ctx context.Context, householdID string, calendarID string, uid string, icalData string, etag string) (*CalendarObject, error) {
+//
+// icalRaw is the VCALENDAR text exactly as the client sent it and rrule the
+// event's RRULE value; either may be nil (nil clears the stored value).
+func (r *Repo) UpsertCalendarObjectWithCTag(ctx context.Context, householdID string, calendarID string, uid string, icalData string, etag string, icalRaw *string, rrule *string) (*CalendarObject, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("db: begin tx (upsert+ctag): %w", err)
@@ -458,7 +563,7 @@ func (r *Repo) UpsertCalendarObjectWithCTag(ctx context.Context, householdID str
 		return nil, fmt.Errorf("db: check existing object: %w", err)
 	}
 
-	obj, err := upsertCalendarObjectQ(ctx, tx, householdID, calendarID, uid, icalData, etag)
+	obj, err := upsertCalendarObjectQ(ctx, tx, householdID, calendarID, uid, icalData, etag, icalRaw, rrule)
 	if err != nil {
 		return nil, err
 	}
@@ -484,65 +589,269 @@ func (r *Repo) UpsertCalendarObjectWithCTag(ctx context.Context, householdID str
 	return obj, nil
 }
 
-// DeleteCalendarObjectWithCTag deletes the calendar object, records a
-// calendar_changes row (action=delete) for the removed event_uid, and bumps
-// the calendar CTag inside a single pgx transaction. If any operation fails
-// the whole transaction is rolled back and the error is returned. This is the
-// operation CalDAV DELETE and API DeleteEvent should use: a stale CTag (event
-// deleted but CTag not bumped) would cause Apple Calendar to keep showing the
-// deleted event forever, and a missing calendar_changes row would cause
-// sync-collection to never emit the 404 tombstone that tells incremental-sync
-// clients to remove the event locally.
+// ErrPreconditionFailed is the sentinel a conditional write returns when the
+// stored state of the object does not satisfy the caller's precondition
+// (If-Match / If-None-Match). CalDAV handlers map it to 412 Precondition
+// Failed. Callbacks passed to PutCalendarObject return it (or an error that
+// wraps it) to abort the write; the transaction is rolled back.
+var ErrPreconditionFailed = errors.New("db: precondition failed")
+
+// ObjectWrite is the new state a conditional write stores for a calendar
+// object. ICALRaw and RRule may be nil (nil clears the stored value), with the
+// same meaning as in UpsertCalendarObjectWithCTag.
+type ObjectWrite struct {
+	ICALData string
+	ETag     string
+	ICALRaw  *string
+	RRule    *string
+}
+
+// maxPutAttempts bounds how often PutCalendarObject re-reads the row after
+// losing an insert race. Each retry only happens when another transaction
+// committed a row with the same (calendar_id, uid) between our locking read
+// and our INSERT, so two attempts are enough in practice; the third is slack.
+const maxPutAttempts = 3
+
+// inCalendarTx runs fn inside one transaction after checking that calendarID
+// belongs to householdID. It commits when fn returns nil and rolls back
+// otherwise, returning fn's error unchanged (so sentinels such as
+// ErrPreconditionFailed reach the caller as-is). owned is false, and fn is not
+// called, when the calendar is missing or belongs to another household:
+// callers treat that as 404.
 //
-// The change row is only recorded when a row was actually deleted. CalDAV
-// DELETE is idempotent — a repeated DELETE for an already-removed event must
-// not produce a spurious delete change row, otherwise sync-collection would
-// tell clients to tombstone an event that is already gone (harmless per RFC
-// 6578 but wasteful and confusing in logs).
-//
-// The household ownership guard lives inside the delete SQL: if the calendar is
-// not owned by the household, no row is deleted (the call still succeeds with
-// nil — DELETE is idempotent by CalDAV convention — but no change row and no
-// CTag bump occur). Callers should have already returned 404 if the calendar
-// wasn't owned (via a prior GetCalendarByCalDAVUID check), so reaching this
-// method with an un-owned calendar_id indicates a bug upstream rather than a
-// normal 404 path.
-func (r *Repo) DeleteCalendarObjectWithCTag(ctx context.Context, householdID string, calendarID string, uid string) error {
+// This is the shared shape for every conditional object write (PUT now,
+// DELETE with If-Match next): fn locks the object row with
+// lockCalendarObjectQ, evaluates the precondition against what it locked, and
+// writes, so no concurrent writer can slip between the check and the write.
+func (r *Repo) inCalendarTx(ctx context.Context, householdID string, calendarID string, fn func(tx pgx.Tx) error) (owned bool, err error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return fmt.Errorf("db: begin tx (delete+ctag): %w", err)
+		return false, fmt.Errorf("db: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	tag, err := tx.Exec(ctx, `
-		DELETE FROM calendar_objects
-		WHERE calendar_id = $1 AND uid = $2
-		AND EXISTS (
-			SELECT 1 FROM calendars
-			WHERE id = calendar_objects.calendar_id AND household_id = $3
-		)
-	`, calendarID, uid, householdID)
-	if err != nil {
-		return fmt.Errorf("db: delete calendar object: %w", err)
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM calendars WHERE id = $1 AND household_id = $2)`,
+		calendarID, householdID,
+	).Scan(&owned); err != nil {
+		return false, fmt.Errorf("db: check calendar ownership: %w", err)
 	}
+	if !owned {
+		return false, nil
+	}
+	if err := fn(tx); err != nil {
+		return true, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return true, fmt.Errorf("db: commit: %w", err)
+	}
+	return true, nil
+}
 
-	// Only record a delete change row if a row was actually removed. A
-	// repeated DELETE for an already-deleted event affects zero rows and must
-	// not produce a tombstone, otherwise every redundant client DELETE would
-	// pollute the change stream.
-	if tag.RowsAffected() > 0 {
+// lockCalendarObjectQ reads the (calendar_id, uid) row and locks it FOR
+// UPDATE until the transaction ends. Returns nil, nil when there is no such
+// row; in that case nothing is locked, so a create must still rely on the
+// UNIQUE (calendar_id, uid) constraint (see insertCalendarObjectIfAbsentQ).
+//
+// Under READ COMMITTED, if another transaction holds the lock, this waits for
+// it and then returns the row as that transaction committed it, so the
+// precondition is always evaluated against the latest committed state.
+func lockCalendarObjectQ(ctx context.Context, q querier, calendarID string, uid string) (*CalendarObject, error) {
+	var o CalendarObject
+	err := q.QueryRow(ctx, `
+		SELECT id, calendar_id, uid, ical_data, etag, entity_type, entity_id, created_at, updated_at, ical_raw, rrule
+		FROM calendar_objects
+		WHERE calendar_id = $1 AND uid = $2
+		FOR UPDATE
+	`, calendarID, uid).Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("db: lock calendar object: %w", err)
+	}
+	return &o, nil
+}
+
+// insertCalendarObjectIfAbsentQ inserts a new row and returns it, or returns
+// nil, nil when a row with the same (calendar_id, uid) already exists
+// (including one a concurrent transaction committed while we waited on it).
+func insertCalendarObjectIfAbsentQ(ctx context.Context, q querier, calendarID string, uid string, w ObjectWrite) (*CalendarObject, error) {
+	var o CalendarObject
+	err := q.QueryRow(ctx, `
+		INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, ical_raw, rrule)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (calendar_id, uid) DO NOTHING
+		RETURNING id, calendar_id, uid, ical_data, etag, entity_type, entity_id, created_at, updated_at, ical_raw, rrule
+	`, calendarID, uid, w.ICALData, w.ETag, w.ICALRaw, w.RRule).Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("db: insert calendar object: %w", err)
+	}
+	return &o, nil
+}
+
+// updateLockedCalendarObjectQ overwrites a row the caller has locked with
+// lockCalendarObjectQ in the same transaction.
+func updateLockedCalendarObjectQ(ctx context.Context, q querier, calendarID string, uid string, w ObjectWrite) (*CalendarObject, error) {
+	var o CalendarObject
+	err := q.QueryRow(ctx, `
+		UPDATE calendar_objects
+		SET ical_data = $3, etag = $4, ical_raw = $5, rrule = $6, updated_at = NOW()
+		WHERE calendar_id = $1 AND uid = $2
+		RETURNING id, calendar_id, uid, ical_data, etag, entity_type, entity_id, created_at, updated_at, ical_raw, rrule
+	`, calendarID, uid, w.ICALData, w.ETag, w.ICALRaw, w.RRule).Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule)
+	if err != nil {
+		return nil, fmt.Errorf("db: update calendar object: %w", err)
+	}
+	return &o, nil
+}
+
+// PutCalendarObject is the conditional create-or-update CalDAV PUT uses. In a
+// single transaction it:
+//
+//  1. checks the calendar belongs to householdID (not owned: returns
+//     nil, false, nil and the caller answers 404);
+//  2. locks the existing (calendar_id, uid) row FOR UPDATE, or finds none;
+//  3. calls decide with that row (nil when absent). decide evaluates the
+//     request's preconditions against it and returns the state to store, or
+//     an error (ErrPreconditionFailed for a failed If-Match /
+//     If-None-Match) that aborts and rolls back the write and is returned
+//     unchanged;
+//  4. updates the locked row, or inserts with ON CONFLICT DO NOTHING. When
+//     the insert finds a row a concurrent transaction just committed, it goes
+//     back to step 2 and calls decide again with that row, so a create-only
+//     PUT (If-None-Match: *) gets ErrPreconditionFailed and an unconditional
+//     PUT becomes an update instead of failing;
+//  5. records the calendar_changes row (create/update, for sync-collection)
+//     and bumps the calendar CTag, then commits.
+//
+// Because the precondition is evaluated against the locked row inside the
+// write transaction, two clients PUTting with the same If-Match cannot both
+// succeed: the second waits on the row lock, then sees the first one's new
+// ETag and fails. decide may be called more than once and must not have side
+// effects.
+//
+// created reports whether the row was inserted (201) rather than updated
+// (200).
+func (r *Repo) PutCalendarObject(ctx context.Context, householdID string, calendarID string, uid string, decide func(existing *CalendarObject) (ObjectWrite, error)) (obj *CalendarObject, created bool, err error) {
+	owned, err := r.inCalendarTx(ctx, householdID, calendarID, func(tx pgx.Tx) error {
+		for attempt := 0; attempt < maxPutAttempts; attempt++ {
+			existing, err := lockCalendarObjectQ(ctx, tx, calendarID, uid)
+			if err != nil {
+				return err
+			}
+			w, err := decide(existing)
+			if err != nil {
+				return err
+			}
+			action := ChangeUpdate
+			if existing != nil {
+				obj, err = updateLockedCalendarObjectQ(ctx, tx, calendarID, uid, w)
+				if err != nil {
+					return err
+				}
+				created = false
+			} else {
+				obj, err = insertCalendarObjectIfAbsentQ(ctx, tx, calendarID, uid, w)
+				if err != nil {
+					return err
+				}
+				if obj == nil {
+					// Lost the insert race: re-read the winner's row and
+					// re-evaluate the precondition against it.
+					continue
+				}
+				created = true
+				action = ChangeCreate
+			}
+			if err := recordChangeQ(ctx, tx, calendarID, uid, action); err != nil {
+				return err
+			}
+			return incrementCalendarCTagQ(ctx, tx, calendarID)
+		}
+		return fmt.Errorf("db: put calendar object %q: row kept changing under %d attempts", uid, maxPutAttempts)
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if !owned {
+		return nil, false, nil
+	}
+	return obj, created, nil
+}
+
+// DeleteCalendarObjectWithCTag deletes the calendar object unconditionally,
+// records a calendar_changes row (action=delete) and bumps the calendar CTag
+// in one transaction. It is DeleteCalendarObjectIf with no precondition; see
+// that method for the details. A calendar of another household, or an event
+// that is already gone, is a no-op that returns nil (DELETE is idempotent).
+func (r *Repo) DeleteCalendarObjectWithCTag(ctx context.Context, householdID string, calendarID string, uid string) error {
+	_, _, err := r.DeleteCalendarObjectIf(ctx, householdID, calendarID, uid, nil)
+	return err
+}
+
+// DeleteCalendarObjectIf is the conditional delete CalDAV DELETE uses
+// (If-Match, #4662). In a single transaction it:
+//
+//  1. checks the calendar belongs to householdID (not owned: returns
+//     owned=false and the caller answers 404);
+//  2. locks the (calendar_id, uid) row FOR UPDATE, or finds none;
+//  3. calls check with that row (nil when absent), when check is non-nil.
+//     check evaluates the request's precondition against the locked row and
+//     returns an error (ErrPreconditionFailed, or one wrapping it) to abort;
+//     the error is returned unchanged and nothing is written;
+//  4. if a row exists, deletes it, records a calendar_changes row
+//     (action=delete, the sync-collection tombstone) and bumps the CTag.
+//
+// Because check sees the locked row, a stale If-Match cannot delete an event
+// another device just updated: a concurrent PUT holding the lock commits
+// first, and the delete then sees the new ETag and fails (or the delete wins
+// and the PUT, which re-reads under the lock, sees no row).
+//
+// A missing row that passes check is not an error (deleted=false): CalDAV
+// DELETE without If-Match is idempotent, and no tombstone or CTag bump is
+// written for it, so repeated DELETEs do not pollute the change stream.
+//
+// The delete is a plain DELETE on calendar_objects, so its row triggers run as
+// before (038's AFTER DELETE maintenance_calendar_sync_trigger removes the
+// maintenance task linked to the event). Lock order matches PutCalendarObject:
+// object row first, then the calendars row via the CTag UPDATE.
+func (r *Repo) DeleteCalendarObjectIf(ctx context.Context, householdID string, calendarID string, uid string, check func(existing *CalendarObject) error) (owned bool, deleted bool, err error) {
+	owned, err = r.inCalendarTx(ctx, householdID, calendarID, func(tx pgx.Tx) error {
+		existing, err := lockCalendarObjectQ(ctx, tx, calendarID, uid)
+		if err != nil {
+			return err
+		}
+		if check != nil {
+			if err := check(existing); err != nil {
+				return err
+			}
+		}
+		if existing == nil {
+			return nil
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM calendar_objects WHERE calendar_id = $1 AND uid = $2`, calendarID, uid)
+		if err != nil {
+			return fmt.Errorf("db: delete calendar object: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			// Cannot happen while we hold the row lock; refuse rather than
+			// write a tombstone for a row we did not delete.
+			return fmt.Errorf("db: delete calendar object %q: locked row vanished", uid)
+		}
+		deleted = true
 		if err := recordChangeQ(ctx, tx, calendarID, uid, ChangeDelete); err != nil {
 			return err
 		}
-		if err := incrementCalendarCTagQ(ctx, tx, calendarID); err != nil {
-			return err
-		}
+		return incrementCalendarCTagQ(ctx, tx, calendarID)
+	})
+	if err != nil {
+		return owned, false, err
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("db: commit (delete+ctag): %w", err)
-	}
-	return nil
+	return owned, deleted, nil
 }
 
 // UpdateCalendarProps updates the name and/or color of a calendar, but only
@@ -619,14 +928,17 @@ func (r *Repo) UpdateCalendarProps(ctx context.Context, householdID string, cale
 // filtering is done in-app since events are stored as serialized JSON in the
 // ical_data column. For a home OS with typical volumes (<1000 events), this is
 // acceptable. The household check is enforced via an INNER JOIN with calendars.
-func (r *Repo) ListCalendarObjectsInRange(ctx context.Context, householdID string, calendarID string) ([]CalendarObject, error) {
+// Events acc may not read are left out (see access.go).
+func (r *Repo) ListCalendarObjectsInRange(ctx context.Context, householdID string, calendarID string, acc Access) ([]CalendarObject, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at
+		SELECT o.id, o.calendar_id, o.uid, o.ical_data, o.etag, o.entity_type, o.entity_id, o.created_at, o.updated_at, o.ical_raw, o.rrule
 		FROM calendar_objects o
 		INNER JOIN calendars c ON c.id = o.calendar_id
 		WHERE o.calendar_id = $1 AND c.household_id = $2
+		  AND o.superseded_at IS NULL
+		  AND `+calendarVisibleSQL("$3")+` AND `+objectVisibleSQL("$3", "$4")+`
 		ORDER BY o.created_at ASC
-	`, calendarID, householdID)
+	`, calendarID, householdID, acc.Role, acc.vendorArg())
 	if err != nil {
 		return nil, fmt.Errorf("db: list calendar objects in range: %w", err)
 	}
@@ -635,7 +947,7 @@ func (r *Repo) ListCalendarObjectsInRange(ctx context.Context, householdID strin
 	var objects []CalendarObject
 	for rows.Next() {
 		var o CalendarObject
-		if err := rows.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.CalendarID, &o.UID, &o.ICALData, &o.ETag, &o.EntityType, &o.EntityID, &o.CreatedAt, &o.UpdatedAt, &o.ICALRaw, &o.RRule); err != nil {
 			return nil, fmt.Errorf("db: scan calendar object: %w", err)
 		}
 		objects = append(objects, o)

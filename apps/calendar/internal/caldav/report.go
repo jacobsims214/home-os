@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"home-os/calendar/internal/db"
 	"home-os/calendar/internal/ical"
 	"home-os/calendar/internal/logging"
+	"home-os/icalx"
 )
 
 // ----- XML types for REPORT request parsing -----
@@ -148,7 +150,7 @@ func handleSyncCollection(w http.ResponseWriter, r *http.Request, repo *db.Repo,
 		return
 	}
 
-	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID)
+	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: sync-collection: get calendar",
 			slog.String("calendar_uid", calUID),
@@ -236,13 +238,13 @@ func handleSyncCollection(w http.ResponseWriter, r *http.Request, repo *db.Repo,
 // current event in the calendar. Used for the no-token initial sync and for
 // the unparseable-token fallback.
 func writeSyncInitialResponses(ctx context.Context, buf *strings.Builder, repo *db.Repo, householdID string, cal *db.Calendar) error {
-	objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID)
+	objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		return fmt.Errorf("list objects: %w", err)
 	}
 	for i := range objects {
 		obj := &objects[i]
-		icalText, err := generateICalText(obj)
+		icalText, err := renderObjectICal(obj)
 		if err != nil {
 			logging.Logger.Warn("caldav: sync-collection: skip malformed event",
 				slog.String("event_uid", obj.UID),
@@ -280,7 +282,7 @@ func writeSyncIncrementalResponses(ctx context.Context, buf *strings.Builder, re
 
 	// Fetch all current objects once and index by UID so create/update
 	// responses can include the latest data without a per-change lookup.
-	objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID)
+	objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		return fmt.Errorf("list objects: %w", err)
 	}
@@ -317,54 +319,41 @@ func writeSyncIncrementalResponses(ctx context.Context, buf *strings.Builder, re
 		case db.ChangeCreate, db.ChangeUpdate:
 			obj, ok := objByUID[ch.EventUID]
 			if !ok {
-			// The final action is create/update but the object is gone.
-			// This should not happen (a delete would have superseded it
-			// with a higher revision); skip defensively rather than emit
-			// a response with no data.
-			logging.Logger.Warn("caldav: sync-collection: change recorded but object missing, skipping",
+				// The final action is create/update but the object is not
+				// in the caller's list: an event the caller's role may not
+				// read (role policy, #4718: e.g. a bill mirror on a
+				// housesitter's view, an ad-hoc event on a vendor's
+				// Maintenance calendar), or, defensively, a row that is gone
+				// (a delete would normally have superseded it). Skip it:
+				// emitting anything would expose the hidden event's UID.
+				logging.Logger.Debug("caldav: sync-collection: change for an event not visible to the caller, skipping",
+					slog.String("event_uid", ch.EventUID),
+					slog.String("action", string(ch.Action)))
+				continue
+			}
+			icalText, err := renderObjectICal(&obj)
+			if err != nil {
+				logging.Logger.Warn("caldav: sync-collection: skip malformed event",
+					slog.String("event_uid", obj.UID),
+					slog.String("error", err.Error()))
+				continue
+			}
+			writeReportResponse(buf, cal.CalDAVUID, obj.UID, obj.ETag, icalText)
+			emittedCount++
+		case db.ChangeDelete:
+			writeSyncTombstone(buf, cal.CalDAVUID, ch.EventUID)
+			emittedCount++
+		default:
+			logging.Logger.Warn("caldav: sync-collection: unknown action, skipping",
 				slog.String("event_uid", ch.EventUID),
 				slog.String("action", string(ch.Action)))
-			continue
 		}
-		icalText, err := generateICalText(&obj)
-		if err != nil {
-			logging.Logger.Warn("caldav: sync-collection: skip malformed event",
-				slog.String("event_uid", obj.UID),
-				slog.String("error", err.Error()))
-			continue
-		}
-		writeReportResponse(buf, cal.CalDAVUID, obj.UID, obj.ETag, icalText)
-		emittedCount++
-	case db.ChangeDelete:
-		writeSyncTombstone(buf, cal.CalDAVUID, ch.EventUID)
-		emittedCount++
-	default:
-		logging.Logger.Warn("caldav: sync-collection: unknown action, skipping",
-			slog.String("event_uid", ch.EventUID),
-			slog.String("action", string(ch.Action)))
-	}
 	}
 	logging.Logger.Info("caldav: sync-collection: incremental sync",
 		slog.String("calendar", cal.Name),
 		slog.Int64("since_rev", sinceRev),
 		slog.Int("responses", emittedCount))
 	return nil
-}
-
-// generateICalText unmarshals a stored calendar object's JSON ical_data into
-// a CalEvent and regenerates the iCalendar text representation. The UID is
-// set from the DB column because it is not stored inside the JSON.
-// DTStamp/LAST-MODIFIED are sourced from the DB updated_at so re-generation
-// is deterministic across REPORT responses (see HandleGET for the full
-// rationale).
-func generateICalText(obj *db.CalendarObject) (string, error) {
-	ev := &ical.CalEvent{}
-	if err := json.Unmarshal([]byte(obj.ICALData), ev); err != nil {
-		return "", fmt.Errorf("unmarshal event: %w", err)
-	}
-	ev.UID = obj.UID
-	ev.DTStamp = obj.UpdatedAt
-	return ical.GenerateEvent(ev), nil
 }
 
 // writeSyncTombstone writes a D:response entry for a deleted resource per
@@ -439,7 +428,7 @@ func handleCalendarQuery(w http.ResponseWriter, r *http.Request, repo *db.Repo, 
 	}
 
 	// Resolve calendar UID to calendar ID.
-	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID)
+	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: get calendar",
 			slog.String("calendar_uid", calUID),
@@ -453,11 +442,13 @@ func handleCalendarQuery(w http.ResponseWriter, r *http.Request, repo *db.Repo, 
 		return
 	}
 
-	// Extract time range from the raw XML body.
+	// Extract time range from the raw XML body, and the optional
+	// <C:expand start= end=/> inside <C:calendar-data> (RFC 4791 §9.6.5).
 	timeStart, timeEnd, hasTimeRange := extractTimeRangeFromXML(string(body))
+	expandStart, expandEnd, wantExpand := extractExpandRange(body)
 
 	// Fetch all objects for this calendar.
-	objects, err := repo.ListCalendarObjectsInRange(ctx, householdID, cal.ID)
+	objects, err := repo.ListCalendarObjectsInRange(ctx, householdID, cal.ID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: list objects",
 			slog.String("calendar", cal.Name),
@@ -465,18 +456,6 @@ func handleCalendarQuery(w http.ResponseWriter, r *http.Request, repo *db.Repo, 
 			slog.String("error", err.Error()))
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
-	}
-
-	// Filter by time range (in-app since events are stored as JSON).
-	var filtered []db.CalendarObject
-	if hasTimeRange {
-		for _, obj := range objects {
-			if eventInTimeRange(obj.ICALData, timeStart, timeEnd) {
-				filtered = append(filtered, obj)
-			}
-		}
-	} else {
-		filtered = objects
 	}
 
 	// Build multistatus XML response.
@@ -487,30 +466,39 @@ func handleCalendarQuery(w http.ResponseWriter, r *http.Request, repo *db.Repo, 
 	buf := &strings.Builder{}
 	writeXMLHeader(buf)
 
-	for _, obj := range filtered {
-		// Unmarshal the stored JSON to a CalEvent so we can generate iCalendar text.
-		ev := &ical.CalEvent{}
-		if err := json.Unmarshal([]byte(obj.ICALData), ev); err != nil {
+	var matched int
+	for i := range objects {
+		obj := &objects[i]
+		// Render first: the time-range test runs against the iCalendar the
+		// client will actually receive (raw VCALENDAR when present and in
+		// step with the JSON, else generated from the JSON), so a recurring
+		// series is judged by its RRULE/EXDATE/overrides, not by its first
+		// instance.
+		icalText, err := renderObjectICal(obj)
+		if err != nil {
 			logging.Logger.Warn("caldav: unmarshal event for report",
 				slog.String("event_uid", obj.UID),
 				slog.String("error", err.Error()))
 			continue
 		}
-		// Set UID from the DB column (not stored in JSON)
-		ev.UID = obj.UID
-		// Source DTSTAMP/LAST-MODIFIED from the DB updated_at for stable
-		// re-generation. See HandleGET for the full rationale.
-		ev.DTStamp = obj.UpdatedAt
-		icalText := ical.GenerateEvent(ev)
-
+		if hasTimeRange && !objectInTimeRange(obj, icalText, timeStart, timeEnd) {
+			continue
+		}
+		if wantExpand {
+			if expanded, ok := expandRecurringICal(icalText, expandStart, expandEnd); ok {
+				icalText = expanded
+			}
+		}
 		writeReportResponse(buf, cal.CalDAVUID, obj.UID, obj.ETag, icalText)
+		matched++
 	}
 
 	writeXMLFooter(buf)
 	logging.Logger.Info("caldav: calendar-query",
 		slog.String("calendar", cal.Name),
-		slog.Int("events", len(filtered)),
-		slog.Bool("time_range", hasTimeRange))
+		slog.Int("events", matched),
+		slog.Bool("time_range", hasTimeRange),
+		slog.Bool("expand", wantExpand))
 	w.Write([]byte(buf.String()))
 }
 
@@ -526,7 +514,7 @@ func handleCalendarMultiget(w http.ResponseWriter, r *http.Request, repo *db.Rep
 		return
 	}
 
-	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID)
+	cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, calUID, auth.AccessFor(ctx, householdID))
 	if err != nil {
 		logging.Logger.Error("caldav: get calendar",
 			slog.String("calendar_uid", calUID),
@@ -557,7 +545,7 @@ func handleCalendarMultiget(w http.ResponseWriter, r *http.Request, repo *db.Rep
 			continue
 		}
 
-		obj, err := repo.GetCalendarObjectByUID(ctx, householdID, cal.ID, eventUID)
+		obj, err := repo.GetCalendarObjectByUID(ctx, householdID, cal.ID, eventUID, auth.AccessFor(ctx, householdID))
 		if err != nil {
 			// A real DB error (connection failure, query error, etc.) MUST NOT be
 			// conflated with "not found". Logging it leaves a server-side trace and
@@ -575,15 +563,10 @@ func handleCalendarMultiget(w http.ResponseWriter, r *http.Request, repo *db.Rep
 			continue
 		}
 
-		ev := &ical.CalEvent{}
-		if err := json.Unmarshal([]byte(obj.ICALData), ev); err != nil {
+		icalText, err := renderObjectICal(obj)
+		if err != nil {
 			continue
 		}
-		ev.UID = obj.UID
-		// Source DTSTAMP/LAST-MODIFIED from the DB updated_at for stable
-		// re-generation. See HandleGET for the full rationale.
-		ev.DTStamp = obj.UpdatedAt
-		icalText := ical.GenerateEvent(ev)
 		writeReportResponse(buf, cal.CalDAVUID, obj.UID, obj.ETag, icalText)
 	}
 
@@ -605,9 +588,10 @@ func writeReportResponse(w io.Writer, calUID, eventUID, etag, icalText string) {
 	fmt.Fprint(w, "      <D:prop>\n")
 	fmt.Fprintf(w, "        <D:getetag>\"%s\"</D:getetag>\n", xmlEscape(etag))
 	fmt.Fprint(w, "        <C:calendar-data>")
-	fmt.Fprint(w, "<![CDATA[")
-	fmt.Fprint(w, icalText)
-	fmt.Fprint(w, "]]>")
+	// Client VCALENDARs are served verbatim (ical_raw): calendarDataCDATA
+	// replaces runes XML 1.0 forbids, which would make the whole multistatus
+	// unparseable, and splits any "]]>" so it cannot end the CDATA early.
+	fmt.Fprint(w, calendarDataCDATA(icalText))
 	fmt.Fprint(w, "</C:calendar-data>\n")
 	fmt.Fprint(w, "      </D:prop>\n")
 	fmt.Fprintf(w, "      <D:status>HTTP/1.1 200 OK</D:status>\n")
@@ -654,27 +638,159 @@ func parseCalDAVDateTime(s string) (time.Time, error) {
 	return time.Parse("20060102T150405Z", s)
 }
 
-// eventInTimeRange checks if a stored event (JSON serialized CalEvent in icalData)
-// falls within the given time range [start, end).
+// eventInTimeRange checks if a stored event (JSON serialized CalEvent in
+// icalData) overlaps [rangeStart, rangeEnd) per RFC 4791 §9.9: it starts
+// before the range end and ends after the range start. A zero rangeStart or
+// rangeEnd is unbounded on that side. An event with no end is treated as one
+// hour long; a zero-length event matches when rangeStart <= start < rangeEnd.
 func eventInTimeRange(icalData string, rangeStart, rangeEnd time.Time) bool {
 	ev := &ical.CalEvent{}
 	if err := json.Unmarshal([]byte(icalData), ev); err != nil {
 		return false
 	}
-
-	// If no range end is specified, only filter by start.
-	if rangeEnd.IsZero() {
-		return !ev.End.IsZero() && !ev.End.Before(rangeStart)
-	}
-
-	// Event overlaps range if event.Start < rangeEnd AND event.End > rangeStart.
-	// Standard CalDAV time-range filtering: include if event starts before range end
-	// AND event ends after range start (or has no end).
 	evEnd := ev.End
 	if evEnd.IsZero() {
 		evEnd = ev.Start.Add(time.Hour)
 	}
-	return !ev.Start.After(rangeEnd) && !evEnd.Before(rangeStart)
+	startsBeforeEnd := rangeEnd.IsZero() || ev.Start.Before(rangeEnd)
+	if !evEnd.After(ev.Start) {
+		return startsBeforeEnd && !ev.Start.Before(rangeStart)
+	}
+	return startsBeforeEnd && evEnd.After(rangeStart)
+}
+
+// openEndedRangeYears bounds the search window when a time-range has a start
+// but no end (RFC 4791 §9.9 treats a missing end as +infinity). A series that
+// has any instance in the next century counts as overlapping.
+const openEndedRangeYears = 100
+
+// isRecurringICal is a cheap pre-check that avoids a full iCalendar parse for
+// the common single-instance event.
+func isRecurringICal(icalText string) bool {
+	return strings.Contains(icalText, "RRULE") ||
+		strings.Contains(icalText, "RDATE") ||
+		strings.Contains(icalText, "RECURRENCE-ID")
+}
+
+// objectInTimeRange reports whether a calendar object overlaps
+// [rangeStart, rangeEnd) per RFC 4791 §9.9. A recurring object matches when
+// ANY of its instances (after RRULE/RDATE expansion, EXDATE removal and
+// RECURRENCE-ID overrides) overlaps the range, so a weekly series created
+// months ago is returned for this week. Non-recurring objects, and recurring
+// ones whose iCalendar cannot be expanded, fall back to the stored JSON
+// start/end.
+func objectInTimeRange(obj *db.CalendarObject, icalText string, rangeStart, rangeEnd time.Time) bool {
+	if isRecurringICal(icalText) {
+		if in, ok := recurringInTimeRange(icalText, rangeStart, rangeEnd); ok {
+			return in
+		}
+	}
+	return eventInTimeRange(obj.ICALData, rangeStart, rangeEnd)
+}
+
+// recurringInTimeRange expands icalText with icalx over the range. ok is false
+// when the text is not a recurring object icalx can expand (parse error, bad
+// RRULE, no recurrence at all), telling the caller to use the JSON check.
+func recurringInTimeRange(icalText string, rangeStart, rangeEnd time.Time) (in, ok bool) {
+	obj, err := icalx.Parse([]byte(icalText))
+	if err != nil || !isRecurringObject(obj) {
+		return false, false
+	}
+	if rangeEnd.IsZero() {
+		rangeEnd = rangeStart.AddDate(openEndedRangeYears, 0, 0)
+	}
+	occs, err := obj.Expand(rangeStart, rangeEnd, time.UTC)
+	switch {
+	case errors.Is(err, icalx.ErrTooManyOccurrences):
+		// More instances in the window than the expansion cap: certainly
+		// at least one overlaps.
+		return true, true
+	case errors.Is(err, icalx.ErrExpansionBudget), errors.Is(err, icalx.ErrUnsupportedRule):
+		// icalx refused to spend more on this rule (#4656): whether it
+		// overlaps is unknown, so include it rather than silently drop it
+		// (the JSON check only sees the first instance).
+		return true, true
+	case err != nil:
+		logging.Logger.Warn("caldav: calendar-query: expand recurring event",
+			slog.String("event_uid", obj.UID),
+			slog.String("error", err.Error()))
+		return false, false
+	}
+	return len(occs) > 0, true
+}
+
+// isRecurringObject reports whether a parsed object is a series: a master with
+// RRULE/RDATE, or detached RECURRENCE-ID instances.
+func isRecurringObject(obj *icalx.Object) bool {
+	return (obj.Master != nil && obj.Master.IsRecurring()) || len(obj.Overrides) > 0
+}
+
+// expandRecurringICal implements <C:expand> (RFC 4791 §9.6.5) for a recurring
+// object: it returns a VCALENDAR with one VEVENT per instance overlapping
+// [from, to), each carrying a RECURRENCE-ID and no RRULE/RDATE/EXDATE, with
+// date-times in UTC. ok is false for non-recurring objects and on any parse
+// or expansion failure, in which case the caller serves the master as-is.
+func expandRecurringICal(icalText string, from, to time.Time) (string, bool) {
+	if !isRecurringICal(icalText) {
+		return "", false
+	}
+	obj, err := icalx.Parse([]byte(icalText))
+	if err != nil || !isRecurringObject(obj) {
+		return "", false
+	}
+	occs, err := obj.Expand(from, to, time.UTC)
+	if err != nil || len(occs) == 0 {
+		return "", false
+	}
+	events := make([]*icalx.Event, 0, len(occs))
+	for _, oc := range occs {
+		ev := *oc.Event
+		ev.RRule, ev.RDates, ev.ExDates = "", nil, nil
+		ev.TZID, ev.Floating = "", false
+		ev.Start, ev.End = oc.Start.UTC(), oc.End.UTC()
+		ev.RecurrenceID = oc.RecurrenceID
+		events = append(events, &ev)
+	}
+	out, err := icalx.Build(events)
+	if err != nil {
+		logging.Logger.Warn("caldav: calendar-query: build expanded event",
+			slog.String("event_uid", obj.UID),
+			slog.String("error", err.Error()))
+		return "", false
+	}
+	return string(out), true
+}
+
+// extractExpandRange returns the start/end of a <C:expand> element (any
+// namespace prefix). Both attributes are required by RFC 4791; a malformed or
+// partial element is ignored.
+func extractExpandRange(body []byte) (time.Time, time.Time, bool) {
+	decoder := xml.NewDecoder(strings.NewReader(string(body)))
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			return time.Time{}, time.Time{}, false
+		}
+		start, ok := tok.(xml.StartElement)
+		if !ok || start.Name.Local != "expand" {
+			continue
+		}
+		var s, e string
+		for _, a := range start.Attr {
+			switch a.Name.Local {
+			case "start":
+				s = a.Value
+			case "end":
+				e = a.Value
+			}
+		}
+		from, err1 := parseCalDAVDateTime(s)
+		to, err2 := parseCalDAVDateTime(e)
+		if err1 != nil || err2 != nil || from.IsZero() || !to.After(from) {
+			return time.Time{}, time.Time{}, false
+		}
+		return from, to, true
+	}
 }
 
 // extractEventUIDFromHref extracts the event UID from a CalDAV href
@@ -697,56 +813,39 @@ func extractEventUIDFromHref(href string) string {
 	return last
 }
 
-// extractTimeRangeFromXML parses time-range start/end from raw CalDAV XML.
+// extractTimeRangeFromXML returns the start/end of the first <C:time-range>
+// element in a calendar-query body, whatever its namespace prefix and whether
+// or not it is self-closing. Clients send it as
+// <C:time-range start="..." end="..."/>, which the previous substring matcher
+// never found, so every query silently returned the whole calendar. Either
+// attribute may be absent (RFC 4791 §9.9: missing start = -inf, missing end =
+// +inf); ok is false when neither parses.
 func extractTimeRangeFromXML(xmlBody string) (time.Time, time.Time, bool) {
-	var start, end time.Time
-	hasStart := false
-	// Look for time-range element and extract start/end attributes
-	trStart := extractAttr(xmlBody, "time-range", "start")
-	trEnd := extractAttr(xmlBody, "time-range", "end")
-	if trStart != "" {
-		if t, err := parseCalDAVDateTime(trStart); err == nil {
-			start = t
-			hasStart = true
+	decoder := xml.NewDecoder(strings.NewReader(xmlBody))
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			return time.Time{}, time.Time{}, false
 		}
-	}
-	if trEnd != "" {
-		if t, err := parseCalDAVDateTime(trEnd); err == nil {
-			end = t
-		}
-	}
-	return start, end, hasStart
-}
-
-// extractAttr finds an attribute value from an XML element in the body.
-func extractAttr(xmlBody, element, attr string) string {
-	idx := strings.Index(xmlBody, "<"+element)
-	if idx < 0 {
-		idx = strings.Index(xmlBody, element+">")
-	}
-	if idx < 0 {
-		return ""
-	}
-	// Find attribute in the opening tag
-	tagEnd := strings.Index(xmlBody[idx:], ">")
-	if tagEnd < 0 {
-		return ""
-	}
-	tag := xmlBody[idx : idx+tagEnd]
-	// Look for attr="value" or attr='value'
-	for _, quote := range []string{"\"", "'"} {
-		attrIdx := strings.Index(tag, attr+"="+quote)
-		if attrIdx < 0 {
+		el, ok := tok.(xml.StartElement)
+		if !ok || el.Name.Local != "time-range" {
 			continue
 		}
-		valStart := attrIdx + len(attr) + 2 // skip attr="
-		valEnd := strings.Index(tag[valStart:], quote)
-		if valEnd < 0 {
-			continue
+		var start, end time.Time
+		for _, a := range el.Attr {
+			t, err := parseCalDAVDateTime(a.Value)
+			if err != nil {
+				continue
+			}
+			switch a.Name.Local {
+			case "start":
+				start = t
+			case "end":
+				end = t
+			}
 		}
-		return tag[valStart : valStart+valEnd]
+		return start, end, !start.IsZero() || !end.IsZero()
 	}
-	return ""
 }
 
 // extractHrefs extracts all href values from a CalDAV multiget XML body.

@@ -10,9 +10,8 @@
  *
  * Why XMLHttpRequest instead of fetch: the fetch API has no upload-progress
  * event. XHR's `upload.onprogress` is the only standard way to surface byte
- * progress to the user during a multipart upload. The auth bearer token is
- * read directly from the auth store (same source as `apiFetch`) so this
- * stays consistent with the rest of the app's auth flow.
+ * progress to the user during a multipart upload. Like `apiFetch`, it posts
+ * same-origin to the BFF, which authenticates from the session cookie.
  *
  * Why a polling useQuery per uploaded file: the API returns the created File
  * record synchronously from POST /upload with `ocr_status: "pending"`. The
@@ -24,14 +23,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useAuthStore } from "@/stores/auth";
-import { apiFetch, ApiError } from "@/lib/api";
+import { apiFetch, ApiError, bffPath, redirectToLogin } from "@/lib/api";
 import { fileKeys } from "@/lib/query-keys";
 import type { FileRecord, FileOCRStatus } from "@/lib/types/api";
 
 // ─── Constants ────────────────────────────────────────────────
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 const UPLOAD_PATH = "/api/v1/files/upload";
 /** OCR statuses that the worker will not transition away from. */
 const TERMINAL_OCR_STATUSES: FileOCRStatus[] = ["done", "failed", "skipped"];
@@ -72,8 +69,8 @@ interface UploadSlot {
  * Resolves with the created File record on 2xx, rejects with an ApiError
  * on non-2xx or a network failure. `onProgress` receives 0–100.
  *
- * The token is read at call time (not capture time) so a freshly refreshed
- * token from the auth store is always used.
+ * Goes through the BFF (/bff/files/upload); the session cookie authenticates
+ * it, so no Authorization header is set here.
  */
 function uploadFile(
   file: File,
@@ -83,19 +80,15 @@ function uploadFile(
   signal?: AbortSignal,
 ): Promise<FileRecord> {
   return new Promise((resolve, reject) => {
-    const token = useAuthStore.getState().token;
     const form = new FormData();
     form.append("file", file, file.name);
     form.append("entity_type", entityType);
     form.append("entity_id", entityId);
 
     const xhr = new XMLHttpRequest();
-    const url = `${BASE_URL}${UPLOAD_PATH}`;
+    const url = bffPath(UPLOAD_PATH);
 
     xhr.open("POST", url, true);
-    if (token) {
-      xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-    }
     // Do NOT set Content-Type — the browser sets multipart/form-data with
     // the correct boundary when given a FormData body. Setting it manually
     // would strip the boundary and break parsing on the server.
@@ -138,6 +131,8 @@ function uploadFile(
           );
         }
       } else {
+        // Session gone (the BFF already tried a refresh): go sign in again.
+        if (xhr.status === 401) redirectToLogin();
         let body: unknown;
         try {
           body = JSON.parse(xhr.responseText);
@@ -172,16 +167,16 @@ function uploadFile(
 function ocrBadgeClass(status: FileOCRStatus): string {
   switch (status) {
     case "done":
-      return "bg-green-50 text-green-700 ring-green-600/20";
+      return "border-line bg-surface-2 text-ink-2";
     case "failed":
-      return "bg-red-50 text-red-700 ring-red-600/20";
+      return "border-warn-line bg-warn-bg text-warn-ink";
     case "skipped":
-      return "bg-gray-50 text-gray-600 ring-gray-500/20";
+      return "border-line bg-surface-2 text-ink-3";
     case "processing":
-      return "bg-blue-50 text-blue-700 ring-blue-600/20 animate-pulse";
+      return "border-line bg-surface-2 text-ink-3 animate-pulse";
     case "pending":
     default:
-      return "bg-amber-50 text-amber-700 ring-amber-600/20";
+      return "border-line bg-surface-2 text-ink-3";
   }
 }
 
@@ -205,7 +200,7 @@ function ocrLabel(status: FileOCRStatus): string {
 function UploadIcon() {
   return (
     <svg
-      className="h-6 w-6 text-gray-400"
+      className="h-6 w-6 text-ink-3"
       fill="none"
       viewBox="0 0 24 24"
       strokeWidth={1.5}
@@ -320,27 +315,27 @@ function UploadedFileRow({ slot }: { slot: UploadSlot }) {
   }, [slot.fileId, ocrStatus, queryClient]);
 
   return (
-    <li className="rounded-lg border border-gray-200 bg-white px-3 py-2.5">
+    <li className="rounded-token-md border border-line bg-surface px-3 py-2.5">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-gray-900">
+          <p className="break-words text-sm font-medium text-ink">
             {slot.fileName}
           </p>
-          <p className="text-xs text-gray-400">{fmtSize(slot.file.size)}</p>
+          <p className="text-xs text-ink-3">{fmtSize(slot.file.size)}</p>
         </div>
 
         {slot.uploadError ? (
-          <span className="inline-flex items-center rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/20">
+          <span className="inline-flex items-center rounded-full border border-warn-line bg-warn-bg px-2 py-1 text-xs font-medium text-warn-ink">
             Upload failed
           </span>
         ) : slot.uploading ? (
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600">
+          <span className="inline-flex items-center gap-1 text-xs font-medium text-accent">
             <SpinnerIcon />
             {slot.progress}%
           </span>
         ) : slot.fileId ? (
           <span
-            className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset ${ocrBadgeClass(
+            className={`inline-flex items-center rounded-full border px-2 py-1 text-xs font-medium ${ocrBadgeClass(
               ocrStatus,
             )}`}
           >
@@ -351,20 +346,20 @@ function UploadedFileRow({ slot }: { slot: UploadSlot }) {
 
       {/* Upload progress bar */}
       {slot.uploading && !slot.uploadError && (
-        <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-gray-100">
+        <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
           <div
-            className="h-full bg-indigo-600 transition-[width] duration-150 ease-out"
+            className="h-full bg-accent-fill transition-[width] duration-150 ease-out"
             style={{ width: `${slot.progress}%` }}
           />
         </div>
       )}
 
       {slot.uploadError && (
-        <p className="mt-1 text-xs text-red-600">{slot.uploadError}</p>
+        <p className="mt-1 text-xs text-danger">{slot.uploadError}</p>
       )}
 
       {slot.fileId && ocrStatus === "failed" && ocrQ.data?.ocr_error && (
-        <p className="mt-1 text-xs text-red-600">
+        <p className="mt-1 text-xs text-danger">
           OCR error: {ocrQ.data.ocr_error}
         </p>
       )}
@@ -540,19 +535,18 @@ export default function FileUpload({
             fileInputRef.current.click();
           }
         }}
-        className={`flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed px-6 py-8 text-center transition-colors ${
+        className={`flex cursor-pointer flex-col items-center justify-center rounded-token-md border-2 border-dashed px-4 py-6 text-center transition-colors ${
           isDragging
-            ? "border-indigo-500 bg-indigo-50/50"
-            : "border-gray-300 bg-gray-50/50 hover:border-indigo-400 hover:bg-indigo-50/30"
+            ? "border-accent bg-accent-soft"
+            : "border-line bg-surface-2 hover:border-accent hover:bg-accent-soft"
         } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
         aria-label="Drop files here or click to upload"
       >
         <UploadIcon />
-        <p className="mt-2 text-sm font-medium text-gray-700">
-          Drop files here, or{" "}
-          <span className="text-indigo-600">browse</span>
+        <p className="mt-2 text-sm font-medium text-ink">
+          Drop files here, or <span className="text-accent">browse</span>
         </p>
-        <p className="mt-0.5 text-xs text-gray-400">
+        <p className="mt-0.5 text-xs text-ink-3">
           Images, PDFs, documents — up to 25 MB each
         </p>
       </div>
@@ -576,28 +570,29 @@ export default function FileUpload({
         aria-hidden="true"
       />
 
-      {/* Action buttons */}
+      {/* Action buttons. Both are 44 px tall on a phone (#4564): the camera
+          button is the one a parent actually uses for a receipt. */}
       <div className="mt-3 flex flex-wrap gap-2">
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
           disabled={disabled}
-          className="inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-500 disabled:bg-gray-300 transition-colors"
+          className="inline-flex items-center gap-1.5 rounded-token-sm bg-accent-fill px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-50 max-md:min-h-11"
         >
           <UploadIcon />
-          Upload File
+          Upload file
         </button>
         <button
           type="button"
           onClick={() => cameraInputRef.current?.click()}
           disabled={disabled}
-          className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:bg-gray-100 disabled:text-gray-400 transition-colors"
+          className="inline-flex items-center gap-1.5 rounded-token-sm border border-line bg-surface px-3 py-1.5 text-sm font-medium text-ink hover:bg-surface-2 disabled:opacity-50 transition-colors max-md:min-h-11"
           // The camera button is only useful on touch devices that have a
           // camera; on desktop it falls back to a regular file picker.
           title="Take a photo with your camera"
         >
           <CameraIcon />
-          Take Photo
+          Take photo
         </button>
       </div>
 

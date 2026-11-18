@@ -1,17 +1,16 @@
-// Package auth provides OIDC token verification and JWT signing for the Home OS API.
+// Package auth provides OIDC token verification for the Home OS API.
 // Tokens issued by Dex are validated using Dex's JWKS endpoint with RS256 signature
-// verification via coreos/go-oidc/v3. The SignToken function creates HS256 JWTs for
-// the login/register endpoints (a temporary bridge until UI OIDC migration is complete).
+// verification via coreos/go-oidc/v3. Nothing here mints a token: every credential
+// Home OS accepts is issued by Dex (authorization code + PKCE), and #531 removed
+// the last HS256 signer so no hand-rolled JWT path can come back.
 package auth
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 // Identity represents the core OIDC identity from a verified ID token.
@@ -29,6 +28,22 @@ type Verifier struct {
 	inner     *oidc.IDTokenVerifier
 	enabled   bool
 	audiences []string
+	resolver  MemberResolver
+}
+
+// WithResolver attaches a MemberResolver. When set, VerifyToken maps the Dex
+// identity to the Home OS user (Claims.UserID = users.id), household and role,
+// and fails with ErrNoMembership for verified tokens that are not members.
+func (v *Verifier) WithResolver(r MemberResolver) *Verifier {
+	v.resolver = r
+	return v
+}
+
+// NewVerifierWithKeySet builds an enabled Verifier over a caller-supplied key
+// set (e.g. oidc.StaticKeySet). Intended for tests that sign their own tokens.
+func NewVerifierWithKeySet(issuerURL string, keySet oidc.KeySet, audiences []string) *Verifier {
+	inner := oidc.NewVerifier(issuerURL, keySet, &oidc.Config{SkipClientIDCheck: true})
+	return &Verifier{inner: inner, enabled: true, audiences: audiences}
 }
 
 // NewVerifier creates a new Verifier that validates OIDC ID tokens.
@@ -102,6 +117,13 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Identity, erro
 // VerifyToken parses and validates a Dex-issued OIDC token string.
 // It verifies the RS256 signature using Dex's JWKS, then validates the
 // issuer, audience, and expiration claims.
+//
+// When a MemberResolver is attached (WithResolver), the returned Claims carry
+// the Home OS users.id as UserID plus HouseholdID and Role; a verified token
+// with no membership returns an error wrapping ErrNoMembership, a deactivated
+// user one wrapping ErrUserDeactivated, and a database failure one wrapping
+// ErrMemberLookup (see WriteVerifyError for the HTTP mapping). Without a resolver, UserID is the raw
+// Dex sub and HouseholdID/Role are empty.
 func (v *Verifier) VerifyToken(ctx context.Context, tokenStr string) (*Claims, error) {
 	if !v.enabled {
 		return &Claims{
@@ -116,31 +138,29 @@ func (v *Verifier) VerifyToken(ctx context.Context, tokenStr string) (*Claims, e
 		return nil, err
 	}
 
-	return &Claims{
+	claims := &Claims{
 		UserID: ident.Subject,
 		Email:  ident.Email,
 		Name:   ident.Name,
-	}, nil
+		DexSub: ident.Subject,
+	}
+	if v.resolver == nil {
+		return claims, nil
+	}
+
+	m, err := v.resolver.Resolve(ctx, ident.Subject, ident.Email)
+	if err != nil {
+		return nil, fmt.Errorf("resolve member (email=%q): %w", ident.Email, err)
+	}
+	claims.UserID = m.UserID
+	claims.HouseholdID = m.HouseholdID
+	claims.Role = m.Role
+	return claims, nil
 }
 
 // Close is a no-op — kept for interface compatibility.
 // coreos/go-oidc/v3 does not use background refresh goroutines like keyfunc.
 func (v *Verifier) Close() {}
-
-// SignToken creates an HS256 JWT with the given user_id, household_id, and role claims.
-// The token expires in 24 hours. This is used by the Login and Register handlers as a
-// temporary bridge until the UI is fully migrated to Dex OIDC.
-func SignToken(jwtSecret string, userID, householdID, role string) (string, error) {
-	claims := jwt.MapClaims{
-		"user_id":      userID,
-		"household_id": householdID,
-		"role":         role,
-		"exp":          time.Now().Add(24 * time.Hour).Unix(),
-		"iat":          time.Now().Unix(),
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(jwtSecret))
-}
 
 // hasValidAudience checks whether the token's audience claim contains at
 // least one of the expected audiences configured on the verifier. If no

@@ -1,5 +1,6 @@
-// Package note manages polymorphic notes attached to any entity (property,
-// vehicle, pet, asset, vendor, bill, maintenance_task). Notes are household-scoped
+// Package note manages polymorphic notes about one entity (any entity_kind:
+// property, vehicle, pet, asset, vendor, bill, maintenance_task, ...) or about
+// the family itself, ('household', household_id). Notes are household-scoped
 // and support free-form text with an optional title and author reference.
 package note
 

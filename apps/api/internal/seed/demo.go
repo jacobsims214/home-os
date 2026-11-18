@@ -138,9 +138,10 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 			roomIDs["Cabin/"+roomName] = roomID
 		}
 
-		// Set financial fields on Main Residence
+		// Set financial fields on Main Residence. The mortgage is a loan about
+		// the property (section 11), not properties.mortgage_* (#4704).
 		if _, err := pool.Exec(ctx,
-			`UPDATE properties SET purchase_price = 320000, purchase_date = '2018-06-15', current_value = 425000, mortgage_amount = 295000 WHERE id = $1`,
+			`UPDATE properties SET purchase_price = 320000, purchase_date = '2018-06-15', current_value = 425000 WHERE id = $1`,
 			mainResidenceID,
 		); err != nil {
 			return fmt.Errorf("update main residence financials: %w", err)
@@ -293,7 +294,10 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 
 		slog.Info("demo seed: created 5 maintenance tasks")
 
-		// 7. Create vehicles
+		// 7. Create vehicles. Insurance and registration are annual bills
+		// about the vehicle (bills.vehicle_id) and the F-150's financing is a
+		// loan (section 11); the legacy vehicles.lender / loan_* /
+		// insurance_* / registration_* columns are not written (#4704).
 		type vehicleDef struct {
 			year             int
 			make             string
@@ -304,15 +308,14 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 			purchasePrice    float64
 			purchaseDate     string
 			currentValue     float64
-			loanAmount       float64
-			insuranceCost    float64
-			registrationCost float64
+			insuranceCost    string
+			registrationCost string
 		}
 
 		vehicles := []vehicleDef{
-			{2022, "Ford", "F-150", "1FTFW1E83NFA12345", "IL-ABC123", "Agate Black", 55000, "2022-01-15", 42000, 12000, 1200, 150},
-			{2021, "Toyota", "RAV4", "2T3P1RFV5MC123456", "IL-XYZ789", "Magnetic Gray", 32000, "2021-06-01", 26000, 0, 1100, 120},
-			{2019, "Harley-Davidson", "Road Glide", "1HD1KHC19KB123456", "IL-MOTO1", "Vivid Black", 28000, "2019-08-15", 18000, 0, 800, 90},
+			{2022, "Ford", "F-150", "1FTFW1E83NFA12345", "IL-ABC123", "Agate Black", 55000, "2022-01-15", 42000, "1200.00", "150.00"},
+			{2021, "Toyota", "RAV4", "2T3P1RFV5MC123456", "IL-XYZ789", "Magnetic Gray", 32000, "2021-06-01", 26000, "1100.00", "120.00"},
+			{2019, "Harley-Davidson", "Road Glide", "1HD1KHC19KB123456", "IL-MOTO1", "Vivid Black", 28000, "2019-08-15", 18000, "800.00", "90.00"},
 		}
 
 		for _, v := range vehicles {
@@ -320,32 +323,57 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 			if err != nil {
 				return fmt.Errorf("parse purchase date for vehicle %s %s: %w", v.make, v.model, err)
 			}
-			if _, err := pool.Exec(ctx,
+			var vehicleID uuid.UUID
+			if err := pool.QueryRow(ctx,
 				`INSERT INTO vehicles (household_id, year, make, model, vin, license_plate, color,
-				                      purchase_price, purchase_date, current_value, loan_amount, insurance_cost, registration_cost)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+				                      purchase_price, purchase_date, current_value)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				 RETURNING id`,
 				householdID, v.year, v.make, v.model, v.vin, v.licensePlate, v.color,
-				v.purchasePrice, purchaseDate, v.currentValue, v.loanAmount, v.insuranceCost, v.registrationCost,
-			); err != nil {
+				v.purchasePrice, purchaseDate, v.currentValue,
+			).Scan(&vehicleID); err != nil {
 				return fmt.Errorf("insert vehicle %s %s: %w", v.make, v.model, err)
+			}
+			label := fmt.Sprintf("%d %s %s", v.year, v.make, v.model)
+			for _, b := range []struct{ suffix, amount, category string }{
+				{"insurance", v.insuranceCost, "Insurance"},
+				{"registration", v.registrationCost, "Vehicle"},
+			} {
+				if _, err := pool.Exec(ctx,
+					`INSERT INTO bills (household_id, name, amount, category, frequency, vehicle_id)
+					 VALUES ($1, $2, $3::numeric, $4, 'annual', $5)`,
+					householdID, label+" "+b.suffix, b.amount, b.category, vehicleID,
+				); err != nil {
+					return fmt.Errorf("insert %s bill for %s: %w", b.suffix, label, err)
+				}
 			}
 		}
 
-		slog.Info("demo seed: created 3 vehicles")
+		slog.Info("demo seed: created 3 vehicles with insurance and registration bills")
 
-		// 8. Create pets
+		// 8. Create pets. The vet is a family vendor with trade "vet"
+		// (pets.vet_vendor_id); pets.vet_name / vet_phone are legacy and are
+		// not written, so 043's vet backfill has nothing to pick up.
+		var vetVendorID uuid.UUID
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO vendors (household_id, name, specialty, phone, trades)
+			 VALUES ($1, $2, $3, $4, ARRAY['vet'])
+			 RETURNING id`,
+			householdID, "Springfield Animal Hospital", "Veterinarian", "555-0100",
+		).Scan(&vetVendorID); err != nil {
+			return fmt.Errorf("insert vet vendor: %w", err)
+		}
+
 		type petDef struct {
 			name        string
 			species     string
 			breed       string
 			dateOfBirth string
-			vetName     string
-			vetPhone    string
 		}
 
 		pets := []petDef{
-			{"Max", "Dog", "Golden Retriever", "2020-03-15", "Springfield Animal Hospital", "555-0100"},
-			{"Luna", "Cat", "Domestic Shorthair", "2021-07-04", "Springfield Animal Hospital", "555-0100"},
+			{"Max", "Dog", "Golden Retriever", "2020-03-15"},
+			{"Luna", "Cat", "Domestic Shorthair", "2021-07-04"},
 		}
 
 		for _, p := range pets {
@@ -354,15 +382,15 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 				return fmt.Errorf("parse pet DOB for %s: %w", p.name, err)
 			}
 			if _, err := pool.Exec(ctx,
-				`INSERT INTO pets (household_id, name, species, breed, date_of_birth, vet_name, vet_phone)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				householdID, p.name, p.species, p.breed, dob, p.vetName, p.vetPhone,
+				`INSERT INTO pets (household_id, name, species, breed, date_of_birth, vet_vendor_id)
+				 VALUES ($1, $2, $3, $4, $5, $6)`,
+				householdID, p.name, p.species, p.breed, dob, vetVendorID,
 			); err != nil {
 				return fmt.Errorf("insert pet %s: %w", p.name, err)
 			}
 		}
 
-		slog.Info("demo seed: created 2 pets")
+		slog.Info("demo seed: created 2 pets and their vet vendor")
 
 		// 9. Create vendors
 		type vendorDef struct {
@@ -395,20 +423,27 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 
 		slog.Info("demo seed: created 4 vendors")
 
-		// 10. Create bills
+		// 10. Create bills. Home insurance and the cabin's property tax are
+		// about their property (bills.property_id), which is where the
+		// property API reads insurance_annual / property_tax_annual (#4704).
 		type billDef struct {
-			name     string
-			amount   string
-			dueDay   int
-			category string
+			name       string
+			amount     string
+			dueDay     *int
+			dueDate    *string
+			frequency  string
+			category   string
+			propertyID *string
 		}
+		day := func(d int) *int { return &d }
+		date := func(d string) *string { return &d }
 
 		bills := []billDef{
-			{"Mortgage", "2450.00", 1, "Housing"},
-			{"Electric", "180.00", 15, "Utilities"},
-			{"Internet", "89.00", 20, "Utilities"},
-			{"Home Insurance", "210.00", 1, "Insurance"},
-			{"Cabin Property Tax", "1800.00", 15, "Taxes"},
+			{"Mortgage", "2450.00", day(1), nil, "monthly", "Housing", nil},
+			{"Electric", "180.00", day(15), nil, "monthly", "Utilities", nil},
+			{"Internet", "89.00", day(20), nil, "monthly", "Utilities", nil},
+			{"Home Insurance", "210.00", day(1), nil, "monthly", "Insurance", &mainResidenceID},
+			{"Cabin Property Tax", "1800.00", nil, date("2026-12-15"), "annual", "Taxes", &lakeCabinID},
 		}
 
 		for _, b := range bills {
@@ -417,9 +452,9 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 				return fmt.Errorf("parse bill amount for %s: %w", b.name, err)
 			}
 			if _, err := pool.Exec(ctx,
-				`INSERT INTO bills (household_id, name, amount, due_day, category)
-				 VALUES ($1, $2, $3, $4, $5)`,
-				householdID, b.name, amount, b.dueDay, b.category,
+				`INSERT INTO bills (household_id, name, amount, due_day, due_date, frequency, category, property_id)
+				 VALUES ($1, $2, $3, $4, $5::date, $6, $7, $8::uuid)`,
+				householdID, b.name, amount, b.dueDay, b.dueDate, b.frequency, b.category, b.propertyID,
 			); err != nil {
 				return fmt.Errorf("insert bill %s: %w", b.name, err)
 			}
@@ -430,8 +465,8 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 		// 11. Create loans
 		// Mortgage — linked to Main Residence
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO loans (household_id, name, entity_type, entity_id, lender, original_amount, remaining_balance, interest_rate, term_months, monthly_payment, start_date)
-			 VALUES ($1, 'Main Residence Mortgage', 'property', $2, 'Wells Fargo', 295000, 275000, 4.25, 360, 1450, '2018-07-01')`,
+			`INSERT INTO loans (household_id, name, property_id, lender, original_amount, remaining_balance, interest_rate, term_months, monthly_payment, start_date)
+			 VALUES ($1, 'Main Residence Mortgage', $2, 'Wells Fargo', 295000, 275000, 4.25, 360, 1450, '2018-07-01')`,
 			householdID, mainResidenceID,
 		); err != nil {
 			return fmt.Errorf("insert mortgage loan: %w", err)
@@ -443,8 +478,8 @@ func SeedDemo(ctx context.Context, pool *pgxpool.Pool, dexClient *dex.Client) er
 			return fmt.Errorf("get ford ID: %w", err)
 		}
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO loans (household_id, name, entity_type, entity_id, lender, original_amount, remaining_balance, interest_rate, term_months, monthly_payment, start_date)
-			 VALUES ($1, 'F-150 Financing', 'vehicle', $2, 'Ford Credit', 12000, 8500, 6.99, 60, 350, '2022-01-15')`,
+			`INSERT INTO loans (household_id, name, vehicle_id, lender, original_amount, remaining_balance, interest_rate, term_months, monthly_payment, start_date)
+			 VALUES ($1, 'F-150 Financing', $2, 'Ford Credit', 12000, 8500, 6.99, 60, 350, '2022-01-15')`,
 			householdID, fordID,
 		); err != nil {
 			return fmt.Errorf("insert ford loan: %w", err)

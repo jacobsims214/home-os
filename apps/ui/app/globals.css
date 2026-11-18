@@ -1,3 +1,196 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+/* Variants (hover:, disabled:...) here rather than at the end of the file, so
+ * the dark-mode bridge below can override them at equal specificity (#4753). */
+@tailwind variants;
+
+/*
+ * Semantic colour tokens (#4529), from KB design/app-shell.md (artifact #75 v1).
+ * Components use these tokens, never hex, so light and dark both work.
+ *
+ * Mantine sets data-mantine-color-scheme="light|dark" on <html> (resolving
+ * "auto" from prefers-color-scheme; see ColorSchemeScript in app/layout.tsx),
+ * so the dark block keys on that attribute rather than on the media query.
+ * Tailwind aliases (bg-surface, text-ink-2, border-line, ...) live in
+ * tailwind.config.ts. Keep this list in sync with app/theme-tokens.test.mjs.
+ */
+:root,
+:root[data-mantine-color-scheme="light"] {
+  color-scheme: light;
+
+  --bg: #f8f9fa;
+  --surface: #ffffff;
+  --surface-2: #f1f3f5;
+  --raised: #ffffff;
+  --line: #e2e6ea;
+
+  --ink: #212529;
+  --ink-2: #495057;
+  --ink-3: #636a71;
+
+  --accent: #0b7285;
+  --accent-fill: #0b7285;
+  --accent-soft: #e3fafc;
+
+  --badge: #e03131;
+  --danger: #c92a2a;
+  --warn-bg: #fff4e6;
+  --warn-ink: #8a3c00;
+  --warn-line: #ffd8a8;
+
+  --scrim: rgba(17, 20, 24, 0.45);
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-lg: 0 12px 32px rgba(16, 24, 40, 0.18), 0 2px 6px rgba(16, 24, 40, 0.08);
+  --skeleton-shine: rgba(255, 255, 255, 0.5);
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+}
+
+:root[data-mantine-color-scheme="dark"] {
+  color-scheme: dark;
+
+  --bg: #1f1f1f;
+  --surface: #242424;
+  --surface-2: #2e2e2e;
+  --raised: #2b2b2b;
+  --line: #3a3a3a;
+
+  --ink: #e9ecef;
+  --ink-2: #c1c2c5;
+  --ink-3: #9d9fa3;
+
+  --accent: #66d9e8;
+  --accent-fill: #0b7285;
+  --accent-soft: rgba(59, 201, 219, 0.14);
+
+  --badge: #f03e3e;
+  --danger: #ff8787;
+  --warn-bg: #3a2a14;
+  --warn-ink: #ffd8a8;
+  --warn-line: #5c4320;
+
+  --scrim: rgba(0, 0, 0, 0.6);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.4);
+  --skeleton-shine: rgba(255, 255, 255, 0.06);
+}
+
+html,
+body {
+  background-color: var(--bg);
+  color: var(--ink);
+}
+
+body {
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Installed-app touch behaviour (#4533).
+ *
+ * iOS Safari and Chrome treat a double tap on a control as "zoom in", which
+ * makes a tap-heavy app feel slow. The usual fix — maximum-scale=1 or
+ * user-scalable=no in the viewport meta — also kills pinch zoom and fails
+ * WCAG 1.4.4, so it is not used (see app/layout.tsx). `manipulation` turns off
+ * only the double-tap gesture: single taps, scrolling and pinch zoom still work.
+ */
+html {
+  touch-action: manipulation;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/*
+ * Dark-mode bridge for legacy Tailwind colours (#4529). Temporary.
+ *
+ * Page and feature components outside components/ui and components/shared
+ * still hard-code light Tailwind colours (audit #4509: ~480 uses in ~30
+ * files), which made dark mode unreadable. Until each page's rebuild ticket
+ * swaps them for the token utilities (text-ink, bg-surface, border-line...),
+ * this maps the common ones onto tokens in dark mode only. Light mode is
+ * untouched. Delete a rule once grep finds no more uses of its class.
+ *
+ * The :where() keeps each rule at the specificity of the utility it remaps
+ * (0,1,0; hover rules 0,2,0) so hover:/disabled: variants still win (#4753).
+ */
+:where(:root[data-mantine-color-scheme="dark"]) {
+  & .text-gray-900,
+  & .text-gray-800,
+  & .text-gray-700,
+  & .text-black,
+  & .hover\:text-gray-700:hover,
+  & .hover\:text-gray-900:hover { color: var(--ink); }
+  & .text-gray-600 { color: var(--ink-2); }
+  & .text-gray-500,
+  & .text-gray-400,
+  & .disabled\:hover\:text-gray-400:hover:disabled { color: var(--ink-3); }
+
+  & .bg-white { background-color: var(--surface); }
+  & .bg-gray-50,
+  & .bg-gray-100,
+  & .bg-gray-200,
+  & .bg-gray-50\/50,
+  & .bg-gray-100\/50,
+  & .hover\:bg-gray-50:hover,
+  & .hover\:bg-gray-100:hover,
+  & .hover\:bg-gray-200:hover { background-color: var(--surface-2); }
+
+  & .border-gray-100,
+  & .border-gray-200,
+  & .border-gray-300,
+  & .hover\:border-gray-300:hover { border-color: var(--line); }
+  & .divide-gray-50 > :not([hidden]) ~ :not([hidden]),
+  & .divide-gray-100 > :not([hidden]) ~ :not([hidden]),
+  & .divide-gray-200 > :not([hidden]) ~ :not([hidden]) { border-color: var(--line); }
+
+  & .bg-blue-50,
+  & .bg-indigo-50,
+  & .bg-indigo-100,
+  & .bg-indigo-50\/30,
+  & .bg-indigo-50\/50,
+  & .hover\:bg-blue-50:hover,
+  & .hover\:bg-indigo-50:hover,
+  & .hover\:bg-indigo-50\/30:hover { background-color: var(--accent-soft); }
+  & .text-blue-700,
+  & .text-blue-800,
+  & .text-indigo-600,
+  & .text-indigo-700,
+  & .hover\:text-blue-600:hover,
+  & .hover\:text-indigo-500:hover { color: var(--accent); }
+
+  & .bg-red-50,
+  & .hover\:bg-red-50:hover { background-color: rgba(250, 82, 82, 0.14); }
+  & .text-red-600,
+  & .text-red-700,
+  & .text-red-800,
+  & .hover\:text-red-600:hover,
+  & .hover\:text-red-700:hover { color: var(--danger); }
+  & .border-red-200,
+  & .border-red-300 { border-color: rgba(250, 82, 82, 0.4); }
+
+  & .bg-amber-50 { background-color: var(--warn-bg); }
+  & .text-amber-700,
+  & .text-yellow-800 { color: var(--warn-ink); }
+
+  & .bg-green-50 { background-color: rgba(64, 192, 87, 0.14); }
+  & .text-green-600,
+  & .text-green-700,
+  & .text-green-800 { color: #8ce99a; }
+}
+
+/* #4568: the "Skipped for safety" disclosure's caret, matching the mockup. */
+details[data-skipped-for-safety] > summary::-webkit-details-marker {
+  display: none;
+}
+details[data-skipped-for-safety] > summary .safety-caret {
+  transform: rotate(0deg);
+}
+details[data-skipped-for-safety][open] > summary .safety-caret {
+  transform: rotate(90deg);
+}

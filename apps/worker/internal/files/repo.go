@@ -38,13 +38,13 @@ import (
 // Mirrors the EntityType constants in apps/api/internal/file/model.go. If you
 // add a new attachable entity type there, add a query here too.
 var entityNameQueries = map[string]string{
-	"property":    "SELECT name FROM properties WHERE id = $1",
-	"vehicle":     "SELECT CONCAT_WS(' ', NULLIF(year::text, ''), make, model) FROM vehicles WHERE id = $1",
-	"pet":         "SELECT name FROM pets WHERE id = $1",
-	"bill":        "SELECT name FROM bills WHERE id = $1",
-	"maintenance": "SELECT name FROM maintenance_tasks WHERE id = $1",
-	"asset":       "SELECT name FROM assets WHERE id = $1",
-	"vendor":      "SELECT name FROM vendors WHERE id = $1",
+	"property":         "SELECT name FROM properties WHERE id = $1",
+	"vehicle":          "SELECT CONCAT_WS(' ', NULLIF(year::text, ''), make, model) FROM vehicles WHERE id = $1",
+	"pet":              "SELECT name FROM pets WHERE id = $1",
+	"bill":             "SELECT name FROM bills WHERE id = $1",
+	"maintenance_task": "SELECT name FROM maintenance_tasks WHERE id = $1",
+	"asset":            "SELECT name FROM assets WHERE id = $1",
+	"vendor":           "SELECT name FROM vendors WHERE id = $1",
 }
 
 // OCR status constants. These mirror apps/api/internal/file/model.go
@@ -120,6 +120,58 @@ func (r *Repo) ListPending(ctx context.Context, limit int) ([]PendingFile, error
 	return out, nil
 }
 
+// RetryableFile is a failed file whose OCR may be retried: the same
+// fields as PendingFile plus the ocr_error text, which carries the retry
+// state (attempt number and next-attempt time) written by the processor.
+type RetryableFile struct {
+	PendingFile
+	OCRError string
+}
+
+// ListRetryable returns up to limit files with ocr_status 'failed' whose
+// ocr_error starts with the processor's retry marker
+// "[retry <k>/<n> next=<RFC3339>]" and whose next-attempt time has
+// passed, oldest due first. Files that ran out of retries have no marker
+// and are never returned. The due check runs in SQL so rows still waiting
+// out their backoff cannot fill the batch and starve due ones.
+//
+// An empty (non-nil) slice is returned when nothing is due.
+func (r *Repo) ListRetryable(ctx context.Context, limit int) ([]RetryableFile, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, household_id, COALESCE(content_type, ''), ocr_error
+		 FROM (
+		     SELECT id, household_id, content_type, ocr_error,
+		            substring(ocr_error FROM '^\[retry [0-9]+/[0-9]+ next=([^\]]+)\]')::timestamptz AS next_attempt
+		     FROM files
+		     WHERE ocr_status = $1 AND ocr_error LIKE '[retry %'
+		 ) f
+		 WHERE next_attempt <= NOW()
+		 ORDER BY next_attempt ASC
+		 LIMIT $2`,
+		OCRStatusFailed, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("files: list retryable: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]RetryableFile, 0)
+	for rows.Next() {
+		var rf RetryableFile
+		if err := rows.Scan(&rf.ID, &rf.HouseholdID, &rf.ContentType, &rf.OCRError); err != nil {
+			return nil, fmt.Errorf("files: scan retryable row: %w", err)
+		}
+		out = append(out, rf)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("files: iterate retryable rows: %w", err)
+	}
+	return out, nil
+}
+
 // GetBlob returns the raw bytes of the blob backing the given file.
 // It joins files -> file_blobs on blob_id so the worker can fetch bytes
 // by file id alone (it already knows the file id from ListPending).
@@ -162,9 +214,13 @@ func (r *Repo) GetBlob(ctx context.Context, fileID uuid.UUID) ([]byte, error) {
 // logs and drops such files rather than treating them as failures.
 func (r *Repo) UpdateOCRStatus(ctx context.Context, fileID uuid.UUID, ocrStatus string, extractedText *string, ocrError *string) error {
 	tag, err := r.pool.Exec(ctx,
+		// A raw body (text_origin 'raw', migration 072, #4941) is the caller's
+		// own pasted text, and the source a recorded amount is checked
+		// against: extraction never overwrites it.
 		`UPDATE files
 		 SET ocr_status = $1,
-		     extracted_text = COALESCE($2, extracted_text),
+		     extracted_text = CASE WHEN text_origin = 'raw' THEN extracted_text
+		                           ELSE COALESCE($2, extracted_text) END,
 		     ocr_error = $3,
 		     updated_at = NOW()
 		 WHERE id = $4`,
@@ -179,61 +235,76 @@ func (r *Repo) UpdateOCRStatus(ctx context.Context, fileID uuid.UUID, ocrStatus 
 	return nil
 }
 
-// IndexableFile is the slice of a files row the worker needs to build a
-// Typesense FileDocument after OCR completes: the file's own identity plus the
-// polymorphic attach target and tags. extracted_text is intentionally absent —
-// the processor already has it in memory from Tika and passes it through to
-// the indexer separately, avoiding a second read of a potentially-large TEXT
-// column that the processor already wrote.
+// IndexableFile is the slice of a files row the worker needs to index the
+// file in Typesense: its identity, the polymorphic attach target, tags, the
+// OCR text, and updated_at (the version the re-index sweep tracks).
 type IndexableFile struct {
-	ID          uuid.UUID
-	HouseholdID uuid.UUID
-	Name        string
-	EntityType  string
-	EntityID    uuid.UUID
-	Tags        []string
-	CreatedAt   time.Time
+	ID            uuid.UUID
+	HouseholdID   uuid.UUID
+	Name          string
+	EntityType    string
+	EntityID      uuid.UUID
+	Tags          []string
+	ExtractedText string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
-// GetForIndex returns the metadata needed to index a file in Typesense after
-// OCR. It is NOT scoped by household_id — the worker already proved it owns
-// the row via ListPending (which scans across all households by design), and
-// re-checking household ownership here would just duplicate that trust
-// boundary.
-//
-// Returns (nil, nil) — not pgx.ErrNoRows — if the file no longer exists, so
-// the processor can treat a vanished file as "nothing to index" without a
-// special-case error branch. This mirrors the not-found contract of the API's
-// GetFile rather than the UpdateOCRStatus ErrNoRows contract, because the
-// caller is a read path, not a write path.
-func (r *Repo) GetForIndex(ctx context.Context, fileID uuid.UUID) (*IndexableFile, error) {
-	var (
-		f          IndexableFile
-		entityType *string
-		entityID   *uuid.UUID
-	)
-	err := r.pool.QueryRow(ctx,
-		`SELECT id, household_id, name, entity_type, entity_id, tags, created_at
+// IndexCursor is a position in (updated_at, id) order. The zero value is
+// before every row.
+type IndexCursor struct {
+	UpdatedAt time.Time
+	ID        uuid.UUID
+}
+
+// ListIndexable returns up to limit files with ocr_status='done' that come
+// after cursor in (updated_at, id) order, oldest first. updated_at moves on
+// every write to a files row (OCR completion, rename, tag edit), so walking
+// this order from the last indexed position finds every file whose search
+// document is stale. It is NOT scoped by household_id: the worker indexes
+// every household.
+func (r *Repo) ListIndexable(ctx context.Context, after IndexCursor, limit int) ([]IndexableFile, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, household_id, name, entity_type, entity_id, tags,
+		        COALESCE(extracted_text, ''), created_at, updated_at
 		 FROM files
-		 WHERE id = $1`,
-		fileID,
-	).Scan(&f.ID, &f.HouseholdID, &f.Name, &entityType, &entityID, &f.Tags, &f.CreatedAt)
+		 WHERE ocr_status = $1
+		   AND (updated_at > $2 OR (updated_at = $2 AND id > $3))
+		 ORDER BY updated_at, id
+		 LIMIT $4`,
+		OCRStatusDone, after.UpdatedAt, after.ID, limit,
+	)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
+		return nil, fmt.Errorf("files: list indexable: %w", err)
+	}
+	defer rows.Close()
+
+	var out []IndexableFile
+	for rows.Next() {
+		var (
+			f          IndexableFile
+			entityType *string
+			entityID   *uuid.UUID
+		)
+		if err := rows.Scan(&f.ID, &f.HouseholdID, &f.Name, &entityType, &entityID, &f.Tags,
+			&f.ExtractedText, &f.CreatedAt, &f.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("files: list indexable: scan: %w", err)
 		}
-		return nil, fmt.Errorf("files: get for index: %w", err)
+		if entityType != nil {
+			f.EntityType = *entityType
+		}
+		if entityID != nil {
+			f.EntityID = *entityID
+		}
+		if f.Tags == nil {
+			f.Tags = []string{}
+		}
+		out = append(out, f)
 	}
-	if entityType != nil {
-		f.EntityType = *entityType
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("files: list indexable: %w", err)
 	}
-	if entityID != nil {
-		f.EntityID = *entityID
-	}
-	if f.Tags == nil {
-		f.Tags = []string{}
-	}
-	return &f, nil
+	return out, nil
 }
 
 // GetEntityName resolves the human-readable name of the entity a file is
@@ -273,4 +344,78 @@ func (r *Repo) GetEntityName(ctx context.Context, entityType string, entityID uu
 		return "", nil
 	}
 	return *name, nil
+}
+
+// SearchDeletion is one row of file_search_deletions (migration 053): a file
+// deleted from Postgres whose Typesense documents still have to be removed.
+type SearchDeletion struct {
+	FileID      uuid.UUID
+	HouseholdID uuid.UUID
+	DeletedAt   time.Time
+}
+
+// ListSearchDeletions returns up to limit queued search deletions, oldest
+// first. The AFTER DELETE trigger on files fills the queue on every delete
+// path (API, household cascade, ...), so this is the worker's delete signal.
+func (r *Repo) ListSearchDeletions(ctx context.Context, limit int) ([]SearchDeletion, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT file_id, household_id, deleted_at
+		 FROM file_search_deletions
+		 ORDER BY deleted_at, file_id
+		 LIMIT $1`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list search deletions: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByPos[SearchDeletion])
+	if err != nil {
+		return nil, fmt.Errorf("list search deletions: collect: %w", err)
+	}
+	if out == nil {
+		out = []SearchDeletion{}
+	}
+	return out, nil
+}
+
+// AckSearchDeletion removes a queue row once Typesense has confirmed the
+// delete. It matches deleted_at as well, so a row that was queued again
+// meanwhile (same id deleted again, which the trigger turns into an update)
+// is kept for the next tick.
+func (r *Repo) AckSearchDeletion(ctx context.Context, d SearchDeletion) error {
+	if _, err := r.pool.Exec(ctx,
+		`DELETE FROM file_search_deletions WHERE file_id = $1 AND deleted_at = $2`,
+		d.FileID, d.DeletedAt,
+	); err != nil {
+		return fmt.Errorf("ack search deletion %s: %w", d.FileID, err)
+	}
+	return nil
+}
+
+// MissingFileIDs returns the ids in ids that have no files row. The
+// processor uses it once per start to find documents left in Typesense by
+// files deleted before migration 053 queued deletes.
+func (r *Repo) MissingFileIDs(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
+	if len(ids) == 0 {
+		return []uuid.UUID{}, nil
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT u.id FROM unnest($1::uuid[]) AS u(id)
+		 WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.id = u.id)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("missing file ids: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return nil, fmt.Errorf("missing file ids: collect: %w", err)
+	}
+	if out == nil {
+		out = []uuid.UUID{}
+	}
+	return out, nil
 }

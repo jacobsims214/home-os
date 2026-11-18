@@ -193,13 +193,17 @@ func HandleAssetResource(pool *pgxpool.Pool) func(ctx context.Context, req mcp.R
 			Manufacturer *string `json:"manufacturer,omitempty"`
 			Model        *string `json:"model,omitempty"`
 			SerialNumber *string `json:"serial_number,omitempty"`
+			PropertyID   *string `json:"property_id,omitempty"`
+			RoomID       *string `json:"room_id,omitempty"`
 		}
 
 		var a assetData
 		err := pool.QueryRow(ctx,
-			`SELECT id, household_id, name, category, manufacturer, model, serial_number
+			`SELECT id, household_id, name, category, manufacturer, model, serial_number,
+			        property_id::text, room_id::text
 			 FROM assets WHERE id = $1 AND household_id = $2`, id, claims.HouseholdID,
-		).Scan(&a.ID, &a.HouseholdID, &a.Name, &a.Category, &a.Manufacturer, &a.Model, &a.SerialNumber)
+		).Scan(&a.ID, &a.HouseholdID, &a.Name, &a.Category, &a.Manufacturer, &a.Model, &a.SerialNumber,
+			&a.PropertyID, &a.RoomID)
 		if err != nil {
 			return nil, fmt.Errorf("get asset: %w", err)
 		}

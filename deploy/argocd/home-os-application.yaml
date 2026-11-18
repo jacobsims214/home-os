@@ -1,0 +1,140 @@
+# Argo CD Application for Home OS (family hub).
+#
+# No credentials live in this manifest. The chart reads them from Secrets that
+# are pre-created in namespace home-os (see create-home-os-secrets.sh):
+#   home-os-secrets    Opaque: calendarSecret, typesenseApiKey,
+#                      encryptionKey, adminEmail, adminPassword
+#                      (no jwtSecret: auth is Dex OIDC only, #531)
+#   home-os-db-secret  kubernetes.io/basic-auth: username=app, password
+#                      (CNPG initdb owner secret; also used by Dex and workloads)
+# Both Secrets are annotated argocd.argoproj.io/sync-options: Prune=false and
+# carry no Argo tracking-id, so a sync never prunes or overwrites them.
+#
+# Requires a chart revision with existingSecret support (home-os #4411,
+# feat/family-hub). Manual sync only: there is no syncPolicy.automated.
+#
+# Images (#4679): every home-os image (api, ui, mcp, worker, calendar AND
+# migrations) runs the one tag in global.imageTag. Never `latest`: release.yml
+# only moves `latest` on a release or a run on main, so on feat/family-hub it
+# still points at an old build and an old migrations image. Procedure (#4357):
+#   1. Dispatch release.yml on feat/family-hub (or the branch being deployed):
+#        gh workflow run release.yml --ref feat/family-hub
+#   2. When the run is green, take its sha tag: sha-<first 7 chars of the run's
+#      head commit>, e.g. sha-624186c. Every image of that run (incl.
+#      migrations) carries it; check with
+#        docker buildx imagetools inspect \
+#          ghcr.io/jacobsims214/home-os/migrations:sha-624186c
+#   3. Set global.imageTag below to that one tag and commit it (do not set it
+#      only on the live Application; the next kubectl apply would revert it).
+# The chart refuses to render while imageTag is the placeholder, latest or empty.
+#
+# Apply: kubectl apply -f deploy/argocd/home-os-application.yaml
+#        (does not trigger a sync)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: home-os
+  namespace: argocd
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: home-os
+  source:
+    repoURL: https://github.com/jacobsims214/home-os.git
+    # feat/family-hub until the integration PR merges (#4356). main's chart
+    # predates existingSecret (#4411) and would render empty Secrets. Switch
+    # this back to main in the same change that merges feat/family-hub to main.
+    targetRevision: feat/family-hub
+    path: deploy/helm/home-os
+    helm:
+      valuesObject:
+        namespace: home-os
+        global:
+          imageRegistry: ghcr.io/jacobsims214/home-os
+          # PLACEHOLDER: #4357 sets this to the sha-<short> tag of the
+          # release.yml run on feat/family-hub, one tag for ALL images
+          # (migrations included). See the header for the procedure.
+          imageTag: sha-76de68e
+          # The tag is immutable, so the node cache is safe.
+          imagePullPolicy: IfNotPresent
+          # PLACEHOLDER: #4357 must replace this with the private hostname
+          # Jacob picks in #4389. publicUrl alone drives the Dex issuer
+          # (<publicUrl>/dex), the UI redirect URI (<publicUrl>/api/auth/callback),
+          # the UI/API/MCP public URLs, the MCP resource URL and the ingress
+          # host. The chart refuses to render while this is the placeholder,
+          # empty or localhost.
+          publicUrl: https://homeos.simstech.cloud
+        api:
+          allowRegistration: "false"
+        # 1 replica: Stage 1 replaces the hand-set sha-cc8a503 MCP with the
+        # chart-managed image, and the acceptance criteria require /mcp live.
+        # The old `replicas: 0` was a war-game leftover from when the MCP image
+        # did not exist yet (#4513 §1); it was never cleaned up after the
+        # Deployment was hand-scaled to 1.
+        mcp:
+          replicas: 1
+        ingress:
+          enabled: true
+          className: traefik
+          tlsEnabled: true
+          tlsSecret: simstech-wildcard-tls
+          annotations: {}
+        database:
+          mode: managed
+          managed:
+            existingSecret: home-os-db-secret
+            instances: 2
+            storage: 10Gi
+            backup:
+              enabled: true
+              schedule: "0 2 * * *"
+        dex:
+          existingSecret: home-os-db-secret
+          # RETIRED (#4540, 2026-11-17): the Dex OAuth2 password grant
+          # (grant_type=password at /dex/token and its root /token alias) is OFF.
+          #
+          # It was an INTERIM stopgap (#4886) so a headless caller could mint an
+          # id_token before per-member agent tokens existed. #4535 issued those
+          # tokens to every family agent (each its own read+write token in a
+          # per-instance Secret, wired through moltis householdHub.tokenSecret),
+          # so the grant has no remaining consumer and this removes it.
+          #
+          # Security: a password grant turns any valid Dex password into an
+          # unscoped 24h bearer token for the MCP audience, with no per-agent
+          # revocation and no rate limit at Envoy (Envoy cannot tell a password
+          # grant from a refresh without reading the body). A scoped, revocable
+          # agent token is strictly narrower. Nothing new may depend on it.
+          #
+          # Why the key is written as "" rather than deleted: the absence has to
+          # be legible. The war game had turned the grant on by hand in the LIVE
+          # ConfigMap, and the next sync from a chart that did not carry the key
+          # erased the hand patch and silently left every family agent with no
+          # headless auth (#4357). Keeping the key here makes "off" a value in
+          # the rendered chart, so a future hand-add shows up in the diff.
+          #
+          # LOCAL DEV ONLY, never in production: putting a connector id here
+          # turns the grant back on, typically "local" (Dex's built-in password
+          # DB, enablePasswordDB). The chart FAILS THE RENDER if the id names a
+          # connector that does not exist — Dex accepts a bad id at startup and
+          # only 400s per request afterwards, which reads like any other
+          # misconfiguration. That guard must stay, retired grant or not.
+          passwordConnector: ""
+          # expiry.idTokens, pinned explicitly so it cannot drift back to a Dex
+          # default unnoticed (#4886). 24h is the normal UI token lifetime and is
+          # NOT part of the retired stopgap: the war game's 720h came from the
+          # same hand patch as the password connector, and #4886 deliberately
+          # kept 24h. Now that the grant is gone this pin matters more, not less
+          # — it is what stops a later "make logins last longer" change from
+          # leaving a 30-day unscoped bearer token in an agent's environment.
+          idTokenExpiry: "24h"
+        secrets:
+          existingSecret: home-os-secrets
+        # Created once by create-home-os-secrets.sh (never rotated by it).
+        # Optional in the pods: until it exists, agent sharing is off.
+        agentCredentials:
+          existingSecret: home-os-agent-credentials
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

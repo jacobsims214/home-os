@@ -2,11 +2,18 @@ package household
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/api/internal/auth"
+	"home-os/api/internal/invite"
+	"home-os/api/internal/seed"
 )
 
 // Repo provides read/write access to the households and memberships tables
@@ -68,21 +75,145 @@ func (r *Repo) GetHousehold(ctx context.Context, id uuid.UUID) (*Household, erro
 	return hh, nil
 }
 
+// Errors returned by UpdateHousehold.
+var (
+	// ErrHouseholdNotFound: no such household, or the actor is not a member
+	// of it. A household the actor cannot see is reported as absent, so a
+	// caller cannot probe another family's ids.
+	ErrHouseholdNotFound = errors.New("household not found")
+	// ErrNotHouseholdManager: the actor is a member but the household role
+	// policy does not let them change the household (only owner and
+	// family_manager may; auth.Can(role, ResHousehold, ActWrite)).
+	ErrNotHouseholdManager = errors.New("not allowed to change this household")
+)
+
+// HouseholdUpdate is a change to a household's name and/or timezone. A nil
+// field is left unchanged; both nil changes nothing.
+type HouseholdUpdate struct {
+	Name     *string
+	Timezone *string
+}
+
+// UpdateHousehold applies u to householdID on behalf of actorID and returns
+// the updated household.
+//
+// Authorization is decided here from memberships, never from request claims:
+// the actor must be a member of householdID (otherwise
+// ErrHouseholdNotFound, the same answer as an unknown id) and their role
+// there must pass auth.Can(role, ResHousehold, ActWrite) — owner and
+// family_manager only (otherwise ErrNotHouseholdManager). A caller with
+// several families therefore edits exactly the one it is a member of with a
+// managing role; memberships.role is read from the row, so a demotion takes
+// effect on the next request.
+//
+// name and timezone must already be validated by the caller (non-empty,
+// within the column limits, timezone a real IANA zone name).
+func (r *Repo) UpdateHousehold(ctx context.Context, householdID, actorID uuid.UUID, u HouseholdUpdate) (*Household, error) {
+	// No transaction and no row lock: a name or timezone is last-write-wins,
+	// and the UPDATE's WHERE clause plus the membership check are the whole
+	// decision. The role comes from the memberships row on every call, so a
+	// demotion applies on the next request.
+	var actorRole string
+	err := r.pool.QueryRow(ctx,
+		`SELECT role::text FROM memberships WHERE household_id = $1 AND user_id = $2`,
+		householdID, actorID,
+	).Scan(&actorRole)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrHouseholdNotFound // not a member: treated as absent
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update household: actor role: %w", err)
+	}
+	if !auth.Can(actorRole, auth.ResHousehold, auth.ActWrite) {
+		return nil, ErrNotHouseholdManager
+	}
+
+	hh := &Household{}
+	err = r.pool.QueryRow(ctx,
+		`UPDATE households
+		 SET name = COALESCE($2, name),
+		     timezone = COALESCE($3, timezone),
+		     updated_at = NOW()
+		 WHERE id = $1
+		 RETURNING id, name, timezone, settings, created_at, updated_at`,
+		householdID, u.Name, u.Timezone,
+	).Scan(&hh.ID, &hh.Name, &hh.Timezone, &hh.Settings, &hh.CreatedAt, &hh.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrHouseholdNotFound // deleted between the two queries
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update household: %w", err)
+	}
+	return hh, nil
+}
+
+// UserHousehold is one household the caller belongs to, with their role.
+type UserHousehold struct {
+	ID       string    `json:"id"`
+	Name     string    `json:"name"`
+	Timezone string    `json:"timezone"`
+	Role     string    `json:"role"`
+	JoinedAt time.Time `json:"joined_at"`
+}
+
+// ListForUser returns every household userID is a member of, oldest
+// membership first (memberships.created_at, then memberships.id). The first
+// entry is the one the API uses when a request carries no X-Household-ID.
+func (r *Repo) ListForUser(ctx context.Context, userID uuid.UUID) ([]UserHousehold, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT h.id::text, h.name, h.timezone, m.role::text, m.created_at
+		 FROM memberships m
+		 JOIN households h ON h.id = m.household_id
+		 WHERE m.user_id = $1
+		 ORDER BY m.created_at ASC, m.id ASC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list households for user: %w", err)
+	}
+	defer rows.Close()
+
+	out := []UserHousehold{}
+	for rows.Next() {
+		var h UserHousehold
+		if err := rows.Scan(&h.ID, &h.Name, &h.Timezone, &h.Role, &h.JoinedAt); err != nil {
+			return nil, fmt.Errorf("scan user household: %w", err)
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list households for user: %w", err)
+	}
+	return out, nil
+}
+
 // Member represents a household member with user info.
 type Member struct {
-	UserID    string `json:"user_id"`
-	Email     string `json:"email"`
-	Name      string `json:"name"`
-	Role      string `json:"role"`
-	JoinedAt  string `json:"joined_at"`
+	UserID   string `json:"user_id"`
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+	JoinedAt string `json:"joined_at"`
+	// VendorID / VendorName: for role vendor, the family vendors row the
+	// login works for (memberships.vendor_id, #4799). Null when unlinked
+	// (the vendor then sees every maintenance job) and for other roles.
+	VendorID   *string `json:"vendor_id"`
+	VendorName *string `json:"vendor_name"`
+	// Color is the member's people.color (#4821): the palette name the UI
+	// draws them in, the same value GET /people returns. Null only if the
+	// membership has no person row, which the 041 trigger prevents.
+	Color *string `json:"color"`
 }
 
 // ListMembers returns all members of a household with their user info.
 func (r *Repo) ListMembers(ctx context.Context, householdID uuid.UUID) ([]Member, error) {
+	// The colour comes from the member's person row (041 creates one per
+	// membership, so it is a left join for safety, not for a real case).
 	rows, err := r.pool.Query(ctx,
-		`SELECT m.user_id, u.email, u.name, m.role, m.created_at::text
+		`SELECT m.user_id, u.email, u.name, m.role, m.created_at::text,
+		        m.vendor_id::text, v.name, p.color
 		 FROM memberships m
 		 JOIN users u ON u.id = m.user_id
+		 LEFT JOIN vendors v ON v.id = m.vendor_id AND v.household_id = m.household_id
+		 LEFT JOIN people p ON p.household_id = m.household_id AND p.user_id = m.user_id
 		 WHERE m.household_id = $1
 		 ORDER BY m.created_at`,
 		householdID,
@@ -95,7 +226,7 @@ func (r *Repo) ListMembers(ctx context.Context, householdID uuid.UUID) ([]Member
 	var members []Member
 	for rows.Next() {
 		var m Member
-		if err := rows.Scan(&m.UserID, &m.Email, &m.Name, &m.Role, &m.JoinedAt); err != nil {
+		if err := rows.Scan(&m.UserID, &m.Email, &m.Name, &m.Role, &m.JoinedAt, &m.VendorID, &m.VendorName, &m.Color); err != nil {
 			return nil, fmt.Errorf("scan member: %w", err)
 		}
 		members = append(members, m)
@@ -103,26 +234,336 @@ func (r *Repo) ListMembers(ctx context.Context, householdID uuid.UUID) ([]Member
 	return members, nil
 }
 
-// UpdateMemberRole updates a member's role in a household.
-func (r *Repo) UpdateMemberRole(ctx context.Context, householdID, userID uuid.UUID, role string) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE memberships SET role = $3 WHERE household_id = $1 AND user_id = $2`,
-		householdID, userID, role,
-	)
+// Errors returned by ChangeMemberRole and RemoveMember.
+var (
+	// ErrNotManager: the actor is not an owner or family_manager of the
+	// household, or is a family_manager acting on an owner or granting owner.
+	ErrNotManager = errors.New("not allowed to manage this member")
+	// ErrMemberNotFound: the target user is not a member of the household.
+	ErrMemberNotFound = errors.New("member not found")
+	// ErrLastOwner: the change would leave the household with no owner.
+	ErrLastOwner = errors.New("household must keep at least one owner")
+	// ErrInvalidRole: the role is not a membership_role value.
+	ErrInvalidRole = errors.New("invalid role")
+	// ErrVendorLinkRole: a vendor link was given for a member whose
+	// (resulting) role is not vendor.
+	ErrVendorLinkRole = errors.New("vendor_id is only allowed for the vendor role")
+	// ErrVendorNotFound: the vendor link is not a vendors row of the
+	// household (another family's, or unknown).
+	ErrVendorNotFound = errors.New("vendor not found")
+)
+
+// lockMemberRoles locks the household's membership rows and returns the
+// actor's and target's roles ("" for a non-member) and the owner count. The
+// lock serialises concurrent role changes so the last-owner check holds.
+func lockMemberRoles(ctx context.Context, tx pgx.Tx, householdID, actorID, targetID uuid.UUID) (actorRole, targetRole string, owners int, err error) {
+	rows, err := tx.Query(ctx,
+		`SELECT user_id, role::text FROM memberships WHERE household_id = $1 FOR UPDATE`, householdID)
 	if err != nil {
-		return fmt.Errorf("update member role: %w", err)
+		return "", "", 0, fmt.Errorf("lock memberships: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var uid uuid.UUID
+		var role string
+		if err := rows.Scan(&uid, &role); err != nil {
+			return "", "", 0, fmt.Errorf("scan membership: %w", err)
+		}
+		if uid == actorID {
+			actorRole = role
+		}
+		if uid == targetID {
+			targetRole = role
+		}
+		if role == auth.RoleOwner {
+			owners++
+		}
+	}
+	return actorRole, targetRole, owners, rows.Err()
+}
+
+// ChangeMemberRole sets targetID's role in householdID on behalf of actorID.
+// Authorization is decided inside the transaction from memberships (never
+// from request claims): see auth.CanModifyMember and auth.CanGrantRole. The
+// last owner cannot be demoted.
+func (r *Repo) ChangeMemberRole(ctx context.Context, householdID, actorID, targetID uuid.UUID, role string) error {
+	return r.UpdateMember(ctx, householdID, actorID, targetID, MemberUpdate{Role: role})
+}
+
+// MemberUpdate is a change to one membership. Role "" keeps the current
+// role. SetVendor applies VendorID (nil clears the link); without it the
+// link is kept while the member stays a vendor.
+type MemberUpdate struct {
+	Role      string
+	SetVendor bool
+	VendorID  *uuid.UUID
+}
+
+// UpdateMember changes targetID's role and/or vendor link in householdID on
+// behalf of actorID, in one transaction, with ChangeMemberRole's rules
+// (owner/family_manager only, judged from the locked memberships rows).
+//
+// The vendor link (memberships.vendor_id, #4799) exists only on vendor
+// memberships: setting one for a member whose resulting role is not vendor
+// is ErrVendorLinkRole, a vendor of another family (or unknown) is
+// ErrVendorNotFound, and a role change away from vendor clears the link, so
+// a later demotion back to vendor starts unlinked.
+func (r *Repo) UpdateMember(ctx context.Context, householdID, actorID, targetID uuid.UUID, u MemberUpdate) error {
+	if u.Role != "" && !auth.ValidRole(u.Role) {
+		return ErrInvalidRole
+	}
+	role := u.Role
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	actorRole, targetRole, owners, err := lockMemberRoles(ctx, tx, householdID, actorID, targetID)
+	if err != nil {
+		return err
+	}
+	if !auth.CanManageMembers(actorRole) {
+		return ErrNotManager
+	}
+	if targetRole == "" {
+		return ErrMemberNotFound
+	}
+	if role == "" {
+		role = targetRole
+	}
+	if !auth.CanModifyMember(actorRole, targetRole) || !auth.CanGrantRole(actorRole, role) {
+		return ErrNotManager
+	}
+	if targetRole == auth.RoleOwner && role != auth.RoleOwner && owners <= 1 {
+		return ErrLastOwner
+	}
+	if u.SetVendor && u.VendorID != nil {
+		if role != auth.RoleVendor {
+			return ErrVendorLinkRole
+		}
+		var ok bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM vendors WHERE id = $1 AND household_id = $2)`,
+			*u.VendorID, householdID,
+		).Scan(&ok); err != nil {
+			return fmt.Errorf("check vendor: %w", err)
+		}
+		if !ok {
+			return ErrVendorNotFound
+		}
+	}
+	// vendor_id: the new link when one is set, NULL for a non-vendor role,
+	// otherwise unchanged.
+	setVendor := u.SetVendor || role != auth.RoleVendor
+	var vendorID *uuid.UUID
+	if u.SetVendor && role == auth.RoleVendor {
+		vendorID = u.VendorID
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE memberships
+		 SET role = $3::membership_role,
+		     vendor_id = CASE WHEN $4 THEN $5::uuid ELSE vendor_id END
+		 WHERE household_id = $1 AND user_id = $2`,
+		householdID, targetID, role, setVendor, vendorID,
+	); err != nil {
+		return fmt.Errorf("update member: %w", err)
+	}
+	if err := deletePendingInvites(ctx, tx, householdID, targetID, ungrantableRoles(role)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// RemoveMember removes targetID from householdID on behalf of actorID, with
+// the same rules as ChangeMemberRole. The last owner cannot be removed.
+func (r *Repo) RemoveMember(ctx context.Context, householdID, actorID, targetID uuid.UUID) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	actorRole, targetRole, owners, err := lockMemberRoles(ctx, tx, householdID, actorID, targetID)
+	if err != nil {
+		return err
+	}
+	if !auth.CanManageMembers(actorRole) {
+		return ErrNotManager
+	}
+	if targetRole == "" {
+		return ErrMemberNotFound
+	}
+	if !auth.CanModifyMember(actorRole, targetRole) {
+		return ErrNotManager
+	}
+	if targetRole == auth.RoleOwner && owners <= 1 {
+		return ErrLastOwner
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM memberships WHERE household_id = $1 AND user_id = $2`,
+		householdID, targetID,
+	); err != nil {
+		return fmt.Errorf("remove member: %w", err)
+	}
+	if err := deletePendingInvites(ctx, tx, householdID, targetID, nil); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// allRoles lists the membership_role values (see auth.ValidRole).
+var allRoles = []string{
+	auth.RoleOwner, auth.RoleFamilyManager, auth.RoleFamilyMember,
+	auth.RoleViewer, auth.RoleHousesitter, auth.RoleVendor,
+}
+
+// ungrantableRoles returns the invitation roles a member with role could no
+// longer create (auth.CanGrantRole is false): every role for a non-manager,
+// owner for a family_manager, none for an owner.
+func ungrantableRoles(role string) []string {
+	out := []string{}
+	for _, r := range allRoles {
+		if !auth.CanGrantRole(role, r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// deletePendingInvites deletes the pending (unaccepted) invitations userID
+// created in householdID, inside the caller's transaction: all of them when
+// roles is nil (the inviter was removed), otherwise only those whose role is
+// in roles (the inviter was demoted and could no longer create them). Their
+// accept links then answer 404 like unknown tokens. An empty, non-nil roles
+// deletes nothing. Accepted invitations are history and are kept.
+func deletePendingInvites(ctx context.Context, tx pgx.Tx, householdID, userID uuid.UUID, roles []string) error {
+	if roles != nil && len(roles) == 0 {
+		return nil
+	}
+	var err error
+	if roles == nil {
+		_, err = tx.Exec(ctx,
+			`DELETE FROM invitations
+			 WHERE household_id = $1 AND invited_by = $2 AND accepted_at IS NULL`,
+			householdID, userID)
+	} else {
+		_, err = tx.Exec(ctx,
+			`DELETE FROM invitations
+			 WHERE household_id = $1 AND invited_by = $2 AND accepted_at IS NULL
+			   AND role::text = ANY($3::text[])`,
+			householdID, userID, roles)
+	}
+	if err != nil {
+		return fmt.Errorf("delete pending invitations: %w", err)
 	}
 	return nil
 }
 
-// RemoveMember removes a member from a household.
-func (r *Repo) RemoveMember(ctx context.Context, householdID, userID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx,
-		`DELETE FROM memberships WHERE household_id = $1 AND user_id = $2`,
-		householdID, userID,
-	)
-	if err != nil {
-		return fmt.Errorf("remove member: %w", err)
+// Errors returned by CreateFamily.
+var (
+	// ErrAlreadyMember: the caller already belongs to a household and is not
+	// an instance admin, so onboarding is not for them.
+	ErrAlreadyMember = errors.New("user already belongs to a household")
+	// ErrUserInactive: the caller's user row is deactivated (users.active=false).
+	ErrUserInactive = errors.New("user is deactivated")
+	// ErrNoIdentity: neither a Dex subject nor an email was supplied.
+	ErrNoIdentity = errors.New("identity has no subject or email")
+)
+
+// CreatorIdentity is the verified Dex identity creating a family.
+type CreatorIdentity struct {
+	Subject string
+	Email   string
+	Name    string
+}
+
+// CreateFamilyResult describes what CreateFamily wrote.
+type CreateFamilyResult struct {
+	Household   *Household
+	UserID      uuid.UUID
+	Role        string
+	UserCreated bool
+}
+
+// CreateFamily creates a household with the caller as its owner, in a single
+// transaction:
+//
+//  1. finds the Home OS user by users.dex_sub, then lower(email) (backfilling
+//     a NULL dex_sub), or creates a Dex-only user when neither matches
+//     (invite.FindOrCreateUser);
+//  2. locks that user row (FOR UPDATE) so two concurrent onboarding requests
+//     from the same user cannot both create a family;
+//  3. refuses deactivated users (ErrUserInactive) and users who already have
+//     a membership unless they are an instance admin (ErrAlreadyMember);
+//  4. inserts the household, the owner membership, and the default
+//     Family/Bills/Maintenance calendars (seed.EnsureDefaultCalendars) and
+//     the starter list templates (seed.EnsureStarterLists).
+//
+// Nothing is written unless every step succeeds. name and timezone must
+// already be validated by the caller.
+func (r *Repo) CreateFamily(ctx context.Context, ident CreatorIdentity, name, timezone string) (*CreateFamilyResult, error) {
+	sub := strings.TrimSpace(ident.Subject)
+	email := strings.TrimSpace(ident.Email)
+	if sub == "" && email == "" {
+		return nil, ErrNoIdentity
 	}
-	return nil
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create family: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	userID, created, err := invite.FindOrCreateUser(ctx, tx, sub, email, ident.Name)
+	if errors.Is(err, invite.ErrNoEmail) {
+		return nil, ErrNoIdentity
+	}
+	if err != nil {
+		return nil, fmt.Errorf("create family: %w", err)
+	}
+
+	var active, instanceAdmin, hasMembership bool
+	if err := tx.QueryRow(ctx,
+		`SELECT u.active, u.is_instance_admin,
+		        EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = u.id)
+		 FROM users u WHERE u.id = $1
+		 FOR UPDATE OF u`, userID,
+	).Scan(&active, &instanceAdmin, &hasMembership); err != nil {
+		return nil, fmt.Errorf("create family: lock user: %w", err)
+	}
+	if !active {
+		return nil, ErrUserInactive
+	}
+	if hasMembership && !instanceAdmin {
+		return nil, ErrAlreadyMember
+	}
+
+	hh := &Household{}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO households (name, timezone) VALUES ($1, $2)
+		 RETURNING id, name, timezone, settings, created_at, updated_at`,
+		name, timezone,
+	).Scan(&hh.ID, &hh.Name, &hh.Timezone, &hh.Settings, &hh.CreatedAt, &hh.UpdatedAt); err != nil {
+		return nil, fmt.Errorf("create family: insert household: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO memberships (household_id, user_id, role) VALUES ($1, $2, 'owner')`,
+		hh.ID, userID,
+	); err != nil {
+		return nil, fmt.Errorf("create family: insert owner membership: %w", err)
+	}
+
+	if err := seed.EnsureDefaultCalendars(ctx, tx, hh.ID.String()); err != nil {
+		return nil, fmt.Errorf("create family: %w", err)
+	}
+	if err := seed.EnsureStarterLists(ctx, tx, hh.ID.String()); err != nil {
+		return nil, fmt.Errorf("create family: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("create family: commit: %w", err)
+	}
+	return &CreateFamilyResult{Household: hh, UserID: userID, Role: "owner", UserCreated: created}, nil
 }

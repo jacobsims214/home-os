@@ -3,6 +3,7 @@ package maintenance
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -10,9 +11,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/calendar"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/subject"
 	"home-os/api/pkg/apierr"
 )
 
@@ -23,8 +26,8 @@ type searchIndexer interface {
 
 // calendarSyncer is the subset of calendar.Repo needed for maintenance sync.
 type calendarSyncer interface {
-	UpsertMaintenanceEvent(ctx context.Context, householdID uuid.UUID, taskID uuid.UUID, propertyID *uuid.UUID, title, description string, dueDate time.Time) error
-	DeleteMaintenanceEvent(ctx context.Context, taskID uuid.UUID) error
+	UpsertMaintenanceEvent(ctx context.Context, householdID, taskID uuid.UUID, title, description string, dueDate time.Time) error
+	DeleteMaintenanceEvent(ctx context.Context, householdID, taskID uuid.UUID) error
 }
 
 // Handler holds the dependencies needed by maintenance HTTP handlers.
@@ -50,58 +53,112 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexTask(ctx context.Context, t *Task) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search indexing", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("maintenance: panic during search indexing", "panic", r)
+		}
+	}()
 	body := ""
-	if t.Description != nil { body = *t.Description }
-	if t.Status != "" { body += " " + string(t.Status) }
-	if t.Cost != nil { body += " " + *t.Cost }
+	if t.Description != nil {
+		body = *t.Description
+	}
+	if t.Status != "" {
+		body += " " + string(t.Status)
+	}
+	if t.Cost != nil {
+		body += " " + *t.Cost
+	}
 	doc := search.SearchDocument{
 		ID: "maintenance-task-" + t.ID.String(), HouseholdID: t.HouseholdID.String(),
 		EntityType: "maintenance_task", EntityID: t.ID.String(),
 		Title: t.Name, Body: body,
 		CreatedAt: t.CreatedAt.Unix(), UpdatedAt: t.UpdatedAt.Unix(),
 	}
-	if t.PropertyID != nil { pid := t.PropertyID.String(); doc.PropertyID = &pid }
-	if t.AssetID != nil { aid := t.AssetID.String(); doc.Tags = append(doc.Tags, "asset:"+aid) }
-	if t.VehicleID != nil { vid := t.VehicleID.String(); doc.Tags = append(doc.Tags, "vehicle:"+vid) }
+	if t.PropertyID != nil {
+		pid := t.PropertyID.String()
+		doc.PropertyID = &pid
+	}
+	if t.AssetID != nil {
+		aid := t.AssetID.String()
+		doc.Tags = append(doc.Tags, "asset:"+aid)
+	}
+	if t.VehicleID != nil {
+		vid := t.VehicleID.String()
+		doc.Tags = append(doc.Tags, "vehicle:"+vid)
+	}
 	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
 		slog.Warn("maintenance: failed to index task", "id", t.ID, "error", err)
 	}
 }
 
 func (h *Handler) deleteTaskIndex(ctx context.Context, id string) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search deletion", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("maintenance: panic during search deletion", "panic", r)
+		}
+	}()
 	if err := h.search.DeleteDocument(context.Background(), "maintenance-task-"+id); err != nil {
 		slog.Warn("maintenance: failed to delete task from search", "id", id, "error", err)
 	}
 }
 
 func (h *Handler) indexSchedule(ctx context.Context, s *Schedule) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search indexing", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("maintenance: panic during search indexing", "panic", r)
+		}
+	}()
 	body := ""
-	if s.Description != nil { body = *s.Description }
-	if s.EstimatedCost != nil { body += " " + *s.EstimatedCost }
-	if s.RRule != "" { body += " " + s.RRule }
+	if s.Description != nil {
+		body = *s.Description
+	}
+	if s.EstimatedCost != nil {
+		body += " " + *s.EstimatedCost
+	}
+	if s.RRule != "" {
+		body += " " + s.RRule
+	}
 	doc := search.SearchDocument{
 		ID: "maintenance-schedule-" + s.ID.String(), HouseholdID: s.HouseholdID.String(),
 		EntityType: "maintenance_schedule", EntityID: s.ID.String(),
 		Title: s.Name, Body: body,
 		CreatedAt: s.CreatedAt.Unix(), UpdatedAt: s.UpdatedAt.Unix(),
 	}
-	if s.PropertyID != nil { pid := s.PropertyID.String(); doc.PropertyID = &pid }
-	if s.AssetID != nil { aid := s.AssetID.String(); doc.Tags = append(doc.Tags, "asset:"+aid) }
-	if s.VehicleID != nil { vid := s.VehicleID.String(); doc.Tags = append(doc.Tags, "vehicle:"+vid) }
+	if s.PropertyID != nil {
+		pid := s.PropertyID.String()
+		doc.PropertyID = &pid
+	}
+	if s.AssetID != nil {
+		aid := s.AssetID.String()
+		doc.Tags = append(doc.Tags, "asset:"+aid)
+	}
+	if s.VehicleID != nil {
+		vid := s.VehicleID.String()
+		doc.Tags = append(doc.Tags, "vehicle:"+vid)
+	}
 	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
 		slog.Warn("maintenance: failed to index schedule", "id", s.ID, "error", err)
 	}
 }
 
 func (h *Handler) deleteScheduleIndex(ctx context.Context, id string) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("maintenance: panic during search deletion", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("maintenance: panic during search deletion", "panic", r)
+		}
+	}()
 	if err := h.search.DeleteDocument(context.Background(), "maintenance-schedule-"+id); err != nil {
 		slog.Warn("maintenance: failed to delete schedule from search", "id", id, "error", err)
 	}
@@ -114,12 +171,10 @@ type createTaskRequest struct {
 	Description *string `json:"description,omitempty"`
 	DueDate     *string `json:"due_date,omitempty"` // RFC3339 date
 	ScheduleID  *string `json:"schedule_id,omitempty"`
-	PropertyID  *string `json:"property_id,omitempty"`
-	AssetID     *string `json:"asset_id,omitempty"`
-	VehicleID    *string `json:"vehicle_id,omitempty"`
-	Cost        *string `json:"cost,omitempty"`
-	VendorID    *string `json:"vendor_id,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
+	subject.Fields
+	Cost     *string `json:"cost,omitempty"`
+	VendorID *string `json:"vendor_id,omitempty"`
+	Notes    *string `json:"notes,omitempty"`
 }
 
 type updateTaskRequest struct {
@@ -129,12 +184,19 @@ type updateTaskRequest struct {
 	DueDate     *string `json:"due_date,omitempty"`
 	CompletedAt *string `json:"completed_at,omitempty"`
 	ScheduleID  *string `json:"schedule_id,omitempty"`
-	PropertyID  *string `json:"property_id,omitempty"`
-	AssetID     *string `json:"asset_id,omitempty"`
-	VehicleID    *string `json:"vehicle_id,omitempty"`
-	Cost        *string `json:"cost,omitempty"`
-	VendorID    *string `json:"vendor_id,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
+	subject.Fields
+	Cost     *string `json:"cost,omitempty"`
+	VendorID *string `json:"vendor_id,omitempty"`
+	Notes    *string `json:"notes,omitempty"`
+}
+
+// statusOnly reports whether the request changes nothing but status,
+// completed_at and notes (what a vendor may change).
+func (req updateTaskRequest) statusOnly() bool {
+	f := req.Fields
+	return req.Name == nil && req.Description == nil && req.DueDate == nil && req.ScheduleID == nil &&
+		req.Cost == nil && req.VendorID == nil &&
+		f.PropertyID == nil && f.VehicleID == nil && f.AssetID == nil && f.EntityType == nil && f.EntityID == nil
 }
 
 type taskResponse struct {
@@ -143,7 +205,7 @@ type taskResponse struct {
 	ScheduleID  *string `json:"schedule_id,omitempty"`
 	PropertyID  *string `json:"property_id,omitempty"`
 	AssetID     *string `json:"asset_id,omitempty"`
-	VehicleID    *string `json:"vehicle_id,omitempty"`
+	VehicleID   *string `json:"vehicle_id,omitempty"`
 	Name        string  `json:"name"`
 	Description *string `json:"description,omitempty"`
 	Status      string  `json:"status"`
@@ -163,10 +225,8 @@ type createScheduleRequest struct {
 	Description   *string `json:"description,omitempty"`
 	RRule         string  `json:"rrule"`
 	EstimatedCost *string `json:"estimated_cost,omitempty"`
-	PropertyID    *string `json:"property_id,omitempty"`
-	AssetID       *string `json:"asset_id,omitempty"`
-		VehicleID      *string `json:"vehicle_id,omitempty"`
-	VendorID      *string `json:"vendor_id,omitempty"`
+	subject.Fields
+	VendorID *string `json:"vendor_id,omitempty"`
 }
 
 type scheduleResponse struct {
@@ -174,7 +234,7 @@ type scheduleResponse struct {
 	HouseholdID   string  `json:"household_id"`
 	PropertyID    *string `json:"property_id,omitempty"`
 	AssetID       *string `json:"asset_id,omitempty"`
-		VehicleID      *string `json:"vehicle_id,omitempty"`
+	VehicleID     *string `json:"vehicle_id,omitempty"`
 	Name          string  `json:"name"`
 	Description   *string `json:"description,omitempty"`
 	RRule         string  `json:"rrule"`
@@ -266,14 +326,14 @@ func toTaskResponse(t *Task) taskResponse {
 
 func toScheduleResponse(s *Schedule) scheduleResponse {
 	resp := scheduleResponse{
-		ID:          s.ID.String(),
-		HouseholdID: s.HouseholdID.String(),
-		Name:        s.Name,
-		Description: s.Description,
-		RRule:       s.RRule,
+		ID:            s.ID.String(),
+		HouseholdID:   s.HouseholdID.String(),
+		Name:          s.Name,
+		Description:   s.Description,
+		RRule:         s.RRule,
 		EstimatedCost: s.EstimatedCost,
-		CreatedAt:   timePtr(s.CreatedAt),
-		UpdatedAt:   timePtr(s.UpdatedAt),
+		CreatedAt:     timePtr(s.CreatedAt),
+		UpdatedAt:     timePtr(s.UpdatedAt),
 	}
 	if s.PropertyID != nil {
 		v := s.PropertyID.String()
@@ -283,11 +343,47 @@ func toScheduleResponse(s *Schedule) scheduleResponse {
 		v := s.AssetID.String()
 		resp.AssetID = &v
 	}
+	resp.VehicleID = subject.String(s.VehicleID)
 	if s.VendorID != nil {
 		v := s.VendorID.String()
 		resp.VendorID = &v
 	}
 	return resp
+}
+
+// vendorScope returns the caller's vendor scope (#4799): for a member with
+// role vendor whose membership is linked to a vendors row, that vendor's id,
+// and the handlers then show and update only that vendor's tasks and
+// schedules (others are absent: omitted from lists, 404 on update). nil for
+// every other caller, including an unlinked vendor, who keeps seeing every
+// job. The link is read from memberships on each request, so setting or
+// clearing it applies at once. A vendor without a membership row (or
+// without a users.id in the claims) is refused, failing closed.
+func (h *Handler) vendorScope(w http.ResponseWriter, r *http.Request, claims *auth.Claims, householdID uuid.UUID) (*uuid.UUID, bool) {
+	if claims.Role != auth.RoleVendor {
+		return nil, true
+	}
+	userID, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		apierr.Forbidden(w, "the vendor role needs a signed-in user")
+		return nil, false
+	}
+	vendorID, err := h.repo.LinkedVendor(r.Context(), householdID, userID)
+	if errors.Is(err, ErrNotMember) {
+		apierr.Forbidden(w, "not a member of this household")
+		return nil, false
+	}
+	if err != nil {
+		apierr.InternalError(w, err)
+		return nil, false
+	}
+	return vendorID, true
+}
+
+// ownJob reports whether a record assigned to vendorID is visible in scope
+// (nil scope: everything).
+func ownJob(scope, vendorID *uuid.UUID) bool {
+	return scope == nil || (vendorID != nil && *vendorID == *scope)
 }
 
 // ListTasks returns all maintenance tasks for the authenticated household.
@@ -326,7 +422,12 @@ func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
 		propertyID = &id
 	}
 
-	tasks, err := h.repo.ListTasks(r.Context(), householdID, status, propertyID)
+	scope, ok := h.vendorScope(w, r, claims, householdID)
+	if !ok {
+		return
+	}
+
+	tasks, err := h.repo.ListTasks(r.Context(), householdID, status, propertyID, scope)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -377,19 +478,9 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, "invalid schedule_id")
 		return
 	}
-	propertyID, err := parseUUID(req.PropertyID)
-	if err != nil {
-		apierr.BadRequest(w, "invalid property_id")
-		return
-	}
-	assetID, err := parseUUID(req.AssetID)
-	if err != nil {
-		apierr.BadRequest(w, "invalid asset_id")
-		return
-	}
-	vehicleID, err := parseUUID(req.VehicleID)
-	if err != nil {
-		apierr.BadRequest(w, "invalid vehicle_id")
+	var subj subject.Subject
+	if err := req.Fields.Apply(&subj); err != nil {
+		apierr.BadRequest(w, err.Error())
 		return
 	}
 	vendorID, err := parseUUID(req.VendorID)
@@ -405,9 +496,9 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		Status:      TaskStatusPending,
 		DueDate:     dueDate,
 		ScheduleID:  scheduleID,
-		PropertyID:  propertyID,
-		AssetID:     assetID,
-		VehicleID:   vehicleID,
+		PropertyID:  subj.PropertyID,
+		AssetID:     subj.AssetID,
+		VehicleID:   subj.VehicleID,
 		Cost:        req.Cost,
 		VendorID:    vendorID,
 		Notes:       req.Notes,
@@ -415,7 +506,7 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	created, err := h.repo.CreateTask(r.Context(), task)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 
@@ -464,11 +555,34 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		apierr.Forbidden(w, "task does not belong to your household")
 		return
 	}
+	// A linked vendor may only touch their own jobs; anyone else's task is
+	// treated as not existing (#4799).
+	scope, ok := h.vendorScope(w, r, claims, householdID)
+	if !ok {
+		return
+	}
+	if !ownJob(scope, existing.VendorID) {
+		apierr.NotFound(w, "task not found")
+		return
+	}
 
 	var req updateTaskRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		apierr.BadRequest(w, "invalid request body")
 		return
+	}
+
+	// Household role policy (#4689): a role with only update_status (a
+	// vendor) may change status, completion and notes, nothing else.
+	if !middleware.Can(r, auth.ResMaintenance, auth.ActWrite) {
+		if !middleware.Can(r, auth.ResMaintenance, auth.ActUpdateStatus) {
+			apierr.Forbidden(w, middleware.DenyMessage(claims.Role, auth.ResMaintenance, auth.ActWrite))
+			return
+		}
+		if !req.statusOnly() {
+			apierr.Forbidden(w, "the "+claims.Role+" role can only change a task's status, completed_at and notes")
+			return
+		}
 	}
 
 	updates := &Task{}
@@ -531,34 +645,18 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		}
 		updates.ScheduleID = id
 	}
-	if req.PropertyID != nil {
-		id, err := parseUUID(req.PropertyID)
-		if err != nil {
-			apierr.BadRequest(w, "invalid property_id")
+	var subj *subject.Subject
+	if req.Fields != (subject.Fields{}) {
+		subj = &subject.Subject{PropertyID: existing.PropertyID, VehicleID: existing.VehicleID, AssetID: existing.AssetID}
+		if err := req.Fields.Apply(subj); err != nil {
+			apierr.BadRequest(w, err.Error())
 			return
 		}
-		updates.PropertyID = id
-	}
-	if req.AssetID != nil {
-		id, err := parseUUID(req.AssetID)
-		if err != nil {
-			apierr.BadRequest(w, "invalid asset_id")
-			return
-		}
-		updates.AssetID = id
-	}
-	if req.VehicleID != nil {
-		id, err := parseUUID(req.VehicleID)
-		if err != nil {
-			apierr.BadRequest(w, "invalid vehicle_id")
-			return
-		}
-		updates.VehicleID = id
 	}
 
-	updated, err := h.repo.UpdateTask(r.Context(), taskID, updates)
+	updated, err := h.repo.UpdateTask(r.Context(), taskID, updates, subj)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 	if updated == nil {
@@ -596,16 +694,20 @@ func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Delete the calendar event first so phones get a delete change; the 027
+	// trigger deletes the task with it. repo.DeleteTask then removes a task
+	// that had no event (and is a no-op otherwise). If the calendar step
+	// fails, deleting the task still removes the event via the 038 rehome
+	// trigger, only without the change row.
+	if h.calSync != nil {
+		if err := h.calSync.DeleteMaintenanceEvent(r.Context(), householdID, taskID); err != nil {
+			slog.Warn("maintenance: failed to delete calendar event", "task_id", taskID, "error", err)
+		}
+	}
+
 	if err := h.repo.DeleteTask(r.Context(), taskID, householdID); err != nil {
 		apierr.InternalError(w, err)
 		return
-	}
-
-	// Delete the linked calendar event (if any).
-	if h.calSync != nil {
-		if err := h.calSync.DeleteMaintenanceEvent(r.Context(), taskID); err != nil {
-			slog.Warn("maintenance: failed to delete calendar event", "task_id", taskID, "error", err)
-		}
 	}
 
 	// Delete from search index
@@ -614,26 +716,21 @@ func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// syncToCalendar creates or updates a calendar event for a maintenance task
-// that has a due date. If the task has no due date, any existing calendar
-// event is deleted. Errors are logged but never fail the request — calendar
-// sync is best-effort.
+// syncToCalendar creates or updates the all-day calendar event of a
+// maintenance task that has a due date (see calendar.Repo
+// UpsertMaintenanceEvent; mirrors the MCP's syncEvent). A task without a due
+// date has no event and nothing is done: deleting an event would delete the
+// task too (027 trigger), and a due date can't be cleared once set. Errors
+// are logged but never fail the request — calendar sync is best-effort.
 func (h *Handler) syncToCalendar(ctx context.Context, householdID uuid.UUID, task *Task) {
-	if h.calSync == nil {
-		return
-	}
-	if task.DueDate == nil {
-		// Task has no due date — remove any existing calendar event.
-		if err := h.calSync.DeleteMaintenanceEvent(ctx, task.ID); err != nil {
-			slog.Warn("maintenance: failed to delete calendar event for task without due date", "task_id", task.ID, "error", err)
-		}
+	if h.calSync == nil || task.DueDate == nil {
 		return
 	}
 	desc := ""
 	if task.Description != nil {
 		desc = *task.Description
 	}
-	if err := h.calSync.UpsertMaintenanceEvent(ctx, householdID, task.ID, task.PropertyID, task.Name, desc, *task.DueDate); err != nil {
+	if err := h.calSync.UpsertMaintenanceEvent(ctx, householdID, task.ID, task.Name, desc, *task.DueDate); err != nil {
 		slog.Warn("maintenance: failed to sync calendar event", "task_id", task.ID, "error", err)
 	}
 }
@@ -653,7 +750,12 @@ func (h *Handler) ListSchedules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schedules, err := h.repo.ListSchedules(r.Context(), householdID)
+	scope, ok := h.vendorScope(w, r, claims, householdID)
+	if !ok {
+		return
+	}
+
+	schedules, err := h.repo.ListSchedules(r.Context(), householdID, scope)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -697,14 +799,9 @@ func (h *Handler) CreateSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	propertyID, err := parseUUID(req.PropertyID)
-	if err != nil {
-		apierr.BadRequest(w, "invalid property_id")
-		return
-	}
-	assetID, err := parseUUID(req.AssetID)
-	if err != nil {
-		apierr.BadRequest(w, "invalid asset_id")
+	var subj subject.Subject
+	if err := req.Fields.Apply(&subj); err != nil {
+		apierr.BadRequest(w, err.Error())
 		return
 	}
 	vendorID, err := parseUUID(req.VendorID)
@@ -719,14 +816,15 @@ func (h *Handler) CreateSchedule(w http.ResponseWriter, r *http.Request) {
 		Description:   req.Description,
 		RRule:         req.RRule,
 		EstimatedCost: req.EstimatedCost,
-		PropertyID:    propertyID,
-		AssetID:       assetID,
+		PropertyID:    subj.PropertyID,
+		AssetID:       subj.AssetID,
+		VehicleID:     subj.VehicleID,
 		VendorID:      vendorID,
 	}
 
 	created, err := h.repo.CreateSchedule(r.Context(), schedule)
 	if err != nil {
-		apierr.InternalError(w, err)
+		apierr.DB(w, err)
 		return
 	}
 

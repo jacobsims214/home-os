@@ -15,13 +15,14 @@ spec:
       labels:
         app: home-os-worker
     spec:
+      {{- include "home-os.podSecurityContext" (dict "uid" 65532) | nindent 6 }}
       containers:
       - name: worker
-        image: "{{ .Values.global.imageRegistry }}/worker:{{ .Values.global.imageTag }}"
+        image: "{{ .Values.global.imageRegistry }}/worker:{{ include "home-os.imageTag" . }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         env:
-        - name: DATABASE_URL
-          value: {{ include "home-os.databaseUrl" . | quote }}
+        {{- include "home-os.databaseEnv" . | nindent 8 }}
         - name: TYPESENSE_HOST
           value: home-os-typesense
         - name: TYPESENSE_PORT
@@ -29,7 +30,7 @@ spec:
         - name: TYPESENSE_API_KEY
           valueFrom:
             secretKeyRef:
-              name: home-os-secrets
+              name: {{ include "home-os.secretsName" . }}
               key: typesenseApiKey
         - name: POLL_INTERVAL
           value: "5s"
@@ -37,5 +38,34 @@ spec:
           value: "http://home-os-tika:{{ .Values.tika.port }}"
         - name: LOG_LEVEL
           value: "info"
+        {{- /*
+        Worker email (bill_due / maintenance_due) is opt-in: Home OS notifies
+        in-app, and the worker skips email when SMTP_HOST is unset. The
+        password comes only from a pre-created Secret, never from values.
+        */}}
+        {{- if .Values.worker.smtp.enabled }}
+        - name: SMTP_HOST
+          value: {{ required "worker.smtp.enabled requires smtp.host" .Values.smtp.host | quote }}
+        - name: SMTP_PORT
+          value: {{ .Values.smtp.port | quote }}
+        - name: SMTP_FROM
+          value: {{ .Values.smtp.from | quote }}
+        {{- if .Values.smtp.username }}
+        {{- if not (or .Values.smtp.existingSecret .Values.secrets.existingSecret) }}
+        {{- fail "worker.smtp.enabled with smtp.username requires smtp.existingSecret (or secrets.existingSecret) for the password" }}
+        {{- end }}
+        - name: SMTP_USERNAME
+          value: {{ .Values.smtp.username | quote }}
+        - name: SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "home-os.smtpSecretName" . }}
+              key: {{ include "home-os.smtpSecretPasswordKey" . }}
+        {{- end }}
+        {{- end }}
+        volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         resources:
           {{- toYaml .Values.worker.resources | nindent 10 }}
+      volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}

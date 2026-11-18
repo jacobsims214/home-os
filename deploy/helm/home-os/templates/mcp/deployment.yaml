@@ -15,10 +15,12 @@ spec:
       labels:
         app: home-os-mcp
     spec:
+      {{- include "home-os.podSecurityContext" (dict "uid" 65532) | nindent 6 }}
       containers:
       - name: mcp
-        image: "{{ .Values.global.imageRegistry }}/mcp:{{ .Values.global.imageTag }}"
+        image: "{{ .Values.global.imageRegistry }}/mcp:{{ include "home-os.imageTag" . }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: {{ .Values.mcp.port }}
         - containerPort: {{ .Values.mcp.metadataPort }}
@@ -28,19 +30,39 @@ spec:
           value: "{{ .Values.mcp.port }}"
         - name: METADATA_PORT
           value: "{{ .Values.mcp.metadataPort }}"
-        - name: DATABASE_URL
-          value: {{ include "home-os.databaseUrl" . | quote }}
-        - name: JWT_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: home-os-secrets
-              key: jwtSecret
+        {{- include "home-os.databaseEnv" . | nindent 8 }}
+        {{- include "home-os.agentCredentialsEnv" . | nindent 8 }}
         - name: LOG_LEVEL
           value: "info"
         - name: DEX_JWKS_URL
           value: "http://home-os-envoy.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.envoy.port }}/dex/keys"
+        - name: PUBLIC_BASE_URL
+          value: {{ include "home-os.publicUrl" . | quote }}
         - name: DEX_ISSUER
-          value: "http://localhost:8000/dex"
+          value: {{ include "home-os.dexIssuer" . | quote }}
+        - name: DEX_GRPC_ADDR
+          value: "home-os-dex:5557"
+        {{- include "home-os.dexGrpcClientEnv" . | nindent 8 }}
+        {{- with .Values.mcp.acceptedClientIDs }}
+        {{- if has "home-os-ui" . }}
+        {{- fail "mcp.acceptedClientIDs must not contain home-os-ui: the MCP accepts only tokens issued for itself (#4692)" }}
+        {{- end }}
+        - name: MCP_ACCEPTED_AUDIENCES
+          value: {{ join "," . | quote }}
+        {{- end }}
+        {{- with .Values.mcp.registerRateLimit }}
+        - name: MCP_REGISTER_PER_MINUTE
+          value: {{ .perMinute | default 5 | quote }}
+        - name: MCP_REGISTER_PER_HOUR
+          value: {{ .perHour | default 60 | quote }}
+        - name: MCP_TRUSTED_PROXIES
+          value: {{ join "," (.trustedProxies | default (dig "rateLimit" "trustedProxies" list $.Values.api) | default list) | quote }}
+        {{- end }}
+        volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
+        {{- if .Values.dex.grpcTLS.enabled }}
+        {{- include "home-os.dexGrpcClientVolumeMount" . | nindent 8 }}
+        {{- end }}
         resources:
           {{- toYaml .Values.mcp.resources | nindent 10 }}
         readinessProbe:
@@ -55,3 +77,8 @@ spec:
             port: {{ .Values.mcp.port }}
           initialDelaySeconds: 15
           periodSeconds: 20
+      volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}
+      {{- if .Values.dex.grpcTLS.enabled }}
+      {{- include "home-os.dexGrpcClientVolume" . | nindent 6 }}
+      {{- end }}

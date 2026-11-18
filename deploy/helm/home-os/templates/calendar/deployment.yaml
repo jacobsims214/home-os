@@ -15,18 +15,33 @@ spec:
       labels:
         app: home-os-calendar
     spec:
+      {{- include "home-os.podSecurityContext" (dict "uid" 65532) | nindent 6 }}
       containers:
       - name: calendar
-        image: "{{ .Values.global.imageRegistry }}/calendar:{{ .Values.global.imageTag }}"
+        image: "{{ .Values.global.imageRegistry }}/calendar:{{ include "home-os.imageTag" . }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        {{- include "home-os.containerSecurityContext" . | nindent 8 }}
         ports:
         - containerPort: {{ .Values.calendar.port }}
         env:
         - name: PORT
           value: "{{ .Values.calendar.port }}"
-        - name: DATABASE_URL
-          value: {{ include "home-os.databaseUrl" . | quote }}
+        {{- include "home-os.databaseEnv" . | nindent 8 }}
         - name: LOG_LEVEL
           value: "info"
+        {{- with .Values.calendar.auth }}
+        - name: CALDAV_TRUSTED_PROXIES
+          value: {{ join "," (.trustedProxies | default list) | quote }}
+        - name: CALDAV_AUTH_REQUESTS_PER_MINUTE
+          value: {{ .requestsPerMinute | default 120 | quote }}
+        - name: CALDAV_AUTH_FAILURES_PER_MINUTE
+          value: {{ .failuresPerMinute | default 10 | quote }}
+        - name: CALDAV_AUTH_ACCOUNT_FAILURES_PER_HOUR
+          value: {{ .accountFailuresPerHour | default 30 | quote }}
+        {{- end }}
+        volumeMounts:
+        {{- include "home-os.tmpVolumeMount" . | nindent 8 }}
         resources:
           {{- toYaml .Values.calendar.resources | nindent 10 }}
+      volumes:
+      {{- include "home-os.tmpVolume" . | nindent 6 }}

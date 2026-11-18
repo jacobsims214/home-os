@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"home-os/calendar/internal/auth"
 	"home-os/calendar/internal/db"
@@ -28,10 +29,10 @@ const (
 
 // propfindRequest is the XML body of a PROPFIND request.
 type propfindRequest struct {
-	XMLName xml.Name       `xml:"DAV: propfind"`
-	AllProp *allProp       `xml:"DAV: allprop"`
-	Prop    *propList      `xml:"DAV: prop"`
-	PropName *propName    `xml:"DAV: propname"`
+	XMLName  xml.Name  `xml:"DAV: propfind"`
+	AllProp  *allProp  `xml:"DAV: allprop"`
+	Prop     *propList `xml:"DAV: prop"`
+	PropName *propName `xml:"DAV: propname"`
 }
 
 type allProp struct{}
@@ -93,6 +94,11 @@ func writeResponseForCalendar(w io.Writer, cal *db.Calendar, props []xmlElement)
 // object (an .ics resource) inside a calendar collection. This is what Apple
 // Calendar expects when it sends PROPFIND Depth:1 on a calendar to enumerate
 // all events.
+//
+// calendar-data and getcontentlength describe the same iCalendar text GET
+// serves (renderObjectICal), never the JSON stored in ical_data. The text is
+// rendered only when one of those two properties is requested. If rendering
+// fails, both are reported in a 500 propstat and the rest still succeed.
 func writeResponseForEvent(w io.Writer, calUID string, obj *db.CalendarObject, props []xmlElement) {
 	fmt.Fprintf(w, "  <D:response>\n")
 	fmt.Fprintf(w, "    <D:href>/dav/%s/%s.ics</D:href>\n", calUID, obj.UID)
@@ -110,23 +116,45 @@ func writeResponseForEvent(w io.Writer, calUID string, obj *db.CalendarObject, p
 		fmt.Fprintf(w, "    </D:propstat>\n")
 	} else {
 		// Return only requested properties.
-		var known, unknown []xmlElement
+		var known, unknown, failed []xmlElement
+		var icalText string
+		rendered, renderFailed := false, false
 		for _, p := range props {
-			if isKnownEventProp(p.XMLName) {
-				known = append(known, p)
-			} else {
+			if !isKnownEventProp(p.XMLName) {
 				unknown = append(unknown, p)
+				continue
 			}
+			if needsRenderedICal(p.XMLName) {
+				if !rendered && !renderFailed {
+					text, err := renderObjectICal(obj)
+					if err != nil {
+						logging.Logger.Warn("caldav: render event for propfind",
+							slog.String("event_uid", obj.UID),
+							slog.String("error", err.Error()))
+						renderFailed = true
+					} else {
+						icalText, rendered = text, true
+					}
+				}
+				if renderFailed {
+					failed = append(failed, p)
+					continue
+				}
+			}
+			known = append(known, p)
 		}
 		if len(known) > 0 {
 			fmt.Fprintf(w, "    <D:propstat>\n")
 			fmt.Fprintf(w, "      <D:prop>\n")
 			for _, p := range known {
-				writeSingleEventProp(w, p.XMLName, obj)
+				writeSingleEventProp(w, p.XMLName, obj, icalText)
 			}
 			fmt.Fprintf(w, "      </D:prop>\n")
 			fmt.Fprintf(w, "      <D:status>HTTP/1.1 200 OK</D:status>\n")
 			fmt.Fprintf(w, "    </D:propstat>\n")
+		}
+		if len(failed) > 0 {
+			writePropStatEmpty(w, failed, "HTTP/1.1 500 Internal Server Error")
 		}
 		if len(unknown) > 0 {
 			writePropStatNotFound(w, unknown)
@@ -134,6 +162,13 @@ func writeResponseForEvent(w io.Writer, calUID string, obj *db.CalendarObject, p
 	}
 
 	fmt.Fprintf(w, "  </D:response>\n")
+}
+
+// needsRenderedICal reports whether an event property's value is derived from
+// the served iCalendar text.
+func needsRenderedICal(name xml.Name) bool {
+	return (name.Space == nsDAV && name.Local == "getcontentlength") ||
+		(name.Space == nsC && name.Local == "calendar-data")
 }
 
 // isKnownEventProp returns true if the property is supported for individual
@@ -155,7 +190,9 @@ func isKnownEventProp(name xml.Name) bool {
 }
 
 // writeSingleEventProp writes a single property for an event resource.
-func writeSingleEventProp(w io.Writer, name xml.Name, obj *db.CalendarObject) {
+// icalText is the rendered iCalendar body (renderObjectICal); it is only read
+// for getcontentlength and calendar-data.
+func writeSingleEventProp(w io.Writer, name xml.Name, obj *db.CalendarObject, icalText string) {
 	switch name.Space {
 	case nsDAV:
 		switch name.Local {
@@ -168,7 +205,10 @@ func writeSingleEventProp(w io.Writer, name xml.Name, obj *db.CalendarObject) {
 		case "displayname":
 			fmt.Fprintf(w, "        <D:displayname>%s.ics</D:displayname>\n", xmlEscape(obj.UID))
 		case "getcontentlength":
-			fmt.Fprintf(w, "        <D:getcontentlength>%d</D:getcontentlength>\n", len(obj.ICALData))
+			// Octets of the GET body, which is written as-is (UTF-8). It is
+			// not recomputed from calendar-data: that one may have had
+			// XML-illegal runes replaced (calendarDataCDATA), GET has not.
+			fmt.Fprintf(w, "        <D:getcontentlength>%d</D:getcontentlength>\n", len(icalText))
 		case "getlastmodified":
 			fmt.Fprintf(w, "        <D:getlastmodified>%s</D:getlastmodified>\n", obj.UpdatedAt.UTC().Format(http.TimeFormat))
 		case "creationdate":
@@ -177,7 +217,8 @@ func writeSingleEventProp(w io.Writer, name xml.Name, obj *db.CalendarObject) {
 	case nsC:
 		switch name.Local {
 		case "calendar-data":
-			fmt.Fprintf(w, "        <C:calendar-data><![CDATA[%s]]></C:calendar-data>\n", obj.ICALData)
+			// XML-illegal runes replaced, "]]>" split: see calendarDataCDATA.
+			fmt.Fprintf(w, "        <C:calendar-data>%s</C:calendar-data>\n", calendarDataCDATA(icalText))
 		}
 	}
 }
@@ -225,17 +266,27 @@ func writePropStatOK(w io.Writer, cal *db.Calendar, includeHomeSet bool) {
 	fmt.Fprint(w, "          <D:supported-report><D:report><D:sync-collection/></D:report></D:supported-report>\n")
 	fmt.Fprint(w, "        </D:supported-report-set>\n")
 	fmt.Fprint(w, "        <C:supported-calendar-data><C:calendar-data content-type=\"text/calendar\" version=\"2.0\"/></C:supported-calendar-data>\n")
-	fmt.Fprint(w, "        <D:current-user-privilege-set>\n")
-	fmt.Fprint(w, "          <D:privilege><D:read/></D:privilege>\n")
-	fmt.Fprint(w, "          <D:privilege><D:read-current-user-privilege-set/></D:privilege>\n")
-	fmt.Fprint(w, "          <D:privilege><D:write/></D:privilege>\n")
-	fmt.Fprint(w, "        </D:current-user-privilege-set>\n")
+	writeCalendarPrivilegeSet(w, cal)
 	if includeHomeSet {
 		fmt.Fprint(w, "        <C:calendar-home-set><D:href>/dav/calendars/</D:href></C:calendar-home-set>\n")
 	}
 	fmt.Fprint(w, "      </D:prop>\n")
 	fmt.Fprintf(w, "      <D:status>HTTP/1.1 200 OK</D:status>\n")
 	fmt.Fprint(w, "    </D:propstat>\n")
+}
+
+// writeCalendarPrivilegeSet writes the calendar's current-user-privilege-set.
+// Read-only roles (cal.Writable false, role policy #4718) get read only, so
+// phones show the calendar as read-only instead of letting the member edit
+// and then failing with 403.
+func writeCalendarPrivilegeSet(w io.Writer, cal *db.Calendar) {
+	fmt.Fprint(w, "        <D:current-user-privilege-set>\n")
+	fmt.Fprint(w, "          <D:privilege><D:read/></D:privilege>\n")
+	fmt.Fprint(w, "          <D:privilege><D:read-current-user-privilege-set/></D:privilege>\n")
+	if cal.Writable {
+		fmt.Fprint(w, "          <D:privilege><D:write/></D:privilege>\n")
+	}
+	fmt.Fprint(w, "        </D:current-user-privilege-set>\n")
 }
 
 // writePropStatForProps writes a propstat with only the requested properties.
@@ -278,11 +329,7 @@ func writeSingleProp(w io.Writer, cal *db.Calendar, name xml.Name) {
 		case "getetag":
 			fmt.Fprintf(w, "        <D:getetag>%s</D:getetag>\n", xmlEscape(cal.CTag))
 		case "current-user-privilege-set":
-			fmt.Fprint(w, "        <D:current-user-privilege-set>\n")
-			fmt.Fprint(w, "          <D:privilege><D:read/></D:privilege>\n")
-			fmt.Fprint(w, "          <D:privilege><D:read-current-user-privilege-set/></D:privilege>\n")
-			fmt.Fprint(w, "          <D:privilege><D:write/></D:privilege>\n")
-			fmt.Fprint(w, "        </D:current-user-privilege-set>\n")
+			writeCalendarPrivilegeSet(w, cal)
 		}
 	case nsC:
 		switch name.Local {
@@ -314,6 +361,13 @@ func writeSingleProp(w io.Writer, cal *db.Calendar, name xml.Name) {
 
 // writePropStatNotFound writes a propstat with 404 for unsupported properties.
 func writePropStatNotFound(w io.Writer, props []xmlElement) {
+	writePropStatEmpty(w, props, "HTTP/1.1 404 Not Found")
+}
+
+// writePropStatEmpty writes a propstat listing props as empty elements with
+// the given status line (e.g. 404 for unknown properties, 500 for properties
+// whose value could not be produced).
+func writePropStatEmpty(w io.Writer, props []xmlElement, status string) {
 	fmt.Fprint(w, "    <D:propstat>\n")
 	fmt.Fprint(w, "      <D:prop>\n")
 	for _, p := range props {
@@ -322,16 +376,19 @@ func writePropStatNotFound(w io.Writer, props []xmlElement) {
 			prefixForNamespace(p.XMLName.Space), p.XMLName.Space)
 	}
 	fmt.Fprint(w, "      </D:prop>\n")
-	fmt.Fprint(w, "      <D:status>HTTP/1.1 404 Not Found</D:status>\n")
+	fmt.Fprintf(w, "      <D:status>%s</D:status>\n", status)
 	fmt.Fprint(w, "    </D:propstat>\n")
 }
 
 // writePrincipalResponse writes the response for a PROPFIND on the principal
 // URL (/dav/) itself — returns properties of the principal resource.
 // The email is used for calendar-user-address-set and email-address-set.
-func writePrincipalResponse(w io.Writer, calendars []db.Calendar, props []xmlElement, includeCalendarSet bool, email string) {
+// base is the request's URL base ("/dav/" or "/dav/households/<id>/", see
+// auth.DAVBase): the response href and calendar-home-set are built from it so
+// a household-scoped principal points at that household's home set.
+func writePrincipalResponse(w io.Writer, calendars []db.Calendar, props []xmlElement, includeCalendarSet bool, email, base string) {
 	fmt.Fprint(w, "  <D:response>\n")
-	fmt.Fprint(w, "    <D:href>/dav/</D:href>\n")
+	fmt.Fprintf(w, "    <D:href>%s</D:href>\n", xmlEscape(base))
 
 	// If no specific props requested, return all known principal props.
 	if len(props) == 0 {
@@ -340,7 +397,7 @@ func writePrincipalResponse(w io.Writer, calendars []db.Calendar, props []xmlEle
 		fmt.Fprint(w, "        <D:resourcetype><D:principal/></D:resourcetype>\n")
 		fmt.Fprint(w, "        <D:current-user-principal><D:href>/dav/</D:href></D:current-user-principal>\n")
 		fmt.Fprint(w, "        <D:principal-URL><D:href>/dav/</D:href></D:principal-URL>\n")
-		fmt.Fprint(w, "        <C:calendar-home-set><D:href>/dav/calendars/</D:href></C:calendar-home-set>\n")
+		fmt.Fprintf(w, "        <C:calendar-home-set><D:href>%scalendars/</D:href></C:calendar-home-set>\n", xmlEscape(base))
 		fmt.Fprintf(w, "        <D:displayname>%s</D:displayname>\n", xmlEscape(email))
 		fmt.Fprintf(w, "        <C:calendar-user-address-set><D:href>mailto:%s</D:href></C:calendar-user-address-set>\n", xmlEscape(email))
 		fmt.Fprintf(w, "        <CS:email-address-set><CS:email-address>%s</CS:email-address></CS:email-address-set>\n", xmlEscape(email))
@@ -362,7 +419,7 @@ func writePrincipalResponse(w io.Writer, calendars []db.Calendar, props []xmlEle
 			fmt.Fprint(w, "    <D:propstat>\n")
 			fmt.Fprint(w, "      <D:prop>\n")
 			for _, p := range known {
-				writeSinglePrincipalProp(w, p.XMLName, email)
+				writeSinglePrincipalProp(w, p.XMLName, email, base)
 			}
 			fmt.Fprint(w, "      </D:prop>\n")
 			fmt.Fprint(w, "      <D:status>HTTP/1.1 200 OK</D:status>\n")
@@ -408,7 +465,7 @@ func isKnownPrincipalProp(name xml.Name) bool {
 }
 
 // writeSinglePrincipalProp writes a single property for the principal resource.
-func writeSinglePrincipalProp(w io.Writer, name xml.Name, email string) {
+func writeSinglePrincipalProp(w io.Writer, name xml.Name, email, base string) {
 	switch name.Space {
 	case nsDAV:
 		switch name.Local {
@@ -421,7 +478,7 @@ func writeSinglePrincipalProp(w io.Writer, name xml.Name, email string) {
 		case "displayname":
 			fmt.Fprintf(w, "        <D:displayname>%s</D:displayname>\n", xmlEscape(email))
 		case "calendar-home-set":
-			fmt.Fprint(w, "        <C:calendar-home-set><D:href>/dav/calendars/</D:href></C:calendar-home-set>\n")
+			fmt.Fprintf(w, "        <C:calendar-home-set><D:href>%scalendars/</D:href></C:calendar-home-set>\n", xmlEscape(base))
 		case "current-user-privilege-set":
 			fmt.Fprint(w, "        <D:current-user-privilege-set>\n")
 			fmt.Fprint(w, "          <D:privilege><D:read/></D:privilege>\n")
@@ -444,7 +501,7 @@ func writeSinglePrincipalProp(w io.Writer, name xml.Name, email string) {
 	case nsC:
 		switch name.Local {
 		case "calendar-home-set":
-			fmt.Fprint(w, "        <C:calendar-home-set><D:href>/dav/calendars/</D:href></C:calendar-home-set>\n")
+			fmt.Fprintf(w, "        <C:calendar-home-set><D:href>%scalendars/</D:href></C:calendar-home-set>\n", xmlEscape(base))
 		case "calendar-user-address-set":
 			fmt.Fprintf(w, "        <C:calendar-user-address-set><D:href>mailto:%s</D:href></C:calendar-user-address-set>\n", xmlEscape(email))
 		case "schedule-inbox-URL":
@@ -452,7 +509,7 @@ func writeSinglePrincipalProp(w io.Writer, name xml.Name, email string) {
 		case "schedule-outbox-URL":
 			fmt.Fprint(w, "        <C:schedule-outbox-URL><D:href>/dav/</D:href></C:schedule-outbox-URL>\n")
 		case "schedule-default-calendar-URL":
-			fmt.Fprint(w, "        <C:schedule-default-calendar-URL><D:href>/dav/calendars/</D:href></C:schedule-default-calendar-URL>\n")
+			fmt.Fprintf(w, "        <C:schedule-default-calendar-URL><D:href>%scalendars/</D:href></C:schedule-default-calendar-URL>\n", xmlEscape(base))
 		}
 	case nsCS:
 		switch name.Local {
@@ -478,14 +535,98 @@ func prefixForNamespace(ns string) string {
 	}
 }
 
-// xmlEscape escapes special XML characters in a string.
+// xmlEscape escapes special XML characters in a string. Runes XML 1.0 does
+// not allow at all (see xmlSafeText) are replaced first, since no escape can
+// make them legal.
 func xmlEscape(s string) string {
+	s = xmlSafeText(s)
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	s = strings.ReplaceAll(s, "'", "&apos;")
 	s = strings.ReplaceAll(s, "\"", "&quot;")
 	return s
+}
+
+// isXMLChar reports whether r matches XML 1.0's Char production (§2.2):
+// #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF].
+// Everything else (the other C0 controls, surrogates, U+FFFE, U+FFFF) is
+// forbidden even inside CDATA and even as a character reference.
+func isXMLChar(r rune) bool {
+	switch {
+	case r == 0x9 || r == 0xA || r == 0xD:
+		return true
+	case r >= 0x20 && r <= 0xD7FF:
+		return true
+	case r >= 0xE000 && r <= 0xFFFD:
+		return true
+	case r >= 0x10000 && r <= utf8.MaxRune:
+		return true
+	}
+	return false
+}
+
+// firstNonXMLChar returns the byte offset of the first rune in s that XML 1.0
+// does not allow, or of the first invalid UTF-8 byte, or -1 if there is none.
+func firstNonXMLChar(s string) int {
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < utf8.RuneSelf {
+			if c < 0x20 && c != 0x9 && c != 0xA && c != 0xD {
+				return i
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if (r == utf8.RuneError && size == 1) || !isXMLChar(r) {
+			return i
+		}
+		i += size
+	}
+	return -1
+}
+
+// xmlSafeText returns s with every rune XML 1.0 forbids (and every invalid
+// UTF-8 byte) replaced by U+FFFD, so it can be written into an XML document.
+// It returns s itself, without allocating, when there is nothing to replace,
+// which is the case for every iCalendar body PUT accepts since #4659.
+//
+// Stored text can still carry such runes: rows written before PUT refused
+// them, and API/MCP edits to ical_data that the generated iCalendar copies
+// from. One of them inside a REPORT or PROPFIND multistatus would make the
+// whole response unparseable and stop sync for the calendar, so every text
+// that goes into a CalDAV XML body passes through here.
+func xmlSafeText(s string) string {
+	i := firstNonXMLChar(s)
+	if i < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteString(s[:i])
+	for i < len(s) {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if (r == utf8.RuneError && size == 1) || !isXMLChar(r) {
+			b.WriteRune(utf8.RuneError)
+		} else {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
+}
+
+// calendarDataCDATA returns icalText as the content of a C:calendar-data
+// element: one or more CDATA sections holding xmlSafeText(icalText), with any
+// "]]>" split across two sections so it cannot end the CDATA early (client
+// VCALENDARs are served verbatim from ical_raw, #4406/#4615).
+//
+// The result can differ from the GET body (which is text/calendar, not XML,
+// and is served unchanged) by the runes xmlSafeText replaced, so for such a
+// row calendar-data and getcontentlength do not describe identical bytes.
+func calendarDataCDATA(icalText string) string {
+	return "<![CDATA[" + strings.ReplaceAll(xmlSafeText(icalText), "]]>", "]]]]><![CDATA[>") + "]]>"
 }
 
 // ----- PROPFIND handler -----
@@ -539,12 +680,11 @@ func HandlePROPFIND(w http.ResponseWriter, r *http.Request, repo *db.Repo, path 
 
 	case path == "/dav/" || path == "":
 		// PROPFIND on principal URL.
-		householdID := auth.HouseholdIDFromContext(ctx)
-		calendars, err := repo.ListCalendars(ctx, householdID)
+		calendars, err := listDiscoveryCalendars(ctx, repo)
 		if err != nil {
 			logging.Logger.Error("caldav: list calendars",
 				slog.String("path", path),
-				slog.String("household_id", householdID),
+				slog.String("household_id", auth.HouseholdIDFromContext(ctx)),
 				slog.String("error", err.Error()))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
@@ -556,18 +696,18 @@ func HandlePROPFIND(w http.ResponseWriter, r *http.Request, repo *db.Repo, path 
 
 		buf := &strings.Builder{}
 		writeXMLHeader(buf)
-		writePrincipalResponse(buf, calendars, requestedProps, depth != "0", auth.EmailFromContext(ctx))
+		writePrincipalResponse(buf, calendars, requestedProps, depth != "0", auth.EmailFromContext(ctx), auth.DAVBase(ctx))
 		writeXMLFooter(buf)
 		w.Write([]byte(buf.String()))
 
 	case path == "/dav/calendars/" || path == "/dav/calendars":
 		// PROPFIND on calendar home-set — return only calendars, no principal.
-		householdID := auth.HouseholdIDFromContext(ctx)
-		calendars, err := repo.ListCalendars(ctx, householdID)
+		// Unscoped, this lists every household the user belongs to.
+		calendars, err := listDiscoveryCalendars(ctx, repo)
 		if err != nil {
 			logging.Logger.Error("caldav: list calendars",
 				slog.String("path", path),
-				slog.String("household_id", householdID),
+				slog.String("household_id", auth.HouseholdIDFromContext(ctx)),
 				slog.String("error", err.Error()))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
@@ -594,7 +734,7 @@ func HandlePROPFIND(w http.ResponseWriter, r *http.Request, repo *db.Repo, path 
 		}
 
 		householdID := auth.HouseholdIDFromContext(ctx)
-		cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, uid)
+		cal, err := repo.GetCalendarByCalDAVUID(ctx, householdID, uid, auth.AccessFor(ctx, householdID))
 		if err != nil {
 			logging.Logger.Error("caldav: get calendar",
 				slog.String("path", path),
@@ -622,7 +762,7 @@ func HandlePROPFIND(w http.ResponseWriter, r *http.Request, repo *db.Repo, path 
 		// Apple Calendar uses PROPFIND Depth:1 to list all events in a calendar
 		// before fetching their bodies via REPORT calendar-multiget.
 		if depth != "0" {
-			objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID)
+			objects, err := repo.ListCalendarObjects(ctx, householdID, cal.ID, auth.AccessFor(ctx, householdID))
 			if err != nil {
 				logging.Logger.Error("caldav: list calendar objects",
 					slog.String("calendar_uid", uid),
@@ -640,6 +780,29 @@ func HandlePROPFIND(w http.ResponseWriter, r *http.Request, repo *db.Repo, path 
 	default:
 		http.Error(w, "Not Found", http.StatusNotFound)
 	}
+}
+
+// listDiscoveryCalendars returns the calendars a discovery PROPFIND (principal
+// or calendar home-set) lists. A household-scoped request
+// (/dav/households/<id>/...) lists only that household. An unscoped request
+// lists the calendars of every household the user belongs to, default
+// household first, so a member of two families sees both in one account.
+// Calendar hrefs stay /dav/<uid>/: caldav_uid is globally unique and the auth
+// middleware routes each one to its own household.
+func listDiscoveryCalendars(ctx context.Context, repo *db.Repo) ([]db.Calendar, error) {
+	householdIDs := auth.HouseholdIDsFromContext(ctx)
+	if auth.HouseholdScopeFromContext(ctx) != "" || len(householdIDs) == 0 {
+		return repo.ListCalendars(ctx, auth.HouseholdIDFromContext(ctx), auth.Access(ctx))
+	}
+	var all []db.Calendar
+	for _, hid := range householdIDs {
+		cals, err := repo.ListCalendars(ctx, hid, auth.AccessFor(ctx, hid))
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, cals...)
+	}
+	return all, nil
 }
 
 // extractCalendarUID extracts the calendar UID from a path like /dav/{uid}/.

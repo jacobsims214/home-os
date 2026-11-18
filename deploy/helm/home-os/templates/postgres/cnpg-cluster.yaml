@@ -4,9 +4,15 @@ kind: Cluster
 metadata:
   name: home-os-postgres
   namespace: {{ .Values.namespace }}
+  annotations:
+    # Argo CD: before the migrations Job (wave -1) and the workloads (wave 0).
+    # Argo's built-in postgresql.cnpg.io/Cluster health check keeps wave -1
+    # waiting until the cluster is ready (#4678).
+    argocd.argoproj.io/sync-wave: "-2"
 spec:
   instances: {{ .Values.database.managed.instances }}
-  imageName: ghcr.io/cloudnative-pg/postgresql:16
+  imageName: {{ .Values.database.managed.imageName | quote }}
+  imagePullPolicy: {{ .Values.global.thirdPartyImagePullPolicy }}
   storage:
     size: {{ .Values.database.managed.storage }}
   bootstrap:
@@ -14,7 +20,16 @@ spec:
       database: app
       owner: app
       secret:
-        name: home-os-db-secret
+        name: {{ include "home-os.dbSecretName" . }}
+      # Dex stores its state in a separate `dex` database (templates/dex/configmap.yaml),
+      # which it connects to as `app`. initdb only creates `app`, so create `dex` here.
+      # CNPG runs this as the postgres superuser, inside the `app` database, once, at
+      # the end of initdb. CREATE DATABASE has to run outside a transaction; CNPG runs
+      # each statement as its own autocommit Exec, so that works.
+      # Clusters that already exist never run the bootstrap again, so adding this
+      # leaves their existing dex database alone (no drop, no recreate, no ALTER).
+      postInitApplicationSQL:
+        - CREATE DATABASE dex OWNER app
   managed:
     roles:
     - name: app

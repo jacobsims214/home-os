@@ -1,0 +1,476 @@
+{
+  "note": "Household role policy contract (#4689). apps/api/internal/auth/roles.go and apps/mcp/internal/auth/policy.go each mirror this table; TestRolePolicyMatchesFixture in both packages fails when either drifts. Edit both tables, this file and KB decisions/2026-11-15-role-policy.md together.",
+  "roles": [
+    "owner",
+    "family_manager",
+    "family_member",
+    "viewer",
+    "housesitter",
+    "vendor"
+  ],
+  "policy": {
+    "activity": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer"
+      ]
+    },
+    "agent_tokens": {
+      "create": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer"
+      ],
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter",
+        "vendor"
+      ],
+      "revoke": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter",
+        "vendor"
+      ],
+      "write_scope": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "assets": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter",
+        "vendor"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "bills": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "budget": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "calendar": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "family_notes": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "files": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "guides": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "household": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter",
+        "vendor"
+      ],
+      "write": [
+        "owner",
+        "family_manager"
+      ]
+    },
+    "invites": {
+      "read": [
+        "owner",
+        "family_manager"
+      ],
+      "write": [
+        "owner",
+        "family_manager"
+      ]
+    },
+    "links": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "lists": {
+      "add_items": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "housesitter"
+      ],
+      "check_items": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "housesitter"
+      ],
+      "edit_items": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ],
+      "manage": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ],
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter"
+      ]
+    },
+    "loans": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "maintenance": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "vendor"
+      ],
+      "update_status": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "vendor"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "meals": {
+      "rate_others": [
+        "owner",
+        "family_manager"
+      ],
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "members": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter"
+      ],
+      "write": [
+        "owner",
+        "family_manager"
+      ]
+    },
+    "notes": {
+      "annotate": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "housesitter"
+      ],
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "notifications": {
+      "mark_read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter",
+        "vendor"
+      ],
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter",
+        "vendor"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "password": {
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter",
+        "vendor"
+      ]
+    },
+    "people": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer"
+      ],
+      "read_basic": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter"
+      ],
+      "set_color": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "pets": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "preferences": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "properties": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter",
+        "vendor"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "search": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter",
+        "vendor"
+      ]
+    },
+    "secrets": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "vehicles": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    },
+    "vendors": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
+      ]
+    }
+  },
+  "entity_resources": {
+    "asset": "assets",
+    "bill": "bills",
+    "budget": "budget",
+    "calendar": "calendar",
+    "calendar_event": "calendar",
+    "document": "files",
+    "document_link": "files",
+    "file": "files",
+    "guide": "guides",
+    "household": "family_notes",
+    "list": "lists",
+    "list_item": "lists",
+    "loan": "loans",
+    "maintenance": "maintenance",
+    "maintenance_schedule": "maintenance",
+    "maintenance_task": "maintenance",
+    "meal_feedback": "meals",
+    "meal_plan": "meals",
+    "note": "notes",
+    "person": "people",
+    "person_preference": "preferences",
+    "pet": "pets",
+    "property": "properties",
+    "recipe": "meals",
+    "room": "properties",
+    "secret": "secrets",
+    "vehicle": "vehicles",
+    "vendor": "vendors"
+  }
+}

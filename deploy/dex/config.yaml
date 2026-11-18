@@ -1,0 +1,70 @@
+# Dex config for docker compose ONLY (deploy/docker-compose.yml).
+# Every value here is a local-development value: the static password below is
+# the public demo password (admin@homeos.demo / demo1234), not a secret.
+# Kubernetes renders its own config from deploy/helm/home-os/templates/dex.
+#
+# The issuer must be the URL browsers use (Caddy on https://localhost:8443) and
+# must match DEX_ISSUER on the api service, or the API rejects every token.
+
+issuer: https://localhost:8443/dex
+
+# sqlite is enough for local dev; the file lives in the dex_data volume.
+storage:
+  type: sqlite3
+  config:
+    file: /var/dex/dex.db
+
+web:
+  http: 0.0.0.0:5556
+
+# The API uses Dex's gRPC API (DEX_GRPC_ADDR, default home-os-dex:5557) to sync
+# passwords for invited and bootstrap users.
+grpc:
+  addr: 0.0.0.0:5557
+
+oauth2:
+  skipApprovalScreen: true
+  alwaysShowLoginScreen: false
+  # Same enforcement as the chart (#694). Keep this in step with
+  # deploy/helm/home-os/templates/dex/configmap.yaml: the UI and MCP clients
+  # both send S256, so a developer build should reject a no-challenge or
+  # "plain" authorize request exactly as production does. Only enforced by
+  # Dex >= v2.46.0, which is what docker-compose.yml pins.
+  pkce:
+    enforce: true
+    codeChallengeMethodsSupported: ["S256"]
+
+staticClients:
+  # Public client: no secret, the UI uses PKCE (S256).
+  - id: home-os-ui
+    name: Home OS UI
+    public: true
+    redirectURIs:
+      - https://localhost:8443/api/auth/callback
+  - id: home-os-mcp
+    name: Home OS MCP
+    public: true
+    redirectURIs:
+      - http://127.0.0.1:19876/mcp/oauth/callback
+
+enablePasswordDB: true
+
+# Matches the user the API seeds with DEMO_MODE=true; the API resolves the
+# token to that user by email. Hash is bcrypt("demo1234"), dev only.
+staticPasswords:
+  - email: admin@homeos.demo
+    hash: "$2a$10$0I8e4nSeZdrhyXBUjjjbVuIg5zRGfYtO8D1qDDCLgmZQ8LdHwdVxC"
+    username: admin
+    userID: 7d4b1f0e-5c1a-4c3e-9a57-2f1d0c9e6b11
+
+expiry:
+  # id_token lifetime, same as the chart (dex.idTokenExpiry). Dex keeps one
+  # refresh token per user per client, so a login on a second browser revokes
+  # the first browser's refresh token; the first browser stays signed in only
+  # until its id_token expires, then goes to /login once (#4649).
+  idTokens: "24h"
+  # Refresh tokens rotate on use. Within this window Dex hands the current token
+  # to a request presenting the just-rotated one, so concurrent BFF refreshes
+  # don't reject each other. Same value as the chart (dex.refreshTokenReuseInterval).
+  refreshTokens:
+    reuseInterval: "10s"

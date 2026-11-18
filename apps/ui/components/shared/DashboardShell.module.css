@@ -1,0 +1,290 @@
+/*
+ * App shell styles (#4528), per KB design/app-shell.md (artifact #75 v1).
+ * Colours come from the semantic theme tokens in app/globals.css (#4529);
+ * the --shell-* names are kept as aliases so the shell's rules don't change.
+ * Breakpoints: sm = 48em (768 px), md = 62em (992 px).
+ */
+
+.shellVars {
+  --shell-accent: var(--accent);
+  --shell-accent-soft: var(--accent-soft);
+  --shell-bg: var(--bg);
+  --shell-surface: var(--surface);
+  --shell-surface-2: var(--surface-2);
+  --shell-raised: var(--raised);
+  --shell-line: var(--line);
+  --shell-ink: var(--ink);
+  --shell-ink-2: var(--ink-2);
+  --shell-ink-3: var(--ink-3);
+}
+
+/* The tab bar's More sheet (BottomNav.module.css) renders in a portal,
+   outside .root, so it composes .shellVars itself. */
+.root {
+  composes: shellVars;
+  min-height: 100dvh;
+}
+
+.root :focus-visible {
+  outline: 2px solid var(--shell-accent);
+  outline-offset: 2px;
+}
+
+/* ---------- header ---------- */
+
+.header {
+  background: var(--shell-surface);
+  border-bottom: 1px solid var(--shell-line);
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.headerRow {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px 0 4px;
+}
+
+.iconButton {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  color: var(--shell-ink-2);
+}
+
+.titleBlock {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 4px;
+}
+
+.familyChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  align-self: flex-start;
+  max-width: 100%;
+  min-height: 24px;
+  padding: 0 4px 0 0;
+  border-radius: var(--mantine-radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  color: var(--shell-ink-2);
+}
+
+.familyChip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: var(--shell-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.titleLine {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
+.date {
+  display: none;
+  font-size: 13px;
+  color: var(--shell-ink-3);
+  white-space: nowrap;
+}
+
+.avatarButton {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+}
+
+/* ---------- tablet rail ---------- */
+
+.rail {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 0 calc(12px + env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+}
+
+.railMenu {
+  margin-bottom: 6px;
+}
+
+.railItem {
+  width: 68px;
+  min-height: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 4px 0;
+  border-radius: var(--mantine-radius-md);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.15;
+  text-align: center;
+  color: var(--shell-ink-2);
+  text-decoration: none;
+}
+
+.railPill {
+  width: 52px;
+  height: 30px;
+  border-radius: 15px;
+  display: grid;
+  place-items: center;
+  transition: background-color 150ms ease;
+}
+
+.railItem:hover .railPill {
+  background: var(--shell-surface-2);
+}
+
+.railItem[aria-current="page"] {
+  color: var(--shell-accent);
+  font-weight: 600;
+}
+
+.railItem[aria-current="page"] .railPill {
+  background: var(--shell-accent-soft);
+}
+
+.railItem[aria-disabled="true"] {
+  cursor: default;
+}
+
+.railRule {
+  width: 32px;
+  height: 1px;
+  flex: none;
+  margin: 6px 0;
+  background: var(--shell-line);
+}
+
+.railBottom {
+  margin-top: auto;
+}
+
+/* ---------- navbar (rail + sidebar column) ---------- */
+
+.navbar {
+  background: var(--shell-surface);
+  border-right: 1px solid var(--shell-line);
+}
+
+/* Mantine only slides the collapsed navbar off screen; take it out of the
+   tab order and the accessibility tree on phones too. */
+@media (max-width: 47.99em) {
+  .navbar {
+    display: none;
+  }
+}
+
+.sidebar {
+  height: 100%;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+/* ---------- main ---------- */
+
+.main {
+  background: var(--shell-bg);
+  min-height: 100dvh;
+  /* Below 48em Mantine pads main by the footer (the tab bar, whose height
+     includes the safe-area inset), so content never sits under the bar. */
+}
+
+.content {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 16px;
+  min-width: 0;
+}
+
+/* ---------- drawer ---------- */
+
+.drawerContent {
+  background: var(--raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.drawerHeader {
+  padding-top: calc(8px + env(safe-area-inset-top, 0px));
+  background: inherit;
+}
+
+.drawerBody {
+  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+}
+
+/* ---------- breakpoints ---------- */
+
+@media (min-width: 48em) {
+  /* No tab bar from 48em up: keep content clear of the home indicator. */
+  .main {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .headerRow {
+    height: 64px;
+    padding: 0 16px 0 20px;
+    gap: 4px;
+  }
+
+  .title {
+    font-size: 22px;
+  }
+
+  .content {
+    padding: 24px;
+  }
+}
+
+@media (min-width: 62em) {
+  .headerRow {
+    padding: 0 24px 0 32px;
+  }
+
+  .title {
+    font-size: 24px;
+  }
+
+  .date {
+    display: block;
+  }
+
+  .content {
+    padding: 28px 32px 40px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .railPill {
+    transition: none;
+  }
+}

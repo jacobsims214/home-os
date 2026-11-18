@@ -1,0 +1,23 @@
+/*
+ * The brand mark's tile (#5200). Geometry and colour are the approved shell
+ * mockup's `.logo` (artifact #75 v1, KB design/app-shell.md): a 28 px square,
+ * radius 8, `--accent-fill` background, white glyph centred in it.
+ *
+ * Tokens only (app/globals.css) — app/theme-tokens.test.mjs scans this file for
+ * literal colours, comments included. `--accent-fill` is the same cyan.9 in
+ * BOTH schemes, so light and dark render the identical mark and the glyph keeps
+ * its 5.59:1 white-on-accent contrast without a scheme-specific rule.
+ */
+
+.tile {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  border-radius: var(--r-sm);
+  background: var(--accent-fill);
+  color: var(--mantine-color-white);
+}
+
+.glyph {
+  display: block;
+}
