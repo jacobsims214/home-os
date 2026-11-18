@@ -83,6 +83,15 @@ const SEED_USER = {
   name: "E2E Tester",
 };
 
+/**
+ * What the stub's POST /auth/caldav-password reports as the CalDAV server
+ * (#5289). A public URL, not this machine's: the UI must display this value
+ * verbatim, so a spec fails if a localhost literal ever comes back. Override
+ * with E2E_CALDAV_SERVER_URL to assert the UI follows the API rather than a
+ * constant.
+ */
+const CALDAV_SERVER_URL = process.env.E2E_CALDAV_SERVER_URL || "https://home.example/dav/";
+
 const key = randomBytes(32);
 // refresh token -> session id (sid). A sid lives for the whole sign-in.
 const refreshTokens = new Map();
@@ -416,6 +425,18 @@ const server = createServer(async (req, res) => {
         { search: url.search, role: activeHousehold?.role ?? "owner" },
       );
       if (out) return send(res, out[0], out[1]);
+    }
+    // POST /auth/caldav-password (#5289). Mirrors the API's caldavPasswordResponse
+    // (apps/api/internal/auth/handler.go): the plaintext is returned once, and
+    // server_url is built from the API's PUBLIC_URL. The stub answers a fixed
+    // public URL on purpose — it is what the UI must show verbatim instead of a
+    // localhost literal, and a spec asserts exactly that.
+    if (resource === "auth/caldav-password" && req.method === "POST") {
+      return send(res, 200, {
+        password: "e2eapppassword0123456789abcdefghij",
+        username: SEED_USER.email,
+        server_url: CALDAV_SERVER_URL,
+      });
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
       stats.apiWrites.push(`${req.method} ${path}${url.search}${body.name ? ` ${body.name}` : ""}`);

@@ -14,18 +14,32 @@
  * hash of a fresh app password, #4822's neighbour), the copy button, and the
  * Apple Calendar steps. The app password is shown once — the server keeps only
  * the hash — so the copy-now warning is part of the UI, not decoration.
+ *
+ * The Server field is NOT a constant here (#5289): it shows the `server_url`
+ * the API returns with the app password, because only the API knows the
+ * deployment's public origin (its PUBLIC_URL). Until the person generates a
+ * password there is no response to read, so the field shows this page's own
+ * origin + /dav/ — the same rule the API uses — and a placeholder when even
+ * that is unknown (server render). See caldav-server.ts: there is no loopback
+ * fallback, because rendering one is the bug this ticket fixes.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Alert, Button, CopyButton, Stack, Text, TextInput } from "@mantine/core";
 import { IconAlertTriangle, IconCheck, IconCopy } from "@tabler/icons-react";
 import { apiFetch } from "@/lib/api";
 import { useMe } from "@/lib/today/api";
 import { SectionHeader, SettingsCard } from "./SettingsFrame";
+import { caldavServerUrl } from "./caldav-server";
 
-/** The CalDAV endpoint the API has always documented for this page. */
-const CALDAV_SERVER = "http://localhost:8081";
+/** What POST /api/v1/auth/caldav-password answers (handler.go caldavPasswordResponse). */
+type CaldavPassword = {
+  password: string;
+  username: string;
+  /** Public CalDAV endpoint, built from the API's PUBLIC_URL by the server. */
+  server_url?: string;
+};
 
 const STEPS = [
   "Open Settings on your iPhone or Mac.",
@@ -41,10 +55,20 @@ export default function PhoneCalendarSection() {
   const [password, setPassword] = useState<string | null>(null);
 
   const generate = useMutation({
-    mutationFn: () =>
-      apiFetch<{ password: string }>("/api/v1/auth/caldav-password", { method: "POST" }),
+    mutationFn: () => apiFetch<CaldavPassword>("/api/v1/auth/caldav-password", { method: "POST" }),
     onSuccess: (data) => setPassword(data.password),
   });
+
+  // The server the person types into their phone. The API's answer wins; until
+  // there is one, this deployment's own /dav/ (caldav-server.ts, #5289).
+  //
+  // The origin is read in an effect, not during render: this component is
+  // server-rendered too, and reading window there would make the first client
+  // render disagree with the HTML (a hydration error over an input's value).
+  // One extra render, and the field simply shows its placeholder until then.
+  const [origin, setOrigin] = useState<string | undefined>(undefined);
+  useEffect(() => setOrigin(window.location.origin), []);
+  const server = caldavServerUrl(generate.data?.server_url, origin);
 
   return (
     <>
@@ -56,7 +80,8 @@ export default function PhoneCalendarSection() {
       <SettingsCard title="1. App password">
         <Text size="sm" c="var(--ink-2)" mb={12}>
           Your phone uses its own password, not your Home OS one. You can replace it any time without
-          changing your real password.
+          changing your real password. Generating it also tells this page the exact server address to
+          type into your phone — it is the address for this house, not a generic one.
         </Text>
         <Button onClick={() => generate.mutate()} loading={generate.isPending}>
           Generate app password
@@ -102,10 +127,17 @@ export default function PhoneCalendarSection() {
 
       <SettingsCard title="2. Add the account on your phone">
         <div style={{ display: "grid", gap: 10 }}>
-          <TextInput label="Server" value={CALDAV_SERVER} readOnly ff="monospace" />
+          <TextInput
+            label="Server"
+            value={server}
+            placeholder="Generate an app password to see it"
+            readOnly
+            ff="monospace"
+            data-settings-readonly="caldav-server"
+          />
           <TextInput
             label="User name"
-            value={me.data?.email ?? ""}
+            value={generate.data?.username ?? me.data?.email ?? ""}
             placeholder={me.isError ? "Couldn't load your email" : "Loading…"}
             readOnly
             ff="monospace"
