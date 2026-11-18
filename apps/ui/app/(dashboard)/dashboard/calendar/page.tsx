@@ -1,721 +1,640 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import FullCalendar from "@fullcalendar/react";
-import dayGridPlugin from "@fullcalendar/daygrid";
-import timeGridPlugin from "@fullcalendar/timegrid";
-import { apiFetch } from "@/lib/api";
-import Modal from "@/components/ui/Modal";
-import Button from "@/components/ui/Button";
-import Input from "@/components/ui/Input";
-import Select from "@/components/ui/Select";
+/**
+ * Calendar (#4550) — agenda first, with recurrence, built to the approved
+ * mockup (artifact #87 v1) inside the approved shell (artifact #75 v1), and
+ * reading the same API Today (#4549) reads so the two screens always agree.
+ *
+ * WHAT THE R1 WAR GAMES CHANGED HERE (KB discoveries/war-game-r1-*.md):
+ *
+ *  1. AGENDA FIRST. A parent asks "what's on this week". So the default view is
+ *     a week of days, each a list of what's on it; day/week/month are there for
+ *     the times a grid is the right answer. On a phone the toolbar offers
+ *     Agenda / Day / Month (the week grid is a tablet-and-up tool, per the
+ *     mockup).
+ *  2. ONE RECURRING EVENT IS ONE THING. Round one turned a weekly activity into
+ *     9 and 35 rows. The API returns one row per occurrence (each carrying the
+ *     series id and its recurrence_id); groupSeries() puts them back together, so
+ *     a Tue/Thu lesson is one card with its dates as chips.
+ *  3. THE DAY AND TIME COME FROM THE DATA. Every event carries local_date,
+ *     weekday, local_time and end_local_* computed by the API in the
+ *     household's zone (apps/api/internal/calendar/localday.go). Nothing on
+ *     this page builds a weekday from a Date, so no browser zone can move an
+ *     event — which is exactly how round one shifted an all-day event a day.
+ *  4. ALL-DAY IS A DATE, NEVER AN INSTANT: it renders on its local_date as
+ *     "All day" and never borrows a clock time.
+ *  5. WHO ADDED WHAT, where the feed knows: the sheet prints "Added by Amber
+ *     via moltis-wg-amber". Cross-family visibility is proven, and attribution
+ *     is what stops "did you book that?".
+ *  6. BILLS. Their mirrors sit on the Bills calendar, their amount and their
+ *     PAID/DUE state come from GET /bills through the one shared bill rule, and
+ *     an entry on the Bills calendar that is not linked to a bill says so
+ *     instead of borrowing bill state.
+ *  7. A FAILED READ IS NEVER AN EMPTY WEEK (audit #74): each source has its own
+ *     error card with Try again, and the empty state explains what would fill
+ *     it. Skeleton only in the content area.
+ *
+ * WHAT THIS PAGE CANNOT DO, said in the UI rather than faked: the REST API's
+ * PATCH edits a series as a whole — there is no per-occurrence scope yet (KB
+ * architecture/api-calendar-recurrence.md). The editor says "Saving changes
+ * every date" before the person commits, and offers no "just this one" button
+ * that could not keep its promise.
+ */
 
-// ── Types ──────────────────────────────────────────────────────
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { SegmentedControl, Skeleton } from "@mantine/core";
+import { useMediaQuery } from "@mantine/hooks";
+import { notifications } from "@mantine/notifications";
+import { IconChevronLeft, IconChevronRight, IconFilter, IconPlus, IconX } from "@tabler/icons-react";
+import EventSheet from "@/components/calendar/event-sheet";
+import EventEditor from "@/components/calendar/event-editor";
+import { AgendaView, CalendarEmpty, CalendarError, CalendarSkeleton, DayGridView, MonthView, WeekGridView } from "@/components/calendar/views";
+import {
+  attributionMap,
+  billReading,
+  buildAgenda,
+  emptyReason,
+  eventBody,
+  groupSeries,
+  monthGrid,
+  monthStart,
+  daysFromEvents,
+  missingDayTable,
+  rangeFor,
+  rangeTitle,
+  seriesId,
+  weekRangeLabel,
+  type AgendaDay,
+  type BillReading,
+  type CalendarRow,
+  type CalendarView,
+  type CalEvent,
+  type DayInfo,
+  type EventFormValues,
+  type Series,
+} from "@/lib/calendar/model";
+import { useCalendarAccess, useCalendarActivity, useCalendarEvents, useCalendarHousehold, useCalendars, useBills, useCreateEvent, useDeleteEvent, usePeople, useUpdateEvent } from "@/lib/calendar/api";
+import { householdToday } from "@/lib/today/agenda";
 
-interface Calendar {
-  id: string;
-  name: string;
-  type: string;
-  color: string;
-  property_id: string | null;
-}
-
-interface CalEvent {
-  id: string;
-  calendar_id: string;
-  event_type: string;
-  title: string;
-  description: string;
-  start: string;
-  end: string;
-  all_day: boolean;
-  location: string;
-  color: string;
-  entity_type: string;
-  entity_id: string;
-}
-
-interface Property {
-  id: string;
-  name: string;
-}
-
-// ── Event type config ──────────────────────────────────────────
-
-type EventTypeKey =
-  | "family"
-  | "appointment"
-  | "maintenance"
-  | "bill"
-  | "vehicle"
-  | "pet"
-  | "custom";
-
-const EVENT_TYPES: Record<
-  EventTypeKey,
-  { color: string; icon: React.ReactNode; label: string }
-> = {
-  family: {
-    color: "#8b5cf6",
-    icon: (
-      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
-      </svg>
-    ),
-    label: "Family",
-  },
-  appointment: {
-    color: "#3b82f6",
-    icon: (
-      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
-      </svg>
-    ),
-    label: "Appointment",
-  },
-  maintenance: {
-    color: "#f59e0b",
-    icon: (
-      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M11.42 15.17l7.07-7.07a4.95 4.95 0 00-7-7l-7.07 7.07a4.95 4.95 0 007 7zm-2.83-2.83l-1.41-1.41" />
-      </svg>
-    ),
-    label: "Maintenance",
-  },
-  bill: {
-    color: "#f97316",
-    icon: (
-      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-    ),
-    label: "Bill",
-  },
-  vehicle: {
-    color: "#6b7280",
-    icon: (
-      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 18.75a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h6m-9 0H3.375a1.125 1.125 0 01-1.125-1.125V14.25m17.25 4.5a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m3 0h1.125c.621 0 1.129-.504 1.09-1.124a17.902 17.902 0 00-3.213-9.193 2.056 2.056 0 00-1.58-.86H14.25M16.5 18.75h-2.25m0-11.177v-.958c0-.568-.422-1.048-.987-1.106a48.554 48.554 0 00-10.026 0 1.106 1.106 0 00-.987 1.106v7.635m12-6.677v6.677m0 4.5v-4.5m0 0h-12" />
-      </svg>
-    ),
-    label: "Vehicle",
-  },
-  pet: {
-    color: "#ec4899",
-    icon: (
-      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M15.182 15.182a4.5 4.5 0 01-6.364 0M21 12a9 9 0 11-18 0 9 9 0 0118 0zM9.75 9.75c0 .414-.168.75-.375.75S9 10.164 9 9.75 9.168 9 9.375 9s.375.336.375.75zm-.375 0h.008v.015h-.008V9.75zm5.625 0c0 .414-.168.75-.375.75s-.375-.336-.375-.75.168-.75.375-.75.375.336.375.75zm-.375 0h.008v.015h-.008V9.75z" />
-      </svg>
-    ),
-    label: "Pet",
-  },
-  custom: {
-    color: "#6366f1",
-    icon: (
-      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" />
-      </svg>
-    ),
-    label: "Custom",
-  },
-};
-
-const TYPE_KEYS: EventTypeKey[] = [
-  "family",
-  "appointment",
-  "maintenance",
-  "bill",
-  "vehicle",
-  "pet",
-  "custom",
+const ICON_STROKE = 1.75;
+/**
+ * The view switch. Agenda is first because that is what a parent asks for
+ * ("what's on this week"); Week is the grid a tablet or desktop can show, and
+ * on a phone it stays out of the way (the mockup hides it there) — the agenda
+ * covers the same week in a form a phone can read.
+ */
+const VIEW_OPTIONS: { value: string; label: string }[] = [
+  { value: "agenda", label: "Agenda" },
+  { value: "day", label: "Day" },
+  { value: "week", label: "Week" },
+  { value: "month", label: "Month" },
 ];
 
-// ── Helpers ─────────────────────────────────────────────────────
-
-/** Format a local date + optional time to an RFC 3339 UTC string. */
-function toRFC3339(dateStr: string, timeStr: string): string {
-  if (!dateStr) return "";
-  const full = timeStr ? `${dateStr}T${timeStr}:00` : `${dateStr}T00:00:00`;
-  const d = new Date(full);
-  return d.toISOString();
-}
-
-/** Extract just the date part (YYYY-MM-DD) from a UTC ISO string. */
-function isoToDate(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toISOString().slice(0, 10); // local-naive for input[type=date]
-  } catch {
-    return "";
-  }
-}
-
-/** Extract HH:MM from a UTC ISO string. */
-function isoToTime(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return `${String(d.getHours()).padStart(2, "0")}:${String(
-      d.getMinutes()
-    ).padStart(2, "0")}`;
-  } catch {
-    return "";
-  }
-}
-
-/** Get a human-friendly name for a calendar given its properties. */
-function calendarLabel(cal: Calendar, properties: Property[]): string {
-  if (cal.property_id) {
-    const prop = properties.find((p) => p.id === cal.property_id);
-    return prop ? `${prop.name} — ${cal.name}` : cal.name;
-  }
-  return cal.name;
-}
-
-// ── Page component ─────────────────────────────────────────────
-
 export default function CalendarPage() {
-  const queryClient = useQueryClient();
+  const router = useRouter();
+  const household = useCalendarHousehold();
+  const timezone = household?.timezone ?? null;
+  const { canWrite } = useCalendarAccess();
 
-  // Filters
-  const [typeFilter, setTypeFilter] = useState<EventTypeKey | null>(null); // null = All
-  const [propertyFilter, setPropertyFilter] = useState<string>(""); // "" = All
+  // Today in the HOUSEHOLD's zone, after mount: the server's clock is not the
+  // family's, and a page that says "today" on the wrong day is worse than one
+  // that paints a skeleton first.
+  const [today, setToday] = useState<string | null>(null);
+  const [view, setView] = useState<CalendarView>("agenda");
+  const [anchor, setAnchor] = useState<string | null>(null);
+  const [hidden, setHidden] = useState<Record<string, boolean>>({});
+  const [sheet, setSheet] = useState<{ series: Series; occurrence: CalEvent } | null>(null);
+  const [editing, setEditing] = useState<{ series: Series | null; occurrence: CalEvent | null } | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // The week GRID is a wider-screen tool (the mockup hides it on phones): the
+  // agenda covers the same week in a form a phone can read.
+  const wideEnoughForWeek = useMediaQuery("(min-width: 48em)", false, { getInitialValueInEffect: false });
 
-  // Modals
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [selectedEvent, setSelectedEvent] = useState<CalEvent | null>(null);
-
-  // Add form state
-  const [formTitle, setFormTitle] = useState("");
-  const [formType, setFormType] = useState<EventTypeKey>("custom");
-  const [formCalendarId, setFormCalendarId] = useState("");
-  const [formDate, setFormDate] = useState("");
-  const [formStartTime, setFormStartTime] = useState("");
-  const [formEndTime, setFormEndTime] = useState("");
-  const [formAllDay, setFormAllDay] = useState(false);
-  const [formLocation, setFormLocation] = useState("");
-  const [formDescription, setFormDescription] = useState("");
-  const [formError, setFormError] = useState("");
-
-  // ── Queries ──────────────────────────────────────────────────
-
-  const { data: calendars = [], isLoading: calsLoading } = useQuery({
-    queryKey: ["calendars"],
-    queryFn: () =>
-      apiFetch<{ data: Calendar[] }>("/api/v1/calendars").then((r) => r.data),
-    staleTime: 60_000,
-  });
-
-  const { data: propertiesData } = useQuery({
-    queryKey: ["properties"],
-    queryFn: () => apiFetch<{ data: Property[] }>("/api/v1/properties"),
-    staleTime: 60_000,
-  });
-  const properties = propertiesData?.data ?? [];
-
-  const { data: allEvents = [], isLoading: eventsLoading } = useQuery({
-    queryKey: ["calendar-events", propertyFilter],
-    queryFn: () => {
-      const params: Record<string, string | undefined> = {};
-      if (propertyFilter) params.property_id = propertyFilter;
-      return apiFetch<{ data: CalEvent[] }>("/api/v1/calendars/events", {
-        params,
-      }).then((r) => r.data);
-    },
-    staleTime: 30_000,
-  });
-
-  // ── Mutations ────────────────────────────────────────────────
-
-  const createMutation = useMutation({
-    mutationFn: (body: Record<string, unknown>) =>
-      apiFetch<{ data: CalEvent }>(
-        `/api/v1/calendars/${formCalendarId}/events`,
-        { method: "POST", body }
-      ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["calendar-events"] });
-      setShowAddModal(false);
-      resetAddForm();
-    },
-    onError: (e: unknown) => {
-      setFormError(e instanceof Error ? e.message : "Failed to create event");
-    },
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: ({
-      calendarId,
-      eventId,
-    }: {
-      calendarId: string;
-      eventId: string;
-    }) =>
-      apiFetch<void>(`/api/v1/calendars/${calendarId}/events/${eventId}`, {
-        method: "DELETE",
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["calendar-events"] });
-      setSelectedEvent(null);
-    },
-  });
-
-  // ── Refs for default calendar ────────────────────────────────
-
-  // Set default calendar when calendars load
   useEffect(() => {
-    if (calendars.length > 0 && !formCalendarId) {
-      setFormCalendarId(calendars[0].id);
+    setToday(householdToday(timezone));
+    const id = setInterval(() => setToday(householdToday(timezone)), 60_000);
+    return () => clearInterval(id);
+  }, [timezone]);
+
+  // The anchor follows today until the person navigates away from it.
+  const anchorDate = anchor ?? today ?? "";
+
+  const range = useMemo(
+    () => (anchorDate ? rangeFor(view === "agenda" || view === "week" ? weekStartOf(anchorDate, view) : anchorDate, view) : null),
+    [anchorDate, view],
+  );
+
+  const calendarsQuery = useCalendars(!!today);
+  const eventsQuery = useCalendarEvents(range?.start ?? null, range?.end ?? null);
+  const billsQuery = useBills(!!today);
+  const peopleQuery = usePeople(!!today);
+  const activityQuery = useCalendarActivity(!!today);
+
+  const createEvent = useCreateEvent();
+  const updateEvent = useUpdateEvent();
+  const deleteEvent = useDeleteEvent();
+
+  const calendars = useMemo(() => calendarsQuery.data?.data ?? [], [calendarsQuery.data]);
+  const visibleCalendars = useMemo(
+    () => calendars.filter((c) => !hidden[c.id]),
+    [calendars, hidden],
+  );
+  const hiddenCount = calendars.filter((c) => hidden[c.id]).length;
+
+  // The API answers one entry per day of the range, each with its weekday, so a
+  // quiet day can be shown and a grid's columns named. An older API may not send
+  // it; then the events' own local_date/weekday still group the agenda, and the
+  // grid says why it can't draw its headers (it never invents a weekday).
+  const dayTable = useMemo<DayInfo[]>(() => eventsQuery.data?.days ?? [], [eventsQuery.data]);
+  const noDayTable = !eventsQuery.isLoading && missingDayTable(dayTable);
+  const rawDays = useMemo<DayInfo[]>(() => {
+    if (dayTable.length > 0) return dayTable;
+    return daysFromEvents(eventsQuery.data?.data ?? []);
+  }, [dayTable, eventsQuery.data]);
+
+  const visibleIds = useMemo(() => new Set(visibleCalendars.map((c) => c.id)), [visibleCalendars]);
+  const visibleEvents = useMemo(
+    () => (eventsQuery.data?.data ?? []).filter((e) => visibleIds.has(e.calendar_id)),
+    [eventsQuery.data, visibleIds],
+  );
+  const series = useMemo(() => groupSeries(visibleEvents), [visibleEvents]);
+  const days = useMemo(() => {
+    if (rawDays.length === 0) return [];
+    if (view === "month") {
+      // The API is asked for the month plus a week either side; the grid is the
+      // six weeks that cover the month.
+      return monthGrid(monthStart(anchorDate), rawDays);
     }
-  }, [calendars, formCalendarId]);
+    if (view === "day") return rawDays.filter((d) => d.local_date === anchorDate).slice(0, 1);
+    return rawDays.slice(0, 7);
+  }, [rawDays, view, anchorDate]);
 
-  // ── Filtered events ──────────────────────────────────────────
+  const agenda: AgendaDay[] = useMemo(
+    () => (today ? buildAgenda(visibleEvents, days, today) : []),
+    [visibleEvents, days, today],
+  );
 
-  const filteredEvents = useMemo(() => {
-    if (!typeFilter) return allEvents;
-    return allEvents.filter((e) => e.event_type === typeFilter);
-  }, [allEvents, typeFilter]);
+  const bills = useMemo(() => billsQuery.data?.data ?? [], [billsQuery.data]);
+  const billByEventId = useMemo(() => {
+    const map = new Map<string, BillReading>();
+    for (const ev of visibleEvents) {
+      const cal = calendars.find((c) => c.id === ev.calendar_id);
+      map.set(`${ev.id}@${ev.local_date ?? ""}`, billReading(ev, bills, today ?? "", { onBillsCalendar: cal?.type === "bills" }));
+    }
+    return map;
+  }, [visibleEvents, bills, calendars, today]);
 
-  // ── FullCalendar events ──────────────────────────────────────
+  const billFor = useCallback(
+    (ev: CalEvent) => billByEventId.get(`${ev.id}@${ev.local_date ?? ""}`),
+    [billByEventId],
+  );
 
-  const fcEvents = useMemo(() => {
-    return filteredEvents.map((e) => {
-      const et = EVENT_TYPES[e.event_type as EventTypeKey];
-      const bgColor =
-        e.color || et?.color || EVENT_TYPES.custom.color;
-      return {
-        id: e.id,
-        title: e.title,
-        start: e.start,
-        end: e.end,
-        allDay: e.all_day,
-        backgroundColor: bgColor,
-        borderColor: bgColor,
-        extendedProps: e,
-      };
-    });
-  }, [filteredEvents]);
+  const attribution = useMemo(
+    () => attributionMap(activityQuery.data?.data ?? [], null),
+    [activityQuery.data],
+  );
 
-  // ── Form helpers ─────────────────────────────────────────────
+  // ── navigation ────────────────────────────────────────────
+  const shift = (direction: -1 | 1) => {
+    if (!today) return;
+    const base = anchorDate || today;
+    if (view === "day") return setAnchor(addDays(base, direction));
+    if (view === "month") return setAnchor(addMonths(monthStart(base), direction));
+    setAnchor(addDays(base, 7 * direction));
+  };
+  const goToday = () => {
+    setAnchor(null);
+    setView((v) => v);
+  };
 
-  function resetAddForm() {
-    setFormTitle("");
-    setFormType("custom");
-    setFormDate("");
-    setFormStartTime("");
-    setFormEndTime("");
-    setFormAllDay(false);
-    setFormLocation("");
-    setFormDescription("");
-    setFormError("");
-  }
-
-  function openAddModal() {
-    resetAddForm();
-    setShowAddModal(true);
-  }
-
-  function handleAddSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setFormError("");
-
-    if (!formTitle.trim()) {
-      setFormError("Title is required");
+  // ── writes ────────────────────────────────────────────────
+  const handleSave = (values: EventFormValues, target: { calendarId: string; eventId: string | null }) => {
+    setSaveError(null);
+    const body = eventBody(values, timezone);
+    const done = () => {
+      setEditing(null);
+      setSheet(null);
+      notifications.show({ message: target.eventId ? "Event saved. Everyone in the family sees it." : "Event added. Everyone in the family sees it.", color: "cyan" });
+    };
+    const failed = (err: unknown) => setSaveError(err instanceof Error ? err.message : "That didn't save. Try again.");
+    if (target.eventId) {
+      // The series' own id: an occurrence and its siblings share it, and the
+      // API's PATCH takes that id.
+      updateEvent.mutate({ calendarId: target.calendarId, eventId: target.eventId, body }, { onSuccess: done, onError: failed });
       return;
     }
-    if (!formCalendarId) {
-      setFormError("Please select a calendar");
-      return;
-    }
-    if (!formDate) {
-      setFormError("Date is required");
-      return;
-    }
+    // A new event belongs to the calendar in the form; event_type is a kind the
+    // API accepts, not the calendar's type.
+    createEvent.mutate(
+      { calendarId: target.calendarId, body: { ...body, event_type: values.eventType || "family" } },
+      { onSuccess: done, onError: failed },
+    );
+  };
 
-    const start = toRFC3339(formDate, formAllDay ? "" : formStartTime || "09:00");
-    const end = formAllDay
-      ? toRFC3339(formDate, "")
-      : toRFC3339(formDate, formEndTime || formStartTime || "10:00");
+  const handleDelete = () => {
+    const target = sheet?.series.occurrences[0] ?? editing?.occurrence;
+    if (!target) return;
+    deleteEvent.mutate(
+      { calendarId: target.calendar_id, eventId: seriesId(target) },
+      {
+        onSuccess: () => {
+          setSheet(null);
+          setEditing(null);
+          notifications.show({ message: sheet?.series.repeating ? "Deleted every date in the series." : "Event deleted.", color: "cyan" });
+        },
+        onError: (err) => {
+          const message = err instanceof Error ? err.message : "That didn't delete. Try again.";
+          setSaveError(message);
+          notifications.show({ message, color: "red" });
+        },
+      },
+    );
+  };
 
-    createMutation.mutate({
-      title: formTitle.trim(),
-      description: formDescription.trim() || undefined,
-      start,
-      end,
-      all_day: formAllDay,
-      location: formLocation.trim() || undefined,
-      event_type: formType,
-      color: EVENT_TYPES[formType].color,
-    });
+  // ── states ────────────────────────────────────────────────
+  if (!today) {
+    return (
+      <div className="mx-auto w-full max-w-[1120px] px-4 pb-8 pt-4 md:px-6 md:pt-6" id="calendar-page">
+        <CalendarShellSkeleton />
+      </div>
+    );
   }
 
-  function handleDelete() {
-    if (!selectedEvent) return;
-    deleteMutation.mutate({
-      calendarId: selectedEvent.calendar_id,
-      eventId: selectedEvent.id,
-    });
-  }
-
-  // ── Render ───────────────────────────────────────────────────
+  const rangeLabel = view === "week" ? weekRangeLabel(days) : days.length > 0 ? rangeTitle(days, view === "agenda" ? "week" : view) : "";
+  const loading = eventsQuery.isLoading || calendarsQuery.isLoading;
+  const error = (eventsQuery.error ?? calendarsQuery.error) as Error | null;
+  const empty = !loading && !error && series.length === 0;
+  const reason = empty
+    ? emptyReason({
+        hiddenCount,
+        calendarCount: calendars.length,
+        hasAnyEvents: (eventsQuery.data?.data ?? []).length > 0,
+        rangeLabel: rangeLabel || "this week",
+        canWrite,
+      })
+    : null;
 
   return (
-    <div className="flex h-full flex-col">
-      {/* ── Filter bar ────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-3 border-b border-gray-200 bg-white px-4 py-3 sm:flex-nowrap">
-        {/* Event type chips */}
-        <div className="flex flex-wrap items-center gap-1.5">
+    <div className="mx-auto flex w-full max-w-[1120px] flex-col gap-4 px-4 pb-8 pt-4 md:px-6 md:pt-6" id="calendar-page">
+      {/* ── toolbar ──────────────────────────────────────────── */}
+      <div className="flex flex-col gap-2.5 md:flex-row md:items-center md:gap-3">
+        <div className="flex min-w-0 items-center gap-1">
           <button
-            onClick={() => setTypeFilter(null)}
-            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-              typeFilter === null
-                ? "bg-indigo-600 text-white"
-                : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-            }`}
+            type="button"
+            onClick={() => shift(-1)}
+            className="grid h-11 w-11 flex-none place-items-center rounded-token-md text-ink-2 hover:bg-surface-2"
+            aria-label={view === "day" ? "Previous day" : view === "month" ? "Previous month" : "Previous week"}
+            data-testid="calendar-prev"
           >
-            All
+            <IconChevronLeft size={20} stroke={ICON_STROKE} />
           </button>
-          {TYPE_KEYS.map((key) => {
-            const et = EVENT_TYPES[key];
-            return (
-              <button
-                key={key}
-                onClick={() => setTypeFilter(key)}
-                className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                  typeFilter === key
-                    ? "text-white"
-                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                }`}
-                style={
-                  typeFilter === key
-                    ? { backgroundColor: et.color }
-                    : undefined
-                }
-              >
-                {et.icon} {et.label}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Property dropdown + Add button */}
-        <div className="ml-auto flex items-center gap-3">
-          <select
-            value={propertyFilter}
-            onChange={(e) => setPropertyFilter(e.target.value)}
-            className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          <button
+            type="button"
+            onClick={() => shift(1)}
+            className="grid h-11 w-11 flex-none place-items-center rounded-token-md text-ink-2 hover:bg-surface-2"
+            aria-label={view === "day" ? "Next day" : view === "month" ? "Next month" : "Next week"}
+            data-testid="calendar-next"
           >
-            <option value="">All Properties</option>
-            {properties.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-
-          <Button onClick={openAddModal} className="shrink-0">
-            + Add Event
-          </Button>
+            <IconChevronRight size={20} stroke={ICON_STROKE} />
+          </button>
+          <div className="min-w-0 flex-1 px-1">
+            <h2 className="truncate text-[18px] font-semibold leading-tight tracking-tight text-ink md:text-[20px]" data-testid="calendar-range">
+              {loading ? <Skeleton height={20} width={150} /> : rangeLabel || "Calendar"}
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={goToday}
+            className="h-9 flex-none rounded-token-sm border border-line bg-surface px-3 text-[13px] font-semibold text-ink hover:bg-surface-2"
+            data-testid="calendar-today"
+          >
+            Today
+          </button>
         </div>
-      </div>
 
-      {/* ── Calendar ──────────────────────────────────────────── */}
-      <div className="flex-1 p-4" style={{ minHeight: "600px" }}>
-        {eventsLoading ? (
-          <div className="flex h-full items-center justify-center">
-            <svg
-              className="h-6 w-6 animate-spin text-indigo-600"
-              fill="none"
-              viewBox="0 0 24 24"
-            >
-              <circle
-                className="opacity-25"
-                cx="12"
-                cy="12"
-                r="10"
-                stroke="currentColor"
-                strokeWidth="4"
-              />
-              <path
-                className="opacity-75"
-                fill="currentColor"
-                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-              />
-            </svg>
-          </div>
-        ) : (
-          <FullCalendar
-            plugins={[dayGridPlugin, timeGridPlugin]}
-            initialView="dayGridMonth"
-            headerToolbar={{
-              left: "prev,next today",
-              center: "title",
-              right: "dayGridMonth,timeGridWeek,timeGridDay",
+        <div className="flex items-center gap-2 md:ml-auto">
+          <SegmentedControl
+            value={view}
+            onChange={(value) => {
+              setView(value as CalendarView);
+              // Switching to the week view from the agenda should land on the
+              // week that CONTAINS the anchor: the anchor is the day.
             }}
-            events={fcEvents}
-            eventClick={(info) => {
-              setSelectedEvent(info.event.extendedProps as CalEvent);
-            }}
-            height="auto"
-            contentHeight="auto"
-            eventDisplay="block"
-            dayMaxEvents={4}
-            nowIndicator
-            eventTimeFormat={{
-              hour: "numeric",
-              minute: "2-digit",
-              meridiem: "short",
-            }}
+            data={wideEnoughForWeek ? VIEW_OPTIONS : VIEW_OPTIONS.filter((o) => o.value !== "week")}
+            size="xs"
+            radius="md"
+            aria-label="Calendar view"
+            data-testid="calendar-view"
           />
-        )}
-      </div>
-
-      {/* ── Add Event modal ───────────────────────────────────── */}
-      <Modal
-        opened={showAddModal}
-        onClose={() => {
-          setShowAddModal(false);
-          resetAddForm();
-        }}
-        title="Add Event"
-        size="lg"
-      >
-        <form onSubmit={handleAddSubmit} className="space-y-4">
-          <Input
-            label="Title"
-            value={formTitle}
-            onChange={(e) => setFormTitle(e.target.value)}
-            placeholder="e.g. Dentist appointment"
-            required
-          />
-
-          <Select
-            label="Event Type"
-            value={formType}
-            onChange={(e) => {
-              if (e) setFormType(e as EventTypeKey);
-            }}
-            data={TYPE_KEYS.map((k) => ({
-              value: k,
-              label: EVENT_TYPES[k].label,
-            }))}
-          />
-
-          <Select
-            label="Calendar"
-            value={formCalendarId}
-            onChange={(e) => e && setFormCalendarId(e)}
-            placeholder={calsLoading ? "Loading..." : "Select a calendar"}
-            data={calendars.map((c) => ({
-              value: c.id,
-              label: calendarLabel(c, properties),
-            }))}
-          />
-
-          <Input
-            label="Date"
-            type="date"
-            value={formDate}
-            onChange={(e) => setFormDate(e.target.value)}
-            required
-          />
-
-          {/* All-day toggle */}
-          <label className="flex items-center gap-2 text-sm font-medium text-gray-900">
-            <input
-              type="checkbox"
-              checked={formAllDay}
-              onChange={(e) => setFormAllDay(e.target.checked)}
-              className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-600"
+          {calendars.length > 1 && (
+            <CalendarFilter
+              calendars={calendars}
+              hidden={hidden}
+              onToggle={(id) => setHidden((prev) => ({ ...prev, [id]: !prev[id] }))}
+              onShowAll={() => setHidden({})}
             />
-            All Day
-          </label>
-
-          {!formAllDay && (
-            <div className="grid grid-cols-2 gap-3">
-              <Input
-                label="Start Time"
-                type="time"
-                value={formStartTime}
-                onChange={(e) => setFormStartTime(e.target.value)}
-              />
-              <Input
-                label="End Time"
-                type="time"
-                value={formEndTime}
-                onChange={(e) => setFormEndTime(e.target.value)}
-              />
-            </div>
           )}
-
-          <Input
-            label="Location"
-            value={formLocation}
-            onChange={(e) => setFormLocation(e.target.value)}
-            placeholder="e.g. 123 Main St"
-          />
-
-          {/* Description — textarea (not available as a UI component, so use styled textarea) */}
-          <div>
-            <label
-              htmlFor="event-description"
-              className="block text-sm font-medium text-gray-900"
-            >
-              Description
-            </label>
-            <textarea
-              id="event-description"
-              value={formDescription}
-              onChange={(e) => setFormDescription(e.target.value)}
-              rows={3}
-              placeholder="Event notes..."
-              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-600"
-            />
-          </div>
-
-          {formError && (
-            <p className="text-sm text-red-600">{formError}</p>
-          )}
-
-          <div className="flex justify-end gap-3 pt-2">
+          {canWrite && (
             <button
               type="button"
-              onClick={() => {
-                setShowAddModal(false);
-                resetAddForm();
-              }}
-              className="inline-flex items-center justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+              onClick={() => setEditing({ series: null, occurrence: null })}
+              className="hidden h-9 items-center gap-1.5 rounded-token-sm bg-accent-fill px-3.5 text-[13px] font-semibold text-white md:inline-flex"
+              data-testid="calendar-new"
             >
-              Cancel
+              <IconPlus size={16} stroke={ICON_STROKE} aria-hidden />
+              New event
             </button>
-            <Button type="submit" loading={createMutation.isPending}>
-              Add Event
-            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* A filter that hides calendars says so: an empty week must never be a
+          filter the person forgot. */}
+      {hiddenCount > 0 && (
+        <div className="flex items-center gap-2 rounded-token-sm bg-surface-2 py-1 pl-3 pr-1 text-[13px] text-ink-2" data-testid="calendar-filter-note">
+          <IconFilter size={16} stroke={ICON_STROKE} className="flex-none text-ink-3" aria-hidden />
+          <span className="flex-1">
+            {calendars.filter((c) => hidden[c.id]).map((c) => c.name).join(" and ")} {hiddenCount === 1 ? "is" : "are"} hidden
+          </span>
+          <button type="button" onClick={() => setHidden({})} className="min-h-9 rounded-token-sm px-2 text-[13px] font-semibold text-accent">
+            Show all
+          </button>
+        </div>
+      )}
+
+      {/* ── content ──────────────────────────────────────────── */}
+      {error ? (
+        <CalendarError
+          what="Couldn't load the calendar"
+          onRetry={() => {
+            eventsQuery.refetch();
+            calendarsQuery.refetch();
+          }}
+        />
+      ) : loading ? (
+        <CalendarSkeleton rows={view === "agenda" ? 4 : 3} />
+      ) : noDayTable && view !== "agenda" ? (
+        <CalendarEmpty
+          title="This view needs the calendar's day list"
+          body="Home OS answered with your events but not the list of days, so the grid's column headers can't be drawn without guessing a weekday. The agenda shows everything in the meantime."
+          action={null}
+          onNew={() => setEditing({ series: null, occurrence: null })}
+          onShowAll={() => setHidden({})}
+        />
+      ) : empty && reason ? (
+        <CalendarEmpty
+          title={reason.title}
+          body={reason.body}
+          action={reason.action}
+          onNew={() => setEditing({ series: null, occurrence: null })}
+          onShowAll={() => setHidden({})}
+        />
+      ) : (
+        <div className="md:grid md:grid-cols-[minmax(0,1fr)]">
+          {view === "agenda" && (
+            <AgendaView
+              days={days}
+              agenda={agenda}
+              series={series}
+              calendars={calendars}
+              bills={bills}
+              people={peopleQuery.data?.data ?? []}
+              today={today}
+              billFor={billFor}
+              onOpen={(s, o) => setSheet({ series: s, occurrence: o })}
+              onJumpToDate={(d) => {
+                setAnchor(d);
+                setView("day");
+              }}
+            />
+          )}
+          {view === "day" && (
+            <DayGridView
+              days={days}
+              agenda={agenda}
+              series={series}
+              calendars={calendars}
+              bills={bills}
+              people={peopleQuery.data?.data ?? []}
+              today={today}
+              billFor={billFor}
+              onOpen={(s, o) => setSheet({ series: s, occurrence: o })}
+              onJumpToDate={(d) => setAnchor(d)}
+            />
+          )}
+          {view === "week" && (
+            <WeekGridView
+              days={days}
+              agenda={agenda}
+              series={series}
+              calendars={calendars}
+              bills={bills}
+              people={peopleQuery.data?.data ?? []}
+              today={today}
+              billFor={billFor}
+              onOpen={(s, o) => setSheet({ series: s, occurrence: o })}
+              onJumpToDate={(d) => setAnchor(d)}
+            />
+          )}
+          {view === "month" && (
+            <MonthView
+              days={days}
+              agenda={agenda}
+              series={series}
+              calendars={calendars}
+              bills={bills}
+              people={peopleQuery.data?.data ?? []}
+              today={today}
+              billFor={billFor}
+              onOpen={(s, o) => setSheet({ series: s, occurrence: o })}
+              onJumpToDate={(d) => {
+                setAnchor(d);
+                setView("day");
+              }}
+            />
+          )}
+        </div>
+      )}
+
+      {/* New event, as a floating action on a phone (the mockup's FAB). It
+          stays away when the empty card is up: that card already carries the
+          one action, and two Add buttons on top of each other is exactly the
+          kind of duplication a careful screen avoids. */}
+      {canWrite && !(empty && reason) && (
+        <div className="pointer-events-none sticky bottom-[calc(72px+env(safe-area-inset-bottom))] z-30 flex h-0 justify-end md:hidden">
+          <button
+            type="button"
+            onClick={() => setEditing({ series: null, occurrence: null })}
+            className="pointer-events-auto grid h-14 w-14 -translate-y-full place-items-center rounded-[16px] bg-accent-fill text-white shadow-token-lg"
+            aria-label="New event"
+            data-testid="calendar-fab"
+          >
+            <IconPlus size={26} stroke={2} />
+          </button>
+        </div>
+      )}
+
+      {/* ── overlays ─────────────────────────────────────────── */}
+      <EventSheet
+        opened={!!sheet}
+        onClose={() => setSheet(null)}
+        series={sheet?.series ?? null}
+        occurrence={sheet?.occurrence ?? null}
+        calendars={calendars}
+        bills={bills}
+        people={peopleQuery.data?.data ?? []}
+        attribution={sheet ? attribution.get(sheet.occurrence.id) : undefined}
+        today={today}
+        canWrite={canWrite}
+        onEdit={() => {
+          if (!sheet) return;
+          setEditing({ series: sheet.series, occurrence: sheet.occurrence });
+          setSheet(null);
+        }}
+        onDelete={handleDelete}
+        onOpenRecord={(href) => router.push(href)}
+      />
+
+      <EventEditor
+        opened={!!editing}
+        onClose={() => {
+          setEditing(null);
+          setSaveError(null);
+        }}
+        series={editing?.series ?? null}
+        occurrence={editing?.occurrence ?? null}
+        anchorDate={anchorDate || today}
+        calendars={calendars}
+        timezone={timezone}
+        saving={createEvent.isPending || updateEvent.isPending}
+        error={saveError}
+        onSave={handleSave}
+        onDelete={handleDelete}
+        canWrite={canWrite}
+      />
+    </div>
+  );
+}
+
+// ── small chrome ────────────────────────────────────────────
+
+function CalendarShellSkeleton() {
+  return (
+    <div className="flex flex-col gap-4" aria-busy="true">
+      <Skeleton height={40} radius="sm" />
+      <Skeleton height={220} radius="md" />
+      <Skeleton height={120} radius="md" />
+    </div>
+  );
+}
+
+/** Calendars, each with a colour and its kind; a checkbox hides one. */
+function CalendarFilter({
+  calendars,
+  hidden,
+  onToggle,
+  onShowAll,
+}: {
+  calendars: readonly CalendarRow[];
+  hidden: Record<string, boolean>;
+  onToggle: (id: string) => void;
+  onShowAll: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const hiddenCount = calendars.filter((c) => hidden[c.id]).length;
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label="Filter calendars"
+        className="relative grid h-9 w-9 place-items-center rounded-token-md border border-line bg-surface text-ink-2 hover:bg-surface-2"
+        data-testid="calendar-filter"
+      >
+        <IconFilter size={18} stroke={ICON_STROKE} />
+        {hiddenCount > 0 && <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-accent" aria-hidden />}
+      </button>
+      {open && (
+        <>
+          <button type="button" className="fixed inset-0 z-30 cursor-default" aria-label="Close filter" onClick={() => setOpen(false)} />
+          <div
+            className="absolute right-0 z-40 mt-1 w-64 rounded-token-md border border-line bg-raised p-2 shadow-token-lg"
+            role="dialog"
+            aria-label="Show on calendar"
+            data-testid="calendar-filter-panel"
+          >
+            {calendars.map((c) => (
+              <label key={c.id} className="flex min-h-11 cursor-pointer items-center gap-2.5 rounded-token-sm px-2 hover:bg-surface-2">
+                <input
+                  type="checkbox"
+                  checked={!hidden[c.id]}
+                  onChange={() => onToggle(c.id)}
+                  className="h-5 w-5 flex-none"
+                  style={{ accentColor: c.color || "var(--accent)" }}
+                />
+                <span className="h-3 w-3 flex-none rounded-[4px]" style={{ background: c.color || "var(--accent)" }} aria-hidden />
+                <span className="min-w-0 flex-1">
+                  <b className="block truncate text-sm font-medium text-ink">{c.name}</b>
+                  <span className="block truncate text-[12px] text-ink-3">{calendarKindLabel(c.type)}</span>
+                </span>
+              </label>
+            ))}
+            <button
+              type="button"
+              onClick={onShowAll}
+              className="mt-1 flex min-h-10 w-full items-center gap-2 rounded-token-sm px-2 text-[13px] font-semibold text-accent hover:bg-surface-2"
+            >
+              <IconX size={16} stroke={ICON_STROKE} aria-hidden />
+              Show all
+            </button>
           </div>
-        </form>
-      </Modal>
-
-      {/* ── Detail / Delete modal ─────────────────────────────── */}
-      {selectedEvent && (
-        <Modal
-          opened={!!selectedEvent}
-          onClose={() => setSelectedEvent(null)}
-          title="Event Details"
-          size="md"
-        >
-          <div className="space-y-4">
-            {/* Title */}
-            <div>
-              <p className="text-xs font-medium text-gray-500">Title</p>
-              <p className="text-sm font-semibold text-gray-900">
-                {selectedEvent.title}
-              </p>
-            </div>
-
-            {/* Event Type */}
-            <div>
-              <p className="text-xs font-medium text-gray-500">Event Type</p>
-              <p className="text-sm text-gray-700 capitalize">
-                {(() => {
-                  const et =
-                    EVENT_TYPES[selectedEvent.event_type as EventTypeKey];
-                  return et ? (
-                    <span className="inline-flex items-center gap-1">{et.icon} {et.label}</span>
-                  ) : selectedEvent.event_type;
-                })()}
-              </p>
-            </div>
-
-            {/* Date / Time */}
-            <div>
-              <p className="text-xs font-medium text-gray-500">Date</p>
-              <p className="text-sm text-gray-700">
-                {new Date(selectedEvent.start).toLocaleDateString("en-US", {
-                  weekday: "long",
-                  month: "long",
-                  day: "numeric",
-                  year: "numeric",
-                })}
-                {!selectedEvent.all_day && (
-                  <>
-                    {" "}
-                    {new Date(selectedEvent.start).toLocaleTimeString(
-                      "en-US",
-                      { hour: "numeric", minute: "2-digit" }
-                    )}
-                    {" – "}
-                    {new Date(selectedEvent.end).toLocaleTimeString("en-US", {
-                      hour: "numeric",
-                      minute: "2-digit",
-                    })}
-                  </>
-                )}
-              </p>
-            </div>
-
-            {/* Location */}
-            {selectedEvent.location && (
-              <div>
-                <p className="text-xs font-medium text-gray-500">Location</p>
-                <p className="text-sm text-gray-700">
-                  {selectedEvent.location}
-                </p>
-              </div>
-            )}
-
-            {/* Description */}
-            {selectedEvent.description && (
-              <div>
-                <p className="text-xs font-medium text-gray-500">
-                  Description
-                </p>
-                <p className="text-sm text-gray-700 whitespace-pre-wrap">
-                  {selectedEvent.description}
-                </p>
-              </div>
-            )}
-
-            {/* Calendar */}
-            <div>
-              <p className="text-xs font-medium text-gray-500">Calendar</p>
-              <p className="text-sm text-gray-700">
-                {(() => {
-                  const cal = calendars.find(
-                    (c) => c.id === selectedEvent.calendar_id
-                  );
-                  return cal ? calendarLabel(cal, properties) : "Unknown";
-                })()}
-              </p>
-            </div>
-
-            {/* Linked entity */}
-            {selectedEvent.entity_type && (
-              <div className="rounded-md bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
-                Linked to: {selectedEvent.entity_type}
-              </div>
-            )}
-
-            {/* Delete button */}
-            <div className="flex justify-end gap-3 pt-2 border-t border-gray-100">
-              <button
-                type="button"
-                onClick={handleDelete}
-                disabled={deleteMutation.isPending}
-                className="inline-flex items-center justify-center rounded-md border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-600 hover:bg-red-50 disabled:opacity-50"
-              >
-                {deleteMutation.isPending ? "Deleting..." : "Delete Event"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelectedEvent(null)}
-                className="inline-flex items-center justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </Modal>
+        </>
       )}
     </div>
   );
+}
+
+function calendarKindLabel(type: string): string {
+  switch (type) {
+    case "family":
+      return "The family's own events";
+    case "bills":
+      return "Due dates from Money";
+    case "maintenance":
+      return "Upkeep from People & House";
+    case "vehicles":
+      return "Vehicle dates";
+    case "properties":
+      return "This property";
+    default:
+      return "Shared calendar";
+  }
+}
+
+// ── date arithmetic on the DIGITS the API sent ───────────────
+
+/** The week's first day: the anchor itself (the agenda starts on the day you are). */
+function weekStartOf(anchor: string, view: CalendarView): string {
+  return view === "week" ? anchor : anchor;
+}
+
+function addDays(date: string, n: number): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!m) return date;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + n));
+  return d.toISOString().slice(0, 10);
+}
+
+function addMonths(date: string, n: number): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!m) return date;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1 + n;
+  const target = new Date(Date.UTC(y, mo, 1));
+  // Clamp the day to the target month's length (Jan 31 + 1 month → Feb 28).
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  const day = Math.min(Number(m[3]), lastDay);
+  return `${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }

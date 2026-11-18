@@ -120,6 +120,20 @@ func parseRange(r *http.Request) (EventRange, string) {
 	return rg, ""
 }
 
+// eventListResponse is a listing's body: the events (each carrying its
+// local_date, weekday and local_time, see localday.go) and, for a requested
+// range, the weekday of every day in it, so a calendar grid draws its column
+// headers from data instead of deriving a weekday from a date (#4550).
+//
+// `days` is omitted for an unbounded listing, which has no range to describe.
+func eventListResponse(events []Event, rg EventRange) map[string]any {
+	body := map[string]any{"data": events}
+	if rg.expands() {
+		body["days"] = rangeDays(*rg.Start, *rg.End, 0)
+	}
+	return body
+}
+
 // writeEventError answers a create/update error: 400 with the message for
 // invalid input (bad or unsupported RRULE, timezone, reminders), then
 // apierr.DB: an entity_type that is not a registered entity kind is 400
@@ -178,7 +192,7 @@ func (h *Handler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	apierr.JSON(w, http.StatusOK, map[string]any{"data": events})
+	apierr.JSON(w, http.StatusOK, eventListResponse(events, rg))
 }
 
 // ListAllEvents GET /api/v1/calendars/events — all events for household
@@ -207,7 +221,7 @@ func (h *Handler) ListAllEvents(w http.ResponseWriter, r *http.Request) {
 		apierr.InternalError(w, err)
 		return
 	}
-	apierr.JSON(w, http.StatusOK, map[string]any{"data": events})
+	apierr.JSON(w, http.StatusOK, eventListResponse(events, rg))
 }
 
 // CreateEvent POST /api/v1/calendars/:id/events
