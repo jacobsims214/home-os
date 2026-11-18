@@ -212,9 +212,10 @@ export default function PetDetailPage() {
       </span>
       <div className="min-w-0">
         <h3 className="text-[22px] font-semibold leading-tight tracking-tight text-ink [overflow-wrap:anywhere]">{pet.name}</h3>
-        <p className="mt-0.5 text-sm text-ink-3 [overflow-wrap:anywhere]">
-          {[subtitle, vet ? `Vet: ${vet}` : ""].filter(Boolean).join(" · ") || "No details yet"}
-        </p>
+        {/* Breed and age only: the vet is the Vet section's job one line below,
+            and the mockup's head line carries the next vet visit, which the API
+            does not return. This says what the record does have. */}
+        <p className="mt-0.5 text-sm text-ink-3 [overflow-wrap:anywhere]">{subtitle || "No details yet"}</p>
       </div>
     </div>
   ) : null;

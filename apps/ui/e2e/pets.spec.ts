@@ -212,10 +212,12 @@ for (const colorScheme of ["light", "dark"] as const) {
       const actions = main.getByRole("button", { name: "Actions for Biscuit" });
       expect((await actions.boundingBox())!.height).toBeGreaterThanOrEqual(43.5);
 
-      // The head: the paw, the name, breed and age.
+      // The head: the paw, the name, breed and age. The vet is the Vet
+      // section's job, not the head's.
       const head = main.locator("[data-pet-head]");
       await expect(head).toBeVisible();
       await expect(head).toContainText("Golden retriever \u00b7 6");
+      await expect(head).not.toContainText("Springfield Animal Hospital");
 
       // Care notes, above everything, with the warning in words (never colour alone).
       const notes = main.locator("[data-pet-notes]");
