@@ -5,14 +5,13 @@
  * spec (KB design/app-shell.md, artifact #75 v1). Replaces the old,
  * never-mounted BottomNav.
  *
- * - Five equal tabs: Today, Calendar, Lists, Meals (TAB_SECTIONS from
- *   nav-config) and More. The active tab comes from the route
- *   (activeSection), with aria-current="page".
- * - Sections without a page yet (`comingSoon`) stay in place but don't link
- *   to a 404: they're dimmed, and tapping one says it's coming soon.
- * - More is a button that opens the More sheet: search, the four Household
- *   sections as tiles, then Notifications, Switch family, Settings and the
- *   account row. While the sheet is open More is the active tab.
+ * - Four tabs from nav-config (TAB_SECTIONS: Today, Calendar, Meals) plus More.
+ *   The active tab comes from the route (activeSection), with
+ *   aria-current="page". Every tab is a link: a section only exists in
+ *   nav-config when its page exists (#5199), so there is no placeholder tab.
+ * - More is a button that opens the More sheet: search, the Household sections
+ *   as tiles, then Notifications, Switch family, Settings and the account row.
+ *   While the sheet is open More is the active tab.
  * - Tabs and tiles are filtered by the user's household role
  *   (useNavSections, #4543): a housesitter has no Money or Documents tile,
  *   a vendor keeps Today and More only. The UI hides; the API enforces.
@@ -29,7 +28,6 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Avatar, Drawer, TextInput, UnstyledButton, VisuallyHidden } from "@mantine/core";
 import { useReducedMotion } from "@mantine/hooks";
-import { notifications } from "@mantine/notifications";
 import { IconBell, IconChevronRight, IconLayoutGrid, IconSearch } from "@tabler/icons-react";
 import { useNavSections } from "@/components/shared/use-nav-role";
 import HouseholdSwitcher, {
@@ -47,12 +45,17 @@ import {
 } from "@/components/shared/nav-config";
 import classes from "./BottomNav.module.css";
 
-/** One-line hints under the More sheet's Household tiles. */
+/**
+ * One-line hints under the More sheet's Household tiles, from artifact #75 v1
+ * (#5199). They describe what is behind the tile; they never say "coming soon"
+ * — a destination that isn't built isn't in nav-config, so it has no tile.
+ * People & House uses the artifact's wording; Money keeps its static line
+ * because the artifact's live count ("2 bills due this week") needs the
+ * due-soon data the page tickets own.
+ */
 const TILE_HINTS: Partial<Record<NavSectionId, string>> = {
-  documents: "Coming soon",
-  people: "Properties, members, vehicles",
+  people: "Family, home, cars, pets, vendors",
   money: "Bills and loans",
-  guides: "Coming soon",
 };
 
 interface BottomNavProps {
@@ -128,25 +131,6 @@ function Tab({ section, active }: { section: NavSection; active: boolean }) {
     </>
   );
 
-  if (section.comingSoon) {
-    return (
-      <button
-        type="button"
-        className={classes.tab}
-        aria-disabled="true"
-        onClick={() =>
-          notifications.show({
-            id: `coming-soon-${section.id}`,
-            message: `${section.label} is coming soon.`,
-            autoClose: 2500,
-          })
-        }
-      >
-        {inner}
-        <VisuallyHidden>(coming soon)</VisuallyHidden>
-      </button>
-    );
-  }
   return (
     <Link
       href={section.href}
@@ -305,13 +289,6 @@ function Tile({ section, active }: { section: NavSection; active: boolean }) {
       <span className={classes.tileHint}>{TILE_HINTS[section.id]}</span>
     </>
   );
-  if (section.comingSoon) {
-    return (
-      <div className={classes.tile} aria-disabled="true">
-        {inner}
-      </div>
-    );
-  }
   return (
     <Link href={section.href} className={classes.tile} aria-current={active ? "page" : undefined}>
       {inner}

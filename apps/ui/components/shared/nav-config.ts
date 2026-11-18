@@ -4,18 +4,25 @@
  * (#4536) and the sidebar / drawer content (#4543).
  *
  * Order, grouping, labels and icons follow the approved shell spec
- * (KB design/app-shell.md, artifact #75 v1): Today, Calendar, Lists, Meals |
- * "Household": Documents, People & House, Money, Guides | Settings.
+ * (KB design/app-shell.md, artifact #75 v1): Today, Calendar, Meals |
+ * "Household": People & House, Money | Settings.
+ *
+ * EVERY SECTION HERE IS A REAL DESTINATION (#5199). The list used to carry
+ * Lists, Documents and Guides with `comingSoon: true`, which the shell rendered
+ * as a "Soon" pill / "Coming soon" tile: placeholder copy shipped to a family,
+ * advertising features the build did not have (artifact #168, D7/D8; the
+ * approved artifact has no such badge anywhere). Those three have no page yet,
+ * so they are simply not in the list — a hidden destination is honest, a badge
+ * saying "soon" is a promise. When one of those pages lands, add its section
+ * back here pointing at the real route; there is deliberately no flag for
+ * "planned but unbuilt".
  *
  * Plain data and pure helpers only (no JSX), so it can be unit tested.
  */
 import type { Icon } from "@tabler/icons-react";
 import {
-  IconBook,
   IconCalendar,
-  IconFileText,
   IconHome,
-  IconListCheck,
   IconSettings,
   IconSun,
   IconToolsKitchen,
@@ -44,19 +51,10 @@ export const NAV_ROLES: readonly NavRole[] = [
 const FAMILY: readonly NavRole[] = ["owner", "family_manager", "family_member"];
 /** Family roles plus viewer (read-only on everything). */
 const READERS: readonly NavRole[] = [...FAMILY, "viewer"];
-/** Readers plus housesitter (calendar, lists, meals, guides). */
+/** Readers plus housesitter (calendar and meals). */
 const SITTERS: readonly NavRole[] = [...READERS, "housesitter"];
 
-export type NavSectionId =
-  | "today"
-  | "calendar"
-  | "lists"
-  | "meals"
-  | "documents"
-  | "people"
-  | "money"
-  | "guides"
-  | "settings";
+export type NavSectionId = "today" | "calendar" | "meals" | "people" | "money" | "settings";
 
 export interface NavSection {
   id: NavSectionId;
@@ -73,11 +71,6 @@ export interface NavSection {
    * highlighted on today's pages until the Family Hub pages replace them.
    */
   matches?: string[];
-  /**
-   * The page doesn't exist yet (its Stage 3 ticket builds it). Navigation
-   * surfaces show the item but don't link to a 404.
-   */
-  comingSoon?: boolean;
   /**
    * Roles that see this section. Left out: every role (including the
    * vendor, who reaches properties and maintenance under People & House).
@@ -107,7 +100,6 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     matches: ["/dashboard/activity"],
   },
   { id: "calendar", label: "Calendar", href: "/dashboard/calendar", icon: IconCalendar, group: "main", tab: true, roles: SITTERS },
-  { id: "lists", label: "Lists", href: "/dashboard/lists", icon: IconListCheck, group: "main", tab: true, comingSoon: true, roles: SITTERS },
   // Meals is the WEEK PLAN and the dinner suggestions (#4568), with the recipe
   // box one tap away on its own tab (/dashboard/recipes). #4567 built the recipe
   // pages and pointed this tab at them only because /dashboard/meals did not
@@ -123,7 +115,6 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     roles: SITTERS,
     matches: ["/dashboard/recipes"],
   },
-  { id: "documents", label: "Documents", href: "/dashboard/documents", icon: IconFileText, group: "household", comingSoon: true, roles: READERS },
   {
     id: "people",
     label: "People & House",
@@ -151,7 +142,6 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     matches: ["/dashboard/money", "/dashboard/loans"],
     roles: READERS,
   },
-  { id: "guides", label: "Guides", href: "/dashboard/guides", icon: IconBook, group: "household", comingSoon: true, roles: SITTERS },
   { id: "settings", label: "Settings", href: "/dashboard/settings", icon: IconSettings, group: "you", matches: ["/dashboard/admin"] },
 ];
 

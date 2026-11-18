@@ -119,7 +119,7 @@ test.describe("desktop 1440px", () => {
     await expectHeadingUncovered(page);
     await expectNoHorizontalOverflow(page);
 
-    // Sidebar content from nav-config (#4543): all nine sections, Today current.
+    // Sidebar content from nav-config (#4543): every section, Today current.
     expect(await sectionNames(nav)).toEqual(ALL_SECTIONS);
     await expect(nav.getByRole("link", { name: "Today" })).toHaveAttribute("aria-current", "page");
     await expect(nav.getByRole("search")).toBeVisible();
@@ -139,11 +139,13 @@ test.describe("desktop 1440px", () => {
 
 // ─── Sidebar / drawer content (#4543) ─────────────────────────
 
-const ALL_SECTIONS = ["Today", "Calendar", "Lists", "Meals", "Documents", "People & House", "Money", "Guides", "Settings"];
+// #5199: only sections with a real page are in the nav, so each row is a link
+// and there is no "Soon" tag to strip.
+const ALL_SECTIONS = ["Today", "Calendar", "Meals", "People & House", "Money", "Settings"];
 
-/** Section names in a nav surface, in order ("Soon" tags stripped). */
+/** Section names in a nav surface, in order. */
 async function sectionNames(scope: ReturnType<Page["locator"]>) {
-  const rows = scope.locator('ul li > a, ul li > span[aria-disabled="true"]');
+  const rows = scope.locator("ul li > a, ul li > span[aria-disabled=\"true\"]");
   const texts = await rows.evaluateAll((els) =>
     els.map((el) => (el.querySelector('[class*="rowLabel"]')?.textContent ?? el.textContent ?? "").trim()),
   );
@@ -163,7 +165,7 @@ test.describe("phone 390px drawer content", () => {
   test.use({ viewport: { width: 390, height: 844 } });
   test.beforeEach(() => onlyOn("phone"));
 
-  test("the drawer shows the same nine sections as the sidebar, and logs out through the logout route", async ({ loggedInPage: page }) => {
+  test("the drawer shows the same sections as the sidebar, and logs out through the logout route", async ({ loggedInPage: page }) => {
     await gotoHome(page);
     await page.locator("header").getByRole("button", { name: "Open menu" }).click();
     const drawer = page.getByRole("dialog", { name: /Home OS menu/ });
@@ -188,9 +190,9 @@ test.describe("phone 390px drawer content", () => {
 test.describe("role-aware navigation", () => {
   // Resizes across all three breakpoints in one page: desktop-chrome only.
   test.beforeEach(() => onlyOn("desktop"));
-  test("housesitter: no Money or Documents in the sidebar, drawer, rail or More sheet", async ({ loggedInPage: page }) => {
+  test("housesitter: no Money in the sidebar, drawer, rail or More sheet", async ({ loggedInPage: page }) => {
     await asRole(page, "housesitter");
-    const expected = ["Today", "Calendar", "Lists", "Meals", "People & House", "Guides", "Settings"];
+    const expected = ["Today", "Calendar", "Meals", "People & House", "Settings"];
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await gotoHome(page);
@@ -211,7 +213,6 @@ test.describe("role-aware navigation", () => {
     const sheet = page.getByRole("dialog", { name: "More" });
     await expect(sheet).toBeVisible();
     await expect(sheet.getByText("Money", { exact: true })).toHaveCount(0);
-    await expect(sheet.getByText("Documents", { exact: true })).toHaveCount(0);
     await expect(sheet.getByText("People & House", { exact: true })).toBeVisible();
   });
 

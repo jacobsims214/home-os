@@ -359,15 +359,8 @@ function RailItem({
   );
   const cls = className ? `${classes.railItem} ${className}` : classes.railItem;
 
-  if (section.comingSoon) {
-    // The page isn't built yet; show the section without linking to a 404.
-    return (
-      <span className={cls} aria-disabled="true" title={`${section.label}: coming soon`}>
-        {inner}
-        <VisuallyHidden>(coming soon)</VisuallyHidden>
-      </span>
-    );
-  }
+  // Every section in nav-config is a real page (#5199); nothing is drawn as a
+  // dimmed non-link any more.
   return (
     <Link href={section.href} className={cls} aria-current={active ? "page" : undefined}>
       {inner}
