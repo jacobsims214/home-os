@@ -167,9 +167,16 @@ function AgentShareSwitch({
         disabled={!allowed || pending}
         onChange={(next) => onToggle(secret, next)}
         label={
-          <span className="text-[13px] font-medium text-ink-2">
-            {pending ? "Saving…" : label}
-          </span>
+          <>
+            {/* The accessible name carries the credential's name, so a screen
+                reader hears "Share Netflix with agents" and not five identical
+                "Shared with agents" switches (mockup artifact #103). The visible
+                text is decorative because the sr-only span already names it. */}
+            <span className="sr-only">{`Share ${name} with agents`}</span>
+            <span aria-hidden="true" className="text-[13px] font-medium text-ink-2">
+              {pending ? "Saving…" : label}
+            </span>
+          </>
         }
       />
       {why && <p className="pl-[52px] text-xs leading-snug text-ink-3">{why}</p>}
