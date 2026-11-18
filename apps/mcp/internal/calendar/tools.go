@@ -69,11 +69,19 @@ type Event struct {
 	People          []EventPerson `json:"people,omitempty" jsonschema_description:"Family members the event is for."`
 	RecurrenceID    string        `json:"recurrence_id,omitempty" jsonschema_description:"For one occurrence: its original start; pass it as occurrence_date."`
 
+	// ManagedBy is the record that keeps this event, when one does (#5301):
+	// the kind of the record whose own code writes and rewrites the entry, read
+	// from calendar_objects.entity_type/entity_id and never inferred from the
+	// title or the date. Empty for an ordinary event, including one that is
+	// merely linked to a person, pet or vehicle.
+	ManagedBy string `json:"managed_by,omitempty" jsonschema_description:"The kind of record that keeps this entry and rewrites it from itself (bill, maintenance_task). Present only when a record owns it. It is NOT something an assistant created: never call such an entry yours, and never delete it with event_delete — change the record instead."`
+	ManagedID string `json:"managed_id,omitempty" jsonschema_description:"The id of that record, for bill_update/bill_delete (bill_id) or maintenance_update/maintenance_delete (task_id)."`
+
 	// EntityType is calendar_objects.entity_type: what the event is a mirror
 	// of ('bill', 'maintenance_task', a person or pet link, or nothing). It is
 	// never serialized; the role rule uses it to classify an event by what it
 	// mirrors (#4807), because a bill-linked event on the Family calendar still
-	// carries the bill's name.
+	// carries the bill's name. It is also what managedBy is computed from.
 	EntityType string `json:"-"`
 
 	// billLike marks an entry that MAKES A CLAIM ABOUT MONEY and is not the
@@ -229,6 +237,7 @@ type eventRow struct {
 	IcalData     string
 	EventType    string
 	EntityType   *string
+	EntityID     *string
 	CalendarName string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -281,6 +290,12 @@ func parseRow(row eventRow, loc *time.Location) (*Event, storedSeries, error) {
 	}
 	if row.EntityType != nil {
 		ev.EntityType = *row.EntityType
+	}
+	// Ownership (#5301): only a record that keeps the entry owns it, and this
+	// is read off the row's entity link — never off the title, the date or the
+	// calendar. See projection.go.
+	if owner, ok := managedBy(row.EntityType, row.EntityID, row.EventType); ok {
+		ev.ManagedBy, ev.ManagedID = owner.kind, *row.EntityID
 	}
 	// A money claim nobody keeps up to date (#4943): nothing is the record for
 	// it, it is not a bill's own mirror, and it states an amount or sits on a
@@ -555,11 +570,11 @@ func loadHouseholdLocation(ctx context.Context, pool *pgxpool.Pool, householdID 
 // 'properties', 'custom'), which the role view needs to decide whether the
 // caller may see this event at all (#4808); co.entity_type is the record the
 // event mirrors (#4807).
-const eventColumns = `co.id::text, co.calendar_id::text, co.ical_data, co.event_type, co.entity_type::text, c.name, co.created_at, co.updated_at, co.rrule, co.ical_raw, c.type::text, co.superseded_at, co.superseded_reason, co.superseded_by::text`
+const eventColumns = `co.id::text, co.calendar_id::text, co.ical_data, co.event_type, co.entity_type::text, co.entity_id::text, c.name, co.created_at, co.updated_at, co.rrule, co.ical_raw, c.type::text, co.superseded_at, co.superseded_reason, co.superseded_by::text`
 
 func scanEventRow(row pgx.Row) (eventRow, error) {
 	var r eventRow
-	err := row.Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.EntityType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt,
+	err := row.Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.EntityType, &r.EntityID, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt,
 		&r.Rrule, &r.IcalRaw, &r.CalendarType, &r.SupersededAt, &r.SupersededReason, &r.SupersededBy)
 	return r, err
 }
@@ -1343,7 +1358,17 @@ func plural(n int, one, many string) string {
 }
 
 // eventHints are the next steps for one event.
+//
+// An event a record keeps (#5301) gets one hint and never the "Remove it with
+// event_delete" pair: that pair is exactly the offer that led an assistant to
+// tell a parent the bill-sync entries were "duplicates I added" and offer to
+// delete them (war game R2 F-AGENT-2). Its hint names the record that owns the
+// entry instead, so a model reading the result says where the entry comes from
+// rather than guessing from its title.
 func eventHints(ev Event) []string {
+	if owner, ok := ownerOfKind(ev.ManagedBy, ev.ManagedID); ok {
+		return owner.hints(ev.Title, ev.ManagedID)
+	}
 	if ev.Recurring {
 		day := ev.LocalDate
 		if ev.RecurrenceID != "" {
