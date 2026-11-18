@@ -186,6 +186,15 @@ export interface SecretRecord {
   secret_type: SecretType;
   created_at: string;
   updated_at: string;
+  /**
+   * "Shared with agents" (#4446): the server holds a second, server-readable
+   * copy so an MCP agent can read this credential. False is the default and
+   * the only value the UI can create by itself; turning it on is an explicit
+   * owner/family_manager action. agent_ciphertext is never serialized.
+   */
+  shared_with_agents?: boolean;
+  /** When sharing was turned on; absent when not shared. */
+  agent_shared_at?: string;
 }
 
 /** Alias used by UI components */
@@ -217,4 +226,16 @@ export interface UpdateSecretRequest {
   key_version: number;
   name: string;
   secret_type: SecretType;
+  /**
+   * The NEW plaintext payload, sent only when this save must keep a
+   * credential shared with agents (#4446). A PATCH without it drops the
+   * server copy, because a new blob may mean a new password. The API accepts
+   * it from an owner or family_manager only; anyone else gets 403.
+   */
+  agent_value?: Record<string, string>;
+}
+
+/** Body of PUT /api/v1/secrets/:id/agent-share — the plaintext payload. */
+export interface ShareSecretRequest {
+  value: Record<string, string>;
 }

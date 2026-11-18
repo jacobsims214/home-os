@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * SecretsSection — the native Home OS secrets manager UI for entity detail
- * pages.
+ * SecretsSection — the native Home OS credentials UI for entity detail pages,
+ * mobile-first (#4575, mockup artifact #103 "Credentials" pane).
  *
  * This replaces the old PasswordsSection (which linked external ciphers). Unlike
  * the link-based PasswordsSection, SecretsSection owns the full lifecycle of
@@ -26,9 +26,36 @@
  *
  * The list pattern (TanStack Query + delete mutation + ConfirmDialog) mirrors
  * apps/ui/components/files/FileList.tsx.
+ *
+ * ## Mobile-first (#4575)
+ *  - < 768 px: one card per credential, the whole name area is a 44 px+
+ *    button that opens the viewer, and the share switch sits beside it as its
+ *    own 44 px target (never nested inside the button).
+ *  - >= 768 px: the same data as a table, per the mockup. The phone card is
+ *    the source of truth; the table is a second presentation of it.
+ *  - Nothing clips at 375 px: long names and URLs wrap with
+ *    `[overflow-wrap:anywhere]`, and no row has a fixed width.
+ *
+ * ## "Shared with agents" (#4446, #4575)
+ * Turning sharing on stores a SECOND copy of the credential that the server
+ * (and only the server) can decrypt, so the family's MCP agents can read it.
+ * Every agent read is written to the family activity feed.
+ *
+ *  - The switch is drawn only for an owner or family_manager, mirroring the
+ *    API's role gate (`canManageAgentSharing`). For everyone else it is
+ *    rendered DISABLED with the reason — presentation only; the API still
+ *    answers 403 for them, and no role check here decides access.
+ *  - Sharing OFF is the default and nothing in this component turns it on by
+ *    itself: each PUT is one credential, after a click.
+ *  - The plaintext never enters React state: `enableAgentSharing` decrypts it
+ *    in memory and hands it to the API in one call (see agent-sharing.ts).
+ *  - Each credential links to the activity feed filtered to it, which is where
+ *    the agent's reads of that credential appear. The feed is the audit trail;
+ *    this component shows presence and a way to get there, never the values.
  */
 
 import { useState } from "react";
+import Link from "next/link";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, ApiError } from "@/lib/api";
 import { secretKeys } from "@/lib/query-keys";
@@ -39,6 +66,14 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import MasterPasswordPrompt from "@/components/secrets/MasterPasswordPrompt";
 import SecretEditor from "@/components/secrets/SecretEditor";
 import SecretViewer from "@/components/secrets/SecretViewer";
+import Switch from "@/components/ui/Switch";
+import { useNavRole } from "@/components/shared/use-nav-role";
+import {
+  agentShareErrorMessage,
+  canManageAgentSharing,
+  disableAgentSharing,
+  enableAgentSharing,
+} from "@/components/secrets/agent-sharing";
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -60,6 +95,105 @@ function formatDate(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+// ─── Agent-sharing bits ───────────────────────────────────────
+
+/**
+ * The activity feed filtered to one credential (#4575).
+ *
+ * The API's `entity_id` filter already narrows the feed to one record
+ * (apps/api/internal/activity/handler.go, parseFilter), and an agent read is
+ * logged with entity_type 'secret' and this credential's id. So the audit
+ * trail for one credential is a plain link — no new endpoint, no new query
+ * shape, and the same page a person already reads.
+ */
+export function credentialActivityHref(secretId: string): string {
+  return `/dashboard/activity?entity_type=secret&entity_id=${encodeURIComponent(secretId)}`;
+}
+
+/** Robot mark, so "shared with agents" reads as agents and not as a person. */
+function AgentIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={1.5}
+      stroke="currentColor"
+      aria-hidden="true"
+    >
+      <rect x="5" y="8" width="14" height="11" rx="3" />
+      <path strokeLinecap="round" d="M12 4v4M12 4a1 1 0 1 1 0-.01M9 13v.5M15 13v.5M10 16h4" />
+    </svg>
+  );
+}
+
+/**
+ * The "Shared with agents" switch for one credential.
+ *
+ * Presentational only: it renders what the API reported (`shared_with_agents`)
+ * and calls the one handler it is given. It never decides access — that is
+ * `canManageAgentSharing`, which mirrors the API's role gate for drawing the
+ * control, and the API, which enforces it.
+ *
+ * Deliberately NOT wired to any default: an unchecked switch does nothing
+ * until it is clicked, and a checked one means the server already holds a
+ * copy. Turning it on requires the vault key, which is why the parent passes
+ * a handler rather than this component doing the work.
+ */
+function AgentShareSwitch({
+  secret,
+  role,
+  pending,
+  onToggle,
+}: {
+  secret: SecretListItem;
+  role: string | null;
+  pending: boolean;
+  onToggle: (secret: SecretListItem, next: boolean) => void;
+}) {
+  const allowed = canManageAgentSharing(role);
+  const on = secret.shared_with_agents === true;
+  const name = secret.name || "this credential";
+  const label = on ? "Shared with agents" : "Not shared with agents";
+  // A disabled control must say WHY, not just be pale: the mockup's member view
+  // keeps the switch visible with "Only Jacob or Amber can change sharing."
+  const why = allowed ? undefined : "Only an owner or family manager can change sharing.";
+  return (
+    <div className="flex min-h-11 flex-col justify-center gap-0.5" data-testid={`agent-share-${secret.id}`}>
+      <Switch
+        checked={on}
+        disabled={!allowed || pending}
+        onChange={(next) => onToggle(secret, next)}
+        label={
+          <span className="text-[13px] font-medium text-ink-2">
+            {pending ? "Saving…" : label}
+          </span>
+        }
+      />
+      {why && <p className="pl-[52px] text-xs leading-snug text-ink-3">{why}</p>}
+      {allowed && on && secret.agent_shared_at && (
+        <p className="pl-[52px] text-xs leading-snug text-ink-3">
+          Since {formatDate(secret.agent_shared_at)}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** The link from one credential to its own slice of the family activity feed. */
+function CredentialActivityLink({ secretId, name }: { secretId: string; name: string }) {
+  return (
+    <Link
+      href={credentialActivityHref(secretId)}
+      className="inline-flex min-h-11 items-center gap-1.5 text-[13px] font-semibold text-accent"
+      aria-label={`Agent activity for ${name || "this credential"}`}
+    >
+      <AgentIcon />
+      Agent activity
+    </Link>
+  );
 }
 
 // ─── Secret-type icon ──────────────────────────────────────────
@@ -213,10 +347,150 @@ function TrashIconButton({
   );
 }
 
+// ─── Rows ─────────────────────────────────────────────────────
+
+/**
+ * One credential on a phone: the name area is the button (the whole row is a
+ * 44 px target) and the share switch sits on its own line below, so a thumb
+ * never opens the viewer when it meant to flip the switch or vice versa.
+ *
+ * The switch gets a row of its own rather than sitting to the right of the
+ * name: at 375 px a switch plus a long credential name leaves the name about
+ * eight characters wide.
+ */
+function CredentialCard({
+  secret,
+  role,
+  sharingId,
+  onOpen,
+  onToggleShare,
+  onDelete,
+  deleting,
+}: {
+  secret: SecretListItem;
+  role: string | null;
+  sharingId: string | null;
+  onOpen: () => void;
+  onToggleShare: (secret: SecretListItem, next: boolean) => void;
+  onDelete: () => void;
+  deleting: boolean;
+}) {
+  const name = secret.name || "Untitled secret";
+  return (
+    <li
+      className="rounded-token-md border border-line bg-surface"
+      data-testid={`secret-card-${secret.id}`}
+    >
+      <div className="flex items-stretch gap-1 p-1">
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-token-md px-3 py-2 text-left transition-colors hover:bg-surface-2 active:bg-surface-2"
+        >
+          <SecretTypeIcon secretType={secret.secret_type} />
+          <span className="min-w-0 flex-1">
+            <span className="block text-[15px] font-semibold leading-snug text-ink [overflow-wrap:anywhere]">
+              {name}
+            </span>
+            <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink-3">
+              <span className="capitalize">{secret.secret_type.replace("_", " ")}</span>
+              <span aria-hidden="true">·</span>
+              <span>added {formatDate(secret.created_at)}</span>
+            </span>
+          </span>
+        </button>
+        <div className="flex shrink-0 items-center">
+          <TrashIconButton
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+            disabled={deleting}
+            label={`Delete ${name}`}
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-line px-3 py-1.5">
+        <AgentShareSwitch
+          secret={secret}
+          role={role}
+          pending={sharingId === secret.id}
+          onToggle={onToggleShare}
+        />
+        <CredentialActivityLink secretId={secret.id} name={name} />
+      </div>
+    </li>
+  );
+}
+
+/** One credential on a tablet or desktop, per the mockup's credentials table. */
+function CredentialTableRow({
+  secret,
+  role,
+  sharingId,
+  onOpen,
+  onToggleShare,
+  onDelete,
+  deleting,
+}: {
+  secret: SecretListItem;
+  role: string | null;
+  sharingId: string | null;
+  onOpen: () => void;
+  onToggleShare: (secret: SecretListItem, next: boolean) => void;
+  onDelete: () => void;
+  deleting: boolean;
+}) {
+  const name = secret.name || "Untitled secret";
+  return (
+    <tr className="border-b border-line last:border-0">
+      <td className="px-2 py-2 align-middle">
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex min-h-11 w-full min-w-0 items-center gap-3 rounded-token-md px-2 text-left transition-colors hover:bg-surface-2"
+        >
+          <SecretTypeIcon secretType={secret.secret_type} />
+          <span className="min-w-0">
+            <span className="block text-sm font-semibold text-ink [overflow-wrap:anywhere]">{name}</span>
+            <span className="block text-xs text-ink-3">
+              <span className="capitalize">{secret.secret_type.replace("_", " ")}</span>
+              {" · added "}
+              {formatDate(secret.created_at)}
+            </span>
+          </span>
+        </button>
+      </td>
+      <td className="px-3 py-2 align-middle">
+        <AgentShareSwitch
+          secret={secret}
+          role={role}
+          pending={sharingId === secret.id}
+          onToggle={onToggleShare}
+        />
+      </td>
+      <td className="px-3 py-2 align-middle">
+        <CredentialActivityLink secretId={secret.id} name={name} />
+      </td>
+      <td className="px-1 py-2 text-right align-middle">
+        <TrashIconButton
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          disabled={deleting}
+          label={`Delete ${name}`}
+        />
+      </td>
+    </tr>
+  );
+}
+
 // ─── Component ────────────────────────────────────────────────
 
 /**
- * SecretsSection renders the native secrets attached to a given household
+ * SecretsSection renders the native credentials attached to a given household
  * entity (entity_type + entity_id). When the vault is locked it shows an
  * unlock prompt; when unlocked it fetches the entity-scoped secret list and
  * lets the user view, add, and delete secrets.
@@ -226,6 +500,9 @@ export default function SecretsSection({ entityType, entityId }: SecretsSectionP
   // Subscribe to isUnlocked only — avoids re-rendering the list when the
   // cryptoKey changes but the lock state doesn't.
   const isUnlocked = useSecretsStore((s) => s.isUnlocked);
+  // The signed-in role decides whether the share switch is drawn ENABLED. It is
+  // presentation only: the API's own gate (403) is what actually decides.
+  const role = useNavRole();
 
   // ── Modal / selection state ───────────────────────────────
   const [showUnlock, setShowUnlock] = useState(false);
@@ -241,6 +518,10 @@ export default function SecretsSection({ entityType, entityId }: SecretsSectionP
   const [viewTarget, setViewTarget] = useState<string | null>(null);
   /** Secret pending deletion confirmation. null = dialog closed. */
   const [deleteTarget, setDeleteTarget] = useState<SecretListItem | null>(null);
+  /** Credential whose agent-sharing switch is mid-flight (null = idle). */
+  const [sharingId, setSharingId] = useState<string | null>(null);
+  /** Last agent-sharing failure, shown under the list in plain words. */
+  const [shareError, setShareError] = useState<string | null>(null);
 
   // ── Setup-vs-unlock mode detection ────────────────────────
   // The secrets store does NOT surface a "needs setup" flag — `isUnlocked`
@@ -312,6 +593,44 @@ export default function SecretsSection({ entityType, entityId }: SecretsSectionP
     if (deleteTarget) {
       deleteMutation.mutate(deleteTarget.id);
     }
+  }
+
+  // ── Agent sharing (#4575) ──────────────────────────────────
+  // One credential per click: PUT sends the decrypted value once (the server
+  // seals its own copy), DELETE drops the server copy. Nothing here changes a
+  // default — a credential starts unshared and stays that way unless a person
+  // with the right role flips this switch.
+  //
+  // The plaintext is kept INSIDE enableAgentSharing(), never in state: what
+  // this component holds before and after is only the API's boolean.
+  const shareMutation = useMutation({
+    mutationFn: async ({ secret, next }: { secret: SecretListItem; next: boolean }) => {
+      if (next) {
+        const cryptoKey = useSecretsStore.getState().cryptoKey;
+        if (!cryptoKey) {
+          throw new Error("Unlock the vault before sharing a credential with agents.");
+        }
+        await enableAgentSharing(secret.id, cryptoKey);
+      } else {
+        await disableAgentSharing(secret.id);
+      }
+    },
+    onMutate: ({ secret }) => {
+      setShareError(null);
+      setSharingId(secret.id);
+    },
+    onSuccess: () => {
+      // The list carries shared_with_agents, so refetch it for the truth.
+      void queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (err) => {
+      setShareError(agentShareErrorMessage(err));
+    },
+    onSettled: () => setSharingId(null),
+  });
+
+  function handleToggleShare(secret: SecretListItem, next: boolean) {
+    shareMutation.mutate({ secret, next });
   }
 
   const deleteErrorMessage =
@@ -405,38 +724,86 @@ export default function SecretsSection({ entityType, entityId }: SecretsSectionP
             <p className="text-sm text-gray-400 italic">No secrets added.</p>
           )}
 
-          {/* Populated */}
-          {secrets.map((secret) => (
-            <div
-              key={secret.id}
-              className="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 transition-colors hover:border-gray-300 hover:bg-gray-50"
-              onClick={() => setViewTarget(secret.id)}
-            >
-              <SecretTypeIcon secretType={secret.secret_type} />
+          {/* The sharing explainer, once there is something to share. It states
+              the policy, not a control: sharing is per credential and off
+              unless someone turns it on. */}
+          {!secretsQ.isLoading && !secretsQ.isError && secrets.length > 0 && (
+            <p className="flex items-start gap-2 rounded-token-md bg-accent-soft px-3 py-2 text-[13px] leading-snug text-ink-2">
+              <AgentIcon className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+              <span>
+                <strong className="font-semibold text-ink">Shared with agents</strong> lets the
+                family&apos;s assistants use one login when you ask them to. Every use shows in
+                Activity. Leave banking and email off.
+                {!canManageAgentSharing(role) && " Only an owner or family manager can change sharing."}
+              </span>
+            </p>
+          )}
 
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-gray-900">
-                  {secret.name || "Untitled secret"}
-                </p>
-                <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-500">
-                  <span className="capitalize">{secret.secret_type.replace("_", " ")}</span>
-                  <span aria-hidden="true">·</span>
-                  <span>added {formatDate(secret.created_at)}</span>
-                </p>
-              </div>
+          {/* Populated — phone cards, then the tablet/desktop table. Both are
+              rendered from the same rows; CSS picks one, so there is a single
+              source of truth and no JS width sniffing. */}
+          {secrets.length > 0 && (
+            <>
+              <ul
+                className="m-0 list-none space-y-2 p-0 md:hidden"
+                data-testid="secrets-cards"
+              >
+                {secrets.map((secret) => (
+                  <CredentialCard
+                    key={secret.id}
+                    secret={secret}
+                    role={role}
+                    sharingId={sharingId}
+                    onOpen={() => setViewTarget(secret.id)}
+                    onToggleShare={handleToggleShare}
+                    onDelete={() => setDeleteTarget(secret)}
+                    deleting={deleteMutation.isPending}
+                  />
+                ))}
+              </ul>
 
-              <div className="flex shrink-0 items-center gap-2">
-                <TrashIconButton
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDeleteTarget(secret);
-                  }}
-                  disabled={deleteMutation.isPending}
-                  label={`Delete ${secret.name || "secret"}`}
-                />
+              <div
+                className="hidden overflow-x-auto rounded-token-md border border-line md:block"
+                data-testid="secrets-table"
+              >
+                {/* Caption for screen readers: a bare table has no name. */}
+                <table className="w-full border-collapse text-sm">
+                  <caption className="sr-only">Credentials for this record</caption>
+                  <thead>
+                    <tr className="border-b border-line bg-surface-2 text-left text-xs uppercase tracking-wide text-ink-3">
+                      <th scope="col" className="px-3 py-2 font-semibold">Name</th>
+                      <th scope="col" className="px-3 py-2 font-semibold">Shared with agents</th>
+                      <th scope="col" className="px-3 py-2 font-semibold">Agent activity</th>
+                      <th scope="col" className="px-1 py-2 text-right">
+                        <span className="sr-only">Actions</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {secrets.map((secret) => (
+                      <CredentialTableRow
+                        key={secret.id}
+                        secret={secret}
+                        role={role}
+                        sharingId={sharingId}
+                        onOpen={() => setViewTarget(secret.id)}
+                        onToggleShare={handleToggleShare}
+                        onDelete={() => setDeleteTarget(secret)}
+                        deleting={deleteMutation.isPending}
+                      />
+                    ))}
+                  </tbody>
+                </table>
               </div>
-            </div>
-          ))}
+            </>
+          )}
+
+          {/* Sharing failure — plain words, below the list, announced. */}
+          {shareError && (
+            <p role="alert" className="rounded-token-md bg-warn-bg px-3 py-2 text-[13px] text-warn-ink">
+              {shareError}
+            </p>
+          )}
         </div>
       )}
 

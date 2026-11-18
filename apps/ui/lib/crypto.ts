@@ -67,7 +67,7 @@ const IV_LENGTH = 12; // bytes (AES-GCM standard nonce)
 async function deriveKeyBits(
   password: string,
   saltBase64: string,
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
   const salt = base64ToBytes(saltBase64);
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
@@ -87,7 +87,11 @@ async function deriveKeyBits(
     keyMaterial,
     256,
   );
-  return new Uint8Array(bits);
+  // Copy into a fresh ArrayBuffer-backed view, same as stringToBytes, so the
+  // result satisfies BufferSource under TS 5.7+ stricter typing.
+  const raw = new Uint8Array(new ArrayBuffer(bits.byteLength));
+  raw.set(new Uint8Array(bits));
+  return raw;
 }
 
 /**

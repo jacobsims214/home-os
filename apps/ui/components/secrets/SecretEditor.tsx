@@ -22,6 +22,22 @@
  * apps/ui/stores/secrets.ts (cryptoKey + keyVersion). If the vault is
  * locked (no cryptoKey) it renders a locked notice instead of the form —
  * the parent SecretsSection is responsible for showing MasterPasswordPrompt.
+ *
+ * ## Shared with agents (#4446, #4575)
+ * A PATCH that does not carry `agent_value` DROPS the credential's server-side
+ * copy, i.e. saving silently stops sharing with agents. So:
+ *
+ *  - An owner or family_manager editing a shared credential sends the NEW
+ *    plaintext as `agent_value` in the same PATCH, which re-seals it. The
+ *    plaintext is the payload already assembled for encryption; it is never
+ *    logged or stored.
+ *  - Anyone else editing a shared credential gets a warning ABOVE the form,
+ *    saying saving turns sharing off, and the submit button says so too. Their
+ *    `agent_value` would be 403 anyway (the API allows owner/manager only), so
+ *    the UI does not send one.
+ *
+ * Neither branch changes what sharing means or who may set it: unshared stays
+ * unshared, and only the API decides who may re-share.
  */
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -29,6 +45,8 @@ import { apiFetch, ApiError } from "@/lib/api";
 import { encrypt, decrypt } from "@/lib/crypto";
 import { useSecretsStore } from "@/stores/secrets";
 import { secretKeys } from "@/lib/query-keys";
+import { useNavRole } from "@/components/shared/use-nav-role";
+import { canManageAgentSharing } from "@/components/secrets/agent-sharing";
 import Modal from "@/components/ui/Modal";
 import Input from "@/components/ui/Input";
 import Select from "@/components/ui/Select";
@@ -192,6 +210,9 @@ export default function SecretEditor({
   const cryptoKey = useSecretsStore((s) => s.cryptoKey);
   const keyVersion = useSecretsStore((s) => s.keyVersion);
   const isUnlocked = useSecretsStore((s) => s.isUnlocked);
+  // Who is editing, to decide whether this save can keep the agent copy.
+  // Presentation only — the API's CanShareWithAgents check is authoritative.
+  const role = useNavRole();
 
   const isEditMode = !!editSecretId;
 
@@ -351,6 +372,14 @@ export default function SecretEditor({
           name: fields.name.trim(),
           secret_type: secretType,
         };
+        // Keep a shared credential shared: a PATCH without agent_value drops
+        // the server copy. Only an owner/family_manager may send it, so a
+        // member's save intentionally lets sharing fall away (with the warning
+        // shown above the form). `payload` is already in memory for the
+        // encrypt above; it is not copied anywhere else.
+        if (sharedWithAgents && canManageAgentSharing(role)) {
+          req.agent_value = payload;
+        }
         updateMutation.mutate(req);
       } else {
         const req: CreateSecretRequest = {
@@ -379,6 +408,18 @@ export default function SecretEditor({
 
   const submitting = createMutation.isPending || updateMutation.isPending;
   const loadingEdit = isEditMode && editQuery.isLoading && !loadedId;
+  /**
+   * The fetched record's agent-sharing state. Read from the API response (the
+   * same flag the list shows), never inferred from anything the user typed.
+   */
+  const sharedWithAgents = editQuery.data?.shared_with_agents === true;
+  /**
+   * True when saving this credential will silently drop its agent copy: it is
+   * shared, and this person is not an owner or family_manager, so no
+   * agent_value can travel with the PATCH. This is the mockup's "Member edits
+   * shared" warning (artifact #103).
+   */
+  const willUnshare = sharedWithAgents && !canManageAgentSharing(role);
 
   // Memoize the title so it doesn't flicker between create/edit.
   const title = useMemo(
@@ -403,6 +444,38 @@ export default function SecretEditor({
         </div>
       ) : (
         <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Sharing warning (#4575): a PATCH without agent_value drops the
+              server copy, so a non-manager's save turns sharing off. Say so
+              BEFORE they type, and say it again on the button. */}
+          {willUnshare && (
+            <div
+              role="note"
+              className="flex items-start gap-2 rounded-token-md border border-warn-line bg-warn-bg px-3 py-2 text-[13px] leading-snug text-warn-ink"
+              data-testid="agent-share-warning"
+            >
+              <svg
+                className="mt-0.5 h-4 w-4 shrink-0"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={1.5}
+                stroke="currentColor"
+                aria-hidden="true"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 9v3.75m0 3.75h.008M10.34 3.94l-8.1 14.02A1.5 1.5 0 0 0 3.54 20.25h16.92a1.5 1.5 0 0 0 1.3-2.29L13.66 3.94a1.5 1.5 0 0 0-2.6 0Z"
+                />
+              </svg>
+              <span>
+                <strong className="font-semibold">Saving turns off sharing with agents.</strong>{" "}
+                {fields.name.trim() || "This credential"} is shared with agents now. Only an owner
+                or family manager can share one, so saving your changes means agents lose access
+                until one of them turns sharing back on.
+              </span>
+            </div>
+          )}
+
           {/* Secret type selector */}
           <Select
             label="Type"
@@ -553,7 +626,11 @@ export default function SecretEditor({
               Cancel
             </Button>
             <Button type="submit" loading={submitting}>
-              {isEditMode ? "Save Changes" : "Create Secret"}
+              {willUnshare
+                ? "Save and stop sharing"
+                : isEditMode
+                  ? "Save Changes"
+                  : "Create Secret"}
             </Button>
           </div>
         </form>
