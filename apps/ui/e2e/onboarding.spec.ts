@@ -50,6 +50,16 @@ function recordWrites(page: Page): Array<{ path: string; body: string }> {
   return writes;
 }
 
+/**
+ * Opens the wizard and waits for its first screen.
+ */
+async function openWizard(page: Page): Promise<void> {
+  await page.goto("/welcome");
+  await expect(
+    page.getByRole("heading", { level: 1, name: /Welcome to Home OS/i }),
+  ).toBeVisible();
+}
+
 test.beforeEach(async ({ page }) => {
   await page.setViewportSize(PHONE);
 });
@@ -59,7 +69,7 @@ test("a new family is created from the wizard and the person lands on Today", as
 }) => {
   onlyOn("phone");
   const writes = recordWrites(page);
-  await page.goto("/welcome");
+  await openWizard(page);
 
   // ── Welcome ────────────────────────────────────────────────────
   await expect(page.getByRole("heading", { level: 1, name: /Welcome to Home OS/i })).toBeVisible();
@@ -117,7 +127,7 @@ test("the optional steps can be skipped and the family is still created", async 
 }) => {
   onlyOn("phone");
   const writes = recordWrites(page);
-  await page.goto("/welcome");
+  await openWizard(page);
   await page.getByRole("button", { name: /Start a family hub/i }).first().click();
 
   await page.getByLabel("Family name").fill("Skippers");
@@ -151,7 +161,7 @@ test("a family with no name is refused at the end, and nothing is written", asyn
 }) => {
   onlyOn("phone");
   const writes = recordWrites(page);
-  await page.goto("/welcome");
+  await openWizard(page);
   await page.getByRole("button", { name: /Start a family hub/i }).first().click();
 
   // Walk to the last step leaving the name blank; skip both optional steps.
@@ -172,7 +182,7 @@ test("a family with no name is refused at the end, and nothing is written", asyn
 
 test("every step fits a phone and its actions are finger-sized", async ({ loggedInPage: page }) => {
   onlyOn("phone");
-  await page.goto("/welcome");
+  await openWizard(page);
 
   const steps: Array<() => Promise<void>> = [
     async () => {},
