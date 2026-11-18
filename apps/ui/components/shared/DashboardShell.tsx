@@ -40,7 +40,6 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
 import {
   ActionIcon,
   AppShell,
@@ -50,7 +49,7 @@ import {
   VisuallyHidden,
 } from "@mantine/core";
 import { useDisclosure, useMediaQuery, useReducedMotion } from "@mantine/hooks";
-import { IconChevronDown, IconMenu2 } from "@tabler/icons-react";
+import { IconMenu2 } from "@tabler/icons-react";
 import dayjs from "dayjs";
 import AccountMenu, { HeaderAccountButton } from "@/components/account/AccountMenu";
 import { useAccountIdentity } from "@/components/shared/use-account";
@@ -63,7 +62,6 @@ import HouseholdSwitcher, {
   type HouseholdSwitcherControl,
 } from "@/components/shared/HouseholdSwitcher";
 import { useNavSections } from "@/components/shared/use-nav-role";
-import { apiFetch } from "@/lib/api";
 import { NAV_ICON_STROKE, activeSection, pageTitle, type NavSection } from "@/components/shared/nav-config";
 import classes from "./DashboardShell.module.css";
 import bottomNavClasses from "./BottomNav.module.css";

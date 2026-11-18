@@ -153,41 +153,6 @@ export default function AccountMenu({ placement, opened, onChange, trigger }: Ac
 
 // ─── The identity header ──────────────────────────────────────
 
-// ─── The identity header ──────────────────────────────────────
-
-/** The signed-in person, as GET /auth/me sends it (flat, like the Go handler). */
-interface Me {
-  id: string;
-  name?: string;
-  email?: string;
-  avatar_url?: string | null;
-}
-
-/**
- * GET /auth/me's body, whichever way it is delivered: the API returns the user
- * flat (`{id, name, email, avatar_url}`), and the e2e stub answers inside the
- * usual `{data: …}` envelope. Reading both keeps the menu's identity right in
- * the tests as well as in production, without a second endpoint or a guess.
- */
-function readMe(body: Me | { data?: Me } | undefined): Me | null {
-  if (!body) return null;
-  if (typeof body === "object" && "data" in body) return body.data ?? null;
-  return body as Me;
-}
-
-/**
- * The identity the menu shows: the persisted profile when it is there, else
- * GET /auth/me.
- *
- * Nothing else in the app fills the zustand profile any more — the token
- * accepting POST that used to was removed with the BFF migration (#4622), so
- * `user` is null on a fresh sign-in and every host that read it rendered
- * "Account". The query is the same one the Settings index uses (`["auth","me"]`,
- * 10 minute staleTime, so it is fetched once per session and shared), and its
- * result is written back into the store so the drawer foot, the More sheet row
- * and this menu all agree without each polling for it.
- */
-
 /**
  * Avatar, name and email, plus a close button when this is the popover.
  *
