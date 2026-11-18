@@ -431,3 +431,62 @@ test.describe("desktop", () => {
     await snap(page, testInfo, "calendar-week-desktop");
   });
 });
+
+// ── the first-load race (#5307) ─────────────────────────────
+
+test.describe("first load after a fresh sign-in", () => {
+  // The war-game finding (F-CAL-1): a fresh sign-in → straight to the calendar
+  // intermittently showed "Couldn't load the calendar", and the next visit
+  // worked. The precondition that was missing is not the date — it is WHICH
+  // HOUSEHOLD. A fresh sign-in has just cleared the household cookie (#4574),
+  // so a read fired before /me/households answers is scoped to a guess and can
+  // come back 401/503 while the session settles.
+  //
+  // This replays that ordering: the household list is slow, and the first event
+  // read answers 503 like a session that isn't ready yet.
+  test("waits for the household, then rides out one not-ready answer", async ({ loggedInPage: page }, testInfo) => {
+    onlyOn("phone");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await freezeToday(page);
+
+    // Record WHEN each calendar read reaches the network, relative to the
+    // household list answering. The bug is a read that arrives first.
+    let householdAnswered = false;
+    let readsBeforeHousehold = 0;
+    let eventsAskedOnce = false;
+
+    await page.route("**/bff/me/households", async (route) => {
+      await new Promise((r) => setTimeout(r, 400)); // a slow first load
+      householdAnswered = true;
+      await route.fulfill({ json: { data: [{ ...HOUSEHOLD, role: "owner" }] } });
+    });
+    await page.route("**/bff/auth/me", (route) => route.fulfill({ json: { id: "u1", email: "jacob@sims.family", name: "Jacob Sims" } }));
+    await page.route("**/bff/calendars/events**", async (route) => {
+      if (!householdAnswered) readsBeforeHousehold += 1;
+      // The first read after sign-in meets a session that isn't ready yet: 503,
+      // the BFF's AUTH_UNAVAILABLE. The read must retry on that, not paint the
+      // error card — and never on a timer.
+      if (!eventsAskedOnce) {
+        eventsAskedOnce = true;
+        return route.fulfill({ status: 503, json: { error: { code: "AUTH_UNAVAILABLE", message: "auth provider unavailable" } } });
+      }
+      return route.fulfill({ json: { data: PIANO, days: weekDays() } });
+    });
+    await page.route("**/bff/calendars", (route) => route.fulfill({ json: { data: CALENDARS } }));
+    await page.route("**/bff/bills**", (route) => route.fulfill({ json: { data: BILLS } }));
+    await page.route("**/bff/people**", (route) => route.fulfill({ json: { data: PEOPLE } }));
+    await page.route("**/bff/activity**", (route) => route.fulfill({ json: { data: ACTIVITY } }));
+
+    await page.goto("/dashboard/calendar");
+
+    // The page loads on the first navigation: the event the transient read was
+    // supposed to hide is on screen, and no error card was ever shown.
+    await expect(page.getByTestId("calendar-view")).toBeVisible();
+    await expect(page.locator("[data-testid='series-card']").first()).toContainText("Piano lesson");
+    await expect(page.getByTestId("calendar-error")).toHaveCount(0);
+    // The invariant the bug broke: no request went out before the household was
+    // known, so nothing was ever read against a guessed scope.
+    expect(readsBeforeHousehold).toBe(0);
+    await snap(page, testInfo, "calendar-first-load-after-signin");
+  });
+});
