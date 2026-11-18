@@ -116,6 +116,7 @@ var untaggedByDesign = map[string]string{
 	"pet.VetRef":                   "storage: decoded from or encoded to a database column, not the wire",
 	"property.Finance":             "internal: repository filter/result or runtime config, never encoded",
 	"property.Room":                "storage: decoded from or encoded to a database column, not the wire",
+	"searchrecon.ReconcileStats":   "internal: what a reindex run did, for the CLI and the sweep log; never encoded to a client",
 	"search.SearchFilters":         "internal: repository filter/result or runtime config, never encoded",
 	"searchtest.Env":               "internal: the Typesense test harness's own settings",
 	"smtp.Config":                  "internal: repository filter/result or runtime config, never encoded",
