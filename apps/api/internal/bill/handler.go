@@ -17,6 +17,7 @@ import (
 	"home-os/api/internal/subject"
 	"home-os/api/pkg/apierr"
 	"home-os/api/pkg/jsonopt"
+	"home-os/api/pkg/money"
 )
 
 type searchIndexer interface {
@@ -187,10 +188,12 @@ func toResponse(b *Bill) billResponse {
 		s := b.VendorID.String()
 		resp.VendorID = &s
 	}
-	if b.Amount.Valid {
-		s := b.Amount.Int.String()
-		resp.Amount = &s
-	}
+	// The amount is a decimal string of DOLLARS ("2340.00"), never the
+	// NUMERIC's mantissa: pgx stores 2340.00 as Int=234000, Exp=-2, and
+	// Int.String() alone sent "234000", which rendered as $234,000 (#5297).
+	// money.DecimalString keeps the exponent, so the wire carries the same
+	// number the database does.
+	resp.Amount = money.DecimalString(b.Amount)
 	return resp
 }
 
