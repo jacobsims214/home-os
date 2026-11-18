@@ -83,6 +83,7 @@ import { reportAllergies } from "@/lib/recipes/allergy";
 import { useNavRole } from "@/components/shared/use-nav-role";
 import { NAV_ICON_STROKE } from "@/components/shared/nav-config";
 import ActivityFeed from "@/components/today/ActivityFeed";
+import NewEventForm from "@/components/calendar/new-event-form";
 import { canReadActivity, roleKnown } from "@/lib/resource-access";
 import {
   billsAndUpkeepDue,
@@ -157,6 +158,17 @@ export default function TodayPage() {
     : null;
 
   const canSeeMoney = role == null || MONEY_ROLES.has(role);
+  // ResCalendar write is owner / family_manager / family_member (apps/api
+  // internal/auth/roles.go): a housesitter and a viewer may READ the day but not
+  // add to it. The Calendar page hides its own New event control for them, and
+  // Today does the same rather than offering a form the API would refuse.
+  const canWriteEvents = role == null || FAMILY_ROLES.has(role);
+  // "Add event" opens the calendar's own create form IN PLACE (#5302): the
+  // bottom sheet on a phone, the centred dialog from 768 px. Nothing is read
+  // until it opens (`useCalendars(opened && …)`), so the closed form is one
+  // empty render, not a query on every visit to Today.
+  const [addingEvent, setAddingEvent] = useState(false);
+
   // Family activity needs ResActivity read: owner, family_manager,
   // family_member, viewer. A housesitter and a vendor answer 403, so neither the
   // section nor its request happens for them — #4577, role policy #4689.
@@ -236,7 +248,14 @@ export default function TodayPage() {
           aria-label="Quick actions"
           className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-0.5 [scrollbar-width:none] lg:mx-0 lg:flex-wrap lg:px-0 [&::-webkit-scrollbar]:hidden"
         >
-          <QuickAction href="/dashboard/calendar" icon={<IconCalendar size={18} stroke={NAV_ICON_STROKE} />} label="Add event" />
+          {canWriteEvents && (
+            <QuickAction
+              onClick={() => setAddingEvent(true)}
+              icon={<IconCalendar size={18} stroke={NAV_ICON_STROKE} />}
+              label="Add event"
+              testId="today-add-event"
+            />
+          )}
           <QuickAction href="/dashboard/lists" icon={<IconListCheck size={18} stroke={NAV_ICON_STROKE} />} label="Add to a list" />
           <QuickAction href="/dashboard/meals" icon={<IconToolsKitchen size={18} stroke={NAV_ICON_STROKE} />} label="Plan dinner" />
           {isFamily && <QuickAction href="/dashboard/members" icon={<IconUsers size={18} stroke={NAV_ICON_STROKE} />} label="Family" />}
@@ -260,6 +279,8 @@ export default function TodayPage() {
               isLoading={agenda.isLoading}
               error={agenda.error as Error | null}
               onRetry={() => agenda.refetch()}
+              canAddEvent={canWriteEvents}
+              onAddEvent={() => setAddingEvent(true)}
             />
           </div>
           <div className="order-5 lg:order-none">
@@ -329,6 +350,25 @@ export default function TodayPage() {
           </div>
         </div>
       </div>
+
+      {/*
+        The calendar's own create form, opened IN PLACE by "Add event" (#5302):
+        the bottom sheet on a phone, the centred dialog from 768 px — the wave's
+        one create-modal idiom, not a second form. Today's date is the anchor,
+        so a new event lands on the day the person is looking at.
+      */}
+      {canWriteEvents && (
+        <NewEventForm
+          opened={addingEvent}
+          onClose={() => setAddingEvent(false)}
+          anchorDate={today}
+          timezone={timezone}
+          canWrite={canWriteEvents}
+          // The new event belongs on today's agenda as soon as the API accepts
+          // it: refetch the day rather than leaving the page a stale copy.
+          onCreated={() => agenda.refetch()}
+        />
+      )}
     </div>
   );
 }
@@ -356,15 +396,46 @@ function greetingSummary(rows: readonly AgendaRow[], dueRows: readonly DueRow[],
 
 // ── shared bits ─────────────────────────────────────────────
 
-function QuickAction({ href, icon, label }: { href: string; icon: React.ReactNode; label: string }) {
-  return (
-    <UnstyledButton
-      component={Link}
-      href={href}
-      className="flex h-10 flex-none items-center gap-1.5 rounded-full border border-line bg-surface px-3.5 pl-3 text-sm font-medium text-ink hover:bg-surface-2 lg:h-9 lg:rounded-token-sm"
-    >
+/**
+ * A quick action: a chip that either opens a form here (`onClick`) or goes to
+ * the page that owns the job (`href`). "Add event" is the first kind — a chip
+ * that promised a form but only changed the page is exactly the R2 G9 failure
+ * (#5302), so a chip that opens something now SAYS so with aria-haspopup.
+ */
+function QuickAction({
+  href,
+  onClick,
+  icon,
+  label,
+  testId,
+}: {
+  href?: string;
+  onClick?: () => void;
+  icon: React.ReactNode;
+  label: string;
+  testId?: string;
+}) {
+  const shared = {
+    className:
+      "flex h-10 flex-none items-center gap-1.5 rounded-full border border-line bg-surface px-3.5 pl-3 text-sm font-medium text-ink hover:bg-surface-2 lg:h-9 lg:rounded-token-sm",
+    "data-testid": testId,
+  };
+  const inner = (
+    <>
       <span className="text-accent" aria-hidden>{icon}</span>
       {label}
+    </>
+  );
+  if (onClick) {
+    return (
+      <UnstyledButton onClick={onClick} aria-haspopup="dialog" {...shared}>
+        {inner}
+      </UnstyledButton>
+    );
+  }
+  return (
+    <UnstyledButton component={Link} href={href ?? "#"} {...shared}>
+      {inner}
     </UnstyledButton>
   );
 }
@@ -464,6 +535,8 @@ function AgendaSection({
   isLoading,
   error,
   onRetry,
+  canAddEvent,
+  onAddEvent,
 }: {
   rows: AgendaRow[];
   /** Tomorrow's rows, for the empty state's "tomorrow starts at ..." line only. */
@@ -472,6 +545,8 @@ function AgendaSection({
   isLoading: boolean;
   error: Error | null;
   onRetry: () => void;
+  canAddEvent: boolean;
+  onAddEvent: () => void;
 }) {
   // "Show N more tonight": everything past the first five timed rows, as the
   // mockup has it. Recurring expansion means a busy day can be long.
@@ -506,9 +581,11 @@ function AgendaSection({
             icon={<IconCalendar size={20} stroke={NAV_ICON_STROKE} />}
             title="Nothing scheduled today"
             action={
-              <Button component={Link} href="/dashboard/calendar" size="xs" variant="default" leftSection={<IconPlus size={16} stroke={NAV_ICON_STROKE} />}>
-                Add event
-              </Button>
+              canAddEvent ? (
+                <Button onClick={onAddEvent} size="xs" variant="default" leftSection={<IconPlus size={16} stroke={NAV_ICON_STROKE} />} data-testid="today-add-event-empty">
+                  Add event
+                </Button>
+              ) : undefined
             }
           >
             {tomorrowRows.length > 0
