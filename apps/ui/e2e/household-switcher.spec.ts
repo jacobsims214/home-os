@@ -193,6 +193,7 @@ test.describe("family switcher, phone 390", () => {
       const row = (label: string) => drawer.getByText(label, { exact: true }).count();
       const counts = {
         money: await row("Money"),
+        documents: await row("Documents"),
         people: await row("People & House"),
         calendar: await row("Calendar"),
       };
@@ -201,23 +202,24 @@ test.describe("family switcher, phone 390", () => {
       return counts;
     };
 
-    // Owner: money, people and calendar are all reachable.
-    expect(await navInDrawer()).toEqual({ money: 1, people: 1, calendar: 1 });
+    // Owner: money, documents, people and calendar are all reachable.
+    expect(await navInDrawer()).toEqual({ money: 1, documents: 1, people: 1, calendar: 1 });
 
     await (await openPicker(page)).getByRole("radio", { name: /Oak Street/ }).click();
     await expect(chip(page)).toContainText("Oak Street");
     await expect(page.locator("main")).toContainText("Oak Street water");
 
-    // Housesitter: no money (and no documents, which is not in the nav at all).
+    // Housesitter: no money and no documents (#4569 put Documents in the nav
+    // for readers; files read is family + viewer, so a sitter loses both).
     // The nav must never keep the previous family's role on screen, so this is
     // asserted as soon as the switch's data has landed.
-    expect(await navInDrawer()).toEqual({ money: 0, people: 1, calendar: 1 });
+    expect(await navInDrawer()).toEqual({ money: 0, documents: 0, people: 1, calendar: 1 });
 
     // And it follows the household back: nothing is cached from the last role.
     await (await openPicker(page)).getByRole("radio", { name: /Sims family/ }).click();
     await expect(chip(page)).toContainText("Sims family");
     await expect(page.locator("main")).toContainText("Duke Energy electric");
-    expect(await navInDrawer()).toEqual({ money: 1, people: 1, calendar: 1 });
+    expect(await navInDrawer()).toEqual({ money: 1, documents: 1, people: 1, calendar: 1 });
   });
 
   test("switching off a record page lands on that section's list, not on a 404 for the other family's row", async ({

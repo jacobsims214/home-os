@@ -91,12 +91,29 @@ test("logout purges the caches and the persisted user from the page itself", asy
   await plantPreviousSession(page);
   expect(await cachedUrls(page)).toContain("/bff/members");
 
+  // Logout lands on /login, and /login does not stop there: its mount sends the
+  // browser on to /api/auth/login and then to Dex. That second navigation tore
+  // the execution context out from under cachedUrls() below whenever it started
+  // while the evaluate was in flight (`page.evaluate: Execution context was
+  // destroyed`, #5189). Stop the chain at the login start, the same trick the
+  // expired-session test below uses, so /login is the live document while the
+  // purge is inspected. Nothing this test asserts lives past /api/auth/login.
+  await page.route((u) => u.pathname === "/api/auth/login", (route) => route.fulfill({ status: 204 }));
+
   // The session cookies go too, so this asserts the route was really reached.
+  // `waitUntil: "commit"`, never the default "load": /login's hand-off is
+  // superseded by the 204 above, and a superseded document never fires `load`
+  // (waiting for it hangs for the full timeout — seen under E2E_UI=standalone).
   await Promise.all([
-    page.waitForURL(/\/login/, { timeout: 20_000 }),
+    page.waitForURL(/\/login/, { timeout: 20_000, waitUntil: "commit" }),
     page.getByRole("navigation", { name: "Main navigation" }).getByRole("button", { name: /^Account menu for/ }).click()
       .then(() => page.getByRole("menuitem", { name: "Log out" }).click()),
   ]);
+
+  // The login page has rendered, so it has mounted and its sweep has run, and
+  // the 204 stops it from ever navigating on. From here the document is settled
+  // and nothing can destroy the context under the evaluates below.
+  await expect(page.getByText("Redirecting to login...")).toBeVisible({ timeout: 20_000 });
 
   expect(await cachedUrls(page), "no cache entry survives a logout").toEqual([]);
   const leftovers = await page.evaluate(() => ({

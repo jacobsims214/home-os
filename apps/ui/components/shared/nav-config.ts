@@ -11,17 +11,24 @@
  * Lists, Documents and Guides with `comingSoon: true`, which the shell rendered
  * as a "Soon" pill / "Coming soon" tile: placeholder copy shipped to a family,
  * advertising features the build did not have (artifact #168, D7/D8; the
- * approved artifact has no such badge anywhere). Those three have no page yet,
- * so they are simply not in the list — a hidden destination is honest, a badge
- * saying "soon" is a promise. When one of those pages lands, add its section
- * back here pointing at the real route; there is deliberately no flag for
- * "planned but unbuilt".
+ * approved artifact has no such badge anywhere). Guides and Lists still have no
+ * page, so they are simply not in the list — a hidden destination is honest, a
+ * badge saying "soon" is a promise. There is deliberately no flag for
+ * "planned but unbuilt": a section is added back when its route exists, and a
+ * test walks the filesystem to prove every href resolves.
+ *
+ * Documents came back in #4569, when /dashboard/documents landed: it sits in
+ * the Household group between Meals and People & House, exactly as the approved
+ * shell draws it (artifact #75 v1), and only the roles that may read files see
+ * it — the family roles and a viewer. A housesitter and a vendor get 403 from
+ * the files API, so the section is not drawn for them.
  *
  * Plain data and pure helpers only (no JSX), so it can be unit tested.
  */
 import type { Icon } from "@tabler/icons-react";
 import {
   IconCalendar,
+  IconFiles,
   IconHome,
   IconSettings,
   IconSun,
@@ -54,7 +61,7 @@ const READERS: readonly NavRole[] = [...FAMILY, "viewer"];
 /** Readers plus housesitter (calendar and meals). */
 const SITTERS: readonly NavRole[] = [...READERS, "housesitter"];
 
-export type NavSectionId = "today" | "calendar" | "meals" | "people" | "money" | "settings";
+export type NavSectionId = "today" | "calendar" | "meals" | "documents" | "people" | "money" | "settings";
 
 export interface NavSection {
   id: NavSectionId;
@@ -116,6 +123,17 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     matches: ["/dashboard/recipes"],
   },
   {
+    // #4569: the household's paperwork (the documents hub). READERS is the
+    // files read grant in the API's role policy, so a housesitter and a vendor
+    // do not see the section at all — the API answers 403 for them.
+    id: "documents",
+    label: "Documents",
+    href: "/dashboard/documents",
+    icon: IconFiles,
+    group: "household",
+    roles: READERS,
+  },
+  {
     id: "people",
     label: "People & House",
     // The People page (#4565) doesn't exist yet; properties is today's way in.
@@ -159,6 +177,9 @@ const ROUTE_TITLES: ReadonlyArray<[prefix: string, title: string]> = [
   ["/dashboard/admin", "Admin"],
   ["/dashboard/meals", "Meals"],
   ["/dashboard/recipes", "Recipes"],
+  // The Documents hub's own page is the section (its title comes from there);
+  // a single document keeps "Documents", like a recipe keeps "Recipes".
+  ["/dashboard/documents", "Documents"],
   ["/dashboard/search", "Search"],
   // "See all" behind Today's Family activity panel (#4577). It is not a nav
   // section of its own — the header still reads "Family activity", and the tab

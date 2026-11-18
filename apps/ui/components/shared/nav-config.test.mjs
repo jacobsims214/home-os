@@ -14,13 +14,15 @@ import {
   sectionsInGroup,
 } from "./nav-config.ts";
 
-test("the six built sections, in the approved order and groups", () => {
+test("the seven built sections, in the approved order and groups", () => {
+  // #4569 added Documents (Household group, between Meals and People & House,
+  // which is where artifact #75 v1 draws it).
   assert.deepEqual(
     NAV_SECTIONS.map((s) => s.id),
-    ["today", "calendar", "meals", "people", "money", "settings"],
+    ["today", "calendar", "meals", "documents", "people", "money", "settings"],
   );
   assert.deepEqual(sectionsInGroup("main").map((s) => s.label), ["Today", "Calendar", "Meals"]);
-  assert.deepEqual(sectionsInGroup("household").map((s) => s.label), ["People & House", "Money"]);
+  assert.deepEqual(sectionsInGroup("household").map((s) => s.label), ["Documents", "People & House", "Money"]);
   assert.deepEqual(sectionsInGroup("you").map((s) => s.label), ["Settings"]);
   assert.deepEqual(TAB_SECTIONS.map((s) => s.id), ["today", "calendar", "meals"]);
 });
@@ -32,9 +34,13 @@ test("the six built sections, in the approved order and groups", () => {
 // guard: no section may be planned-but-unbuilt, and the three unfinished
 // destinations must not come back as inert entries.
 test("only real destinations are in the nav — no placeholder/coming-soon sections (#5199)", () => {
-  for (const id of ["lists", "documents", "guides"]) {
+  // Documents left this list in #4569: /dashboard/documents exists now, so its
+  // section is back with a real href (checked against the filesystem below).
+  for (const id of ["lists", "guides"]) {
     assert.equal(NAV_SECTIONS.find((s) => s.id === id), undefined, `${id} has no page, so it must not be in the nav`);
   }
+  const documents = NAV_SECTIONS.find((s) => s.id === "documents");
+  assert.equal(documents.href, "/dashboard/documents", "the Documents section points at its real route");
   for (const s of NAV_SECTIONS) {
     assert.equal("comingSoon" in s, false, `${s.id} must not carry a coming-soon flag`);
     assert.equal(s.href, s.href.trim(), s.id);
@@ -102,7 +108,8 @@ test("sectionsForRole follows the household role policy", () => {
   for (const role of ["owner", "family_manager", "family_member", "viewer"]) {
     assert.deepEqual(ids(role), all, role);
   }
-  // No money or documents (files) for a housesitter.
+  // No money or documents (files) for a housesitter (#4689: files read is the
+  // family roles plus viewer). A viewer DOES see Documents (#4569).
   assert.deepEqual(ids("housesitter"), ["today", "calendar", "meals", "people", "settings"]);
   // A vendor reads properties/assets/maintenance only (People & House).
   assert.deepEqual(ids("vendor"), ["today", "people", "settings"]);
@@ -130,4 +137,27 @@ test("Meals links to the week plan and still owns the recipe box (#4568)", () =>
   assert.equal(pageTitle("/dashboard/meals"), "Meals");
   assert.equal(pageTitle("/dashboard/meals/grocery"), "Meals");
   assert.equal(pageTitle("/dashboard/recipes"), "Recipes");
+});
+
+// #4569: the documents hub. Documents is READERS-only (the API's files read
+// grant), so a viewer keeps it and a housesitter / vendor never sees it; the
+// document's own page keeps the section current and its title.
+test("Documents: readers only, its pages belong to the section (#4569)", () => {
+  const documents = NAV_SECTIONS.find((s) => s.id === "documents");
+  assert.ok(documents);
+  assert.equal(documents.label, "Documents");
+  assert.equal(documents.group, "household");
+  for (const role of ["owner", "family_manager", "family_member", "viewer"]) {
+    assert.equal(canSeeSection(documents, role), true, `${role} may read files`);
+  }
+  for (const role of ["housesitter", "vendor"]) {
+    assert.equal(canSeeSection(documents, role), false, `${role} may not read files`);
+  }
+  // A single document and the hub both keep Documents current in the shell.
+  assert.equal(activeSection("/dashboard/documents")?.id, "documents");
+  assert.equal(activeSection("/dashboard/documents/abc-123")?.id, "documents");
+  assert.equal(pageTitle("/dashboard/documents"), "Documents");
+  assert.equal(pageTitle("/dashboard/documents/abc-123"), "Documents");
+  // A prefix must end at a path segment.
+  assert.equal(activeSection("/dashboard/documentsx"), null);
 });

@@ -116,6 +116,14 @@ export async function applyHouseholdSwitch(
 const SECTION_PAGES = new Set(["grocery", "search"]);
 
 /**
+ * Sections whose sub-paths are all PAGES, never records: Settings (#4560) is an
+ * index plus /dashboard/settings/<section>, and every section reads the
+ * household the request is scoped to, so a switch can stay right where it is
+ * instead of bouncing the person out to the section list.
+ */
+const PAGED_SECTIONS = new Set(["settings"]);
+
+/**
  * The URL a switch should move to, or null when the current page is safe.
  *
  * A record page names one household's row by id. After a switch that id is not
@@ -128,6 +136,7 @@ export function householdSwitchTarget(pathname: string | null | undefined): stri
   const parts = path.split("/").filter(Boolean);
   // ["dashboard", "<section>", "<maybe record id>"]
   if (parts[0] !== "dashboard" || parts.length < 3) return null;
+  if (PAGED_SECTIONS.has(parts[1] ?? "")) return null;
   if (SECTION_PAGES.has(parts[2])) return null;
   const section = parts[1];
   if (!section) return "/dashboard";

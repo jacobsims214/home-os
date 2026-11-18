@@ -145,5 +145,9 @@ test("switching off a record page goes to that section's list", () => {
   assert.equal(householdSwitchTarget("/dashboard/meals/grocery"), null);
   assert.equal(householdSwitchTarget("/dashboard/search"), null);
   assert.equal(householdSwitchTarget("/dashboard/settings"), null);
+  // Settings sub-routes are pages of that section (#4560), not records: a
+  // switch must not throw the person out of the section they are reading.
+  assert.equal(householdSwitchTarget("/dashboard/settings/household"), null);
+  assert.equal(householdSwitchTarget("/dashboard/settings/credentials"), null);
   assert.equal(householdSwitchTarget(null), null);
 });

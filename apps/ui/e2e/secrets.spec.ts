@@ -1,6 +1,6 @@
 import { createHash, pbkdf2Sync } from "node:crypto";
 import type { Page, Request } from "@playwright/test";
-import { test, expect, SESSION_COOKIE } from "./fixtures";
+import { seedHouseholds, test, expect, SESSION_COOKIE } from "./fixtures";
 
 /**
  * Secrets master key: setup -> lock -> unlock against the stub API, through
@@ -13,6 +13,22 @@ import { test, expect, SESSION_COOKIE } from "./fixtures";
  */
 
 test.skip(!!process.env.E2E_BASE_URL, "needs the stub API's per-session vaults");
+
+/**
+ * The credentials section is role-gated (#4560): it needs a known household
+ * role before it renders, and the stub's default session has no family list at
+ * all. Seeding one family as owner is what the real API always has.
+ */
+const SETTINGS_HOUSEHOLD = "0b9d4f1e-6a3c-4b8e-9f52-1c7d2a5e8b10";
+async function seedOwnerFamily(
+  request: Parameters<typeof seedHouseholds>[0],
+  sid: string | null,
+  role = "owner",
+) {
+  await seedHouseholds(request, sid!, [
+    { id: SETTINGS_HOUSEHOLD, name: "Sims family", role, timezone: "America/Chicago" },
+  ]);
+}
 
 const stubUrl = `http://127.0.0.1:${process.env.E2E_STUB_PORT || 3901}`;
 const PASSWORD = "e2e master password 4445";
@@ -42,12 +58,18 @@ async function expectNothingStored(page: Page, ...secrets: string[]) {
   for (const s of secrets) expect(stored).not.toContain(s);
 }
 
-test("settings: set up, lock, wrong password stays put, unlock", async ({ loggedInPage: page }) => {
+test("settings: set up, lock, wrong password stays put, unlock", async ({
+  loggedInPage: page,
+  stubSid,
+  request,
+}) => {
+  await seedOwnerFamily(request, stubSid);
   const probes: string[] = [];
   page.on("request", (r) => {
     if (isSecrets("verify", "POST")(r) || isSecrets("key", "GET")(r)) probes.push(`${r.method()} ${new URL(r.url()).pathname}`);
   });
-  await page.goto("/dashboard/settings");
+  // #4560: the vault moved from the one-page Settings to its own section.
+  await page.goto("/dashboard/settings/credentials");
   await expect(page.getByText("Not Set Up", { exact: true })).toBeVisible();
   // The setup probe is GET /secrets/key, never a verifier-less POST /verify.
   expect(probes).toContain("GET /bff/secrets/key");
@@ -75,7 +97,9 @@ test("settings: set up, lock, wrong password stays put, unlock", async ({ logged
   await dialog.getByLabel("Master Password").fill("not the password");
   await dialog.getByRole("button", { name: "Unlock", exact: true }).click();
   await expect(dialog.getByText("Incorrect master password.")).toBeVisible();
-  expect(new URL(page.url()).pathname).toBe("/dashboard/settings");
+  // #4560 moved the vault's entry point to its own section; a wrong master
+  // password must still leave the person on that page, not send them to /login.
+  expect(new URL(page.url()).pathname).toBe("/dashboard/settings/credentials");
 
   // Right password
   await dialog.getByLabel("Master Password").fill(PASSWORD);
@@ -90,13 +114,18 @@ test("settings: set up, lock, wrong password stays put, unlock", async ({ logged
   await expectNothingStored(page, PASSWORD, setupBody.verifier);
 });
 
-test("a household set up before migration 051 unlocks with the same password and is upgraded", async ({ loggedInPage: page }) => {
+test("a household set up before migration 051 unlocks with the same password and is upgraded", async ({
+  loggedInPage: page,
+  stubSid,
+  request,
+}) => {
+  await seedOwnerFamily(request, stubSid);
   // Pre-051 the API stored key_hash = base64(SHA-256(PBKDF2-SHA256(password,
   // salt, 100k))). Seed exactly that, computed outside the UI.
   const salt = Buffer.from("legacy-salt-4445").toString("base64");
   const raw = pbkdf2Sync(PASSWORD, Buffer.from(salt, "base64"), 100_000, 32, "sha256");
   const keyHash = createHash("sha256").update(raw).digest("base64");
-  await page.goto("/dashboard/settings");
+  await page.goto("/dashboard/settings/credentials");
   const seed = await page.request.post(`${stubUrl}/e2e/secrets/seed`, {
     data: { sid: await sessionId(page), key_salt: salt, key_hash: keyHash },
   });
