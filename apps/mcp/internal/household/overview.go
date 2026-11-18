@@ -171,9 +171,9 @@ var howTo = []string{
 	"Every date in a result also carries local_date and weekday; trust those over your own weekday math.",
 	"find tools list and search in one call; pass id for exactly one full record.",
 	"When a list is truncated, pass its next_cursor back as cursor (same filters) to get the next page.",
-	"person_id comes from people[].id here or from person_find.",
-	"calendar_id accepts a calendar name, e.g. Family.",
+	"person_id comes from people[].id here or person_find; calendar_id accepts a name, e.g. Family.",
 	"Not sure which area something is in? search_all looks everywhere at once.",
+	"A bill is not a document. For a paper bill, document_upload its text verbatim, then bill_update source_document_id; never call a bill filed without one.",
 	"The family owns everything (rename it or change its timezone with family_update): properties have rooms, and an asset sits in a room, a property or the family. Bills, loans and upkeep may be for one property, vehicle or asset; none needs a property.",
 }
 

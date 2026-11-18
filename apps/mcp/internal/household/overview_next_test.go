@@ -64,8 +64,9 @@ func decodeOverview(t *testing.T, env envelope) overview {
 func mentionsOnlyRegisteredTools(t *testing.T, s string) {
 	t.Helper()
 	registered := []string{
-		"agenda_get", "bill_find", "bill_pay", "event_create", "event_find", "event_update", "event_delete",
-		"family_update", "maintenance_complete", "maintenance_find", "notification_find", "person_find", "search_all",
+		"agenda_get", "bill_find", "bill_pay", "bill_update", "document_upload", "event_create", "event_find",
+		"event_update", "event_delete", "family_update", "maintenance_complete", "maintenance_find",
+		"notification_find", "person_find", "search_all",
 	}
 	toolLike := []string{"_find", "_get", "_create", "_update", "_delete", "_pay", "_complete", "_all"}
 	for _, w := range strings.FieldsFunc(s, func(r rune) bool { return !(r == '_' || r >= 'a' && r <= 'z') }) {

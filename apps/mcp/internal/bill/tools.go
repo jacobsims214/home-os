@@ -119,6 +119,12 @@ func (r billRow) hasSchedule() bool {
 // bill has no schedule (a monthly bill without due_day, another bill without
 // due_date). A paid once bill has status paid and no next_due_date. amount_paid and already_paid are set only by
 // bill_pay, duplicate only by bill_create's loop guard.
+//
+// document_filed (#5306) says whether a document exists for this bill, and is
+// computed from the row's source_document_id, never from prose. A null
+// source_document_id used to be the only signal, and saying nothing about it
+// read as success: the assistant answered "all filed" for a paper bill whose
+// result had only ever said "Created bill …".
 type billData struct {
 	ID                  string    `json:"id" jsonschema_description:"The bill_id to pass to bill_update, bill_pay or bill_delete."`
 	Name                string    `json:"name"`
@@ -152,6 +158,7 @@ type billData struct {
 	AmountPaid          *float64  `json:"amount_paid,omitempty" jsonschema_description:"bill_pay only: the amount paid."`
 	AlreadyPaid         *bool     `json:"already_paid,omitempty" jsonschema_description:"bill_pay only: true when that due date was already paid and nothing changed."`
 	Duplicate           bool      `json:"duplicate,omitempty" jsonschema_description:"bill_create only: true when the same bill was created minutes ago and was returned instead."`
+	DocumentFiled       bool      `json:"document_filed" jsonschema_description:"true only when a document for this bill exists and is linked. When false nothing was filed, so never say the bill is filed."`
 }
 
 // dateOnly formats t as YYYY-MM-DD.
@@ -182,7 +189,8 @@ func (r billRow) data(today time.Time) billData {
 		Category: r.Category, Autopay: r.AutoPay, ContactID: uuidString(r.VendorID),
 		BudgetCategoryID: uuidString(r.BudgetCategoryID), BudgetCategory: r.BudgetCategory,
 		SourceDocumentID: uuidString(r.SourceDocumentID), SourceDocumentTitle: r.SourceDocumentTitle,
-		PropertyID: uuidString(r.PropertyID), VehicleID: uuidString(r.VehicleID), AssetID: uuidString(r.AssetID),
+		DocumentFiled: r.SourceDocumentID != nil,
+		PropertyID:    uuidString(r.PropertyID), VehicleID: uuidString(r.VehicleID), AssetID: uuidString(r.AssetID),
 		SubjectType: subjectType(r.PropertyID, r.VehicleID, r.AssetID),
 		PaymentURL:  r.PaymentURL, Notes: r.Notes,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
