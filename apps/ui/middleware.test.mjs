@@ -38,6 +38,9 @@ const PUBLIC = [
   "/api/auth",
   "/api/auth/login",
   "/api/auth/callback",
+  "/auth", // the app's own last step of a login (#5304)
+  "/auth/complete",
+  "/auth/complete?to=%2Fdashboard%2Fcalendar",
 ];
 const PASSTHROUGH = [
   "/bff/members",
@@ -56,6 +59,7 @@ const PROTECTED = [
   "/dashboard/settings/profile",
   "/dashboard/report.pdf", // a dot no longer bypasses the guard
   "/loginx", // prefix must match a whole segment
+  "/authx", // "/auth" is the completion route only (#5304)
   "/invitex",
   "/invitesomething",
   "/bffx",
