@@ -112,7 +112,6 @@ function TokenRow({ token, onRevoke }: { token: AgentToken; onRevoke: (token: Ag
         <div className={classes.tokenMeta}>
           <span className={classes.tokenTag}>{scopeLabel(token.scopes)}</span>
           <span>{lastUsedLabel(token.last_used_at)}</span>
-          <span aria-hidden>·</span>
           <span className={soon ? classes.tokenTagWarn : undefined}>{expiryLabel(token.expires_at)}</span>
         </div>
       </div>
@@ -142,12 +141,7 @@ function RevokedRow({ token }: { token: AgentToken }) {
         <code className={classes.tokenPrefix}>{maskedToken(token.token_prefix)}</code>
         <div className={classes.tokenMeta}>
           <span>{revokedLabel(token.revoked_at)}</span>
-          {token.last_used_at && (
-            <>
-              <span aria-hidden>·</span>
-              <span>{lastUsedLabel(token.last_used_at)}</span>
-            </>
-          )}
+          {token.last_used_at && <span>{lastUsedLabel(token.last_used_at)}</span>}
         </div>
       </div>
     </li>
