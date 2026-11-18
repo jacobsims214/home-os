@@ -172,13 +172,16 @@ test("the setup steps are per device, and the values to paste sit right above th
 
   // Android is DAVx5: Google Calendar has no CalDAV support, so "use your
   // Calendar app" would send someone to a screen with no such option.
-  await page.getByRole("radio", { name: "Android" }).click();
+  const devicePicker = page.getByRole("radiogroup", { name: "Which device are you setting up?" });
+  // The radio input itself is visually hidden by the segmented control; the
+  // label is the tap target (and what a thumb actually hits at 390 px).
+  await devicePicker.getByText("Android", { exact: true }).click();
   const android = page.getByTestId("caldav-steps-android");
   await expect(android).toBeVisible();
   await expect(android).toContainText("DAVx5");
   await expect(page.getByTestId("caldav-steps-iphone")).toHaveCount(0);
 
-  await page.getByRole("radio", { name: "Mac" }).click();
+  await devicePicker.getByText("Mac", { exact: true }).click();
   await expect(page.getByTestId("caldav-steps-mac")).toContainText("Calendar → Settings");
 
   // Which calendars appear is the person's role (#4807), said before anyone
