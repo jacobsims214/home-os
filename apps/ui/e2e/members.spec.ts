@@ -78,6 +78,12 @@ function onlyIPhone(): void {
 interface Stubs {
   /** The caller's role in GET /me/households. */
   role: string;
+  /**
+   * The household's zone, for GET /me/households and GET /households/me. Omitted:
+   * the seed's America/Chicago. `""` is a real family state (the API stores an
+   * empty zone), which is the ONE case the card may call "not set" (#5300).
+   */
+  householdTimezone?: string;
   members?: unknown[];
   people?: unknown[];
   invites?: unknown[];
@@ -97,12 +103,32 @@ interface Stubs {
  * exactly the contract the page must not exceed.
  */
 async function stubMembers(page: Page, stubs: Stubs) {
+  const timezone = stubs.householdTimezone ?? HOUSEHOLD.timezone;
   await page.route("**/bff/me/households", (route) =>
-    route.fulfill({ json: { data: [{ ...HOUSEHOLD, role: stubs.role }] } }),
+    route.fulfill({ json: { data: [{ ...HOUSEHOLD, timezone, role: stubs.role }] } }),
   );
   await page.route("**/bff/auth/me", (route) => route.fulfill({ json: ME }));
+  // GET /households/me, in the API's REAL wire shape (#5300): the handler
+  // serialises the Go Household struct, which carries no json tags, so the keys
+  // are `ID`/`Name`/`Timezone` — capitalised. This stub used to answer the tidy
+  // lowercase object the page wished it got, which is how "Time zone not set" on
+  // a family with a zone survived every test. Stub the API as it is, not as the
+  // page would like it: the page no longer reads this route at all (it reads
+  // GET /me/households, the one household source), and a spec that passes here
+  // cannot be passing on a payload the product never sends.
   await page.route("**/bff/households/me", (route) =>
-    route.fulfill({ json: { data: { id: HOUSEHOLD.id, name: HOUSEHOLD.name, timezone: HOUSEHOLD.timezone } } }),
+    route.fulfill({
+      json: {
+        data: {
+          ID: HOUSEHOLD.id,
+          Name: HOUSEHOLD.name,
+          Timezone: timezone,
+          Settings: null,
+          CreatedAt: "2026-01-01T00:00:00Z",
+          UpdatedAt: "2026-01-01T00:00:00Z",
+        },
+      },
+    }),
   );
   await page.route("**/bff/households/me/members", (route) => {
     if (stubs.hangRoster) return; // never answers: the page stays in loading
@@ -232,6 +258,43 @@ for (const colorScheme of ["light", "dark"] as const) {
       // Row actions reach the edge: no sideways scroll at 390 px (#11636).
       await expectNoHorizontalOverflow(page);
       await snap(page, testInfo, "members-roster-iphone");
+    });
+
+    // ── 1b. the household card tells the truth about the family (#5300) ──
+    test("phone 390: the family card shows the real zone and 'an owner', never 'not set'", async ({ loggedInPage: page }, testInfo) => {
+      onlyIPhone();
+      test.skip(colorScheme === "dark", "the card's copy runs once (light)");
+      await stubMembers(page, { role: "owner" });
+      await gotoMembers(page);
+
+      // The war game's line, verbatim. The zone comes from GET /me/households
+      // (the household source Today, Calendar, People and Bills read); this
+      // family has one, so the card must say it and must not claim otherwise.
+      const meta = page.getByTestId("household-meta");
+      await expect(meta).toContainText("America/Chicago");
+      await expect(meta).not.toContainText("not set");
+      // "you're a owner" was the second half of the same line.
+      await expect(meta).toContainText("you're an owner");
+      await expect(meta).not.toContainText("a owner");
+
+      // The name is the family's, not the placeholder the misnamed read drew.
+      await expect(page.getByTestId("household-name")).toHaveText("Sims family");
+
+      await snap(page, testInfo, "members-household-card-iphone");
+    });
+
+    test("phone 390: a family with NO zone is the only case that says 'Time zone not set'", async ({ loggedInPage: page }, testInfo) => {
+      onlyIPhone();
+      test.skip(colorScheme === "dark", "the empty-zone copy runs once (light)");
+      // The household record itself carries an empty zone: a real family state
+      // (the API stores ""), not a loading placeholder. Both reads are stubbed
+      // so the two cannot disagree.
+      await stubMembers(page, { role: "owner", householdTimezone: "" });
+      await gotoMembers(page);
+
+      const meta = page.getByTestId("household-meta");
+      await expect(meta).toContainText("Time zone not set");
+      await expect(meta).toContainText("you're an owner");
     });
 
     // ── 2. a non-manager sees no management controls ───────────
