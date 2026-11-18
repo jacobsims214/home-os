@@ -39,7 +39,6 @@ import {
   IconMapPin,
   IconMessage,
   IconPhone,
-  IconUser,
 } from "@tabler/icons-react";
 import { apiFetch } from "@/lib/api";
 import { billKeys, petKeys, vendorKeys } from "@/lib/query-keys";
@@ -260,6 +259,7 @@ export default function ContactDetailPage() {
         isEditing
         onCancel={() => setIsEditing(false)}
         onSave={() => {
+          // Validate here too, so a bad body never leaves as a request.
           const result = buildContactUpdate(values);
           if (!result.ok) {
             setFormError(result.error);

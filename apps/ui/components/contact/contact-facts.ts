@@ -7,6 +7,8 @@
  * question in one place.
  */
 
+import { tradeLabel } from "./trade-vocabulary.ts";
+
 /** The vendor row as GET /api/v1/vendors returns it (KB apis/vendors.md). */
 export interface Contact {
   id: string;
@@ -84,7 +86,9 @@ export function contactInitial(name: string): string {
  * no subline renders, rather than a blank row.
  */
 export function contactTradesLine(contact: Pick<Contact, "trades" | "specialty">): string {
-  const trades = (contact.trades ?? []).filter(Boolean);
+  // Label them: the stored form is snake_case ("pest_control") and the audit
+  // (#4509) called out exactly that kind of raw value on screen.
+  const trades = (contact.trades ?? []).filter(Boolean).map(tradeLabel);
   if (trades.length > 0) return trades.join(" · ");
   return (contact.specialty ?? "").trim();
 }

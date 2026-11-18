@@ -133,7 +133,10 @@ for (const colorScheme of ["light", "dark"] as const) {
       const cards = main.locator("[data-contact-card]");
       await expect(cards).toHaveCount(CONTACTS.length);
       await expect(cards.first()).toContainText("Joe's Plumbing");
-      await expect(cards.first()).toContainText("plumber · handyman");
+      // Labelled, not raw storage: "pest_control" must never reach the screen (#4509).
+      await expect(cards.first()).toContainText("Plumber · Handyman");
+      await expect(main.locator('[data-contact-card="v3"]')).toContainText("Pest control");
+      await expect(main.locator('[data-contact-card="v3"]')).not.toContainText("pest_control");
 
       // The chips come from the data: every distinct trade, plus All.
       const chips = main.locator("[data-trade-chip]");

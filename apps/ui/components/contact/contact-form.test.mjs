@@ -119,7 +119,9 @@ test("avatar initial never renders an empty tile", () => {
 });
 
 test("the trades line falls back to specialty, then to nothing", () => {
-  assert.equal(contactTradesLine({ trades: ["plumber", "handyman"], specialty: null }), "plumber · handyman");
+  assert.equal(contactTradesLine({ trades: ["plumber", "handyman"], specialty: null }), "Plumber · Handyman");
+  // Raw stored values never reach the screen (#4509 flagged exactly that).
+  assert.equal(contactTradesLine({ trades: ["pest_control"], specialty: null }), "Pest control");
   assert.equal(contactTradesLine({ trades: [], specialty: "Plumbing" }), "Plumbing");
   assert.equal(contactTradesLine({ trades: [], specialty: null }), "");
 });
