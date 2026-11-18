@@ -60,6 +60,16 @@ type Event struct {
 	Recurring    bool       `json:"recurring,omitempty"`
 	RecurrenceID *time.Time `json:"recurrence_id,omitempty"`
 
+	// Read-only, filled by the listing reads (localday.go, #4550): the
+	// event's day, weekday and wall clock in the household's zone, so no
+	// client has to turn an instant into a date or a time. Not stored in
+	// ical_data, so a write can never leave them stale.
+	LocalDate    string `json:"local_date,omitempty"`
+	Weekday      string `json:"weekday,omitempty"`
+	LocalTime    string `json:"local_time,omitempty"`
+	EndLocalDate string `json:"end_local_date,omitempty"`
+	EndLocalTime string `json:"end_local_time,omitempty"`
+
 	// remindersSet: Reminders were given by the client (replace the
 	// event's alarms) rather than omitted (keep them).
 	remindersSet bool
@@ -263,6 +273,11 @@ func collectEvents(rows pgx.Rows, rg EventRange, loc *time.Location, what string
 	if rg.expands() {
 		sortByStart(events)
 	}
+	// Every listing answers each event's day, weekday and wall clock in the
+	// household's zone (#4550), occurrences included, so the UI never derives
+	// them.
+	setLocalDays(events, loc)
+	setLocalTimesAll(events, loc)
 	return events, nil
 }
 
