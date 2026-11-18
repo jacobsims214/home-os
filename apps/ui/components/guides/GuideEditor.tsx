@@ -332,7 +332,13 @@ export default function GuideEditor({
               label="Name"
               required
               value={values.title}
-              onChange={(e) => setValues((v) => ({ ...v, title: e.currentTarget.value }))}
+              onChange={(e) => {
+                // Read the value NOW: React nulls `currentTarget` before the
+                // functional updater runs, so reading it inside setValues throws
+                // (#5309: it crashed on the second keystroke).
+                const value = e.currentTarget.value;
+                setValues((v) => ({ ...v, title: value }));
+              }}
               error={values.title.trim() === "" ? "Required" : undefined}
               classNames={{ input: "max-md:min-h-11 max-md:text-base" }}
               data-guide-edit="title"
@@ -343,7 +349,13 @@ export default function GuideEditor({
               autosize
               minRows={2}
               value={values.summary}
-              onChange={(e) => setValues((v) => ({ ...v, summary: e.currentTarget.value }))}
+              onChange={(e) => {
+                // Read the value NOW: React nulls `currentTarget` before the
+                // functional updater runs, so reading it inside setValues throws
+                // (#5309: it crashed on the second keystroke).
+                const value = e.currentTarget.value;
+                setValues((v) => ({ ...v, summary: value }));
+              }}
               classNames={{ input: "max-md:text-base" }}
               data-guide-edit="summary"
             />
@@ -354,7 +366,13 @@ export default function GuideEditor({
               minRows={8}
               maxRows={28}
               value={values.body}
-              onChange={(e) => setValues((v) => ({ ...v, body: e.currentTarget.value }))}
+              onChange={(e) => {
+                // Read the value NOW: React nulls `currentTarget` before the
+                // functional updater runs, so reading it inside setValues throws
+                // (#5309: it crashed on the second keystroke).
+                const value = e.currentTarget.value;
+                setValues((v) => ({ ...v, body: value }));
+              }}
               classNames={{ input: "max-md:text-base font-mono text-[13px]" }}
               data-guide-edit="steps"
             />
@@ -362,7 +380,13 @@ export default function GuideEditor({
               label="Tags"
               description="Comma separated. “wifi, router”."
               value={values.tags}
-              onChange={(e) => setValues((v) => ({ ...v, tags: e.currentTarget.value }))}
+              onChange={(e) => {
+                // Read the value NOW: React nulls `currentTarget` before the
+                // functional updater runs, so reading it inside setValues throws
+                // (#5309: it crashed on the second keystroke).
+                const value = e.currentTarget.value;
+                setValues((v) => ({ ...v, tags: value }));
+              }}
               classNames={{ input: "max-md:min-h-11 max-md:text-base" }}
               data-guide-edit="tags"
             />
@@ -371,7 +395,13 @@ export default function GuideEditor({
               description="Optional. Saved with this version so history says why."
               maxLength={500}
               value={values.change_note}
-              onChange={(e) => setValues((v) => ({ ...v, change_note: e.currentTarget.value }))}
+              onChange={(e) => {
+                // Read the value NOW: React nulls `currentTarget` before the
+                // functional updater runs, so reading it inside setValues throws
+                // (#5309: it crashed on the second keystroke).
+                const value = e.currentTarget.value;
+                setValues((v) => ({ ...v, change_note: value }));
+              }}
               classNames={{ input: "max-md:min-h-11 max-md:text-base" }}
               data-guide-edit="change-note"
             />
