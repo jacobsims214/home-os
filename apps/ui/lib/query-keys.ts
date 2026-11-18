@@ -175,3 +175,19 @@ export const personKeys = {
   list: () => [...personKeys.lists()] as const,
   detail: (id: string) => [...personKeys.all, "detail", id] as const,
 };
+
+/**
+ * Guides (#4570). The list is fetched whole and narrowed on the client: the
+ * API's only filters are subject and tag (`?property_id=&tag=`), and a family
+ * has tens of guides, not thousands — a search box that round-trips per
+ * keystroke would be slower than the filter it replaces.
+ */
+export const guideKeys = {
+  all: ["guides"] as const,
+  lists: () => [...guideKeys.all, "list"] as const,
+  list: () => [...guideKeys.lists()] as const,
+  details: () => [...guideKeys.all, "detail"] as const,
+  detail: (id: string) => [...guideKeys.details(), id] as const,
+  revisions: (id: string) => [...guideKeys.detail(id), "revisions"] as const,
+  revision: (id: string, revisionId: string) => [...guideKeys.revisions(id), revisionId] as const,
+};
