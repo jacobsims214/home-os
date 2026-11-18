@@ -207,7 +207,10 @@ export default function AssetDetailPage() {
 
   const view = asset && (
     <div className="flex flex-col gap-5">
-      {stats.length > 0 && (
+      {/* One fact alone is not a summary: the strip appears only when there is
+          more than one to compare. A role without money read therefore gets no
+          strip at all, rather than a lone row about the one date it can see. */}
+      {stats.length > 1 && (
         <dl
           data-asset-summary
           className="grid grid-cols-2 divide-x divide-y divide-line overflow-hidden rounded-token-md border border-line bg-surface-2/40 md:grid-cols-4 md:divide-y-0"
@@ -265,16 +268,18 @@ export default function AssetDetailPage() {
         </dl>
       </div>
 
-      {/* Money is absent, not zero: a role without money read gets no rows at
-          all, not a row of dashes about values it may not see (#4912). */}
+      {/* Value and dates. Each row appears only when the API sent that value:
+          a role without money read has purchase_price/current_value/purchase_date
+          redacted (#4912), and a row of dashes about money it cannot see is
+          worse than no row. Money is absent, never $0. */}
       {(usd(asset.current_value) || usd(asset.purchase_price) || asset.purchase_date || asset.warranty_expiry) && (
         <div>
-          <h3 className="text-sm font-semibold text-ink-2">Money and dates</h3>
+          <h3 className="text-sm font-semibold text-ink-2">Value and dates</h3>
           <dl className="m-0 divide-y divide-line">
-            <Row label="Paid">{usd(asset.purchase_price) ?? "\u2014"}</Row>
-            <Row label="Current value">{usd(asset.current_value) ?? "\u2014"}</Row>
-            <Row label="Bought">{asset.purchase_date ? monthYear(asset.purchase_date) : "\u2014"}</Row>
-            <Row label="Warranty until">{asset.warranty_expiry ? monthYear(asset.warranty_expiry) : "\u2014"}</Row>
+            {usd(asset.purchase_price) && <Row label="Paid">{usd(asset.purchase_price)}</Row>}
+            {usd(asset.current_value) && <Row label="Current value">{usd(asset.current_value)}</Row>}
+            {asset.purchase_date && <Row label="Bought">{monthYear(asset.purchase_date)}</Row>}
+            {asset.warranty_expiry && <Row label="Warranty until">{monthYear(asset.warranty_expiry)}</Row>}
           </dl>
         </div>
       )}

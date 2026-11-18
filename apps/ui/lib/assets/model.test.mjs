@@ -68,26 +68,27 @@ test("factsFor: a card shows only what the API sent", () => {
   assert.deepEqual(redacted, [{ label: "Place", value: "Maple Street" }]);
 });
 
-test("summaryFacts: order and omission, so a redacted asset has no strip", () => {
+test("summaryFacts: order, omission, and never more than one 4-up row", () => {
   const stats = summaryFacts(
     asset({
       current_value: "4200.00",
       purchase_price: "5100.00",
       purchase_date: "2019-10-02",
       warranty_expiry: "2029-10-01",
+      // A category has its own row under "What it is", so it is not a summary
+      // fact and must not push the strip to a fifth cell.
       category: "HVAC",
     }),
   );
   assert.deepEqual(
     stats.map((s) => s.label),
-    ["Value", "Paid", "Warranty", "Bought", "Category"],
+    ["Value", "Paid", "Warranty", "Bought"],
   );
   assert.equal(stats.find((s) => s.label === "Value").value, "$4,200");
 
   // #4912: a role without money read gets purchase_* omitted and current_value
-  // null. No money fact survives, so the detail page renders no summary strip.
-  assert.deepEqual(summaryFacts(asset({ current_value: null, category: "HVAC" })), [
-    { label: "Category", value: "HVAC" },
-  ]);
+  // null. Only the warranty date survives, which is one fact - not a strip.
+  const redacted = summaryFacts(asset({ current_value: null, category: "HVAC", warranty_expiry: "2029-10-01" }));
+  assert.deepEqual(redacted, [{ label: "Warranty", value: "Oct 2029" }]);
   assert.deepEqual(summaryFacts(asset()), []);
 });

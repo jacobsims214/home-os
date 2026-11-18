@@ -89,6 +89,8 @@ export function summaryFacts(a: Asset): Fact[] {
   if (paid) facts.push({ label: "Paid", value: paid });
   if (a.warranty_expiry) facts.push({ label: "Warranty", value: monthYear(a.warranty_expiry) });
   if (a.purchase_date) facts.push({ label: "Bought", value: monthYear(a.purchase_date) });
-  if (a.category) facts.push({ label: "Category", value: a.category });
-  return facts;
+  // At most four: the strip is one 4-up row from 768 px, so a fifth fact would
+  // wrap into a lopsided second row. The category already has its own row under
+  // "What it is", so it is not repeated here.
+  return facts.slice(0, 4);
 }
