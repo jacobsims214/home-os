@@ -14,6 +14,7 @@ import (
 	"home-os/api/internal/legacyfinance"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchqueue"
 	"home-os/api/pkg/apierr"
 )
 
@@ -39,32 +40,17 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexProperty(ctx context.Context, p *Property) {
+	// Delegates to the one document builder (#5314). searchqueue.Document
+	// reads the row and produces the same document the index queue's drain
+	// writes, so a write made here and the same write made through an MCP tool
+	// cannot index differently — and there is no second copy of the document
+	// rules to drift. A failure is only logged: the trigger already queued the
+	// row, so the drain retries it.
 	if h.search == nil {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Warn("property: panic during search indexing", "panic", r)
-		}
-	}()
-	body := ""
-	if p.Address != nil {
-		body = *p.Address
-	}
-	if p.PropertyType != nil {
-		body += " " + *p.PropertyType
-	}
-	if p.Notes != nil {
-		body += " " + *p.Notes
-	}
-	doc := search.SearchDocument{
-		ID: "property-" + p.ID.String(), HouseholdID: p.HouseholdID.String(),
-		EntityType: "property", EntityID: p.ID.String(),
-		Title: p.Name, Body: body,
-		CreatedAt: p.CreatedAt.Unix(), UpdatedAt: p.UpdatedAt.Unix(),
-	}
-	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
-		slog.Warn("property: failed to index", "id", p.ID, "error", err)
+	if err := searchqueue.IndexNow(ctx, h.repo.pool, h.search, "property", p.ID.String()); err != nil {
+		slog.Warn("property: indexed later by the queue", "id", p.ID, "error", err)
 	}
 }
 

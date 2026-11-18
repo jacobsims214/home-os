@@ -18,6 +18,7 @@ import (
 	"home-os/api/internal/config"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchqueue"
 	"home-os/api/pkg/apierr"
 )
 
@@ -44,28 +45,29 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexAsset(ctx context.Context, a *Asset) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("asset: panic during search indexing", "panic", r) } }()
-	body := ""
-	if a.Category != nil { body = *a.Category }
-	if a.Manufacturer != nil { body += " " + *a.Manufacturer }
-	if a.Model != nil { body += " " + *a.Model }
-	if a.SerialNumber != nil { body += " " + *a.SerialNumber }
-	doc := search.SearchDocument{
-		ID: "asset-" + a.ID.String(), HouseholdID: a.HouseholdID.String(),
-		EntityType: "asset", EntityID: a.ID.String(),
-		Title: a.Name, Body: body,
-		CreatedAt: a.CreatedAt.Unix(), UpdatedAt: a.UpdatedAt.Unix(),
+	// Delegates to the one document builder (#5314). searchqueue.Document
+	// reads the row and produces the same document the index queue's drain
+	// writes, so a write made here and the same write made through an MCP tool
+	// cannot index differently — and there is no second copy of the document
+	// rules to drift. A failure is only logged: the trigger already queued the
+	// row, so the drain retries it.
+	if h.search == nil {
+		return
 	}
-	if a.PropertyID != nil { pid := a.PropertyID.String(); doc.PropertyID = &pid }
-	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
-		slog.Warn("asset: failed to index", "id", a.ID, "error", err)
+	if err := searchqueue.IndexNow(ctx, h.repo.pool, h.search, "asset", a.ID.String()); err != nil {
+		slog.Warn("asset: indexed later by the queue", "id", a.ID, "error", err)
 	}
 }
 
 func (h *Handler) deleteAssetIndex(ctx context.Context, id string) {
-	if h.search == nil { return }
-	defer func() { if r := recover(); r != nil { slog.Warn("asset: panic during search deletion", "panic", r) } }()
+	if h.search == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("asset: panic during search deletion", "panic", r)
+		}
+	}()
 	if err := h.search.DeleteDocument(context.Background(), "asset-"+id); err != nil {
 		slog.Warn("asset: failed to delete from search", "id", id, "error", err)
 	}
@@ -222,20 +224,20 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-asset := &Asset{
-		HouseholdID:   householdID,
-		Name:          req.Name,
-		PropertyID:    parseUUIDPtr(req.PropertyID),
-		RoomID:        parseUUIDPtr(req.RoomID),
-		Category:      req.Category,
-		Manufacturer:  req.Manufacturer,
-		Model:         req.Model,
-		SerialNumber:  req.SerialNumber,
-		PurchaseDate:  parseDatePtr(req.PurchaseDate),
-		PurchasePrice: parseFloatPtr(req.PurchasePrice),
-		CurrentValue:  parseFloatPtr(req.CurrentValue),
+	asset := &Asset{
+		HouseholdID:    householdID,
+		Name:           req.Name,
+		PropertyID:     parseUUIDPtr(req.PropertyID),
+		RoomID:         parseUUIDPtr(req.RoomID),
+		Category:       req.Category,
+		Manufacturer:   req.Manufacturer,
+		Model:          req.Model,
+		SerialNumber:   req.SerialNumber,
+		PurchaseDate:   parseDatePtr(req.PurchaseDate),
+		PurchasePrice:  parseFloatPtr(req.PurchasePrice),
+		CurrentValue:   parseFloatPtr(req.CurrentValue),
 		WarrantyExpiry: parseDatePtr(req.WarrantyExpiry),
-		Notes:         req.Notes,
+		Notes:          req.Notes,
 	}
 
 	// Property is optional (a family-level asset has neither property nor
@@ -313,20 +315,20 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-// Build partial update — only fields that are present in the request.
+	// Build partial update — only fields that are present in the request.
 	// An empty property_id or room_id clears it (uuid.Nil marks the clear).
 	updates := &Asset{
-		PropertyID:    parseUUIDOrClear(req.PropertyID),
-		RoomID:        parseUUIDOrClear(req.RoomID),
-		Category:      req.Category,
-		Manufacturer:  req.Manufacturer,
-		Model:         req.Model,
-		SerialNumber:  req.SerialNumber,
-		PurchaseDate:  parseDatePtr(req.PurchaseDate),
-		PurchasePrice: parseFloatPtr(req.PurchasePrice),
-		CurrentValue:  parseFloatPtr(req.CurrentValue),
+		PropertyID:     parseUUIDOrClear(req.PropertyID),
+		RoomID:         parseUUIDOrClear(req.RoomID),
+		Category:       req.Category,
+		Manufacturer:   req.Manufacturer,
+		Model:          req.Model,
+		SerialNumber:   req.SerialNumber,
+		PurchaseDate:   parseDatePtr(req.PurchaseDate),
+		PurchasePrice:  parseFloatPtr(req.PurchasePrice),
+		CurrentValue:   parseFloatPtr(req.CurrentValue),
 		WarrantyExpiry: parseDatePtr(req.WarrantyExpiry),
-		Notes:         req.Notes,
+		Notes:          req.Notes,
 	}
 	if req.Name != nil {
 		trimmed := strings.TrimSpace(*req.Name)

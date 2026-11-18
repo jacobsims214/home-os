@@ -15,6 +15,7 @@ import (
 	"home-os/api/internal/calendar"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchqueue"
 	"home-os/api/internal/subject"
 	"home-os/api/pkg/apierr"
 )
@@ -53,44 +54,17 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexTask(ctx context.Context, t *Task) {
+	// Delegates to the one document builder (#5314). searchqueue.Document
+	// reads the row and produces the same document the index queue's drain
+	// writes, so a write made here and the same write made through an MCP tool
+	// cannot index differently — and there is no second copy of the document
+	// rules to drift. A failure is only logged: the trigger already queued the
+	// row, so the drain retries it.
 	if h.search == nil {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Warn("maintenance: panic during search indexing", "panic", r)
-		}
-	}()
-	body := ""
-	if t.Description != nil {
-		body = *t.Description
-	}
-	if t.Status != "" {
-		body += " " + string(t.Status)
-	}
-	if t.Cost != nil {
-		body += " " + *t.Cost
-	}
-	doc := search.SearchDocument{
-		ID: "maintenance-task-" + t.ID.String(), HouseholdID: t.HouseholdID.String(),
-		EntityType: "maintenance_task", EntityID: t.ID.String(),
-		Title: t.Name, Body: body,
-		CreatedAt: t.CreatedAt.Unix(), UpdatedAt: t.UpdatedAt.Unix(),
-	}
-	if t.PropertyID != nil {
-		pid := t.PropertyID.String()
-		doc.PropertyID = &pid
-	}
-	if t.AssetID != nil {
-		aid := t.AssetID.String()
-		doc.Tags = append(doc.Tags, "asset:"+aid)
-	}
-	if t.VehicleID != nil {
-		vid := t.VehicleID.String()
-		doc.Tags = append(doc.Tags, "vehicle:"+vid)
-	}
-	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
-		slog.Warn("maintenance: failed to index task", "id", t.ID, "error", err)
+	if err := searchqueue.IndexNow(ctx, h.repo.pool, h.search, "maintenance_task", t.ID.String()); err != nil {
+		slog.Warn("maintenance: indexed later by the queue", "id", t.ID, "error", err)
 	}
 }
 
@@ -109,44 +83,17 @@ func (h *Handler) deleteTaskIndex(ctx context.Context, id string) {
 }
 
 func (h *Handler) indexSchedule(ctx context.Context, s *Schedule) {
+	// Delegates to the one document builder (#5314). searchqueue.Document
+	// reads the row and produces the same document the index queue's drain
+	// writes, so a write made here and the same write made through an MCP tool
+	// cannot index differently — and there is no second copy of the document
+	// rules to drift. A failure is only logged: the trigger already queued the
+	// row, so the drain retries it.
 	if h.search == nil {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Warn("maintenance: panic during search indexing", "panic", r)
-		}
-	}()
-	body := ""
-	if s.Description != nil {
-		body = *s.Description
-	}
-	if s.EstimatedCost != nil {
-		body += " " + *s.EstimatedCost
-	}
-	if s.RRule != "" {
-		body += " " + s.RRule
-	}
-	doc := search.SearchDocument{
-		ID: "maintenance-schedule-" + s.ID.String(), HouseholdID: s.HouseholdID.String(),
-		EntityType: "maintenance_schedule", EntityID: s.ID.String(),
-		Title: s.Name, Body: body,
-		CreatedAt: s.CreatedAt.Unix(), UpdatedAt: s.UpdatedAt.Unix(),
-	}
-	if s.PropertyID != nil {
-		pid := s.PropertyID.String()
-		doc.PropertyID = &pid
-	}
-	if s.AssetID != nil {
-		aid := s.AssetID.String()
-		doc.Tags = append(doc.Tags, "asset:"+aid)
-	}
-	if s.VehicleID != nil {
-		vid := s.VehicleID.String()
-		doc.Tags = append(doc.Tags, "vehicle:"+vid)
-	}
-	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
-		slog.Warn("maintenance: failed to index schedule", "id", s.ID, "error", err)
+	if err := searchqueue.IndexNow(ctx, h.repo.pool, h.search, "maintenance_schedule", s.ID.String()); err != nil {
+		slog.Warn("maintenance: indexed later by the queue", "id", s.ID, "error", err)
 	}
 }
 

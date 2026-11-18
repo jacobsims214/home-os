@@ -14,6 +14,7 @@ import (
 	"home-os/api/internal/auth"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchqueue"
 	"home-os/api/pkg/apierr"
 )
 
@@ -94,26 +95,17 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexNote(ctx context.Context, n *Note) {
+	// Delegates to the one document builder (#5314). searchqueue.Document
+	// reads the row and produces the same document the index queue's drain
+	// writes, so a write made here and the same write made through an MCP tool
+	// cannot index differently — and there is no second copy of the document
+	// rules to drift. A failure is only logged: the trigger already queued the
+	// row, so the drain retries it.
 	if h.search == nil {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Warn("note: panic during search indexing", "panic", r)
-		}
-	}()
-	title := ""
-	if n.Title != nil {
-		title = *n.Title
-	}
-	doc := search.SearchDocument{
-		ID: "note-" + n.ID.String(), HouseholdID: n.HouseholdID.String(),
-		EntityType: "note", EntityID: n.ID.String(),
-		Title: title, Body: n.Body,
-		CreatedAt: n.CreatedAt.Unix(), UpdatedAt: n.UpdatedAt.Unix(),
-	}
-	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
-		slog.Warn("note: failed to index", "id", n.ID, "error", err)
+	if err := searchqueue.IndexNow(ctx, h.repo.pool, h.search, "note", n.ID.String()); err != nil {
+		slog.Warn("note: indexed later by the queue", "id", n.ID, "error", err)
 	}
 }
 

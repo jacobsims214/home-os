@@ -350,7 +350,7 @@ func NewAssetCreateTool(pool *pgxpool.Pool, idx searchIndexer) (string, mcp.Tool
 		if err := tx.Commit(ctx); err != nil {
 			return respond.Failed("create the asset", err), nil
 		}
-		indexAsset(idx, r)
+		indexAsset(pool, idx, r)
 
 		d := r.data(today, money)
 		next := createNext(d)
@@ -482,7 +482,7 @@ func NewAssetUpdateTool(pool *pgxpool.Pool, idx searchIndexer) (string, mcp.Tool
 		if err := tx.Commit(ctx); err != nil {
 			return respond.Failed("update the asset", err), nil
 		}
-		indexAsset(idx, r)
+		indexAsset(pool, idx, r)
 
 		d := r.data(today, money)
 		summary := fmt.Sprintf("Updated asset %s (%s): %s.", d.Name, strings.Join(f.changed(), ", "), d.describe())

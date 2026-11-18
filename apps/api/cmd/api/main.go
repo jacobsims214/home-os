@@ -24,6 +24,7 @@ import (
 	"home-os/api/internal/invite"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchqueue"
 	"home-os/api/internal/seed"
 	"home-os/api/pkg/apierr"
 	"home-os/api/pkg/smtp"
@@ -116,6 +117,12 @@ func main() {
 	if err := searchClient.InitCollection(ctx); err != nil {
 		slog.Warn("search: failed to initialize collection", "error", err)
 	}
+
+	// Drain search_index_queue (#5314): a trigger queues every write to an
+	// indexed table (migration 075), whichever caller made it — an API
+	// handler, an MCP tool, psql. This is the only writer of household_search
+	// documents, so indexing no longer depends on a caller remembering it.
+	go searchqueue.New(pool, searchClient).Run(ctx)
 
 	// Create the chi router and apply middleware.
 	r := chi.NewRouter()

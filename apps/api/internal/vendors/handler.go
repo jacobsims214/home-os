@@ -14,6 +14,7 @@ import (
 
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchqueue"
 	"home-os/api/pkg/apierr"
 )
 
@@ -38,30 +39,17 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexVendor(ctx context.Context, v *Vendor) {
+	// Delegates to the one document builder (#5314). searchqueue.Document
+	// reads the row and produces the same document the index queue's drain
+	// writes, so a write made here and the same write made through an MCP tool
+	// cannot index differently — and there is no second copy of the document
+	// rules to drift. A failure is only logged: the trigger already queued the
+	// row, so the drain retries it.
 	if h.search == nil {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Warn("vendor: panic during search indexing", "panic", r)
-		}
-	}()
-	parts := make([]string, 0, len(v.Trades)+1)
-	if v.Specialty != nil && *v.Specialty != "" {
-		parts = append(parts, *v.Specialty)
-	}
-	for _, t := range v.Trades {
-		parts = append(parts, strings.ReplaceAll(t, "_", " "))
-	}
-	body := strings.Join(parts, " ")
-	doc := search.SearchDocument{
-		ID: "vendor-" + v.ID.String(), HouseholdID: v.HouseholdID.String(),
-		EntityType: "vendor", EntityID: v.ID.String(),
-		Title: v.Name, Body: body,
-		CreatedAt: v.CreatedAt.Unix(), UpdatedAt: v.UpdatedAt.Unix(),
-	}
-	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
-		slog.Warn("vendor: failed to index", "id", v.ID, "error", err)
+	if err := searchqueue.IndexNow(ctx, h.repo.pool, h.search, "vendor", v.ID.String()); err != nil {
+		slog.Warn("vendors: indexed later by the queue", "id", v.ID, "error", err)
 	}
 }
 

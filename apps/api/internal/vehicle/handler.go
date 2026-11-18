@@ -14,6 +14,7 @@ import (
 	"home-os/api/internal/legacyfinance"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchqueue"
 	"home-os/api/pkg/apierr"
 )
 
@@ -39,38 +40,17 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexVehicle(ctx context.Context, v *Vehicle) {
+	// Delegates to the one document builder (#5314). searchqueue.Document
+	// reads the row and produces the same document the index queue's drain
+	// writes, so a write made here and the same write made through an MCP tool
+	// cannot index differently — and there is no second copy of the document
+	// rules to drift. A failure is only logged: the trigger already queued the
+	// row, so the drain retries it.
 	if h.search == nil {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Warn("vehicle: panic during search indexing", "panic", r)
-		}
-	}()
-	body := ""
-	if v.Make != nil {
-		body = *v.Make
-	}
-	if v.Model != nil {
-		body += " " + *v.Model
-	}
-	if v.VIN != nil {
-		body += " " + *v.VIN
-	}
-	if v.LicensePlate != nil {
-		body += " " + *v.LicensePlate
-	}
-	if v.Color != nil {
-		body += " " + *v.Color
-	}
-	doc := search.SearchDocument{
-		ID: "vehicle-" + v.ID.String(), HouseholdID: v.HouseholdID.String(),
-		EntityType: "vehicle", EntityID: v.ID.String(),
-		Title: v.MakeString(), Body: body,
-		CreatedAt: v.CreatedAt.Unix(), UpdatedAt: v.UpdatedAt.Unix(),
-	}
-	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
-		slog.Warn("vehicle: failed to index", "id", v.ID, "error", err)
+	if err := searchqueue.IndexNow(ctx, h.repo.pool, h.search, "vehicle", v.ID.String()); err != nil {
+		slog.Warn("vehicle: indexed later by the queue", "id", v.ID, "error", err)
 	}
 }
 

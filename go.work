@@ -8,5 +8,6 @@ use (
 	./packages/allergen
 	./packages/billcal
 	./packages/billdue
+	./packages/searchindex
 	./packages/icalx
 )

@@ -14,6 +14,7 @@ import (
 
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchqueue"
 	"home-os/api/internal/subject"
 	"home-os/api/pkg/apierr"
 	"home-os/api/pkg/jsonopt"
@@ -40,30 +41,17 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 }
 
 func (h *Handler) indexBill(ctx context.Context, b *Bill) {
+	// Delegates to the one document builder (#5314). searchqueue.Document
+	// reads the row and produces the same document the index queue's drain
+	// writes, so a write made here and the same write made through an MCP tool
+	// cannot index differently — and there is no second copy of the document
+	// rules to drift. A failure is only logged: the trigger already queued the
+	// row, so the drain retries it.
 	if h.search == nil {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Warn("bill: panic during search indexing", "panic", r)
-		}
-	}()
-	body := ""
-	if b.Category != nil {
-		body = *b.Category
-	}
-	doc := search.SearchDocument{
-		ID: "bill-" + b.ID.String(), HouseholdID: b.HouseholdID.String(),
-		EntityType: "bill", EntityID: b.ID.String(),
-		Title: b.Name, Body: body,
-		CreatedAt: b.CreatedAt.Unix(), UpdatedAt: b.UpdatedAt.Unix(),
-	}
-	if b.PropertyID != nil {
-		pid := b.PropertyID.String()
-		doc.PropertyID = &pid
-	}
-	if err := h.search.IndexDocument(context.Background(), doc); err != nil {
-		slog.Warn("bill: failed to index", "id", b.ID, "error", err)
+	if err := searchqueue.IndexNow(ctx, h.repo.pool, h.search, "bill", b.ID.String()); err != nil {
+		slog.Warn("bill: indexed later by the queue", "id", b.ID, "error", err)
 	}
 }
 

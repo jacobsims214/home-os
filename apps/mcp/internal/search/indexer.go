@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"home-os/mcp/internal/config"
@@ -82,6 +83,32 @@ func (idx *Indexer) IndexDocument(ctx context.Context, doc Document) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("search: typesense returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// DeleteDocument removes a document from the household_search collection by ID.
+// A document that is already gone is success, matching the API's client.
+func (idx *Indexer) DeleteDocument(ctx context.Context, id string) error {
+	url := fmt.Sprintf("%s/collections/%s/documents/%s", idx.serverURL, collectionName, url.PathEscape(id))
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("search: build delete request: %w", err)
+	}
+	req.Header.Set("X-TYPESENSE-API-KEY", idx.apiKey)
+
+	resp, err := idx.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("search: delete document %s: %w", id, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("search: typesense returned %d: %s", resp.StatusCode, string(respBody))

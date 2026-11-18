@@ -24,11 +24,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/search"
 	"home-os/mcp/internal/server"
+	shared "home-os/searchindex"
 )
 
 // Pagination limits shared by every catalog find tool.
@@ -249,10 +251,15 @@ func householdToday(ctx context.Context, q querier, householdID string) (time.Ti
 	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC), nil
 }
 
-// indexAsset upserts the asset into the Typesense household_search
-// collection. Failures are logged, never returned: the tool call succeeds
-// regardless of indexing. A nil indexer (Typesense not configured) skips it.
-func indexAsset(idx searchIndexer, r assetRow) {
+// indexAsset writes the asset's household_search document through the SHARED
+// builder in packages/searchindex (#5314). That builder reads the row and
+// produces exactly the document the API's drain writes, so the API and this
+// tool cannot index differently — this package used to build its own document,
+// which was one of the two copies of the rules this ticket removes.
+//
+// It is a fast path, not the guarantee: migration 075's trigger already queued
+// the row, so if this fails (or Typesense is down) the drain writes it.
+func indexAsset(pool *pgxpool.Pool, idx searchIndexer, r assetRow) {
 	if idx == nil {
 		return
 	}
@@ -261,26 +268,17 @@ func indexAsset(idx searchIndexer, r assetRow) {
 			slog.Warn("asset: panic during search indexing", "panic", p)
 		}
 	}()
-	var body []string
-	for _, s := range []*string{r.Category, r.Manufacturer, r.Model, r.SerialNumber, r.RoomName} {
-		if s != nil && *s != "" {
-			body = append(body, *s)
-		}
-	}
-	doc := search.Document{
-		ID:          "asset-" + r.ID.String(),
-		HouseholdID: r.HouseholdID.String(),
-		EntityType:  "asset",
-		EntityID:    r.ID.String(),
-		Title:       r.Name,
-		Body:        strings.Join(body, " "),
-		CreatedAt:   r.CreatedAt.Unix(),
-		UpdatedAt:   r.UpdatedAt.Unix(),
-		PropertyID:  uuidString(r.PropertyID),
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := idx.IndexDocument(ctx, doc); err != nil {
+	doc, found, err := shared.Build(ctx, pool, "asset", r.ID.String())
+	if err != nil {
+		slog.Warn("asset: cannot build search document", "id", r.ID, "error", err)
+		return
+	}
+	if !found {
+		return
+	}
+	if err := idx.IndexDocument(ctx, search.Document(*doc)); err != nil {
 		slog.Warn("asset: failed to index into search", "id", r.ID, "error", err)
 	}
 }

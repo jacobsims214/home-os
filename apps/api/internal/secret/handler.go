@@ -69,6 +69,7 @@ import (
 
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchqueue"
 	"home-os/api/pkg/apierr"
 )
 
@@ -102,44 +103,17 @@ func (h *Handler) WithSearchClient(sc *search.Client) *Handler {
 // indexSecret indexes a secret's plaintext metadata (name, secret_type) into
 // Typesense so it appears in global search. The encrypted data is never indexed.
 func (h *Handler) indexSecret(ctx context.Context, s *Secret) {
+	// Delegates to the one document builder (#5314). searchqueue.Document
+	// reads the row and produces the same document the index queue's drain
+	// writes, so a write made here and the same write made through an MCP tool
+	// cannot index differently — and there is no second copy of the document
+	// rules to drift. A failure is only logged: the trigger already queued the
+	// row, so the drain retries it.
 	if h.search == nil {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Warn("secret: panic during search indexing", "id", s.ID, "panic", r)
-		}
-	}()
-	tags := []string{s.SecretType}
-	if s.EntityType != "" {
-		tags = append(tags, s.EntityType)
-	}
-
-	// For search indexing, use the parent entity's type and ID so that
-	// clicking a search result navigates to the entity detail page where
-	// the secret can be viewed. If the secret has no parent entity, use
-	// the secret's own ID with entity_type "secret" (non-clickable).
-	indexPathType := "secret"
-	indexPathID := s.ID.String()
-	if s.EntityType != "" && s.EntityType != EntityTypeHousehold && s.EntityID != uuid.Nil {
-		indexPathType = s.EntityType
-		indexPathID = s.EntityID.String()
-	}
-
-	doc := search.SearchDocument{
-		ID:          "secret-" + s.ID.String(),
-		HouseholdID: s.HouseholdID.String(),
-		EntityType:  indexPathType,
-		EntityID:    indexPathID,
-		Title:       s.Name,
-		Body:        s.SecretType,
-		Tags:        tags,
-		CreatedAt:   s.CreatedAt.Unix(),
-		UpdatedAt:   s.UpdatedAt.Unix(),
-	}
-	indexCtx := context.Background()
-	if err := h.search.IndexDocument(indexCtx, doc); err != nil {
-		slog.Warn("secret: failed to index in search", "id", s.ID, "error", err)
+	if err := searchqueue.IndexNow(ctx, h.repo.pool, h.search, "secret", s.ID.String()); err != nil {
+		slog.Warn("secret: indexed later by the queue", "id", s.ID, "error", err)
 	}
 }
 
