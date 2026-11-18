@@ -13,6 +13,7 @@ import {
   inviteLoginHref,
   readAcceptSuccess,
   readInviteToken,
+  readSessionEmail,
   redactToken,
   type AcceptSuccess,
   type InviteErrorCopy,
@@ -162,8 +163,8 @@ type Session = { state: "signed-in"; email: string } | { state: "signed-out" };
  */
 async function whoIsAsking(): Promise<Session> {
   try {
-    const me = await apiFetch<{ email?: string; id?: string }>("/api/v1/auth/me", { redirectOn401: false });
-    return { state: "signed-in", email: me?.email ?? "" };
+    const me = await apiFetch<unknown>("/api/v1/auth/me", { redirectOn401: false });
+    return { state: "signed-in", email: readSessionEmail(me) };
   } catch {
     return { state: "signed-out" };
   }

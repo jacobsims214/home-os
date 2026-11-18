@@ -14,6 +14,7 @@ import {
   inviteLoginHref,
   readAcceptSuccess,
   readInviteToken,
+  readSessionEmail,
   redactToken,
   tokenInUrl,
 } from "./accept.ts";
@@ -158,6 +159,13 @@ test("a success body missing fields still renders", () => {
   assert.deepEqual(readAcceptSuccess(null), { role: "", userCreated: false, email: "" });
   assert.deepEqual(readAcceptSuccess({}), { role: "", userCreated: false, email: "" });
   assert.match(acceptedCopy(readAcceptSuccess({})).detail, /joined the family/i);
+});
+
+test("the session email is read from the API's flat answer and the stub's wrapped one", () => {
+  assert.equal(readSessionEmail({ id: "u1", email: "jacob@sims.family" }), "jacob@sims.family");
+  assert.equal(readSessionEmail({ data: { id: "u1", email: "e2e@homeos.test" } }), "e2e@homeos.test");
+  assert.equal(readSessionEmail({ id: "u1" }), "");
+  assert.equal(readSessionEmail(null), "");
 });
 
 test("tokenInUrl is the only place a token becomes a URL, and it encodes it", () => {

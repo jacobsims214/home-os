@@ -261,6 +261,20 @@ export const MISSING_TOKEN: InviteErrorCopy = {
   dead: true,
 };
 
+/**
+ * The signed-in person's email from GET /auth/me. The Go handler answers the
+ * user flat (`{"id","email",…}`, auth/handler.go userResponse); the e2e stub
+ * wraps it in `data`. Both are read here so the page never renders an email it
+ * had in hand and dropped.
+ */
+export function readSessionEmail(body: unknown): string {
+  if (!body || typeof body !== "object") return "";
+  const flat = body as { email?: unknown; data?: { email?: unknown } };
+  if (typeof flat.email === "string") return flat.email;
+  if (flat.data && typeof flat.data.email === "string") return flat.data.email;
+  return "";
+}
+
 // ── What success means ───────────────────────────────────────────────
 
 export interface AcceptSuccess {
