@@ -276,9 +276,6 @@ export const HeaderAccountButton = forwardRef<
   );
 });
 
-/** Re-exported so a host can keep its own state without importing useState. */
-export type AccountMenuState = [boolean, (opened: boolean) => void];
-
 /** Convenience for hosts that own the open state (the desktop sidebar). */
 export function useAccountMenuState(): { opened: boolean; open: () => void; close: () => void } {
   const [opened, setOpened] = useState(false);
