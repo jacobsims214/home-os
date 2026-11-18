@@ -30,6 +30,9 @@ const PUBLIC = [
   "/reset-password/confirm",
   "/invite/x",
   "/invite/abc123",
+  "/invites", // the accept page the API's accept_url points at (#4579)
+  "/invites/accept",
+  "/invites/accept?token=4f1c9a7e-2b8d",
   "/onboarding",
   "/onboarding/household",
   "/api/auth",
@@ -54,6 +57,7 @@ const PROTECTED = [
   "/dashboard/report.pdf", // a dot no longer bypasses the guard
   "/loginx", // prefix must match a whole segment
   "/invitex",
+  "/invitesomething",
   "/bffx",
   "/api/other",
 ];
