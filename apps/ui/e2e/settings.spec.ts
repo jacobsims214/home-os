@@ -147,6 +147,48 @@ test("the CalDAV server shown is the API's server_url, never a localhost literal
   );
 });
 
+test("the setup steps are per device, and the values to paste sit right above them (#4583)", async ({
+  loggedInPage: page,
+}) => {
+  await page.goto("/dashboard/settings/phone-calendar");
+  await page.getByRole("button", { name: "Generate app password" }).click();
+
+  // The pair the phone asks for is on the same screen as the steps, each with
+  // its own copy button: a person setting up the phone they are reading this on
+  // cannot retype a CalDAV host without a typo.
+  await expect(page.locator('[data-settings-readonly="caldav-server"]')).toHaveValue("https://home.example/dav/");
+  await expect(page.getByRole("button", { name: "Copy the server address" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Copy the user name" })).toBeEnabled();
+  // Shown once, and it says so.
+  await expect(page.getByTestId("caldav-password-warning")).toContainText("shown once");
+
+  // A fresh page opens on the phone, because that is the device in the hand.
+  const iphone = page.getByTestId("caldav-steps-iphone");
+  await expect(iphone).toBeVisible();
+  // iOS 18's path, not the iOS 17 one the page used to print alone.
+  await expect(iphone).toContainText("Settings → Apps → Calendar → Calendar Accounts");
+  await expect(iphone).toContainText("Add CalDAV Account");
+  await expect(iphone).not.toContainText("Reminders");
+
+  // Android is DAVx5: Google Calendar has no CalDAV support, so "use your
+  // Calendar app" would send someone to a screen with no such option.
+  await page.getByRole("radio", { name: "Android" }).click();
+  const android = page.getByTestId("caldav-steps-android");
+  await expect(android).toBeVisible();
+  await expect(android).toContainText("DAVx5");
+  await expect(page.getByTestId("caldav-steps-iphone")).toHaveCount(0);
+
+  await page.getByRole("radio", { name: "Mac" }).click();
+  await expect(page.getByTestId("caldav-steps-mac")).toContainText("Calendar → Settings");
+
+  // Which calendars appear is the person's role (#4807), said before anyone
+  // goes hunting for a sync bug that is a policy decision.
+  await expect(page.getByTestId("caldav-calendar-note")).toContainText("role");
+
+  // Usable at 390 px: nothing runs off the side of the page.
+  await expectNoHorizontalOverflow(page);
+});
+
 test("an unknown section segment says so, and links back to the index", async ({ loggedInPage: page }) => {
   await page.goto("/dashboard/settings/not-a-section");
   await expect(page.getByTestId("settings-section-missing")).toBeVisible();
