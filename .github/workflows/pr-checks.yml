@@ -203,6 +203,13 @@ jobs:
           cache-dependency-path: apps/ui/package-lock.json
       - run: npm ci
         working-directory: apps/ui
+      # The unit suite was green locally but never gated a PR. It now carries
+      # lib/today/one-clock.test.mjs, which fails when a page reads the
+      # current date from the browser's clock instead of the household's
+      # (#5316). A guard CI does not run prevents nothing, so it runs here.
+      - name: Unit tests (includes the one-clock guard)
+        run: npm test
+        working-directory: apps/ui
       - run: npm run build
         working-directory: apps/ui
 
