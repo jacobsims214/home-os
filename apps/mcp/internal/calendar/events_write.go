@@ -371,8 +371,11 @@ func NewEventCreateTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 // storedEvent is a calendar_objects row read for a write.
 type storedEvent struct {
 	calendarID, icalData, uid, eventType string
-	rrule, icalRaw                       *string
-	ej                                   eventJSON
+	// entityType/entityID are the record this entry mirrors (#5301), when one
+	// does: they decide whether a write on it is refused.
+	entityType, entityID *string
+	rrule, icalRaw       *string
+	ej                   eventJSON
 	// supersededAt is set when a bill is the record for this entry (#4943):
 	// it is retired in place, and an edit would bring a stale duplicate back.
 	supersededAt *time.Time
@@ -381,12 +384,12 @@ type storedEvent struct {
 func loadForWrite(ctx context.Context, tx pgx.Tx, eventID, householdID string) (storedEvent, error) {
 	var s storedEvent
 	err := tx.QueryRow(ctx,
-		`SELECT co.calendar_id::text, co.ical_data, co.uid, co.event_type, co.rrule, co.ical_raw, co.superseded_at
+		`SELECT co.calendar_id::text, co.ical_data, co.uid, co.event_type, co.entity_type::text, co.entity_id::text, co.rrule, co.ical_raw, co.superseded_at
 		   FROM calendar_objects co JOIN calendars c ON c.id = co.calendar_id
 		  WHERE co.id = $1 AND c.household_id = $2
 		  FOR UPDATE OF co`,
 		eventID, householdID,
-	).Scan(&s.calendarID, &s.icalData, &s.uid, &s.eventType, &s.rrule, &s.icalRaw, &s.supersededAt)
+	).Scan(&s.calendarID, &s.icalData, &s.uid, &s.eventType, &s.entityType, &s.entityID, &s.rrule, &s.icalRaw, &s.supersededAt)
 	if err != nil {
 		return s, err
 	}
@@ -408,7 +411,7 @@ func scopeArg(args map[string]any) (string, *mcp.CallToolResult) {
 // NewEventUpdateTool creates event_update (replaces update_event).
 func NewEventUpdateTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 	tool := mcp.NewTool("event_update", toolOptions(classU, "Update event",
-		mcp.WithDescription("Change an event; only the given fields change. Changing start keeps the duration unless you also pass end. For repeating events pick scope and occurrence_date. Returns the event."),
+		mcp.WithDescription("Change an event; only the given fields change. Refuses an entry a record keeps (managed_by): change bill or task instead."),
 		mcp.WithString("event_id", mcp.Description("The event's id from event_find"), mcp.Required()),
 		mcp.WithString("title", mcp.Description("New title")),
 		mcp.WithString("start", mcp.Description("New start with offset, e.g. 2026-11-19T17:30:00-05:00; a date if all_day")),
@@ -514,6 +517,14 @@ func NewEventUpdateTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			return respond.Fail(respond.Error{
 				Message: "That calendar entry was retired: a bill with the same name and amount is the record for it.",
 				Fix:     "Change the bill with bill_update, or add one with bill_create; bill_find lists them."}), nil
+		}
+		// An entry a record keeps is not an event anyone made here (#5301): the
+		// record's own code rewrites it from itself, so an edit here is reported
+		// as a change that would not survive. Refuse, and name the record's
+		// tools. This is the write half of the F-AGENT-2 class, alongside
+		// event_delete's refusal.
+		if owner, owned := managedBy(st.entityType, st.entityID, st.eventType); owned {
+			return owner.updateRefusal(st.ej.Title, *st.entityID), nil
 		}
 		series := loadSeries(st.ej, st.uid, st.rrule, st.icalRaw)
 		if series.locked {
@@ -1169,7 +1180,7 @@ func (w updateWrite) save(ctx context.Context, timesChanged bool, scope, note st
 // NewEventDeleteTool creates event_delete (replaces delete_event).
 func NewEventDeleteTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 	tool := mcp.NewTool("event_delete", toolOptions(classX, "Delete event",
-		mcp.WithDescription("Delete an event, or for a repeating event just this occurrence, this and following, or all (scope). Returns what was deleted."),
+		mcp.WithDescription("Delete an event (a repeating one: scope + occurrence_date). Refuses an entry a record keeps (managed_by): change bill or task instead."),
 		mcp.WithString("event_id", mcp.Description("The event's id from event_find"), mcp.Required()),
 		mcp.WithString("scope", mcp.Description("Repeating event: this occurrence, following ones, or all"), mcp.Enum(scopes...)),
 		mcp.WithString("occurrence_date", mcp.Description("Original date of the occurrence (YYYY-MM-DD) for this/following")),
@@ -1207,11 +1218,21 @@ func NewEventDeleteTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return respond.NotFound("event", eventID, "Call event_find to find the event_id; it may already be deleted."), nil
 		}
+		if err != nil && !strings.Contains(err.Error(), "parse stored event") {
+			return respond.Failed("delete the event", err), nil
+		}
+		// An entry a record keeps is not an event anyone made here (#5301), and
+		// deleting it does not last: the record rewrites it from itself on its
+		// next save and the worker's backfill recreates it. Refuse, and name
+		// the record's own tools. This is the guard behind war game R2
+		// F-AGENT-2, where an assistant read a bill's projection as "a
+		// duplicate I added" and offered to delete the family's bill view.
+		if owner, owned := managedBy(st.entityType, st.entityID, st.eventType); owned {
+			return owner.deleteRefusal(st.ej.Title, *st.entityID), nil
+		}
 		series := storedSeries{}
 		if err == nil {
 			series = loadSeries(st.ej, st.uid, st.rrule, st.icalRaw)
-		} else if !strings.Contains(err.Error(), "parse stored event") {
-			return respond.Failed("delete the event", err), nil
 		}
 		recurring := series.recurring() || (series.locked && isRecurringEvent(st.rrule, st.icalRaw))
 
@@ -1249,7 +1270,7 @@ func NewEventDeleteTool(pool *pgxpool.Pool) (mcp.Tool, handlerFunc) {
 			  WHERE co.id = $1 AND c.id = co.calendar_id AND c.household_id = $2
 			RETURNING `+eventColumns,
 			eventID, claims.HouseholdID,
-		).Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.EntityType, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt,
+		).Scan(&r.ID, &r.CalendarID, &r.IcalData, &r.EventType, &r.EntityType, &r.EntityID, &r.CalendarName, &r.CreatedAt, &r.UpdatedAt,
 			&r.Rrule, &r.IcalRaw, &r.CalendarType, &r.SupersededAt, &r.SupersededReason, &r.SupersededBy)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return respond.NotFound("event", eventID, "Call event_find to find the event_id; it may already be deleted."), nil
