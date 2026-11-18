@@ -48,6 +48,20 @@
  *                          keeps the verifier as is; the API stores argon2id.
  *   POST /e2e/secrets/seed {sid, key_salt, key_hash}
  *                          Seed a pre-051 (legacy) master key for a session.
+ *   POST /e2e/secrets/records {sid, records: [{id, name, secret_type,
+ *                                              shared_with_agents?}]}
+ *                          Seed listed credentials for a session (#4575), so a
+ *                          spec can assert the list, the share switch and the
+ *                          per-credential activity link without a real vault.
+ *                          GET /api/v1/secrets answers these (filtered by
+ *                          entity_type/entity_id when the query has them) and
+ *                          GET /api/v1/secrets/:id answers one with a blob.
+ *   PUT/DELETE /api/v1/secrets/:id/agent-share
+ *                          Mirror agentshare.go's role gate: owner and
+ *                          family_manager only (403 otherwise), 404 for an
+ *                          unknown id, 503 without a key configured. A PUT
+ *                          records "PUT agent-share" in apiWrites and sets the
+ *                          flag; a DELETE clears it. The value is never kept.
  *   GET  /e2e/secrets?sid= {set_up, legacy, upgraded, requests}: what the
  *                          secrets endpoints received (field names only).
  *   GET  /healthz          200 (Playwright webServer readiness probe)
@@ -74,6 +88,8 @@ const key = randomBytes(32);
 const refreshTokens = new Map();
 // sid -> { key_salt, key_version, verifier?, key_hash?, upgraded, requests[] }
 const secretKeys = new Map();
+/** Credentials per session for the list/view UI (#4575): see /e2e/secrets/records. */
+const secretRecords = new Map();
 const stats = { dexRefreshes: 0, apiRequests: 0, apiUnauthorized: 0, codeExchanges: 0, lastRedirectUri: null, apiWrites: [], householdHeaders: [] };
 // sid -> [{ id, name, role, timezone, bills }]. Empty: the single seed family.
 const sessionHouseholds = new Map();
@@ -135,13 +151,101 @@ function b64Len(v) {
   return Buffer.from(v, "base64").length;
 }
 
-/** /api/v1/secrets/{key,setup,verify}; null for any other secrets path. */
-function secretsRoute(method, resource, sid, body) {
+/**
+ * The documented shape of a listed credential (#4446): metadata only, plus the
+ * sharing flag. encrypted_data/iv appear ONLY on GET /secrets/:id, exactly as
+ * the Go handler does it, and agent_ciphertext never appears at all.
+ */
+function secretListItem(rec, withBlob = false) {
+  const item = {
+    id: rec.id,
+    household_id: rec.household_id,
+    entity_type: rec.entity_type,
+    entity_id: rec.entity_id,
+    name: rec.name,
+    secret_type: rec.secret_type,
+    key_version: 1,
+    created_at: rec.created_at ?? new Date().toISOString(),
+    updated_at: rec.created_at ?? new Date().toISOString(),
+    shared_with_agents: rec.shared_with_agents === true,
+  };
+  if (item.shared_with_agents) item.agent_shared_at = rec.agent_shared_at;
+  if (withBlob) {
+    item.encrypted_data = rec.encrypted_data ?? "";
+    item.iv = rec.iv ?? "";
+  }
+  return item;
+}
+
+/**
+ * What the API lets one role do with "shared with agents" (#4446's
+ * CanShareWithAgents): owner and family_manager only.
+ */
+const SHARE_ROLES = new Set(["owner", "family_manager"]);
+
+/**
+ * /api/v1/secrets/{key,setup,verify} and, since #4575, the list, one record
+ * and the agent-share endpoints. null for any other secrets path.
+ *
+ * `ctx` carries the request's query string and the caller's role, because the
+ * list is filtered and sharing is role-gated. The role comes from the stub's
+ * seeded households: the first household is the active one, which is what
+ * /me/households resolves to without an X-Household-ID.
+ */
+function secretsRoute(method, resource, sid, body, ctx = {}) {
   const rec = secretKeys.get(sid);
   if (method === "GET" && resource === "secrets/key") {
     if (!rec) return [404, { error: { code: "NOT_FOUND", message: "master key not set up" } }];
     return [200, { data: { key_salt: rec.key_salt, key_version: rec.key_version } }];
   }
+  // ── Per-credential agent sharing (#4575) ────────────────────────────────
+  // Mirrors apps/api/internal/secret/agentshare.go: role gate first (403),
+  // then the id (404), then the server key (503 on PUT). The value is dropped
+  // immediately: this stub records only that a share happened.
+  const shareMatch = /^secrets\/([^/]+)\/agent-share$/.exec(resource);
+  if (shareMatch && (method === "PUT" || method === "DELETE")) {
+    if (!SHARE_ROLES.has(ctx.role)) {
+      return [403, { error: { code: "FORBIDDEN", message: "only an owner or family manager can change agent sharing" } }];
+    }
+    const rows = secretRecords.get(sid) ?? [];
+    const row = rows.find((r) => r.id === shareMatch[1]);
+    if (!row) return [404, { error: { code: "NOT_FOUND", message: "secret not found" } }];
+    if (method === "PUT") {
+      if (!rec) return [503, { error: { code: "AGENT_SHARING_DISABLED", message: "sharing credentials with agents is not configured on this server" } }];
+      if (!body || typeof body.value !== "object" || body.value === null) {
+        return [400, { error: { code: "BAD_REQUEST", message: "value is required" } }];
+      }
+      row.shared_with_agents = true;
+      row.agent_shared_at = new Date().toISOString();
+      row.agent_uses = row.agent_uses ?? 0;
+    } else {
+      row.shared_with_agents = false;
+      row.agent_shared_at = undefined;
+    }
+    return [200, { data: secretListItem(row) }];
+  }
+
+  // ── List and one record (#4575) ─────────────────────────────────────────
+  // GET /secrets is filtered by entity_type/entity_id when the query carries
+  // them (the credentials section always scopes to a record).
+  if (method === "GET" && (resource === "secrets" || resource.startsWith("secrets/"))) {
+    const rows = secretRecords.get(sid) ?? [];
+    if (resource === "secrets") {
+      const params = new URLSearchParams(ctx.search ?? "");
+      const entityType = params.get("entity_type");
+      const entityId = params.get("entity_id");
+      const list = rows.filter(
+        (r) =>
+          (!entityType || r.entity_type === entityType) && (!entityId || r.entity_id === entityId),
+      );
+      return [200, { data: list.map((r) => secretListItem(r)) }];
+    }
+    const id = resource.slice("secrets/".length);
+    const row = rows.find((r) => r.id === id);
+    if (!row) return [404, { error: { code: "NOT_FOUND", message: "secret not found" } }];
+    return [200, { data: secretListItem(row, true) }];
+  }
+
   if (method !== "POST" || (resource !== "secrets/setup" && resource !== "secrets/verify")) return null;
   const verifier = body.verifier || body.key_hash;
   const log = { endpoint: resource, fields: Object.keys(body).sort() };
@@ -208,6 +312,25 @@ const server = createServer(async (req, res) => {
     const rec = secretKeys.get(url.searchParams.get("sid") ?? "");
     return send(res, 200, { set_up: !!rec, legacy: !!rec?.key_hash, upgraded: !!rec?.upgraded, requests: rec?.requests ?? [] });
   }
+  // Credentials for the list/view UI (#4575), per sign-in session like the
+  // vault itself. The blob is a placeholder: no spec decrypts it, because the
+  // specs that matter here are about the list, the share switch and the link.
+  if (path === "/e2e/secrets/records" && req.method === "POST") {
+    const { sid, records } = JSON.parse((await readBody(req)) || "{}");
+    secretRecords.set(
+      sid,
+      (records ?? []).map((r) => ({
+        household_id: SEED_USER.household_id,
+        secret_type: "login",
+        created_at: new Date().toISOString(),
+        encrypted_data: "",
+        iv: "",
+        ...r,
+      })),
+    );
+    return send(res, 201, { ok: true });
+  }
+
   if (path === "/e2e/secrets/seed" && req.method === "POST") {
     const { sid, key_salt, key_hash } = JSON.parse((await readBody(req)) || "{}");
     if (!sid || !key_salt || !key_hash) return send(res, 400, { error: "sid, key_salt and key_hash are required" });
@@ -282,8 +405,16 @@ const server = createServer(async (req, res) => {
         /* not JSON */
       }
     }
-    if (resource.startsWith("secrets/")) {
-      const out = secretsRoute(req.method, resource, jwtClaims(auth.slice(7)).sid ?? "", body);
+    if (resource === "secrets" || resource.startsWith("secrets/")) {
+      // The active household's role is what the API reads from the claims; the
+      // stub derives it the same way /me/households does (#4575's share gate).
+      const out = secretsRoute(
+        req.method,
+        resource,
+        jwtClaims(auth.slice(7)).sid ?? "",
+        body,
+        { search: url.search, role: activeHousehold?.role ?? "owner" },
+      );
       if (out) return send(res, out[0], out[1]);
     }
     if (req.method !== "GET" && req.method !== "HEAD") {

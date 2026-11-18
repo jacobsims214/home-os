@@ -1,2 +1,4 @@
 e2e/.results/
 e2e/.report/
+# Screenshots written by a shot spec (SHOT_DIR); see e2e/shot-4575.spec.ts.
+e2e/.shots/

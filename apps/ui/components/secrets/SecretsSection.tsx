@@ -28,13 +28,15 @@
  * apps/ui/components/files/FileList.tsx.
  *
  * ## Mobile-first (#4575)
- *  - < 768 px: one card per credential, the whole name area is a 44 px+
- *    button that opens the viewer, and the share switch sits beside it as its
- *    own 44 px target (never nested inside the button).
- *  - >= 768 px: the same data as a table, per the mockup. The phone card is
- *    the source of truth; the table is a second presentation of it.
- *  - Nothing clips at 375 px: long names and URLs wrap with
- *    `[overflow-wrap:anywhere]`, and no row has a fixed width.
+ *  - One card per credential at every width, with two separate targets: the
+ *    name area is a 44 px+ button that opens the viewer, and the share switch
+ *    sits on its own line below (never nested inside the button), so a thumb
+ *    cannot flip a switch when it meant to open a credential.
+ *  - Cards rather than the mockup's table because this section lives in a
+ *    ~370 px column beside an entity's details, not in the settings pane the
+ *    mockup draws. The mockup's per-row content is kept.
+ *  - Nothing clips at 375 px: long names wrap with `[overflow-wrap:anywhere]`
+ *    and no row has a fixed width.
  *
  * ## "Shared with agents" (#4446, #4575)
  * Turning sharing on stores a SECOND copy of the credential that the server
@@ -66,7 +68,11 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import MasterPasswordPrompt from "@/components/secrets/MasterPasswordPrompt";
 import SecretEditor from "@/components/secrets/SecretEditor";
 import SecretViewer from "@/components/secrets/SecretViewer";
-import Switch from "@/components/ui/Switch";
+// Mantine's Switch directly, not components/ui/Switch: that wrapper puts its
+// label in a SIBLING span, so the only hit area is the ~20 px input and the
+// words do not toggle anything. Mantine's own `label` prop wraps the input and
+// the text in one <label>, which is the accessible, thumb-sized pattern.
+import { Switch } from "@mantine/core";
 import { useNavRole } from "@/components/shared/use-nav-role";
 import {
   agentShareErrorMessage,
@@ -156,28 +162,30 @@ function AgentShareSwitch({
   const allowed = canManageAgentSharing(role);
   const on = secret.shared_with_agents === true;
   const name = secret.name || "this credential";
+  const disabled = !allowed || pending;
   const label = on ? "Shared with agents" : "Not shared with agents";
   // A disabled control must say WHY, not just be pale: the mockup's member view
   // keeps the switch visible with "Only Jacob or Amber can change sharing."
   const why = allowed ? undefined : "Only an owner or family manager can change sharing.";
   return (
     <div className="flex min-h-11 flex-col justify-center gap-0.5" data-testid={`agent-share-${secret.id}`}>
+      {/* Mantine's `label` makes the SWITCH AND THE WORDS one <label>: the
+          whole row is the hit area (min 44 px tall), so a thumb hits it on a
+          phone, and the text is part of the accessible name. The sr-only suffix
+          names the credential, so a screen reader hears "Shared with agents,
+          Netflix" and not five identical switches (mockup artifact #103). */}
       <Switch
         checked={on}
-        disabled={!allowed || pending}
-        onChange={(next) => onToggle(secret, next)}
+        disabled={disabled}
+        onChange={(e) => onToggle(secret, e.currentTarget.checked)}
         label={
           <>
-            {/* The accessible name carries the credential's name, so a screen
-                reader hears "Share Netflix with agents" and not five identical
-                "Shared with agents" switches (mockup artifact #103). The visible
-                text is decorative because the sr-only span already names it. */}
-            <span className="sr-only">{`Share ${name} with agents`}</span>
-            <span aria-hidden="true" className="text-[13px] font-medium text-ink-2">
-              {pending ? "Saving…" : label}
-            </span>
+            <span aria-hidden="true">{pending ? "Saving…" : label}</span>
+            <span className="sr-only">{`, ${name}`}</span>
           </>
         }
+        classNames={{ root: "min-h-11 flex items-center", label: "text-[13px] font-medium text-ink-2 cursor-inherit" }}
+        {...(disabled ? { "data-disabled-reason": "role" } : {})}
       />
       {why && <p className="pl-[52px] text-xs leading-snug text-ink-3">{why}</p>}
       {allowed && on && secret.agent_shared_at && (
@@ -428,69 +436,6 @@ function CredentialCard({
         <CredentialActivityLink secretId={secret.id} name={name} />
       </div>
     </li>
-  );
-}
-
-/** One credential on a tablet or desktop, per the mockup's credentials table. */
-function CredentialTableRow({
-  secret,
-  role,
-  sharingId,
-  onOpen,
-  onToggleShare,
-  onDelete,
-  deleting,
-}: {
-  secret: SecretListItem;
-  role: string | null;
-  sharingId: string | null;
-  onOpen: () => void;
-  onToggleShare: (secret: SecretListItem, next: boolean) => void;
-  onDelete: () => void;
-  deleting: boolean;
-}) {
-  const name = secret.name || "Untitled secret";
-  return (
-    <tr className="border-b border-line last:border-0">
-      <td className="px-2 py-2 align-middle">
-        <button
-          type="button"
-          onClick={onOpen}
-          className="flex min-h-11 w-full min-w-0 items-center gap-3 rounded-token-md px-2 text-left transition-colors hover:bg-surface-2"
-        >
-          <SecretTypeIcon secretType={secret.secret_type} />
-          <span className="min-w-0">
-            <span className="block text-sm font-semibold text-ink [overflow-wrap:anywhere]">{name}</span>
-            <span className="block text-xs text-ink-3">
-              <span className="capitalize">{secret.secret_type.replace("_", " ")}</span>
-              {" · added "}
-              {formatDate(secret.created_at)}
-            </span>
-          </span>
-        </button>
-      </td>
-      <td className="px-3 py-2 align-middle">
-        <AgentShareSwitch
-          secret={secret}
-          role={role}
-          pending={sharingId === secret.id}
-          onToggle={onToggleShare}
-        />
-      </td>
-      <td className="px-3 py-2 align-middle">
-        <CredentialActivityLink secretId={secret.id} name={name} />
-      </td>
-      <td className="px-1 py-2 text-right align-middle">
-        <TrashIconButton
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-          }}
-          disabled={deleting}
-          label={`Delete ${name}`}
-        />
-      </td>
-    </tr>
   );
 }
 
@@ -746,63 +691,31 @@ export default function SecretsSection({ entityType, entityId }: SecretsSectionP
             </p>
           )}
 
-          {/* Populated — phone cards, then the tablet/desktop table. Both are
-              rendered from the same rows; CSS picks one, so there is a single
-              source of truth and no JS width sniffing. */}
+          {/* Populated. Cards at every width, deliberately: this section renders
+              in a ~370 px column beside an entity's own details (see
+              DetailPageLayout), not in the mockup's full-width settings pane, so
+              the mockup's credentials TABLE does not fit — at 768 px its three
+              columns wrap to one word per line. The mockup's row content is kept;
+              its layout is not. One presentation also means one place to be
+              right about the switch's target size. */}
           {secrets.length > 0 && (
-            <>
-              <ul
-                className="m-0 list-none space-y-2 p-0 md:hidden"
-                data-testid="secrets-cards"
-              >
-                {secrets.map((secret) => (
-                  <CredentialCard
-                    key={secret.id}
-                    secret={secret}
-                    role={role}
-                    sharingId={sharingId}
-                    onOpen={() => setViewTarget(secret.id)}
-                    onToggleShare={handleToggleShare}
-                    onDelete={() => setDeleteTarget(secret)}
-                    deleting={deleteMutation.isPending}
-                  />
-                ))}
-              </ul>
-
-              <div
-                className="hidden overflow-x-auto rounded-token-md border border-line md:block"
-                data-testid="secrets-table"
-              >
-                {/* Caption for screen readers: a bare table has no name. */}
-                <table className="w-full border-collapse text-sm">
-                  <caption className="sr-only">Credentials for this record</caption>
-                  <thead>
-                    <tr className="border-b border-line bg-surface-2 text-left text-xs uppercase tracking-wide text-ink-3">
-                      <th scope="col" className="px-3 py-2 font-semibold">Name</th>
-                      <th scope="col" className="px-3 py-2 font-semibold">Shared with agents</th>
-                      <th scope="col" className="px-3 py-2 font-semibold">Agent activity</th>
-                      <th scope="col" className="px-1 py-2 text-right">
-                        <span className="sr-only">Actions</span>
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {secrets.map((secret) => (
-                      <CredentialTableRow
-                        key={secret.id}
-                        secret={secret}
-                        role={role}
-                        sharingId={sharingId}
-                        onOpen={() => setViewTarget(secret.id)}
-                        onToggleShare={handleToggleShare}
-                        onDelete={() => setDeleteTarget(secret)}
-                        deleting={deleteMutation.isPending}
-                      />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
+            <ul
+              className="m-0 list-none space-y-2 p-0"
+              data-testid="secrets-cards"
+            >
+              {secrets.map((secret) => (
+                <CredentialCard
+                  key={secret.id}
+                  secret={secret}
+                  role={role}
+                  sharingId={sharingId}
+                  onOpen={() => setViewTarget(secret.id)}
+                  onToggleShare={handleToggleShare}
+                  onDelete={() => setDeleteTarget(secret)}
+                  deleting={deleteMutation.isPending}
+                />
+              ))}
+            </ul>
           )}
 
           {/* Sharing failure — plain words, below the list, announced. */}
