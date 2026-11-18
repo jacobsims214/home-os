@@ -66,11 +66,16 @@ export default function DocumentRow({
   today,
 }: {
   file: FileRecord;
-  /** Injected in tests so the relative expiry is stable. */
-  today?: string;
+  /**
+   * The FAMILY's today (#5316), null until the household is known. An expiry
+   * badge derived from the browser's clock is the defect this consolidation
+   * removed, so with no day there is no badge. Injected in tests so the
+   * relative expiry is stable.
+   */
+  today: string | null;
 }) {
   const category = categoryOf(file);
-  const expiry = expiryOf(file, today);
+  const expiry = today ? expiryOf(file, today) : null;
   const meta = rowMeta(file);
   return (
     <Link
@@ -113,7 +118,7 @@ export default function DocumentRow({
           <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[12px] font-medium leading-5" style={{ background: "var(--surface-2)", color: "var(--ink-2)" }}>
             {categoryLabel(category)}
           </span>
-          <ExpiryChip expiry={expiry} />
+          {expiry && <ExpiryChip expiry={expiry} />}
           <FileTextMarker file={file} />
         </span>
       </span>

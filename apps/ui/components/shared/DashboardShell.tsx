@@ -62,7 +62,19 @@ import HouseholdSwitcher, {
 } from "@/components/shared/HouseholdSwitcher";
 import { useNavSections } from "@/components/shared/use-nav-role";
 import { NAV_ICON_STROKE, activeSection, pageTitle, type NavSection } from "@/components/shared/nav-config";
+import { useHouseholdToday } from "@/lib/today/api";
 import classes from "./DashboardShell.module.css";
+
+/** "Wednesday, November 18" for a YYYY-MM-DD the household already decided. */
+function dayHeading(civil: string): string {
+  const [y, m, d] = civil.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
 import bottomNavClasses from "./BottomNav.module.css";
 
 /** Mantine breakpoints the shell switches at (sm = 48em, md = 62em). */
@@ -206,8 +218,11 @@ function ShellHeader({
 }) {
   // The header's date is the FAMILY's date (#5316), the same one every page
   // below it uses. Null until the household is known, so the header never
-  // names a day the rest of the app is not on.
-  const today = useHouseholdDayLabel();
+  // names a day the rest of the app is not on. The formatting is done on the
+  // civil date with an explicit UTC zone: the day was already decided by the
+  // household, so re-reading a clock here would only reintroduce the bug.
+  const todayDay = useHouseholdToday();
+  const today = todayDay ? dayHeading(todayDay) : null;
 
   return (
     <div className={classes.headerRow}>

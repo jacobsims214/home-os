@@ -127,7 +127,12 @@ export default function ListDetailPage() {
   }, [people.data]);
 
   const { open: openItems, checked: checkedItems } = useMemo(() => splitChecked(items), [items]);
-  const groups = useMemo(() => groupItems(openItems, list?.kind ?? "", day), [openItems, list?.kind, day]);
+  // With no family day yet, the due buckets cannot be computed honestly, so
+  // the rows are shown ungrouped rather than binned against the browser's day.
+  const groups = useMemo(
+    () => (day ? groupItems(openItems, list?.kind ?? "", day) : []),
+    [openItems, list?.kind, day],
+  );
   const openCount = openCountOf(items);
   const pct = items.length ? Math.round((checkedItems.length / items.length) * 100) : 0;
 

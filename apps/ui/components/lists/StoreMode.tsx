@@ -42,7 +42,8 @@ export interface StoreModeProps {
   list: ListRow;
   items: ListItem[];
   canCheck: boolean;
-  today?: string;
+  /** The FAMILY's today (#5316); null until the household is known. */
+  today?: string | null;
   onToggle: (item: ListItem) => void;
   onClose: () => void;
 }

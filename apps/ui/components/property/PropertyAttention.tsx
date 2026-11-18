@@ -17,10 +17,15 @@ import type { Asset } from "@/lib/types/api";
 
 const STROKE = 1.75;
 
-function daysOverdue(dueDate: string, now: Date): number {
+/**
+ * Whole days between a civil due date and the FAMILY's today (#5316). Both are
+ * civil dates anchored at T00:00:00, so no browser zone can move the difference
+ * by a day; "how many days" is the only reason a Date is used at all.
+ */
+function daysOverdue(dueDate: string, today: string): number {
   const due = new Date(`${dueDate.slice(0, 10)}T00:00:00`);
-  const today = new Date(`${now.toISOString().slice(0, 10)}T00:00:00`);
-  return Math.max(1, Math.round((today.getTime() - due.getTime()) / 86_400_000));
+  const now = new Date(`${today.slice(0, 10)}T00:00:00`);
+  return Math.max(1, Math.round((now.getTime() - due.getTime()) / 86_400_000));
 }
 
 interface PropertyAttentionProps {
@@ -60,7 +65,7 @@ export default function PropertyAttention({ tasks, things, propertyName, today }
       >
         {overdue.map((task) => {
           const thing = task.asset_id ? thingById.get(task.asset_id) : undefined;
-          const days = task.due_date ? daysOverdue(task.due_date, now) : 0;
+          const days = task.due_date && today ? daysOverdue(task.due_date, today) : 0;
           const subject = [thing?.name, thing ? null : propertyName].filter(Boolean).join(" · ");
           const body = (
             <>

@@ -372,7 +372,7 @@ export default function MealsPage() {
                 </Group>
                 <Button
                   component={Link}
-                  href={`/dashboard/meals/grocery?from=${range.from}&to=${range.to}`}
+                  href={range ? `/dashboard/meals/grocery?from=${range.from}&to=${range.to}` : "/dashboard/meals/grocery"}
                   variant="default"
                   fullWidth
                   mt="sm"
