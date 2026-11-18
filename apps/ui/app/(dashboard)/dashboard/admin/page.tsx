@@ -143,6 +143,25 @@ function day(iso: string): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
+/**
+ * "Central Time (America/Chicago)" for a family row, the way the mockup names
+ * it. The IANA name stays in the text: an admin comparing two families needs the
+ * exact zone, and the long name alone ("Central Standard Time") is ambiguous
+ * across the year. Falls back to the raw value for a zone Intl doesn't know.
+ */
+function zoneLabel(timezone: string): string {
+  try {
+    const long = new Intl.DateTimeFormat("en-US", { timeZone: timezone, timeZoneName: "long" })
+      .formatToParts(new Date())
+      .find((part) => part.type === "timeZoneName")?.value;
+    if (!long) return timezone;
+    const short = long.replace(/ (Standard|Daylight) Time$/, " Time");
+    return `${short} (${timezone})`;
+  } catch {
+    return timezone;
+  }
+}
+
 /** A phone row's families line: the first membership, plus how many more. */
 function membershipSummary(user: AdminUser): string {
   const list = user.memberships ?? [];
@@ -885,7 +904,7 @@ export default function AdminPage() {
                         {family.name}
                       </p>
                       <p className="m-0 text-sm text-ink-3 [overflow-wrap:anywhere]">
-                        {family.timezone} · {family.member_count}{" "}
+                        {zoneLabel(family.timezone)} · {family.member_count}{" "}
                         {family.member_count === 1 ? "member" : "members"} · since {day(family.created_at)}
                       </p>
                     </div>
