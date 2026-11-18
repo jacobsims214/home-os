@@ -71,9 +71,13 @@ type listed struct {
 func currentHousehold(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	// The key is lower-case "id" (#5300): household.Household now has json
+	// tags. A capitalised tag here would still unmarshal (encoding/json
+	// matches field names case-insensitively), so it would hide a regression
+	// in the wire name this test is here to pin.
 	var body struct {
 		Data struct {
-			ID string `json:"ID"`
+			ID string `json:"id"`
 		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))

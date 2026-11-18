@@ -17,10 +17,17 @@ import (
 )
 
 // Subject is the typed subject of a bill, loan or maintenance record.
+//
+// It is embedded in bill.Bill, loan.Loan and guides.Guide, so its fields carry
+// json tags: untagged, any of those structs serialized directly would publish
+// "PropertyID"/"VehicleID"/"AssetID" and a client reading property_id would
+// get undefined (#5300's bug class). No consumer reads these three from JSON
+// today — handlers map them to property_id/vehicle_id/asset_id explicitly — so
+// the tags name the wire contract those mappers already use.
 type Subject struct {
-	PropertyID *uuid.UUID
-	VehicleID  *uuid.UUID
-	AssetID    *uuid.UUID
+	PropertyID *uuid.UUID `json:"property_id"`
+	VehicleID  *uuid.UUID `json:"vehicle_id"`
+	AssetID    *uuid.UUID `json:"asset_id"`
 }
 
 // Fields are the subject fields of a create or update request. An empty
