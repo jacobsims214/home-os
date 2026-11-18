@@ -45,6 +45,7 @@ import HouseholdSection from "@/components/settings/HouseholdSection";
 import MembersSection from "@/components/settings/MembersSection";
 import CredentialsSection from "@/components/settings/CredentialsSection";
 import PhoneCalendarSection from "@/components/settings/PhoneCalendarSection";
+import AgentTokensSection from "@/components/settings/AgentTokens";
 import AccountSection from "@/components/settings/AccountSection";
 
 const SECTION_BODY = {
@@ -52,6 +53,7 @@ const SECTION_BODY = {
   members: MembersSection,
   credentials: CredentialsSection,
   "phone-calendar": PhoneCalendarSection,
+  "agent-tokens": AgentTokensSection,
   account: AccountSection,
 } as const;
 

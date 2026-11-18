@@ -18,13 +18,16 @@ import {
 
 const ids = (role) => settingsSectionsForRole(role).map((s) => s.id);
 
-test("the five sections, in the order the settings mockup lists them", () => {
-  assert.deepEqual(
-    SETTINGS_SECTIONS.map((s) => s.id),
-    ["household", "members", "credentials", "phone-calendar", "account"],
-  );
-  // No agent-tokens section: #4580 owns the page and nothing renders there yet.
-  assert.equal(findSettingsSection("agent-tokens"), null);
+// Agent tokens slots in after Phone calendar (#4580). Credentials keeps the
+// place it already had rather than being moved for the mockup's ordering: a
+// section's position is #4560's table, and moving one would be a change nobody
+// asked this ticket for.
+const ALL_IDS = ["household", "members", "credentials", "phone-calendar", "agent-tokens", "account"];
+
+test("the six sections, in the order the settings page lists them", () => {
+  assert.deepEqual(SETTINGS_SECTIONS.map((s) => s.id), ALL_IDS);
+  // #4580: Agent tokens is a real section, reachable at its own route.
+  assert.equal(findSettingsSection("agent-tokens")?.path, "/dashboard/settings/agent-tokens");
 });
 
 test("every section is a real sub-route of the settings index", () => {
@@ -36,23 +39,28 @@ test("every section is a real sub-route of the settings index", () => {
 });
 
 test("an owner sees every section", () => {
-  assert.deepEqual(ids("owner"), ["household", "members", "credentials", "phone-calendar", "account"]);
+  assert.deepEqual(ids("owner"), ALL_IDS);
 });
 
 test("a family_member sees everything but cannot manage the household", () => {
-  assert.deepEqual(ids("family_member"), ["household", "members", "credentials", "phone-calendar", "account"]);
+  assert.deepEqual(ids("family_member"), ALL_IDS);
   assert.equal(canManageHousehold("family_member"), false);
 });
 
-test("a viewer gets no credentials vault (the API answers 403 there)", () => {
-  assert.deepEqual(ids("viewer"), ["household", "members", "phone-calendar", "account"]);
+test("a viewer gets no credentials vault, but may hold a read-only agent token", () => {
+  // The API refuses ResSecrets for a viewer but allows ResAgentTokens ActCreate
+  // (read scope only), and the mockup lists the section for family + viewer.
+  assert.deepEqual(ids("viewer"), ["household", "members", "phone-calendar", "agent-tokens", "account"]);
+  assert.equal(ids("viewer").includes("credentials"), false);
 });
 
-test("a housesitter gets no credentials vault", () => {
+test("a housesitter gets neither the vault nor agent tokens", () => {
+  // ActCreate is rolesReaders, so a housesitter could only ever be shown a
+  // form that answers 403; the section is not offered at all.
   assert.deepEqual(ids("housesitter"), ["household", "members", "phone-calendar", "account"]);
 });
 
-test("a vendor gets neither members nor credentials: the login is about the house", () => {
+test("a vendor gets neither members, credentials nor tokens: the login is about the house", () => {
   assert.deepEqual(ids("vendor"), ["household", "phone-calendar", "account"]);
 });
 
@@ -67,8 +75,8 @@ test("managers are exactly owner and family_manager", () => {
 });
 
 test("a role that isn't known yet sees everything, and an unknown one fails closed", () => {
-  assert.deepEqual(ids(null), ["household", "members", "credentials", "phone-calendar", "account"]);
-  assert.deepEqual(ids(""), ["household", "members", "credentials", "phone-calendar", "account"]);
+  assert.deepEqual(ids(null), ALL_IDS);
+  assert.deepEqual(ids(""), ALL_IDS);
   assert.deepEqual(ids("grandparent"), ["household", "phone-calendar", "account"]);
 });
 
