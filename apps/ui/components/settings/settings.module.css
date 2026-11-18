@@ -1,0 +1,400 @@
+/* Settings section frame (#4560). Tokens only (app/globals.css), no hex:
+   the shell's semantic colours work in both schemes. */
+
+.frame {
+  display: block;
+  min-width: 0;
+}
+
+/* ---------- phone title bar (the DetailPageLayout idiom) ---------- */
+
+.titleBar {
+  position: sticky;
+  top: var(--app-shell-header-offset, 0px);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 56px;
+  margin: -16px -16px 16px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.backButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
+}
+
+.backButton:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.titleBarHeading {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backSpacer {
+  width: 44px;
+  flex: none;
+}
+
+/* ---------- columns ---------- */
+
+.columns {
+  display: block;
+  min-width: 0;
+}
+
+/* The section list is the wide-screen affordance; on a phone the index page is
+   the list, so it is not rendered there at all. */
+.nav {
+  display: none;
+}
+
+.pane {
+  max-width: 760px;
+  min-width: 0;
+}
+
+.sectionList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sectionLink {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.sectionLink:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.sectionLink[aria-current="page"] {
+  background: var(--surface);
+  box-shadow: inset 3px 0 0 var(--accent), var(--shadow-sm);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.sectionLink[aria-current="page"] svg {
+  color: var(--accent);
+}
+
+/* ---------- pane header ---------- */
+
+.paneHeader {
+  margin: 0 0 16px;
+}
+
+.paneHeadingRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* On a phone the title bar already names the section. */
+.paneTitle {
+  display: none;
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+  color: var(--ink);
+}
+
+.paneDescription {
+  margin: 4px 0 0;
+  max-width: 62ch;
+  color: var(--ink-2);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* ---------- cards ---------- */
+
+.card {
+  margin: 0 0 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.cardHead {
+  padding: 14px 16px 0;
+}
+
+.cardTitle {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--ink);
+}
+
+.cardDescription {
+  margin: 2px 0 0;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.cardBody {
+  padding: 14px 16px 16px;
+}
+
+.cardFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+
+/* ---------- index rows ---------- */
+
+.indexList {
+  margin: 0 0 20px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  list-style: none;
+}
+
+.indexList > li + li {
+  border-top: 1px solid var(--line);
+}
+
+.indexRow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 64px;
+  padding: 10px 14px;
+}
+
+.indexRow:hover {
+  background: var(--surface-2);
+}
+
+.indexIcon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.indexText {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.indexTitle {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.indexHint {
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.indexChevron {
+  flex: none;
+  color: var(--ink-3);
+}
+
+/* Read-only rows for the household settings a non-manager only reads. */
+.readOnlyGrid {
+  display: grid;
+  gap: 10px;
+}
+
+.readOnlyLabel {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.readOnlyValue {
+  font-size: 15px;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+/* One column at every width: the time zone's description wraps to two lines, so
+   side-by-side fields put their inputs at different heights and read as ragged.
+   The settings mockup stacks these fields too. */
+.formRow {
+  display: grid;
+  gap: 16px;
+  max-width: 460px;
+}
+
+.formActions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- tablet and up ---------- */
+
+@media (min-width: 48em) {
+  .titleBar {
+    display: none;
+  }
+
+  .columns {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    gap: 28px;
+    align-items: start;
+  }
+
+  .nav {
+    display: block;
+    position: sticky;
+    top: 88px;
+  }
+
+  .paneTitle {
+    display: block;
+  }
+
+}
+
+@media (min-width: 62em) {
+  .columns {
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 40px;
+  }
+}
+
+/* ---------- index person block (phone index page) ---------- */
+
+.indexPerson {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 2px 14px;
+}
+
+.indexName {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--ink);
+}
+
+.indexMeta {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+@media (min-width: 48em) {
+  .indexPerson {
+    padding-bottom: 0;
+  }
+}
+
+/* ---------- time zone field + picker (#4560) ---------- */
+
+.zoneHintRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.zoneHint {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.zoneList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.zoneOption {
+  display: flex;
+  width: 100%;
+  min-height: 48px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--ink);
+  text-align: left;
+  font: inherit;
+}
+
+.zoneOption:hover {
+  background: var(--surface-2);
+}
+
+.zoneOption[aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.zoneName {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 13px;
+}
+
+.zoneLong {
+  font-size: 12px;
+  color: var(--ink-3);
+}
