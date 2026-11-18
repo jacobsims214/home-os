@@ -41,7 +41,7 @@ import { Button, Card, Skeleton, Text } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import {
   IconAlertTriangle,
-  IconBank,
+  IconBuildingBank,
   IconCalendar,
   IconChevronLeft,
   IconChevronRight,
@@ -721,7 +721,7 @@ export default function MoneyPage() {
                             className="grid size-9 shrink-0 place-items-center rounded-token-md bg-surface-2 text-ink-2"
                           >
                             {item.source === "loan" ? (
-                              <IconBank size={18} stroke={STROKE} />
+                              <IconBuildingBank size={18} stroke={STROKE} />
                             ) : (
                               <IconReceipt size={18} stroke={STROKE} />
                             )}
