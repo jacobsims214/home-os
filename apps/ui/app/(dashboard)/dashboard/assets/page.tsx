@@ -67,7 +67,14 @@ function AssetCard({ asset, propertyName }: { asset: Asset; propertyName: string
           {facts.map((fact, i) => (
             <div
               key={fact.label}
-              className={`min-w-0 px-4 py-2.5 ${i % 2 === 1 ? "border-l border-line" : ""} ${i > 1 ? "border-t border-line" : ""}`}
+              className={[
+                "min-w-0 px-4 py-2.5",
+                i % 2 === 1 ? "border-l border-line" : "",
+                i > 1 ? "border-t border-line" : "",
+                // An odd last fact spans the row: an empty half-cell beside a
+                // lone fact reads as a missing value.
+                facts.length % 2 === 1 && i === facts.length - 1 ? "col-span-2" : "",
+              ].join(" ")}
             >
               <dt className="text-xs text-ink-3">{fact.label}</dt>
               <dd className="text-[15px] font-semibold tabular-nums text-ink [overflow-wrap:anywhere]">{fact.value}</dd>
@@ -118,7 +125,7 @@ function AddAssetModal({
       apiFetch<{ data: Asset }>("/api/v1/assets", { method: "POST", body }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: assetKeys.all });
-      notifications.show({ message: "Thing added", color: "teal" });
+      notifications.show({ message: "Asset added", color: "teal" });
       close();
     },
   });
@@ -179,7 +186,7 @@ function AddAssetModal({
   );
 
   return (
-    <ResponsiveModal opened={opened} onClose={close} title="Add a thing">
+    <ResponsiveModal opened={opened} onClose={close} title="Add asset">
       <form onSubmit={submit} noValidate>
         <Stack gap="md">
           {field("name", "Name", { required: true, placeholder: "e.g. Furnace" })}
@@ -220,7 +227,7 @@ function AddAssetModal({
           {field("notes", "Notes", { placeholder: "Filter size, where the manual is, anything useful" })}
           {create.isError && (
             <p role="alert" className="text-sm text-danger">
-              Couldn&apos;t add the thing: {create.error instanceof Error ? create.error.message : "try again"}
+              Couldn&apos;t add the asset: {create.error instanceof Error ? create.error.message : "try again"}
             </p>
           )}
         </Stack>
@@ -229,7 +236,7 @@ function AddAssetModal({
             Cancel
           </Button>
           <Button type="submit" loading={create.isPending}>
-            Add thing
+            Add asset
           </Button>
         </ResponsiveModalActions>
       </form>
@@ -260,7 +267,7 @@ export default function AssetsPage() {
       <div className="mb-4 md:mb-6">
         <div className="flex items-center justify-between gap-3">
           <h2 className="min-w-0 text-xl font-semibold text-ink md:text-2xl">
-            Things
+            Assets
             {!assetsQuery.isLoading && !assetsQuery.isError && assets.length > 0 && (
               <span className="ml-2 align-middle text-base font-medium text-ink-3">{assets.length}</span>
             )}
@@ -271,14 +278,16 @@ export default function AssetsPage() {
             aria-haspopup="dialog"
             className="max-md:min-h-11 shrink-0"
           >
-            Add thing
+            Add asset
           </Button>
         </div>
-        <p className="mt-1 text-sm text-ink-3">What the house is made of: appliances, HVAC, electronics and the rest.</p>
+        <p className="mt-1 text-sm text-ink-3">
+          The things the house is made of: appliances, HVAC, electronics and the rest.
+        </p>
       </div>
 
       {assetsQuery.isLoading && (
-        <div aria-busy="true" aria-label="Loading things" className="space-y-2">
+        <div aria-busy="true" aria-label="Loading assets" className="space-y-2">
           {[1, 2, 3].map((i) => (
             <div key={i} className="space-y-2 rounded-token-md border border-line bg-surface p-4 shadow-token-sm">
               <Skeleton height={14} width="55%" radius="sm" />
@@ -294,7 +303,7 @@ export default function AssetsPage() {
           className="flex flex-col items-start gap-3 rounded-token-md border border-warn-line bg-warn-bg p-4 text-warn-ink sm:flex-row sm:items-center"
         >
           <IconAlertTriangle size={20} stroke={1.75} className="shrink-0" aria-hidden />
-          <p className="flex-1 text-sm">Couldn&apos;t load things. Check your connection and try again.</p>
+          <p className="flex-1 text-sm">Couldn&apos;t load assets. Check your connection and try again.</p>
           <Button variant="default" onClick={() => assetsQuery.refetch()} loading={assetsQuery.isRefetching} className="max-md:min-h-11">
             Try again
           </Button>
@@ -304,17 +313,17 @@ export default function AssetsPage() {
       {!assetsQuery.isLoading && !assetsQuery.isError && assets.length === 0 && (
         <div className="flex flex-col items-center justify-center gap-3 rounded-token-md border-2 border-dashed border-line px-4 py-12 text-center">
           <p className="text-sm text-ink-3">
-            No things yet. Add the furnace, the washer or anything else worth keeping the details of.
+            No assets yet. Add the furnace, the washer or anything else worth keeping the details of.
           </p>
           <Button variant="light" onClick={() => setShowAdd(true)} leftSection={<IconPlus size={16} />} className="max-md:min-h-11">
-            Add thing
+            Add asset
           </Button>
         </div>
       )}
 
       {!assetsQuery.isLoading && !assetsQuery.isError && assets.length > 0 && (
         <>
-          <ul aria-label="Things" className="space-y-2 md:hidden">
+          <ul aria-label="Assets" className="space-y-2 md:hidden">
             {assets.map((asset) => (
               <li key={asset.id} className="min-w-0">
                 <AssetCard asset={asset} propertyName={propertyName(asset.property_id)} />

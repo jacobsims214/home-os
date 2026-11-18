@@ -112,7 +112,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       await stubAssetsApi(page);
       await page.goto("/dashboard/assets");
       const main = page.locator("main");
-      await expect(main.getByRole("heading", { level: 2, name: /Things/ })).toBeVisible();
+      await expect(main.getByRole("heading", { level: 2, name: /Assets/ })).toBeVisible();
 
       const cards = main.locator("[data-asset-card]");
       await expect(cards).toHaveCount(2);
@@ -157,7 +157,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       await snap(page, testInfo, `assets-390-${colorScheme}`, true);
 
       // Add opens a sheet; it must not navigate to a /new route.
-      const add = main.getByRole("button", { name: "Add thing" });
+      const add = main.getByRole("button", { name: "Add asset" });
       expect((await add.boundingBox())!.height).toBeGreaterThanOrEqual(43.5);
       await add.click();
       await expect(page.getByRole("dialog")).toBeVisible();
@@ -189,6 +189,10 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(summary).toContainText("Oct 2029");
       const statBoxes = await summary.locator("> div").evaluateAll((els) => (els as HTMLElement[]).map((e) => e.getBoundingClientRect().top));
       expect(new Set(statBoxes).size).toBeLessThan(statBoxes.length); // at least two share a row
+
+      // The summary strip is the only place these numbers appear: repeating
+      // them as rows below would be the same four facts twice.
+      await expect(main.getByRole("heading", { name: "Value and dates" })).toHaveCount(0);
 
       // Where: the room and the property are links into the tree.
       await expect(main.getByRole("link", { name: "Utility room" })).toHaveAttribute(
@@ -228,9 +232,11 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(main.getByText("Paid", { exact: true })).toHaveCount(0);
       await expect(main.getByText("Current value", { exact: true })).toHaveCount(0);
       await expect(main).not.toContainText("$0");
-      // Only the warranty date survives, and one fact is not a summary strip.
-      await expect(main.getByText("Warranty until")).toBeVisible();
+      // One surviving fact is not a summary strip, so it is shown as a row
+      // instead - and it is the warranty date, the only thing the API sent.
       await expect(main.locator("[data-asset-summary]")).toHaveCount(0);
+      await expect(main.getByText("Warranty", { exact: true })).toBeVisible();
+      await expect(main.getByText("Oct 2029")).toBeVisible();
       await expectNoHorizontalOverflow(page);
       await snap(page, testInfo, `assets-390-${colorScheme}-redacted`, true);
 
@@ -288,9 +294,9 @@ test("error state offers Try again and never reads as an empty list", async ({ l
   await page.route("**/bff/assets", (route) => route.fulfill({ status: 500, json: { error: "boom" } }));
   await page.goto("/dashboard/assets");
   const main = page.locator("main");
-  await expect(main.getByRole("alert")).toContainText("Couldn't load things");
+  await expect(main.getByRole("alert")).toContainText("Couldn't load assets");
   await expect(main.getByRole("button", { name: "Try again" })).toBeVisible();
-  await expect(main.getByText("No things yet")).toHaveCount(0);
+  await expect(main.getByText("No assets yet")).toHaveCount(0);
 });
 
 test("adding a thing sends the room, not a second property (a room derives it)", async ({ loggedInPage: page }) => {
@@ -305,8 +311,8 @@ test("adding a thing sends the room, not a second property (a room derives it)",
   });
   await page.goto("/dashboard/assets");
   const main = page.locator("main");
-  await expect(main.getByText("No things yet")).toBeVisible();
-  await main.getByRole("button", { name: "Add thing" }).last().click();
+  await expect(main.getByText("No assets yet")).toBeVisible();
+  await main.getByRole("button", { name: "Add asset" }).last().click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
   await dialog.getByLabel(/Name/).fill("Water heater");
@@ -314,7 +320,7 @@ test("adding a thing sends the room, not a second property (a room derives it)",
   await page.getByRole("option", { name: "Maple Street" }).click();
   await dialog.getByLabel("Room").click();
   await page.getByRole("option", { name: "Utility room" }).click();
-  await dialog.getByRole("button", { name: "Add thing" }).click();
+  await dialog.getByRole("button", { name: "Add asset" }).click();
   await expect.poll(() => posted).not.toBeNull();
   expect(posted!["name"]).toBe("Water heater");
   expect(posted!["room_id"]).toBe("r1");

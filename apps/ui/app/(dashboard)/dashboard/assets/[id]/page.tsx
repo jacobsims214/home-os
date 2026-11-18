@@ -36,7 +36,7 @@ import { assetKeys, propertyKeys } from "@/lib/query-keys";
 import DetailPageLayout from "@/components/layout/DetailPageLayout";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import { Select, TextInput } from "@/components/ui";
-import { monthYear, summaryFacts, usd, type Asset } from "@/lib/assets/model";
+import { summaryFacts, type Asset } from "@/lib/assets/model";
 
 interface Named {
   id: string;
@@ -200,7 +200,7 @@ export default function AssetDetailPage() {
     save.mutate(body);
   };
 
-  const title = asset?.name ?? "Thing";
+  const title = asset?.name ?? "Asset";
   const room = asset?.room_id ? roomsQuery.data?.data.find((r) => r.id === asset.room_id) ?? null : null;
   const property = asset?.property_id ? properties.find((p) => p.id === asset.property_id) ?? null : null;
   const stats = asset ? summaryFacts(asset) : [];
@@ -268,18 +268,17 @@ export default function AssetDetailPage() {
         </dl>
       </div>
 
-      {/* Value and dates. Each row appears only when the API sent that value:
-          a role without money read has purchase_price/current_value/purchase_date
-          redacted (#4912), and a row of dashes about money it cannot see is
-          worse than no row. Money is absent, never $0. */}
-      {(usd(asset.current_value) || usd(asset.purchase_price) || asset.purchase_date || asset.warranty_expiry) && (
+      {/* Value and dates, when there is only ONE of them: the summary strip
+          above already carries every money and date fact, so repeating them as
+          rows would be the same numbers twice. With a single fact there is no
+          strip (one cell is not a summary), so it is shown here instead - and a
+          role without money read (#4912) still never sees a row of dashes for
+          values it may not see. */}
+      {stats.length === 1 && (
         <div>
           <h3 className="text-sm font-semibold text-ink-2">Value and dates</h3>
           <dl className="m-0 divide-y divide-line">
-            {usd(asset.purchase_price) && <Row label="Paid">{usd(asset.purchase_price)}</Row>}
-            {usd(asset.current_value) && <Row label="Current value">{usd(asset.current_value)}</Row>}
-            {asset.purchase_date && <Row label="Bought">{monthYear(asset.purchase_date)}</Row>}
-            {asset.warranty_expiry && <Row label="Warranty until">{monthYear(asset.warranty_expiry)}</Row>}
+            <Row label={stats[0].label}>{stats[0].value}</Row>
           </dl>
         </div>
       )}
@@ -376,13 +375,13 @@ export default function AssetDetailPage() {
       isSaving={save.isPending}
     >
       {assetQuery.isLoading && (
-        <Stack aria-busy="true" aria-label="Loading thing">
+        <Stack aria-busy="true" aria-label="Loading asset">
           <Skeleton height={72} radius="sm" />
           <Skeleton height={140} radius="sm" />
         </Stack>
       )}
       {assetQuery.isError && (
-        <Alert color="red" title="Couldn't load this thing">
+        <Alert color="red" title="Couldn't load this asset">
           {assetQuery.error instanceof Error ? assetQuery.error.message : "Try again in a moment."}
           <Button variant="default" size="sm" mt="sm" onClick={() => assetQuery.refetch()} loading={assetQuery.isRefetching}>
             Try again
@@ -390,7 +389,7 @@ export default function AssetDetailPage() {
         </Alert>
       )}
       {!assetQuery.isLoading && !assetQuery.isError && !asset && (
-        <p className="text-sm text-ink-3">No thing found with that id.</p>
+        <p className="text-sm text-ink-3">No asset found with that id.</p>
       )}
       {asset && (isEditing ? edit : view)}
 
@@ -398,7 +397,7 @@ export default function AssetDetailPage() {
         open={showDelete}
         onClose={() => setShowDelete(false)}
         onConfirm={() => remove.mutate()}
-        title="Delete thing"
+        title="Delete asset"
         message={`Delete ${title}? This cannot be undone.`}
         loading={remove.isPending}
       />
