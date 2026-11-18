@@ -105,6 +105,35 @@ const RECEIPT = {
 const PEOPLE = { data: [{ id: "p1", display_name: "Ellie Sims", relationship: "child", color: "brick" }] };
 
 /**
+ * A document filed as "Other" (#5299). The column is NOT NULL DEFAULT 'other',
+ * so this is what a real household has whenever someone tapped Other in the
+ * picker — and Amber's report was a card showing this while the hub counted it
+ * as "not filed yet".
+ */
+const OTHER_DOC = {
+  id: "f3",
+  household_id: "h1",
+  blob_id: "bl3",
+  name: "scan-0042.pdf",
+  title: "Warranty card from the drawer",
+  content_type: "application/pdf",
+  size: 52400,
+  entity_type: "household",
+  entity_id: "h1",
+  category: "other",
+  document_date: null,
+  expires_on: null,
+  person_id: null,
+  ocr_status: "done",
+  extracted_text: "Keep this card.",
+  text_origin: "extracted",
+  tags: [],
+  created_at: "2026-11-14T09:00:00Z",
+  updated_at: "2026-11-14T09:00:00Z",
+  uploaded_by_name: "Amber Sims",
+};
+
+/**
  * Stubs the household reads the hub needs.
  *
  * Three routes, because they are three different endpoints and a catch-all
@@ -184,6 +213,49 @@ test.describe("documents hub", () => {
     await expect(page.locator("[data-document-detail]")).toBeVisible();
     await expect(page.locator("[data-document-title]")).toHaveText("Odyssey auto policy renewal");
     await expect(page.getByRole("heading", { name: "Details" })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test("a document filed as Other is filed: its tile says Other and no card contradicts it", async ({ loggedInPage: page }) => {
+    // Amber G10 (#5299), verbatim: the hub said "Not filed yet 1 — documents
+    // with no category" while the counted card displayed "Other". One rule now
+    // decides both, so the count can never include a card that shows a category.
+    await stubHub(page, [POLICY, RECEIPT, OTHER_DOC]);
+    await page.goto("/dashboard/documents");
+
+    // The Other document gets an Other tile, counted once, and named Other — the
+    // same word its card uses.
+    const otherTile = page.locator('[data-category-tile="other"]');
+    await expect(otherTile).toBeVisible();
+    await expect(otherTile).toContainText("Other");
+    await expect(otherTile).not.toContainText(/not filed/i);
+
+    // Its card in the full list shows "Other" too.
+    const row = page.locator('[data-documents-all] [data-document-row="f3"]');
+    await expect(row.locator("[data-document-category]")).toHaveText("Other");
+
+    // Every card's category chip agrees with whether the page calls the document
+    // unfiled: assert it directly, so a future count or label change cannot
+    // silently disagree. This household has nothing without a category, so NO
+    // card may say "No category".
+    const chips = page.locator("[data-documents-all] [data-document-category]");
+    await expect(chips).toHaveCount(3);
+    for (let i = 0; i < 3; i++) {
+      const text = ((await chips.nth(i).textContent()) ?? "").trim();
+      expect(text, `card ${i} shows a category, so it must not be called unfiled`).not.toBe("No category");
+      expect(text.length).toBeGreaterThan(0);
+    }
+
+    // No unfiled note: this household has nothing without a category.
+    await expect(page.getByText(/No category yet on/)).toHaveCount(0);
+
+    // And the Other tile is a real door: it opens the category view, which is the
+    // API's own filter and shows exactly that document.
+    await otherTile.click();
+    await expect(page).toHaveURL(/\?category=other$/);
+    await expect(page.locator('[data-documents-view="category"]')).toBeVisible();
+    await expect(page.locator("[data-document-row]")).toHaveCount(1);
+    await expect(page.locator('[data-document-row="f3"]')).toBeVisible();
     await expectNoHorizontalOverflow(page);
   });
 

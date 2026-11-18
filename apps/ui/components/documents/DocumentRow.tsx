@@ -24,10 +24,11 @@ import { Text } from "@mantine/core";
 import { IconAlertTriangle, IconChevronRight, IconClock } from "@tabler/icons-react";
 import { NAV_ICON_STROKE } from "@/components/shared/nav-config";
 import FileTextMarker from "@/components/files/FileTextMarker";
-import { CategoryIcon, categoryLabel } from "@/components/documents/categories";
+import { CategoryIcon, categoryTint } from "@/components/documents/categories";
 import {
   categoryOf,
   displayTitle,
+  documentCategoryLabel,
   expiryOf,
   rowMeta,
   type Expiry,
@@ -70,6 +71,10 @@ export default function DocumentRow({
   today?: string;
 }) {
   const category = categoryOf(file);
+  // ONE rule (#5299): the words here and the group the hub counts this
+  // document in are the same decision (`documentCategoryLabel` / `isFiled`),
+  // so a card can never show a category while its group calls it unfiled.
+  const categoryText = documentCategoryLabel(file);
   const expiry = expiryOf(file, today);
   const meta = rowMeta(file);
   return (
@@ -98,8 +103,7 @@ export default function DocumentRow({
           display: "grid",
           placeItems: "center",
           borderRadius: 10,
-          background: category === "other" ? "var(--surface-2)" : "var(--accent-soft)",
-          color: category === "other" ? "var(--ink-2)" : "var(--accent)",
+          ...categoryTint(file),
         }}
       >
         <CategoryIcon category={category} size={18} />
@@ -110,8 +114,15 @@ export default function DocumentRow({
         </Text>
         <span style={{ display: "block", fontSize: 13, color: "var(--ink-3)", lineHeight: 1.4, overflowWrap: "anywhere" }}>{meta}</span>
         <span style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 5 }}>
-          <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[12px] font-medium leading-5" style={{ background: "var(--surface-2)", color: "var(--ink-2)" }}>
-            {categoryLabel(category)}
+          {/* data-document-category is the card's ONE category statement, and
+              it comes from the same rule as the count (#5299) — a test can
+              therefore compare them without guessing at chip markup. */}
+          <span
+            data-document-category
+            className="inline-flex items-center rounded-full px-2 py-0.5 text-[12px] font-medium leading-5"
+            style={{ background: "var(--surface-2)", color: "var(--ink-2)" }}
+          >
+            {categoryText}
           </span>
           <ExpiryChip expiry={expiry} />
           <FileTextMarker file={file} />

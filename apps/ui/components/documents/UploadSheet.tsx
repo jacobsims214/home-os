@@ -56,11 +56,13 @@ import { ResponsiveModal, ResponsiveModalActions } from "@/components/ui";
 import { fileKeys } from "@/lib/query-keys";
 import { apiFetch } from "@/lib/api";
 import type { FileRecord } from "@/lib/types/api";
-import { CategoryIcon } from "@/components/documents/categories";
+import { CategoryIcon, categoryLabel } from "@/components/documents/categories";
 import {
   CATEGORIES,
   CATEGORY_LABELS,
-  CATEGORY_SINGULAR,
+  categoryOf,
+  documentCategoryLabel,
+  isFiled,
   cleanTags,
   formatSize,
   textState,
@@ -613,7 +615,7 @@ function DetailsStep(props: {
                 }}
               >
                 <CategoryIcon category={c} size={18} />
-                {CATEGORY_SINGULAR[c]}
+                {categoryLabel(c)}
               </button>
             );
           })}
@@ -748,7 +750,7 @@ function ReadingStep({ file, onDone }: { file: FileRecord; onDone: () => void })
 // ─── Saved ───────────────────────────────────────────────────
 
 function SavedStep({ file }: { file: FileRecord }) {
-  const category = (file.category ?? "other") as Category;
+  const category = categoryOf(file);
   return (
     <Stack gap="md" data-testid="upload-saved">
       <div style={{ textAlign: "center", padding: "12px 0 4px" }}>
@@ -768,7 +770,7 @@ function SavedStep({ file }: { file: FileRecord }) {
           <IconCheck size={32} stroke={2} />
         </div>
         <Text fw={600} size="lg">
-          Filed under {CATEGORY_LABELS[category]}
+          {isFiled(file) ? `Filed under ${CATEGORY_LABELS[category]}` : "Filed, with no category yet"}
         </Text>
         <Text size="sm" c="dimmed" mt={6} style={{ maxWidth: 340, margin: "6px auto 0" }}>
           {file.title || file.name} is searchable now. You&apos;ll find it under Documents and, if it has an expiry
@@ -784,7 +786,7 @@ function SavedStep({ file }: { file: FileRecord }) {
             {file.title || file.name}
           </Text>
           <Text size="xs" c="dimmed">
-            {CATEGORY_SINGULAR[category]}
+            {documentCategoryLabel(file)}
             {file.expires_on ? ` · expires ${file.expires_on}` : ""}
           </Text>
         </div>
