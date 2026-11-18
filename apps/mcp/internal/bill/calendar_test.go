@@ -60,10 +60,10 @@ func TestBillRuleMatchesDueRule(t *testing.T) {
 			}
 
 			// The due rule's dates from the series start for six years.
-			c, _ := tt.s.cadence()
+			c, _ := cadence(tt.s)
 			end := start.AddDate(6, 0, 0)
 			var want []string
-			for due, ok := c.onOrAfter(start); ok && due.Before(end); due, ok = c.after(due) {
+			for due, ok := c.OnOrAfter(start); ok && due.Before(end); due, ok = c.After(due) {
 				want = append(want, due.Format(time.DateOnly))
 			}
 

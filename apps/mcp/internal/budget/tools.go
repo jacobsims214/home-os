@@ -36,6 +36,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/billdue"
 	"home-os/mcp/internal/bill"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
@@ -752,113 +753,35 @@ func LoadDueSoon(ctx context.Context, q querier, householdID string, today time.
 // depth; depth decides how many items are listed (and so how big the
 // payload is) and MoreItems says how many were not.
 func LoadDueSoonDepth(ctx context.Context, q querier, householdID string, today time.Time, days int, depth Depth) (*DueSoon, error) {
-	end := today.AddDate(0, 0, days)
-	out := &DueSoon{Days: days, From: today.Format(time.DateOnly), To: end.Format(time.DateOnly), Currency: Currency, Items: []DueItem{}}
-
-	rows, err := q.Query(ctx,
-		`SELECT id, name, ROUND(amount * 100)::bigint, frequency, due_day, due_date, paid_date, paid_for_due_date, COALESCE(is_autopay, false)
-		   FROM bills WHERE household_id = $1`, householdID)
+	shared, err := billdue.LoadDueSoonRows(ctx, q, householdID, today, days)
 	if err != nil {
-		return nil, fmt.Errorf("due soon bills: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			id                     uuid.UUID
-			name, freq             string
-			amount                 *int64
-			dueDay                 *int
-			dueDate, paid, paidFor *time.Time
-			autopay                bool
-		)
-		if err := rows.Scan(&id, &name, &amount, &freq, &dueDay, &dueDate, &paid, &paidFor, &autopay); err != nil {
-			return nil, fmt.Errorf("scan bill: %w", err)
-		}
-		due, ok := bill.BillDueFor(today, bill.Schedule{Frequency: freq, DueDay: dueDay, DueDate: dueDate}, paid, paidFor)
-		if !ok {
-			out.NoDueDate++
-			continue
-		}
-		if due.Next.IsZero() || due.DaysUntil < 0 || due.DaysUntil > days {
-			continue
-		}
-		out.add(DueItem{Source: "bill", ID: id.String(), Name: name, Amount: centsPtr(amount), Autopay: autopay}, due.Next, today, amount)
+	// Depth only decides how many items are listed; the counts and the total
+	// always cover every item in the window (#4809).
+	out := &DueSoon{
+		Days: shared.Days, From: shared.From.Format(time.DateOnly), To: shared.To.Format(time.DateOnly),
+		Currency: Currency, Total: FormatCents(shared.TotalCents),
+		BillCount: shared.BillCount, LoanCount: shared.LoanCount,
+		NoDueDate: shared.WithoutDueDate, totalCents: shared.TotalCents, uncountable: shared.Uncountable,
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("due soon bills: %w", err)
+	items := make([]DueItem, 0, len(shared.Items))
+	for _, it := range shared.Items {
+		items = append(items, DueItem{
+			Source: it.Source, ID: it.ID.String(), Name: it.Name,
+			Amount:     centsPtr(it.AmountCents),
+			DueDate:    it.DueDate.Format(time.DateOnly),
+			DueWeekday: it.DueDate.Weekday().String()[:3],
+			DaysUntil:  it.DaysUntil,
+			Autopay:    it.Autopay,
+		})
 	}
-
-	lrows, err := q.Query(ctx,
-		`SELECT id, name, ROUND(monthly_payment * 100)::bigint, due_day, start_date, term_end
-		   FROM loans
-		  WHERE household_id = $1 AND remaining_balance > 0
-		    AND (start_date IS NULL OR start_date <= $3)
-		    AND (term_end IS NULL OR term_end >= $2)`, householdID, today, end)
-	if err != nil {
-		return nil, fmt.Errorf("due soon loans: %w", err)
-	}
-	defer lrows.Close()
-	for lrows.Next() {
-		var (
-			id             uuid.UUID
-			name           string
-			amount         *int64
-			dueDay         *int
-			start, termEnd *time.Time
-		)
-		if err := lrows.Scan(&id, &name, &amount, &dueDay, &start, &termEnd); err != nil {
-			return nil, fmt.Errorf("scan loan: %w", err)
-		}
-		if dueDay == nil || *dueDay < 1 || *dueDay > 31 {
-			out.NoDueDate++
-			continue
-		}
-		next := NextMonthlyDue(today, *dueDay)
-		if start != nil && next.Before(*start) {
-			next = NextMonthlyDue(*start, *dueDay)
-		}
-		if next.After(end) || (termEnd != nil && next.After(*termEnd)) {
-			continue
-		}
-		out.add(DueItem{Source: "loan", ID: id.String(), Name: name, Amount: centsPtr(amount)}, next, today, amount)
-	}
-	if err := lrows.Err(); err != nil {
-		return nil, fmt.Errorf("due soon loans: %w", err)
-	}
-
-	sort.SliceStable(out.Items, func(i, j int) bool {
-		a, b := out.Items[i], out.Items[j]
-		if a.DueDate != b.DueDate {
-			return a.DueDate < b.DueDate
-		}
-		if a.Name != b.Name {
-			return strings.ToLower(a.Name) < strings.ToLower(b.Name)
-		}
-		return a.ID < b.ID
-	})
-	out.Total = FormatCents(out.totalCents)
+	out.Items = items
 	if max := depth.maxDueItemsAt(); len(out.Items) > max {
 		out.MoreItems = len(out.Items) - max
 		out.Items = out.Items[:max]
 	}
 	return out, nil
-}
-
-func (d *DueSoon) add(it DueItem, next, today time.Time, amount *int64) {
-	it.DueDate = next.Format(time.DateOnly)
-	it.DueWeekday = next.Weekday().String()[:3]
-	it.DaysUntil = int(next.Sub(today).Hours() / 24)
-	if it.Source == "loan" {
-		d.LoanCount++
-	} else {
-		d.BillCount++
-	}
-	if amount != nil {
-		d.totalCents += *amount
-	} else {
-		d.uncountable++
-	}
-	d.Items = append(d.Items, it)
 }
 
 // Describe is the due-soon summary phrase, e.g. "Due in the next 30 days:
@@ -881,23 +804,9 @@ func (d *DueSoon) Describe() string {
 
 // NextMonthlyDue is the first date on or after today that falls on dueDay of
 // its month, clamped to the month's last day (31 is Nov 30): the bill and
-// loan rule.
+// loan rule, from home-os/billdue (#4819) so loans and bills cannot drift.
 func NextMonthlyDue(today time.Time, dueDay int) time.Time {
-	y, m, d := today.Date()
-	today = time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
-	c := dayInMonth(y, m, dueDay)
-	if c.Before(today) {
-		c = dayInMonth(y, m+1, dueDay)
-	}
-	return c
-}
-
-func dayInMonth(year int, month time.Month, day int) time.Time {
-	last := time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
-	if day > last {
-		day = last
-	}
-	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	return billdue.NextMonthlyDue(today, dueDay)
 }
 
 func plural(n int, one, many string) string {

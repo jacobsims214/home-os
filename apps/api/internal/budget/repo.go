@@ -15,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"home-os/billdue"
 )
 
 // Category is a budget_categories row. MonthlyAmount is NUMERIC(12,2) carried
@@ -166,6 +168,15 @@ type Obligation struct {
 	MonthlyCents     *int64
 	DueDay           *int
 	DueDate          *time.Time
+}
+
+// DueSoon returns what falls due from today through today + days for the
+// household. It delegates to home-os/billdue, the one implementation of the
+// due rule and the due-soon query (#4819): MCP budget_summary's due_soon
+// section is filled by the same function, so the API and the agent cannot
+// disagree. today is the family's date as midnight UTC.
+func (r *Repo) DueSoon(ctx context.Context, householdID uuid.UUID, today time.Time, days int) (*billdue.DueSoon, error) {
+	return billdue.LoadDueSoonRows(ctx, r.pool, householdID.String(), today, days)
 }
 
 // Obligations returns the household's bills and the loans active in the

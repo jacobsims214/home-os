@@ -707,7 +707,7 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 			return respond.Failed("record the payment", err), nil
 		}
 
-		c, hasSchedule := r.schedule().cadence()
+		c, hasSchedule := cadence(r.schedule())
 		if in.forDueDate != nil {
 			if res := checkForDueDate(r, *in.forDueDate, today); res != nil {
 				return res, nil
@@ -786,22 +786,22 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 // of bills paid. It returns the tool error, or nil when valid.
 func checkForDueDate(r billRow, forDue, today time.Time) *mcp.CallToolResult {
 	given := forDue.Format(time.DateOnly)
-	c, ok := r.schedule().cadence()
+	c, ok := cadence(r.schedule())
 	if !ok {
 		return respond.Invalid("for_due_date",
 			fmt.Sprintf("Bill %s has no due day or due date, so for_due_date %s cannot be checked.", r.Name, given),
 			"Leave for_due_date out, or set the bill's due_day (monthly) or due_date with bill_update first.",
 			map[string]any{"bill_id": r.ID.String()})
 	}
-	if last, ok := c.onOrBefore(forDue); !ok || !last.Equal(forDue) {
+	if last, ok := c.OnOrBefore(forDue); !ok || !last.Equal(forDue) {
 		var want time.Time
 		var which string
-		if c.step == 1 {
-			want = dueDateInMonth(forDue.Year(), forDue.Month(), c.day)
-			which = fmt.Sprintf("due on day %d of each month (%s that month)", c.day, want.Format(time.DateOnly))
+		if c.Step == 1 {
+			want = dueDateInMonth(forDue.Year(), forDue.Month(), c.Day)
+			which = fmt.Sprintf("due on day %d of each month (%s that month)", c.Day, want.Format(time.DateOnly))
 		} else {
-			if want, ok = c.onOrAfter(forDue); !ok {
-				want = c.anchor
+			if want, ok = c.OnOrAfter(forDue); !ok {
+				want = c.Anchor
 			}
 			which = fmt.Sprintf("%s (next %s)", scheduleText(r.schedule()), want.Format(time.DateOnly))
 		}
@@ -810,14 +810,14 @@ func checkForDueDate(r billRow, forDue, today time.Time) *mcp.CallToolResult {
 			fmt.Sprintf("Pass the due date being paid, e.g. %s, or leave for_due_date out.", want.Format(time.DateOnly)),
 			map[string]any{"bill_id": r.ID.String(), "for_due_date": want.Format(time.DateOnly)})
 	}
-	if c.step == 0 {
+	if c.Step == 0 {
 		return nil // a once bill has one due date; paying it early is fine
 	}
-	if limit := today.AddDate(0, c.step, 0); forDue.After(limit) {
-		next, _ := c.onOrAfter(today)
+	if limit := today.AddDate(0, c.Step, 0); forDue.After(limit) {
+		next, _ := c.OnOrAfter(today)
 		period := "a month"
-		if c.step > 1 {
-			period = fmt.Sprintf("%d months", c.step)
+		if c.Step > 1 {
+			period = fmt.Sprintf("%d months", c.Step)
 		}
 		return respond.Invalid("for_due_date",
 			fmt.Sprintf("for_due_date %s is more than %s after today (%s in the family's timezone).",
@@ -832,16 +832,16 @@ func checkForDueDate(r billRow, forDue, today time.Time) *mcp.CallToolResult {
 // of each month", "due every 3 months from 2026-01-15" or "due once, on
 // 2026-03-01".
 func scheduleText(s Schedule) string {
-	c, ok := s.cadence()
+	c, ok := cadence(s)
 	switch {
 	case !ok:
 		return "not scheduled"
-	case c.step == 1:
-		return fmt.Sprintf("due on day %d of each month", c.day)
-	case c.step == 0:
-		return "due once, on " + c.anchor.Format(time.DateOnly)
+	case c.Step == 1:
+		return fmt.Sprintf("due on day %d of each month", c.Day)
+	case c.Step == 0:
+		return "due once, on " + c.Anchor.Format(time.DateOnly)
 	default:
-		return fmt.Sprintf("due every %d months from %s", c.step, c.anchor.Format(time.DateOnly))
+		return fmt.Sprintf("due every %d months from %s", c.Step, c.Anchor.Format(time.DateOnly))
 	}
 }
 
@@ -1220,26 +1220,18 @@ func resolveSchedule(stored Schedule, u billUpdate) (Schedule, error) {
 	if err := checkSchedule(next, u.frequency != nil); err != nil {
 		var ae *argError
 		if errors.As(err, &ae) && u.frequency != nil {
-			ae.message = fmt.Sprintf("Changing %s to %s needs %s.", stored.frequencyName(), next.Frequency, ae.field)
+			ae.message = fmt.Sprintf("Changing %s to %s needs %s.", frequencyName(stored), next.Frequency, ae.field)
 		}
 		return next, err
 	}
 	return next, nil
 }
 
-// frequencyName is s.Frequency, with "" read as monthly.
-func (s Schedule) frequencyName() string {
-	if s.Frequency == "" {
-		return FrequencyMonthly
-	}
-	return s.Frequency
-}
-
 // sameSchedule reports whether two schedules are the same stored values.
 func sameSchedule(a, b Schedule) bool {
 	sameDay := (a.DueDay == nil) == (b.DueDay == nil) && (a.DueDay == nil || *a.DueDay == *b.DueDay)
 	sameDate := (a.DueDate == nil) == (b.DueDate == nil) && (a.DueDate == nil || midnight(*a.DueDate).Equal(midnight(*b.DueDate)))
-	return a.frequencyName() == b.frequencyName() && sameDay && sameDate
+	return frequencyName(a) == frequencyName(b) && sameDay && sameDate
 }
 
 // frequencyAliases maps common words to bills.frequency values.

@@ -15,6 +15,7 @@ require (
 	google.golang.org/grpc v1.76.0
 	home-os/allergen v0.0.0
 	home-os/billcal v0.0.0
+	home-os/billdue v0.0.0
 	home-os/icalx v0.0.0
 )
 
@@ -48,3 +49,5 @@ replace home-os/allergen => ../../packages/allergen
 replace home-os/icalx => ../../packages/icalx
 
 replace home-os/billcal => ../../packages/billcal
+
+replace home-os/billdue => ../../packages/billdue

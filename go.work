@@ -7,5 +7,6 @@ use (
 	./apps/worker
 	./packages/allergen
 	./packages/billcal
+	./packages/billdue
 	./packages/icalx
 )

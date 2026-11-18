@@ -186,6 +186,7 @@ var routeRules = map[string]RouteRule{
 	"PUT /api/v1/budget/categories/{id}":    rr(auth.ResBudget, auth.ActWrite),
 	"DELETE /api/v1/budget/categories/{id}": rr(auth.ResBudget, auth.ActWrite),
 	"GET /api/v1/budget/obligations":        rr(auth.ResBudget, auth.ActRead),
+	"GET /api/v1/budget/due-soon":           rr(auth.ResBudget, auth.ActRead),
 
 	// Lists: PATCH of an item is check_items here; the handler asks for
 	// edit_items when the body changes more than "checked".
