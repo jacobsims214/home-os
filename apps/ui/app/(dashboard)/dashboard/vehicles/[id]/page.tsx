@@ -108,7 +108,13 @@ function fmtDate(iso: string | null | undefined): string | null {
   if (!iso) return null;
   const d = new Date(`${iso.slice(0, 10)}T00:00:00`);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+  // UTC: a civil date, read in the zone that cannot move it (#5316).
+  return d.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    timeZone: "UTC",
+  });
 }
 
 /** One fact in the summary strip: a label and a value, or a dash when unset. */

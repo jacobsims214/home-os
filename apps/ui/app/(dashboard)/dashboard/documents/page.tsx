@@ -78,9 +78,9 @@ import {
   filterDocuments,
   isCategory,
   populatedCategories,
-  todayString,
   type Category,
 } from "@/lib/documents/model";
+import { useHouseholdToday } from "@/lib/today/api";
 import { CategoryIcon } from "@/components/documents/categories";
 import DocumentRow from "@/components/documents/DocumentRow";
 import UploadSheet from "@/components/documents/UploadSheet";
@@ -127,11 +127,15 @@ function DocumentsHub() {
   // counts and the expiring list are computed from it.
   const documentsQ = useDocuments(categoryView ? { category: categoryView } : {}, mayRead);
   const files = useMemo(() => documentsQ.data?.data ?? [], [documentsQ.data]);
-  const today = todayString();
+  // "Expiring soon" and the counts are the FAMILY's day (#5316): a warranty
+  // that expires today is not expired yet, and which of the two it is must not
+  // depend on the browser's zone. Null until the household is known, so the
+  // lists are empty rather than wrong.
+  const today = useHouseholdToday();
 
-  const expiring = useMemo(() => expiringSoon(files, today), [files, today]);
-  const cats = useMemo(() => populatedCategories(files, today), [files, today]);
-  const counts = useMemo(() => categoryCounts(files, today), [files, today]);
+  const expiring = useMemo(() => (today ? expiringSoon(files, today) : []), [files, today]);
+  const cats = useMemo(() => (today ? populatedCategories(files, today) : []), [files, today]);
+  const counts = useMemo(() => (today ? categoryCounts(files, today) : new Map()), [files, today]);
   const filtered = useMemo(() => filterDocuments(files, { q: query }), [files, query]);
 
   const openUpload = (category: Category | null = null) => {

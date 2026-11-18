@@ -63,13 +63,13 @@ import {
   hasStoreMode,
   kindLabel,
   splitChecked,
-  todayKey,
 } from "@/lib/lists/model";
 import type { ListItem } from "@/lib/lists/types";
 import { KindTile } from "@/components/lists/kind";
 import ItemRow from "@/components/lists/ItemRow";
 import QuickAdd from "@/components/lists/QuickAdd";
 import StoreMode from "@/components/lists/StoreMode";
+import { useHouseholdToday } from "@/lib/today/api";
 import ItemEditor from "@/components/lists/ItemEditor";
 
 const STROKE = 1.75;
@@ -108,7 +108,9 @@ export default function ListDetailPage() {
   const [actionsOpen, setActionsOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
 
-  const day = todayKey();
+  // The FAMILY's day (#5316): "bought today" is the household's today, not a
+  // UTC browser's. todayKey() takes it as an argument (see lib/lists/model).
+  const day = useHouseholdToday();
   // The feed is the live truth; the detail query is the first paint. Prefer the
   // feed the moment it has anything, so an optimistic tick is never overwritten
   // by a slower detail response.

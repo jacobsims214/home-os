@@ -55,6 +55,7 @@ import PropertyDetailsSheet from "@/components/property/PropertyDetailsSheet";
 import AddRoomModal, { roomsKey } from "@/components/property/AddRoomModal";
 import AddThingModal from "@/components/property/AddThingModal";
 import { useNavRole } from "@/components/shared/use-nav-role";
+import { useHouseholdToday } from "@/lib/today/api";
 import { canWriteProperty } from "@/components/property/property-access";
 
 const STROKE = 1.75;
@@ -71,6 +72,9 @@ const PROPERTY_TYPES = [
 ];
 
 export default function PropertyDetailPage() {
+  // The FAMILY's day (#5316) for every "overdue" badge on the page. Null until
+  // the household is known: nothing is claimed overdue on a guess.
+  const today = useHouseholdToday();
   const params = useParams<{ id: string }>();
   const propertyId = params.id;
   const queryClient = useQueryClient();
@@ -332,9 +336,10 @@ export default function PropertyDetailPage() {
             canWrite={canWrite}
             onAddRoom={() => setAddRoomOpen(true)}
             onAddThing={openAddThing}
+            today={today}
           />
 
-          <PropertyAttention tasks={tasks} things={things} propertyName={property.name} />
+          <PropertyAttention tasks={tasks} things={things} propertyName={property.name} today={today} />
 
           <PropertyDetailsSheet
             property={property}

@@ -37,7 +37,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import dayjs from "dayjs";
+import { useHouseholdToday } from "@/lib/today/api";
 import {
   Badge,
   Button,
@@ -97,23 +97,20 @@ export default function MealsPage() {
   const params = useSearchParams();
   const requestedWeek = params?.get("week") ?? "";
 
-  // Today comes from the BROWSER once mounted, never during SSR: the server's
-  // clock (and its time zone) is not the family's, and a week row that says
-  // "today" on the wrong day is worse than no highlight for one paint.
-  const [today, setToday] = useState<string | null>(null);
+  // Today is the FAMILY's day (#5316), in the household's time zone, after
+  // mount: the server's clock (and its zone) is not the family's, and a browser
+  // on UTC at 22:30 in New York is already on tomorrow. `nowKey` is null until
+  // the household is known, so no week is claimed to be "this week" on a guess.
+  const nowKey = useHouseholdToday();
   const [weekOffset, setWeekOffset] = useState(0);
-
-  useEffect(() => {
-    setToday(dayjs().format("YYYY-MM-DD"));
-  }, []);
-  const nowKey = today ?? dayjs().format("YYYY-MM-DD");
   const start = useMemo(() => {
     const anchor = requestedWeek || nowKey;
+    if (!anchor) return null;
     return addWeek(weekStart(anchor), weekOffset);
   }, [requestedWeek, nowKey, weekOffset]);
 
-  const range = useMemo(() => ({ from: start, to: addDays(start, 6) }), [start]);
-  const mealsQuery = useMealPlans(range);
+  const range = useMemo(() => (start ? { from: start, to: addDays(start, 6) } : null), [start]);
+  const mealsQuery = useMealPlans(range ?? { from: "", to: "" }, !!range);
   const peopleQuery = usePeople();
   const recipesQuery = useRecipes();
 
@@ -125,7 +122,10 @@ export default function MealsPage() {
   const recipes = useMemo(() => recipesQuery.data?.data ?? [], [recipesQuery.data]);
   const recipesById = useMemo(() => new Map(recipes.map((r) => [r.id, r])), [recipes]);
 
-  const days = useMemo(() => buildWeek(start, meals, nowKey), [start, meals, nowKey]);
+  const days = useMemo(
+    () => (start && nowKey ? buildWeek(start, meals, nowKey) : []),
+    [start, meals, nowKey],
+  );
   const planned = plannedDinners(days);
   const nextEmpty = firstEmptyDay(days);
 
@@ -237,10 +237,10 @@ export default function MealsPage() {
         </Button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <Text fw={600} size="lg" style={{ lineHeight: 1.2 }} data-meals-weekday>
-            {weekHeading(start, nowKey)}
+            {start && nowKey ? weekHeading(start, nowKey) : "This week"}
           </Text>
           <Text size="xs" style={{ color: "var(--ink-3)" }} data-meals-weekrange>
-            {weekLabel(start)} · {planned} {planned === 1 ? "dinner" : "dinners"} planned
+            {start ? weekLabel(start) : "\u2014"} \u00b7 {planned} {planned === 1 ? "dinner" : "dinners"} planned
           </Text>
         </div>
         <Button

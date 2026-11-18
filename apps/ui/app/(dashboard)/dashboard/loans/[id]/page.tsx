@@ -79,7 +79,10 @@ const pct = (v: unknown): string | null => (v == null || v === "" || !Number.isF
 const fmtDate = (v: string | null | undefined): string | null => {
   if (!v) return null;
   const d = new Date(`${v.slice(0, 10)}T00:00:00`);
-  return Number.isNaN(d.getTime()) ? v : d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  // UTC: a civil date, read in the zone that cannot move it (#5316).
+  return Number.isNaN(d.getTime())
+    ? v
+    : d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 };
 
 const entityName = (e: Named): string =>

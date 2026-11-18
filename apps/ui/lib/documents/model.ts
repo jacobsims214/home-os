@@ -138,8 +138,26 @@ export function daysBetween(from: string, to: string): number | null {
   return Math.round(ms / 86_400_000);
 }
 
-/** Today as "YYYY-MM-DD" in the browser's own calendar (what a person sees). */
-export function todayString(now: Date = new Date()): string {
+/**
+ * "YYYY-MM-DD" for one instant, in a ZONE. Kept for callers that already have
+ * the instant they mean (and for the tests that pin the local-day behaviour).
+ *
+ * NOT a source of "today" (#5316): a page's today is the FAMILY's, from
+ * `householdToday(household?.timezone)` via `useHouseholdToday()`. The
+ * `today` arguments below therefore have no default — passing the browser's
+ * day must be a deliberate act, not something a missing argument does.
+ */
+export function todayString(now: Date, timeZone?: string): string {
+  if (timeZone) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(now);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+    return `${get("year")}-${get("month")}-${get("day")}`;
+  }
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const d = String(now.getDate()).padStart(2, "0");
@@ -173,7 +191,7 @@ export interface Expiry {
   label: string;
 }
 
-export function expiryOf(file: Pick<FileRecord, "expires_on">, today: string = todayString()): Expiry {
+export function expiryOf(file: Pick<FileRecord, "expires_on">, today: string): Expiry {
   const raw = file.expires_on ?? null;
   if (!raw) return { state: "none", days: null, label: "" };
   const days = daysBetween(today, raw);
@@ -190,7 +208,7 @@ export function expiryOf(file: Pick<FileRecord, "expires_on">, today: string = t
 }
 
 /** Documents whose expiry is within the window, or already past. */
-export function isExpiring(file: Pick<FileRecord, "expires_on">, today: string = todayString()): boolean {
+export function isExpiring(file: Pick<FileRecord, "expires_on">, today: string): boolean {
   const days = file.expires_on ? daysBetween(today, file.expires_on) : null;
   return days !== null && days <= EXPIRING_WINDOW_DAYS;
 }
@@ -202,7 +220,7 @@ export function isExpiring(file: Pick<FileRecord, "expires_on">, today: string =
  */
 export function expiringSoon<T extends Pick<FileRecord, "expires_on">>(
   files: readonly T[],
-  today: string = todayString(),
+  today: string,
 ): T[] {
   return files
     .filter((f) => isExpiring(f, today))
@@ -374,7 +392,7 @@ export interface CategoryCount {
  * the hub only draws a tile for it when its count is above zero (the mockup's
  * rule: other means "not filed yet", so a zero tile would only nag).
  */
-export function categoryCounts(files: readonly FileRecord[], today: string = todayString()): Map<Category, CategoryCount> {
+export function categoryCounts(files: readonly FileRecord[], today: string): Map<Category, CategoryCount> {
   const out = new Map<Category, CategoryCount>();
   for (const c of CATEGORIES) out.set(c, { category: c, count: 0, expiring: 0, latest: null });
   // Newest first, so the first row seen per category is its latest.
@@ -389,7 +407,7 @@ export function categoryCounts(files: readonly FileRecord[], today: string = tod
 }
 
 /** The categories worth a tile: everything with documents, in display order. */
-export function populatedCategories(files: readonly FileRecord[], today: string = todayString()): CategoryCount[] {
+export function populatedCategories(files: readonly FileRecord[], today: string): CategoryCount[] {
   const counts = categoryCounts(files, today);
   return CATEGORIES.map((c) => counts.get(c)!).filter((c) => c.count > 0);
 }

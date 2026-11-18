@@ -28,12 +28,14 @@ interface PropertyAttentionProps {
   things: Asset[];
   /** The property's name, for a task about the whole house. */
   propertyName: string;
-  /** "View all upkeep" goes to the maintenance page. */
-  now?: Date;
+  /** The FAMILY's civil date (#5316); null while the household loads. */
+  today: string | null;
 }
 
-export default function PropertyAttention({ tasks, things, propertyName, now = new Date() }: PropertyAttentionProps) {
-  const overdue = overdueTasks(tasks, now);
+export default function PropertyAttention({ tasks, things, propertyName, today }: PropertyAttentionProps) {
+  // No day yet: claim nothing. An "overdue" badge derived from the browser's
+  // clock is the defect this consolidation removed.
+  const overdue = today ? overdueTasks(tasks, today) : [];
   if (overdue.length === 0) return null;
   const thingById = new Map(things.map((t) => [t.id, t]));
 

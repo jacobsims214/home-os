@@ -148,7 +148,7 @@ export function formatValue(value: unknown, format?: EntityColumn["format"]): st
   }
   if (format === "date") {
     const d = new Date(String(value));
-    return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleDateString();
+    return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleDateString("en-US", { timeZone: "UTC" });
   }
   return String(value);
 }

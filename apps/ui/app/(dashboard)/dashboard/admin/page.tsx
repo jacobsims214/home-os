@@ -140,7 +140,13 @@ function initials(name: string, email: string): string {
 function day(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  // UTC: an admin row's date is a civil date (#5316).
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
 }
 
 /**

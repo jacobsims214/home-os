@@ -266,6 +266,7 @@ function absoluteDate(iso: string, now: number = Date.now()): string {
     month: "short",
     day: "numeric",
     ...(sameYear ? {} : { year: "numeric" }),
+    timeZone: "UTC",
   });
 }
 

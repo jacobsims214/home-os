@@ -254,14 +254,6 @@ export function dueLabel(due: string, today: string): string {
   return `${weekday(due)}, ${monthDay(due)}`;
 }
 
-/** Today as YYYY-MM-DD in the browser's own timezone (what "Today" means here). */
-export function todayKey(now: Date = new Date()): string {
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
 // ── rows ─────────────────────────────────────────────────────
 
 /** "2 lb", "6", "1 gal" — the quantity column as the mockup draws it. */

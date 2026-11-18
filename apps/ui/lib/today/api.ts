@@ -10,11 +10,12 @@
  * rule, and the cure for audit #74's root cause: a failed read must never
  * render as empty data).
  */
+import { useEffect, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { ApiError, apiFetch } from "@/lib/api";
 import { mealKeys, personKeys } from "@/lib/query-keys";
 import type { AgendaEvent, ActivityRow, BillRow, ListRow, MaintenanceRow, MealRow, PersonRow } from "./agenda";
-import { activityProbePath, agendaRange } from "./agenda";
+import { activityProbePath, agendaRange, householdToday } from "./agenda";
 import type { AllergyWarning } from "@/lib/recipes/allergy";
 
 export interface MyHousehold {
@@ -34,6 +35,41 @@ export function useTodayHousehold() {
     staleTime: 5 * 60_000,
     retry: false,
   });
+}
+
+/**
+ * THE way a page learns what day it is for this family (#5316).
+ *
+ * Returns the household's civil date as YYYY-MM-DD, or **null** until the
+ * household is known. Null is not "no date": every caller must render nothing
+ * date-dependent (or wait) rather than guess, because `householdToday(null)`
+ * falls back to the browser's date — right for a household with no zone set,
+ * wrong as a placeholder.
+ *
+ * It re-ticks every 60 s so a page left open across midnight follows the day,
+ * and it is the only current-date read allowed in a page: `dayjs()`,
+ * `new Date()` and `Date.now()` are guarded by lib/today/one-clock.test.mjs.
+ *
+ * Usage:
+ *
+ *   const today = useHouseholdToday();
+ *   ...
+ *   {today ? daysUntil(due, today) : null}
+ */
+export function useHouseholdToday(): string | null {
+  const q = useTodayHousehold();
+  const timezone = currentHousehold(q.data?.data)?.timezone ?? null;
+  const [today, setToday] = useState<string | null>(null);
+
+  useEffect(() => {
+    // After mount only: the server's zone is not the family's, so an SSR pass
+    // would paint a day the family may not be on.
+    setToday(householdToday(timezone));
+    const id = setInterval(() => setToday(householdToday(timezone)), 60_000);
+    return () => clearInterval(id);
+  }, [timezone]);
+
+  return today;
 }
 
 /** The entry the API resolves for this session: `current`, else the default one. */

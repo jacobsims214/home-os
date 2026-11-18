@@ -132,7 +132,13 @@ function dotStyle(color: string | null): React.CSSProperties | undefined {
 function joinedLabel(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  // UTC: a joined date is a civil date, so UTC cannot move it (#5316).
+  return d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────

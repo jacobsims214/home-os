@@ -50,7 +50,6 @@ import {
 } from "@mantine/core";
 import { useDisclosure, useMediaQuery, useReducedMotion } from "@mantine/hooks";
 import { IconMenu2 } from "@tabler/icons-react";
-import dayjs from "dayjs";
 import AccountMenu, { HeaderAccountButton } from "@/components/account/AccountMenu";
 import { useAccountIdentity } from "@/components/shared/use-account";
 import BottomNav from "@/components/shared/BottomNav";
@@ -205,10 +204,10 @@ function ShellHeader({
   /** The shell's single family-switcher state (#4574). */
   switcher: HouseholdSwitcherControl;
 }) {
-  // Rendered after mount so server and client agree (the server's timezone
-  // may differ from the browser's).
-  const [today, setToday] = useState<string | null>(null);
-  useEffect(() => setToday(dayjs().format("dddd, MMMM D")), []);
+  // The header's date is the FAMILY's date (#5316), the same one every page
+  // below it uses. Null until the household is known, so the header never
+  // names a day the rest of the app is not on.
+  const today = useHouseholdDayLabel();
 
   return (
     <div className={classes.headerRow}>

@@ -392,16 +392,19 @@ function humanize(value: string | null | undefined): string {
  * cannot do that. Civil dates (YYYY-MM-DD) are read as UTC so the browser's
  * zone cannot move a document back a day.
  */
-export function formatShortDate(iso: string | null | undefined): string {
+export function formatShortDate(iso: string | null | undefined, timeZone?: string): string {
   if (!iso) return "";
   const civil = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
   const d = civil ? new Date(Date.UTC(+civil[1], +civil[2] - 1, +civil[3])) : new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
+  // `timeZone` is always explicit (#5316): a civil date is read as UTC so the
+  // browser's zone cannot move it, and an instant is read in the household's
+  // zone so two people in the same family see the same day.
   return d.toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
-    ...(civil ? { timeZone: "UTC" } : {}),
+    timeZone: civil ? "UTC" : timeZone ?? "UTC",
   });
 }
 

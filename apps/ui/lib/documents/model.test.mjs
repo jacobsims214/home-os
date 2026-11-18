@@ -72,9 +72,14 @@ test("formatDay and shortDay never go through a Date for a day string", () => {
   assert.equal(shortDay(null), "");
 });
 
-test("todayString is a local calendar day", () => {
+test("todayString reads the day in the zone it is given (#5316)", () => {
   assert.equal(todayString(new Date(2026, 10, 18, 0, 5)), "2026-11-18");
   assert.equal(todayString(new Date(2026, 0, 3, 23, 55)), "2026-01-03");
+  // 03:30Z is Thursday in UTC but still Wednesday 22:30 in New York. The
+  // argument-less form is the browser's day; a page must pass the household's.
+  const instant = new Date("2026-11-19T03:30:00Z");
+  assert.equal(todayString(instant, "UTC"), "2026-11-19");
+  assert.equal(todayString(instant, "America/New_York"), "2026-11-18");
 });
 
 // ─── Expiry ──────────────────────────────────────────────────

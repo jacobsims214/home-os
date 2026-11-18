@@ -66,6 +66,8 @@ import {
 import { notifications } from "@mantine/notifications";
 import { apiFetch } from "@/lib/api";
 import { assetKeys, maintenanceKeys, propertyKeys, vehicleKeys } from "@/lib/query-keys";
+import { parseCivil } from "@/lib/today/due";
+import { useHouseholdToday } from "@/lib/today/api";
 import type { MaintenanceTask } from "./types";
 
 const ICON_STROKE = 1.75;
@@ -184,20 +186,28 @@ function columnOf(task: MaintenanceTask): "pending" | "in_progress" | "done" {
 
 const OPEN_GROUPS: GroupKey[] = ["overdue", "week", "month30", "later", "nodate"];
 
-/** Whole local calendar days from `now` to `date` (negative = overdue). */
-export function daysUntil(date: string, now: Date = new Date()): number {
-  const d = new Date(date);
-  if (Number.isNaN(d.getTime())) return Number.NaN;
-  const day = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  return Math.round((day(d) - day(now)) / 86_400_000);
+/**
+ * Whole calendar days from `today` to `date` (negative = overdue).
+ *
+ * Both are CIVIL dates (YYYY-MM-DD), in the FAMILY's day (#5316). This used to
+ * take a `Date` defaulting to `new Date()`, which compared the browser's clock
+ * against the household's due date: a task due today read as "1 day overdue"
+ * for anyone west of UTC after 19:00. `parseCivil` turns each into a UTC day
+ * number, so no zone or DST change can move the difference by a day.
+ */
+export function daysUntil(date: string, today: string): number {
+  const a = parseCivil(date);
+  const b = parseCivil(today);
+  if (a === null || b === null) return Number.NaN;
+  return Math.round(a - b);
 }
 
-export function dueGroup(task: MaintenanceTask, now: Date = new Date()): GroupKey {
+export function dueGroup(task: MaintenanceTask, today: string): GroupKey {
   // A skipped task was deliberately not done, so a past due date is not
   // overdue: it keeps the bucket its date falls in and never counts as overdue.
   if (task.status === "skipped") return "nodate";
   if (!task.due_date) return "nodate";
-  const days = daysUntil(task.due_date, now);
+  const days = daysUntil(task.due_date, today);
   if (Number.isNaN(days)) return "nodate";
   if (days < 0) return "overdue";
   if (days <= 7) return "week";
@@ -210,7 +220,14 @@ export function formatDue(dateStr: string | null): string {
   if (!dateStr) return "";
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  // UTC: due dates are civil dates (no zone of their own), so reading them
+  // in UTC is the reading that cannot move one by a day (#5316).
+  return d.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
 }
 
 /**
@@ -221,7 +238,7 @@ export function formatDue(dateStr: string | null): string {
  * about work that is already done (the same mistake as a paid bill reading as
  * due). A done task says when it was finished instead.
  */
-export function dueLine(task: MaintenanceTask, now: Date = new Date()): string {
+export function dueLine(task: MaintenanceTask, today: string): string {
   if (task.status === "done") {
     return task.completed_at ? `Done ${formatDue(task.completed_at)}` : "Done";
   }
@@ -231,7 +248,7 @@ export function dueLine(task: MaintenanceTask, now: Date = new Date()): string {
     return task.due_date ? `Was due ${formatDue(task.due_date)}` : "No due date";
   }
   if (!task.due_date) return "No due date";
-  const days = daysUntil(task.due_date, now);
+  const days = daysUntil(task.due_date, today);
   if (Number.isNaN(days)) return "No due date";
   if (days < 0) return days === -1 ? "1 day overdue" : `${Math.abs(days)} days overdue`;
   if (days === 0) return "Due today";
@@ -247,6 +264,7 @@ function TaskRow({
   busy,
   canWrite,
   canEdit,
+  today,
   onStatus,
   onSnooze,
   first,
@@ -256,11 +274,12 @@ function TaskRow({
   busy: boolean;
   canWrite: boolean;
   canEdit: boolean;
+  today: string;
   onStatus: (status: Status) => void;
   onSnooze: () => void;
   first: boolean;
 }) {
-  const group = dueGroup(task);
+  const group = dueGroup(task, today);
   const subject = subjectOf(task, names);
   const done = task.status === "done";
 
@@ -320,7 +339,7 @@ function TaskRow({
         ) : (
           <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className={["text-[13px] font-medium", group === "overdue" ? "text-danger" : "text-ink-2"].join(" ")}>
-              {dueLine(task)}
+              {dueLine(task, today)}
             </span>
             {/* Status is a word, never just a dot or a colour. */}
             {task.status === "in_progress" && (
@@ -384,16 +403,18 @@ function KanbanCard({
   task,
   names,
   canWrite,
+  today,
   onStatus,
 }: {
   task: MaintenanceTask;
   names: SubjectNames;
   canWrite: boolean;
+  today: string;
   onStatus: (status: Status) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: task.id });
   const subject = subjectOf(task, names);
-  const overdue = task.status !== "done" && task.status !== "skipped" && dueGroup(task) === "overdue";
+  const overdue = task.status !== "done" && task.status !== "skipped" && dueGroup(task, today) === "overdue";
 
   return (
     <div
@@ -409,7 +430,7 @@ function KanbanCard({
           <span className="mt-0.5 block truncate text-[12px] text-ink-3">{subject.parts.join(" · ")}</span>
         )}
         <span className={["mt-1 block text-[12px] font-medium", overdue ? "text-danger" : "text-ink-2"].join(" ")}>
-          {dueLine(task)}
+          {dueLine(task, today)}
         </span>
       </div>
       {canWrite && task.status !== "done" && (
@@ -477,6 +498,11 @@ export default function MaintenanceKanban({ canChangeStatus = true, canEdit = tr
     queryFn: fetchMaintenanceTasks,
   });
   const names = useSubjectNames(!isLoading);
+  // The FAMILY's day (#5316). Null until the household is known, and until
+  // then not one row claims a date is overdue: `today` falls back to "" which
+  // makes every day comparison unreadable, so `dueGroup`/`dueLine` say nothing
+  // rather than something wrong. The load is one round trip the shell makes.
+  const today = useHouseholdToday() ?? "";
 
   const mutation = useMutation({
     mutationFn: ({ taskId, body }: { taskId: string; body: PatchBody }) => patchTask(taskId, body),
@@ -507,8 +533,11 @@ export default function MaintenanceKanban({ canChangeStatus = true, canEdit = tr
 
   const snooze = (task: MaintenanceTask) => {
     if (!canEdit) return;
-    const base = task.due_date ? new Date(task.due_date) : new Date();
-    if (Number.isNaN(base.getTime())) base.setTime(Date.now());
+    // Snooze is +7 CIVIL days from the task's due date, or from the family's
+    // today (#5316). A Date is used only to do the 7-day addition, and it is
+    // anchored at T00:00:00 of the civil date so no browser zone can shift it.
+    const base = new Date(`${(task.due_date ?? today).slice(0, 10)}T00:00:00`);
+    if (Number.isNaN(base.getTime())) return;
     base.setDate(base.getDate() + 7);
     mutation.mutate({ taskId: task.id, body: { due_date: base.toISOString() } });
   };
@@ -533,7 +562,7 @@ export default function MaintenanceKanban({ canChangeStatus = true, canEdit = tr
     const groups: Record<GroupKey, MaintenanceTask[]> = { overdue: [], week: [], month30: [], later: [], nodate: [] };
     for (const t of tasks) {
       if (t.status === "done" || t.status === "skipped") continue;
-      groups[dueGroup(t)].push(t);
+      groups[dueGroup(t, today)].push(t);
     }
     for (const g of OPEN_GROUPS) {
       groups[g].sort((a, b) => {
@@ -678,6 +707,7 @@ export default function MaintenanceKanban({ canChangeStatus = true, canEdit = tr
                         busy={mutation.isPending}
                         canWrite={write}
                         canEdit={canEdit}
+                        today={today}
                         onStatus={(s) => setStatus(task.id, s)}
                         onSnooze={() => snooze(task)}
                         first={i === 0}
@@ -706,6 +736,7 @@ export default function MaintenanceKanban({ canChangeStatus = true, canEdit = tr
                       busy={mutation.isPending}
                       canWrite={write}
                       canEdit={canEdit}
+                      today={today}
                       onStatus={(s) => setStatus(task.id, s)}
                       onSnooze={() => snooze(task)}
                       first={i === 0}
@@ -733,6 +764,7 @@ export default function MaintenanceKanban({ canChangeStatus = true, canEdit = tr
                       busy={mutation.isPending}
                       canWrite={write}
                       canEdit={canEdit}
+                      today={today}
                       onStatus={(s) => setStatus(task.id, s)}
                       onSnooze={() => snooze(task)}
                       first={i === 0}
@@ -794,6 +826,7 @@ export default function MaintenanceKanban({ canChangeStatus = true, canEdit = tr
                               task={task}
                               names={names}
                               canWrite={write}
+                              today={today}
                               onStatus={(s) => setStatus(task.id, s)}
                             />
                           ))}

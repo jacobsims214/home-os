@@ -150,17 +150,15 @@ export function useRecordFacts(targets: readonly Target[]): ReadonlyMap<string, 
   }, [itemTargets, itemQueries, listTypes, listQueries]);
 }
 
-/** The role's `today` in the household's timezone (bills are dated there). */
-export function useHouseholdToday(): string | null {
-  const q = useQuery({
-    queryKey: MY_HOUSEHOLDS_QUERY_KEY,
-    queryFn: () => apiFetch<{ data: MyHousehold[] }>("/api/v1/me/households"),
-    staleTime: 5 * 60_000,
-    retry: false,
-  });
-  const hh = currentHousehold(q.data?.data);
-  return hh ? householdToday(hh.timezone) : null;
-}
+/**
+ * The role's `today` in the household's timezone (bills are dated there).
+ *
+ * This used to compute the day during RENDER, which is the defect #5316 is
+ * about: the server's zone is not the family's, so the first paint could show
+ * a different day than the one the page settled on a moment later. It is now
+ * the one hook in lib/today/api.ts, which computes after mount and re-ticks.
+ */
+export { useHouseholdToday } from "@/lib/today/api";
 
 /**
  * property id → name, for the rows that say whose thing it is ("For: Main

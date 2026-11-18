@@ -50,12 +50,27 @@ export function isOpenTask(task: TreeTask): boolean {
   return task.status === "pending" || task.status === "in_progress";
 }
 
-/** Open and past its due date. A closed task is never overdue. */
-export function isOverdue(task: TreeTask, now: Date = new Date()): boolean {
+/**
+ * Open and past its due date. A closed task is never overdue.
+ *
+ * `today` is the FAMILY's civil date (#5316). This used to default to
+ * `new Date()` and compare against `now.toISOString().slice(0, 10)` — the UTC
+ * day of an instant — so it read a task due today as overdue for anyone east
+ * of UTC, or a day late for anyone west of it. Two civil dates need no zone.
+ */
+export function isOverdue(task: TreeTask, today: string): boolean {
   if (!isOpenTask(task) || !task.due_date) return false;
-  const due = new Date(`${task.due_date.slice(0, 10)}T00:00:00`);
-  if (Number.isNaN(due.getTime())) return false;
-  return due.getTime() < new Date(now.toISOString().slice(0, 10) + "T00:00:00").getTime();
+  const due = civilKey(task.due_date);
+  const now = civilKey(today);
+  if (!due || !now) return false;
+  // Two YYYY-MM-DD strings compare as dates as strings. No Date, no zone.
+  return due < now;
+}
+
+/** The first ten characters of a civil date, or null when it is not one. */
+function civilKey(value: string | null | undefined): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(value ?? "");
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
 }
 
 /**
@@ -90,16 +105,16 @@ export function groupByRoom(rooms: TreeRoom[], things: TreeAsset[]): {
 }
 
 /** How many of this room's things have an open, overdue task against them. */
-export function roomOverdueCount(things: TreeAsset[], tasks: TreeTask[], now: Date = new Date()): number {
+export function roomOverdueCount(things: TreeAsset[], tasks: TreeTask[], today: string): number {
   if (things.length === 0 || tasks.length === 0) return 0;
   const ids = new Set(things.map((t) => t.id));
-  return tasks.filter((t) => t.asset_id && ids.has(t.asset_id) && isOverdue(t, now)).length;
+  return tasks.filter((t) => t.asset_id && ids.has(t.asset_id) && isOverdue(t, today)).length;
 }
 
 /** Every overdue task of the property, worst (earliest due) first. */
-export function overdueTasks(tasks: TreeTask[], now: Date = new Date()): TreeTask[] {
+export function overdueTasks(tasks: TreeTask[], today: string): TreeTask[] {
   return tasks
-    .filter((t) => isOverdue(t, now))
+    .filter((t) => isOverdue(t, today))
     .sort((a, b) => (a.due_date ?? "").localeCompare(b.due_date ?? ""));
 }
 
