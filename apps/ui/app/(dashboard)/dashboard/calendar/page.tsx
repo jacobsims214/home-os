@@ -75,6 +75,8 @@ import {
   type Series,
 } from "@/lib/calendar/model";
 import { useCalendarAccess, useCalendarActivity, useCalendarEvents, useCalendarHousehold, useCalendars, useBills, useCreateEvent, useDeleteEvent, usePeople, useUpdateEvent } from "@/lib/calendar/api";
+import { useHouseholdReadiness } from "@/components/shared/use-nav-role";
+import { calendarReadsReady } from "@/lib/auth/session-readiness";
 import { householdToday } from "@/lib/today/agenda";
 
 const ICON_STROKE = 1.75;
@@ -96,6 +98,16 @@ export default function CalendarPage() {
   const household = useCalendarHousehold();
   const timezone = household?.timezone ?? null;
   const { canWrite } = useCalendarAccess();
+
+  /**
+   * The precondition for every read on this page (#5307): the household the
+   * person is in must be KNOWN before a request goes out. A fresh sign-in has
+   * just cleared the household cookie (#4574), so a read fired before
+   * /me/households answers is scoped to a guess — that is the "Couldn't load
+   * the calendar" right after sign-in. Waiting here is reading the real
+   * precondition, not a delay: the query starts the moment the answer lands.
+   */
+  const householdReady = useHouseholdReadiness();
 
   // Today in the HOUSEHOLD's zone, after mount: the server's clock is not the
   // family's, and a page that says "today" on the wrong day is worse than one
@@ -125,11 +137,14 @@ export default function CalendarPage() {
     [anchorDate, view],
   );
 
-  const calendarsQuery = useCalendars(!!today);
-  const eventsQuery = useCalendarEvents(range?.start ?? null, range?.end ?? null);
-  const billsQuery = useBills(!!today);
-  const peopleQuery = usePeople(!!today);
-  const activityQuery = useCalendarActivity(!!today);
+  // Reading is gated on `ready`, never on `today` alone: `today` comes from the
+  // browser's clock and is set on mount, so it proves nothing about the session.
+  const ready = calendarReadsReady(householdReady);
+  const calendarsQuery = useCalendars(ready);
+  const eventsQuery = useCalendarEvents(ready ? range?.start ?? null : null, ready ? range?.end ?? null : null);
+  const billsQuery = useBills(ready);
+  const peopleQuery = usePeople(ready);
+  const activityQuery = useCalendarActivity(ready);
 
   const createEvent = useCreateEvent();
   const updateEvent = useUpdateEvent();
@@ -262,7 +277,11 @@ export default function CalendarPage() {
   }
 
   const rangeLabel = view === "week" ? weekRangeLabel(days) : days.length > 0 ? rangeTitle(days, view === "agenda" ? "week" : view) : "";
-  const loading = eventsQuery.isLoading || calendarsQuery.isLoading;
+  // A disabled query is PENDING but not loading, so `!ready` has to count as
+  // loading too: otherwise the gate would paint the empty state ("nothing this
+  // week") for the instant before the household is known, which is the one
+  // thing this page must never do (audit #74).
+  const loading = !ready || eventsQuery.isLoading || calendarsQuery.isLoading;
   const error = (eventsQuery.error ?? calendarsQuery.error) as Error | null;
   const empty = !loading && !error && series.length === 0;
   const reason = empty
