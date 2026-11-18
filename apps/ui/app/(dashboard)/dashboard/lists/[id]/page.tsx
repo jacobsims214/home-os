@@ -202,12 +202,13 @@ export default function ListDetailPage() {
           two tap targets compete for the same tap. The content stays mounted,
           so scrolling back to where the person was costs nothing. StoreMode
           and the editor are OUTSIDE this wrapper — they are what stays live. */}
-      <div
-        // React 18 does not know `inert` as a boolean prop and warns if given
-        // one; an empty string is the attribute's own "present" value.
-        {...(storeOpen ? { inert: "" } : {})}
-        aria-hidden={storeOpen ? true : undefined}
-      >
+      {/*
+        `inert` is a DOM attribute React 18 has no types for, so it is spread
+        through a typed assertion rather than written as JSX (which fails the
+        build on `DetailedHTMLProps`). An empty string is the attribute's own
+        "present" value; a boolean `true` would just warn.
+      */}
+      <div {...(storeOpen ? ({ inert: "" } as Record<string, string>) : {})} aria-hidden={storeOpen || undefined}>
       {/* Title bar: back on phones, the list's own header everywhere. */}
       <div className="mb-3 flex items-center gap-1 md:hidden">
         <Link

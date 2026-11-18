@@ -150,7 +150,13 @@ export default function StoreMode({ list, items, canCheck, today, onToggle, onCl
       aria-modal="true"
       aria-labelledby="store-title"
       data-store-mode
-      className="fixed inset-0 z-50 flex flex-col bg-bg"
+      // zIndex 400, the same as cook mode (components/recipes/CookMode.tsx):
+      // this is a screen you stay on, not a dialog you dismiss, so it must sit
+      // above the shell header (100), the phone tab bar (102) and Mantine's
+      // modals (200). At z-50 the tap bar painted over the store header and
+      // swallowed its own "Done" — the screenshot caught it.
+      style={{ zIndex: 400 }}
+      className="fixed inset-0 flex flex-col bg-bg"
     >
       <div className="shrink-0 border-b border-line bg-surface pt-[env(safe-area-inset-top)]">
         <div className="flex h-14 items-center gap-1 px-1.5">

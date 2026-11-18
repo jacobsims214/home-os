@@ -432,6 +432,19 @@ test.describe("store mode", () => {
     // The store view's own live count, not the page's count behind it.
     await expect(dialog.locator("[data-store-count]")).toHaveText("4 left of 5");
 
+    // AND THE OVERLAY IS ON TOP. The shell's phone tab bar is z-index 102 and
+    // the header 100; at a lower z the bar painted over the store header and
+    // the "Done" button underneath it could not be tapped. Caught by a
+    // screenshot, so it is asserted now.
+    const topMost = await page.evaluate(() => {
+      const done = Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Done");
+      if (!done) return null;
+      const r = done.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return { doneIsOnTop: !!hit && (hit === done || done.contains(hit)), hit: hit?.tagName ?? null };
+    });
+    expect(topMost?.doneIsOnTop, `the store "Done" is covered by ${topMost?.hit}`).toBe(true);
+
     await snap(page, testInfo, "lists-store-mode", true);
   });
 
