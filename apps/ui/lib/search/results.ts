@@ -693,6 +693,23 @@ export function recordText(group: GroupDef, record: RecordFacts | null | undefin
   return (record.body ?? "").trim();
 }
 
+// ─── the one URL a query lives at ───────────────────────────
+
+/**
+ * Where a query lives (`#5303`). The Search page renders `?q=`, the sidebar and
+ * drawer boxes navigate to it, and the phone's More sheet does too — one rule,
+ * so a query typed anywhere can be linked, reloaded and shared, and a second
+ * surface cannot invent its own way to spell a search.
+ *
+ * An empty query drops the parameter rather than leaving `?q=`: the page reads
+ * a missing `q` and an empty one the same way, but a bare `?q=` in the address
+ * bar looks like a search that has not happened yet.
+ */
+export function searchHref(q: string | null | undefined): string {
+  const trimmed = (q ?? "").trim();
+  return trimmed ? `/dashboard/search?q=${encodeURIComponent(trimmed)}` : "/dashboard/search";
+}
+
 // ─── narrowing to one area ──────────────────────────────────
 
 /**
