@@ -28,6 +28,7 @@
 import type { Icon } from "@tabler/icons-react";
 import {
   IconCalendar,
+  IconChecklist,
   IconFiles,
   IconHome,
   IconSettings,
@@ -61,7 +62,15 @@ const READERS: readonly NavRole[] = [...FAMILY, "viewer"];
 /** Readers plus housesitter (calendar and meals). */
 const SITTERS: readonly NavRole[] = [...READERS, "housesitter"];
 
-export type NavSectionId = "today" | "calendar" | "meals" | "documents" | "people" | "money" | "settings";
+export type NavSectionId =
+  | "today"
+  | "calendar"
+  | "meals"
+  | "lists"
+  | "documents"
+  | "people"
+  | "money"
+  | "settings";
 
 export interface NavSection {
   id: NavSectionId;
@@ -121,6 +130,19 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     tab: true,
     roles: SITTERS,
     matches: ["/dashboard/recipes"],
+  },
+  {
+    // #4566: Lists is a real destination now, so it is back in the nav — the
+    // approved shell (artifact #75 v1) draws it right after Meals, and #5199
+    // removed it only because there was no page to point at. ResLists in the
+    // API's role policy is rolesSitter for reads: family, viewer, housesitter.
+    // A vendor does not see the section at all.
+    id: "lists",
+    label: "Lists",
+    href: "/dashboard/lists",
+    icon: IconChecklist,
+    group: "main",
+    roles: SITTERS,
   },
   {
     // #4569: the household's paperwork (the documents hub). READERS is the
@@ -183,6 +205,8 @@ const ROUTE_TITLES: ReadonlyArray<[prefix: string, title: string]> = [
   ["/dashboard/admin", "Admin"],
   ["/dashboard/meals", "Meals"],
   ["/dashboard/recipes", "Recipes"],
+  // A single list keeps "Lists", like a recipe keeps "Recipes"; the section's
+  // own label covers it, so no entry is needed here.
   // The Documents hub's own page is the section (its title comes from there);
   // a single document keeps "Documents", like a recipe keeps "Recipes".
   ["/dashboard/documents", "Documents"],

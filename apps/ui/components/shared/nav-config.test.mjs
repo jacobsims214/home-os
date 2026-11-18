@@ -19,9 +19,9 @@ test("the seven built sections, in the approved order and groups", () => {
   // which is where artifact #75 v1 draws it).
   assert.deepEqual(
     NAV_SECTIONS.map((s) => s.id),
-    ["today", "calendar", "meals", "documents", "people", "money", "settings"],
+    ["today", "calendar", "meals", "lists", "documents", "people", "money", "settings"],
   );
-  assert.deepEqual(sectionsInGroup("main").map((s) => s.label), ["Today", "Calendar", "Meals"]);
+  assert.deepEqual(sectionsInGroup("main").map((s) => s.label), ["Today", "Calendar", "Meals", "Lists"]);
   assert.deepEqual(sectionsInGroup("household").map((s) => s.label), ["Documents", "People & House", "Money"]);
   assert.deepEqual(sectionsInGroup("you").map((s) => s.label), ["Settings"]);
   assert.deepEqual(TAB_SECTIONS.map((s) => s.id), ["today", "calendar", "meals"]);
@@ -34,13 +34,14 @@ test("the seven built sections, in the approved order and groups", () => {
 // guard: no section may be planned-but-unbuilt, and the three unfinished
 // destinations must not come back as inert entries.
 test("only real destinations are in the nav — no placeholder/coming-soon sections (#5199)", () => {
-  // Documents left this list in #4569: /dashboard/documents exists now, so its
-  // section is back with a real href (checked against the filesystem below).
-  for (const id of ["lists", "guides"]) {
-    assert.equal(NAV_SECTIONS.find((s) => s.id === id), undefined, `${id} has no page, so it must not be in the nav`);
-  }
+  // Documents left this list in #4569 and Lists in #4566: both routes exist
+  // now, so both sections are back with real hrefs (checked against the
+  // filesystem below). Guides is still unbuilt, so it is still absent.
+  assert.equal(NAV_SECTIONS.find((s) => s.id === "guides"), undefined, "Guides has no page, so it must not be in the nav");
   const documents = NAV_SECTIONS.find((s) => s.id === "documents");
   assert.equal(documents.href, "/dashboard/documents", "the Documents section points at its real route");
+  const lists = NAV_SECTIONS.find((s) => s.id === "lists");
+  assert.equal(lists.href, "/dashboard/lists", "the Lists section points at its real route");
   for (const s of NAV_SECTIONS) {
     assert.equal("comingSoon" in s, false, `${s.id} must not carry a coming-soon flag`);
     assert.equal(s.href, s.href.trim(), s.id);
@@ -110,7 +111,9 @@ test("sectionsForRole follows the household role policy", () => {
   }
   // No money or documents (files) for a housesitter (#4689: files read is the
   // family roles plus viewer). A viewer DOES see Documents (#4569).
-  assert.deepEqual(ids("housesitter"), ["today", "calendar", "meals", "people", "settings"]);
+  // A housesitter also gets Lists (#4566): ResLists reads, adds and checks are
+  // rolesSitter (+ family), so a sitter works the family's lists.
+  assert.deepEqual(ids("housesitter"), ["today", "calendar", "meals", "lists", "people", "settings"]);
   // A vendor reads properties/assets/maintenance only (People & House).
   assert.deepEqual(ids("vendor"), ["today", "people", "settings"]);
 });

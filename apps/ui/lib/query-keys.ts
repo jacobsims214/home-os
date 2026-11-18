@@ -146,6 +146,28 @@ export const mealKeys = {
   feedback: (mealId: string) => [...mealKeys.all, "feedback", mealId] as const,
 };
 
+/**
+ * Lists (#4566). One key for the household's whole set of list rows (the index
+ * and the template picker read the same `archived=all` response, so they share
+ * a cache entry), one per list detail, and one per list's LIVE ITEM FEED.
+ *
+ * The feed key is deliberately not the detail key: the detail query is the
+ * first paint and can be stale, while the feed is the polled truth that the
+ * optimistic check-off writes into. Two keys means a poll can never clobber a
+ * detail fetch that is still in flight.
+ */
+export const listKeys = {
+  all: ["lists"] as const,
+  allRows: () => [...listKeys.all, "rows"] as const,
+  details: () => [...listKeys.all, "detail"] as const,
+  detail: (id: string) => [...listKeys.details(), id] as const,
+  // "feed", not "items": lib/today/api.ts owns ["lists","items",id] with a bare
+  // ListItem[] value, and this entry is an ItemsFeed ({items, as_of}). Sharing
+  // the key would hand Today a feed object where it expects an array.
+  feed: (id: string) => [...listKeys.all, "feed", id] as const,
+  people: () => [...listKeys.all, "people"] as const,
+};
+
 /** The household's people, including their allergies (#4567's safety context). */
 export const personKeys = {
   all: ["people"] as const,
