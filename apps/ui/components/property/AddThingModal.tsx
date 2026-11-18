@@ -15,7 +15,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Stack } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { apiFetch } from "@/lib/api";
-import { assetKeys, propertyKeys } from "@/lib/query-keys";
+import { assetKeys } from "@/lib/query-keys";
 import { ResponsiveModal, ResponsiveModalActions, Button, Select, TextInput } from "@/components/ui";
 import type { Asset } from "@/lib/types/api";
 import type { RoomResponse } from "@/types/property";

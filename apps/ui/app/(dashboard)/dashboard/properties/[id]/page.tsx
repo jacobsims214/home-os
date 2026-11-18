@@ -42,9 +42,10 @@ import type { PropertyDetailResponse, RoomListResponse } from "@/types/property"
 import type { Asset } from "@/lib/types/api";
 import type { MaintenanceTask } from "@/components/maintenance/types";
 import { Skeleton } from "@mantine/core";
-import { ResponsiveModal, ResponsiveModalActions, Select, TextInput } from "@/components/ui";
+import { Select, TextInput } from "@/components/ui";
 import DetailPageLayout from "@/components/layout/DetailPageLayout";
-import LinkedFinances from "@/components/finance/LinkedFinances";
+import LinkedFinances, { useLinkedFinances } from "@/components/finance/LinkedFinances";
+import { pickMortgage } from "@/components/finance/linked-finance-utils";
 import { PROPERTY_EDIT_FIELDS, propertyEditBody } from "@/components/finance/linked-finance-utils";
 import { typeLabel } from "@/components/property/property-tree";
 import { formatUsd, toNumber } from "@/components/property/property-finance";
@@ -113,6 +114,10 @@ export default function PropertyDetailPage() {
       }).then((r) => r.data ?? []),
     enabled: !!propertyId,
   });
+
+  // Same query keys as LinkedFinances, so the mortgage row costs no request.
+  const linked = useLinkedFinances({ kind: "property", id: propertyId });
+  const mortgage = pickMortgage(linked.loans.data ?? []);
 
   const property = propertyQuery.data?.data;
   const rooms = roomsQuery.data?.data ?? [];
@@ -198,11 +203,17 @@ export default function PropertyDetailPage() {
   // ── Edit mode ──────────────────────────────────────────────
 
   if (isEditing) {
+    // Read the value BEFORE entering the updater: by the time a state updater
+    // runs, React has cleared the event and `currentTarget` is null (and the
+    // page crashed on the first keystroke for it).
     const field = (name: string, label: string, props: Record<string, unknown> = {}) => (
       <TextInput
         label={label}
         value={editValues[name] ?? ""}
-        onChange={(e) => setEditValues((v) => ({ ...v, [name]: e.currentTarget.value }))}
+        onChange={(e) => {
+          const value = e.currentTarget.value;
+          setEditValues((v) => ({ ...v, [name]: value }));
+        }}
         {...props}
       />
     );
@@ -236,7 +247,10 @@ export default function PropertyDetailPage() {
           <TextInput
             label="Notes"
             value={editValues.notes ?? ""}
-            onChange={(e) => setEditValues((v) => ({ ...v, notes: e.currentTarget.value }))}
+            onChange={(e) => {
+              const value = e.currentTarget.value;
+              setEditValues((v) => ({ ...v, notes: value }));
+            }}
           />
         </div>
         <p className="mt-3 text-xs text-ink-3">
@@ -322,7 +336,12 @@ export default function PropertyDetailPage() {
 
           <PropertyAttention tasks={tasks} things={things} propertyName={property.name} />
 
-          <PropertyDetailsSheet property={property} roomCount={rooms.length} thingCount={things.length} />
+          <PropertyDetailsSheet
+            property={property}
+            roomCount={rooms.length}
+            thingCount={things.length}
+            mortgage={mortgage ?? null}
+          />
 
           <LinkedFinances subject={{ kind: "property", id: propertyId, name: property.name }} framed />
 

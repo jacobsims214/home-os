@@ -11,9 +11,19 @@
  * knows it is the shared module (#4553, audit #4509).
  */
 
+import Link from "next/link";
 import { formatUsd, monthlyCarryingCost, toNumber } from "./property-finance";
 import { typeLabel } from "./property-tree";
 import type { PropertyResponse } from "@/types/property";
+
+/** The property's mortgage loan, as the linked-finances query returns it. */
+export interface MortgageSummary {
+  id: string;
+  name: string;
+  lender?: string | number | null;
+  interest_rate?: string | number | null;
+  monthly_payment?: string | number | null;
+}
 
 function Row({ field, label, value }: { field: string; label: string; value: React.ReactNode }) {
   return (
@@ -38,10 +48,13 @@ export default function PropertyDetailsSheet({
   property,
   roomCount,
   thingCount,
+  mortgage,
 }: {
   property: PropertyResponse;
   roomCount: number;
   thingCount: number;
+  /** The linked mortgage loan, when there is one: the money lives there. */
+  mortgage?: MortgageSummary | null;
 }) {
   const monthly = monthlyCarryingCost(property);
   const value = formatUsd(toNumber(property.current_value));
@@ -81,6 +94,25 @@ export default function PropertyDetailsSheet({
             )
           }
         />
+        {mortgage && (
+          <Row
+            field="mortgage"
+            label="Mortgage"
+            value={
+              <>
+                {[mortgage.name, mortgage.lender, mortgage.interest_rate ? `${Number(mortgage.interest_rate)}%` : null]
+                  .filter(Boolean)
+                  .join(" · ")}
+                <Link
+                  href={`/dashboard/loans/${mortgage.id}`}
+                  className="ml-2 inline-flex min-h-11 items-center align-middle font-semibold text-accent hover:underline md:min-h-0"
+                >
+                  View loan
+                </Link>
+              </>
+            }
+          />
+        )}
         <Row field="purchase_price" label="Purchase price" value={purchase ?? "Not set"} />
         <Row field="purchase_date" label="Purchased" value={bought ?? "Not set"} />
         <Row field="down_payment" label="Down payment" value={down ?? "Not set"} />
