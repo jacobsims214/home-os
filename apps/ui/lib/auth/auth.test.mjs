@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import "./node-ts-resolve.mjs";
 
 const { resolveDexConfig, dexTokenUrl, DEFAULT_DEX_TOKEN_URL } = await import("./dex-config.ts");
-const { returnPath, returnUrl } = await import("./return-path.ts");
+const { returnPath, returnUrl, completionUrl, AUTH_COMPLETE_PATH } = await import("./return-path.ts");
 const { encodePkceCookie, decodePkceCookie } = await import("./pkce-cookie.ts");
 
 const fromRequest = () => "http://localhost:3000";
@@ -76,6 +76,9 @@ test("returnPath keeps same-origin paths and rejects the rest", () => {
     ["/\n/evil.example", "/dashboard"],
     ["/login?redirect=/x", "/dashboard"],
     ["/api/auth/login", "/dashboard"],
+    ["/auth/complete?to=/dashboard", "/dashboard"],
+    ["/auth/complete", "/dashboard"],
+    ["/authx", "/authx"],
     ["/loginx", "/loginx"],
     ["/" + "a".repeat(3000), "/dashboard"],
   ];
@@ -89,6 +92,36 @@ test("returnUrl never leaves the public origin", () => {
   }
   assert.equal(returnUrl(origin, "/bills?x=1").href, "https://h.example/bills?x=1");
   assert.equal(returnUrl(origin, null).href, "https://h.example/dashboard");
+});
+
+test("completionUrl always lands on the app's own completion page", () => {
+  const origin = "https://h.example";
+  for (const input of [null, "", "/", "//evil.example", "/\\evil.example", "https://evil.example", "/login", "/api/auth/callback"]) {
+    const url = completionUrl(origin, input);
+    assert.equal(url.origin, origin, JSON.stringify(input));
+    assert.equal(url.pathname, AUTH_COMPLETE_PATH, JSON.stringify(input));
+    // ?to= is always a same-origin path: the completion page forwards to it.
+    const to = url.searchParams.get("to");
+    assert.ok(to && to.startsWith("/") && !to.startsWith("//"), `${JSON.stringify(input)} -> ${to}`);
+  }
+});
+
+test("completionUrl keeps the destination, query and hash, and never the code", () => {
+  const url = completionUrl("https://h.example", "/dashboard/calendar?view=week#today");
+  assert.equal(url.pathname, "/auth/complete");
+  assert.equal(url.searchParams.get("to"), "/dashboard/calendar?view=week#today");
+  // The callback's query is not carried over: no code, state or verifier is in
+  // the URL the browser keeps in history (#5304 security requirement).
+  for (const param of ["code", "state", "code_verifier"]) {
+    assert.equal(url.searchParams.get(param), null, param);
+  }
+});
+
+test("completionUrl cannot be aimed at another origin through ?to=", () => {
+  for (const evil of ["//evil.example/x", "/\\evil.example", "https://evil.example/", "/\t/evil.example"]) {
+    const to = completionUrl("https://h.example", evil).searchParams.get("to");
+    assert.equal(new URL(to, "https://h.example").origin, "https://h.example", JSON.stringify(evil));
+  }
 });
 
 test("PKCE cookie round-trips, with and without a return path", () => {

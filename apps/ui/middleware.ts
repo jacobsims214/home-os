@@ -30,6 +30,7 @@ export const PUBLIC_PREFIXES = [
   "/invite", // the flat /invite/<token> spelling listed since #4413; no page uses it yet
   "/onboarding",
   "/api/auth", // OIDC login start + callback, logout
+  "/auth", // /auth/complete: the app's own last step of a login (#5304)
 ];
 
 // Paths the guard never redirects:
