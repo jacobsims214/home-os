@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -42,66 +41,34 @@ func main() {
 		log.Fatalf("files embedding migration: %v", err)
 	}
 
-	type entityDef struct {
-		table      string
-		entityType string
-		nameCol    string
-		bodyCol    string
-	}
-
-	entities := []entityDef{
-		{"assets", "asset", "name", "COALESCE(notes,'')"},
-		{"vehicles", "vehicle", "make || ' ' || model", "COALESCE(notes,'')"},
-		{"pets", "pet", "name", "COALESCE(notes,'')"},
-		{"vendors", "vendor", "name", "COALESCE(notes,'') || ' ' || COALESCE(specialty,'')"},
-		{"properties", "property", "name", "COALESCE(notes,'') || ' ' || COALESCE(address,'')"},
-		{"bills", "bill", "name", "COALESCE(category,'')"},
-		{"notes", "note", "COALESCE(title,'')", "COALESCE(body,'')"},
-		{"secrets", "secret", "name", "secret_type"},
-	}
-
+	// Every entity type the collection covers is rebuilt through the ONE shared
+	// builder in packages/searchindex (#5314), so this tool has no document
+	// knowledge of its own. It used to carry a table list here with its own
+	// name/body columns — a second copy of the rules, and it wrote
+	// created_at/updated_at as "now", which sorted every result by reindex time
+	// instead of by when the thing actually changed. Build reads the real
+	// columns, so a rebuilt index is identical to the one the queue writes.
 	total := 0
-	for _, e := range entities {
-		sql := fmt.Sprintf(
-			`SELECT id::text, household_id::text, %s AS name, %s AS body FROM %s`,
-			e.nameCol, e.bodyCol, e.table)
-		rows, err := pool.Query(ctx, sql)
+	for _, typ := range searchindex.Types() {
+		ids, err := searchindex.IDs(ctx, pool, typ)
 		if err != nil {
-			log.Printf("skip %s: %v", e.table, err)
+			log.Printf("skip %s: %v", typ, err)
 			continue
 		}
-		for rows.Next() {
-			var id, householdID, name, body string
-			if err := rows.Scan(&id, &householdID, &name, &body); err != nil {
+		for _, id := range ids {
+			doc, found, err := searchindex.Build(ctx, pool, typ, id)
+			if err != nil {
+				log.Printf("ERR %s/%s: %v", typ, id, err)
 				continue
 			}
-			doc := search.SearchDocument{
-				ID:          e.entityType + "-" + id,
-				HouseholdID: householdID,
-				EntityType:  e.entityType,
-				EntityID:    id,
-				Title:       name,
-				Body:        body,
-				CreatedAt:   time.Now().Unix(),
-				UpdatedAt:   time.Now().Unix(),
+			if !found {
+				continue
 			}
-			if err := sc.IndexDocument(ctx, doc); err != nil {
-				log.Printf("ERR %s/%s: %v", e.table, id, err)
+			if err := sc.IndexDocument(ctx, search.SearchDocument(*doc)); err != nil {
+				log.Printf("ERR %s/%s: %v", typ, id, err)
 			} else {
 				total++
 			}
-		}
-		rows.Close()
-	}
-	// Guides, and every other type whose document needs more than a name and a
-	// body (tags, property_id, the secret parent rule), are built by the ONE
-	// shared builder in packages/searchindex (#5314) rather than a copy here.
-	// 075's triggers queue every row; this drains what the loop above did not
-	// write. Re-running it is harmless — the builder is deterministic.
-	for _, typ := range searchindex.Types() {
-		if err := drainType(ctx, pool, sc, typ); err != nil {
-			log.Printf("skip %s: %v", typ, err)
-			continue
 		}
 	}
 
