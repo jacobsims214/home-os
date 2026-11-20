@@ -212,7 +212,7 @@ test.describe("family switcher, phone 390", () => {
     loggedInPage: page,
     request,
     stubSid,
-  }) => {
+  }, testInfo) => {
     // Owner in one family, housesitter in the other (the ticket's own example).
     await seedTwoFamilies(request, stubSid!, { sims: "owner", oak: "housesitter" });
     await gotoBills(page);
@@ -238,7 +238,9 @@ test.describe("family switcher, phone 390", () => {
     // Owner: money, documents, people and calendar are all reachable.
     expect(await navInDrawer()).toEqual({ money: 1, documents: 1, people: 1, calendar: 1 });
 
-    await (await openPicker(page)).getByRole("radio", { name: /Oak Street/ }).click();
+    const oakSheet = await openPicker(page);
+    await oakSheet.getByRole("radio", { name: /Oak Street/ }).click();
+    await expect(oakSheet).toBeHidden();
     await expect(chip(page)).toContainText("Oak Street");
 
     // And the page itself: a housesitter gets no money AT ALL, so the bills page
@@ -248,6 +250,11 @@ test.describe("family switcher, phone 390", () => {
     // family's bills here would be asserting money isolation away.
     await expectMoneyNoAccess(page);
     await expect(page.locator("main")).not.toContainText("Oak Street water");
+    await page.screenshot({ path: testInfo.outputPath("switcher-390-housesitter-no-money.png") });
+    await testInfo.attach("switcher-390-housesitter-no-money", {
+      path: testInfo.outputPath("switcher-390-housesitter-no-money.png"),
+      contentType: "image/png",
+    });
 
     // Housesitter: no money and no documents (#4569 put Documents in the nav
     // for readers; files read is family + viewer, so a sitter loses both).
