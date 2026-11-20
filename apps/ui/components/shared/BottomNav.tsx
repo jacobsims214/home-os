@@ -268,10 +268,24 @@ function MoreSheet({
         {/* #5198: the account menu is a dialog (bottom sheet on phones, card
             popover above 48em), not a Mantine menu. */}
         <UnstyledButton className={classes.row} onClick={onOpenAccount} aria-haspopup="dialog">
-          <Avatar size={32} radius="xl" color="cyan.9" variant="filled" src={user?.avatar_url ?? undefined}>
+          {/* Same construction as the header avatar (HeaderAccountButton) and the
+              desktop SidebarAccount: the avatar is decoration, and a
+              VisuallyHidden "Account menu for" names the row. Without them the
+              initials leak into the accessible name — this row announced
+              "ET E2E Tester Account & log out", so the three ways into the
+              account menu disagreed (#5410). */}
+          <Avatar
+            size={32}
+            radius="xl"
+            color="cyan.9"
+            variant="filled"
+            src={user?.avatar_url ?? undefined}
+            aria-hidden
+          >
             {initials}
           </Avatar>
           <span className={classes.accountText}>
+            <VisuallyHidden>Account menu for </VisuallyHidden>
             <span className={classes.rowLabel}>{name}</span>
             <span className={classes.rowSub}>Account &amp; log out</span>
           </span>

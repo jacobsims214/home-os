@@ -77,7 +77,11 @@ function CopyField({
       value={value}
       placeholder={placeholder}
       readOnly
-      ff="monospace"
+      // Monospace on the INPUT only. `ff="monospace"` puts the font on the
+      // field's root, which sets it on the label too: a label in a monospace
+      // face draws its space as one full character cell, so "User name" read
+      // as "User  name" (#5410). The value is what needs the fixed pitch.
+      styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
       data-settings-readonly={dataAttr}
       rightSection={
         <CopyButton value={value} timeout={2000}>
@@ -156,7 +160,7 @@ export default function PhoneCalendarSection() {
               label="App password"
               value={password}
               readOnly
-              ff="monospace"
+              styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
               data-settings-readonly="caldav-password"
               rightSection={
                 <CopyButton value={password} timeout={2000}>

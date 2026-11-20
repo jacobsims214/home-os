@@ -264,7 +264,7 @@ export default function MealsPage() {
             {start && today ? weekHeading(start, today) : "This week"}
           </Text>
           <Text size="xs" style={{ color: "var(--ink-3)" }} data-meals-weekrange>
-            {start ? weekLabel(start) : "\u2014"} \u00b7 {planned} {planned === 1 ? "dinner" : "dinners"} planned
+            {start ? weekLabel(start) : "\u2014"} · {planned} {planned === 1 ? "dinner" : "dinners"} planned
           </Text>
         </div>
         <Button
