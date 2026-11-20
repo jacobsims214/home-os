@@ -26,6 +26,7 @@
 
 import { IconCheck, IconClock } from "@tabler/icons-react";
 import { amountLabel, checkedLabel, dueLabel } from "@/lib/lists/model";
+import { beginCheckTap, tapPointOf } from "@/lib/lists/tap-guard";
 import type { ListItem } from "@/lib/lists/types";
 
 const STROKE = 1.75;
@@ -89,8 +90,21 @@ export default function ItemRow({
   if (item.checked) meta.push(checkedLabel(item));
   if (choresLike && assigneeName && !item.checked) meta.push(assigneeName);
 
-  const toggle = () => {
+  /**
+   * One tap on the check-off (#5406).
+   *
+   * The row is guarded against a DOUBLE tap on the spot it just vacated: the
+   * check-off removes the row instantly (the optimistic paint, #4566), so the
+   * row below slides up under the finger and a second tap ~120 ms later would
+   * check off a different item — silently marking an unbought item as bought.
+   * `beginCheckTap` compares this tap with the last one on the list: same spot,
+   * inside 500 ms, DIFFERENT item = the row moved, not a new intent. It is
+   * called for both layouts and in store mode, because the guard belongs to the
+   * row, not to a screen.
+   */
+  const toggle = (event: React.MouseEvent<HTMLButtonElement>) => {
     if (!canCheck) return;
+    if (beginCheckTap(tapPointOf(item.list_id, item.id, event))) return;
     onToggle(item);
   };
 

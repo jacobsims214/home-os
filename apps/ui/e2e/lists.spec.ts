@@ -389,6 +389,75 @@ test.describe("optimistic check-off", () => {
     await expect(page.getByText(/Checked by Jacob/)).toBeVisible();
   });
 
+  /**
+   * THE BUG (#5406), REPRODUCED THE WAY IT WAS REPORTED.
+   *
+   * Ticking a row removes it from the open list instantly — that is the
+   * deliberate optimistic paint, not an accident — so the row below slides UP
+   * into the space the finger just left. 120 ms later the second half of a real
+   * double tap lands on that row, at the same screen point, and checks off an
+   * item nobody touched: two writes, and the header count drops by two. One
+   * clumsy double-tap in a supermarket silently marks an unbought item as
+   * bought, and nobody buys it.
+   *
+   * The taps are dispatched at the SAME client point with an ~120 ms gap, the
+   * way a thumb does it. Calling `.click()` twice would NOT reproduce the bug:
+   * Playwright re-resolves the locator and aims at the row by id, so it would
+   * hit Bananas again and pass with or without a fix. Aiming at the
+   * coordinates is the whole point of the test.
+   *
+   * WHAT FAILS WITHOUT THE FIX: the second write. `backend.writes` is what the
+   * API was actually told, so this asserts on the wire — two items checked off
+   * means two items checked off, whatever the list chooses to draw.
+   */
+  test("a double-tap on one check-off checks off ONE item, not the row that moved up", async ({
+    loggedInPage: page,
+  }) => {
+    const backend = newBackend();
+    await wire(page, backend);
+    await page.goto(`/dashboard/lists/${LIST_ID}`);
+
+    const bananas = checkBox(page, "i1");
+    const apples = checkBox(page, "i2");
+    await expect(bananas).toHaveAttribute("aria-checked", "false");
+    await expect(apples).toHaveAttribute("aria-checked", "false");
+    const header = page.locator("[data-open-count]");
+    await expect(header).toContainText("4");
+
+    // The point the thumb is on. It does not move between the two taps.
+    const spot = (await bananas.boundingBox())!;
+    const at = { x: spot.x + spot.width / 2, y: spot.y + spot.height / 2 };
+
+    // Tap 1. The tick must be painted by the tap itself, not by the response —
+    // the Stage 3 behaviour that must never regress into a spinner.
+    await page.mouse.move(at.x, at.y);
+    await page.mouse.down();
+    await page.mouse.up();
+    await expect(bananas, "the tap paints the tick before any response").toHaveAttribute("aria-checked", "true");
+    // ...and it does so without waiting for the write: the row leaves the open
+    // list immediately, which is what moves the next row under the finger.
+    await expect(header).toContainText("3");
+
+    // Tap 2, ~120 ms later, at the SAME point: the second half of the double
+    // tap. No re-aim — that is what makes it the reported bug.
+    await page.waitForTimeout(120);
+    await page.mouse.down();
+    await page.mouse.up();
+
+    // Let the 400 ms batcher flush so a second write would have arrived.
+    await page.waitForTimeout(1_500);
+
+    const checkWrites = backend.writes.filter((w) => /\/items\/check /.test(w));
+    const checkedIds = checkWrites.flatMap((w) => w.replace(/^.*\/items\/check /, "").split(","));
+    // EXACTLY ONE ITEM, and it is the one under the finger.
+    expect(checkedIds, `writes: ${JSON.stringify(backend.writes)}`).toEqual(["i1"]);
+
+    // The item that moved up is untouched — not just un-painted, untouched.
+    await expect(apples).toHaveAttribute("aria-checked", "false");
+    // And the header moved by one, not two (4 → 3, never 4 → 2).
+    await expect(header).toContainText("3");
+  });
+
   test("a refused check puts the row back and says so", async ({ loggedInPage: page }) => {
     const backend = newBackend();
     await wire(page, backend);
