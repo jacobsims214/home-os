@@ -71,8 +71,9 @@ const DASHBOARD_ROUTES: readonly string[] = [
   "/dashboard/admin",
   // The onboarding wizard. It sits under (onboarding), but middleware treats
   // /welcome as signed-in work: a visitor without a session is sent to /login,
-  // so it belongs here. The stub's seed user already has a family, which is
-  // exactly the state a returning person lands in.
+  // so it belongs here. It is the ONE route whose fixture is "no family"
+  // (applyFixtures): the stub's seed household would (correctly) send this
+  // session to Today instead of the page being scanned (#5409).
   "/welcome",
   // Seeded by e2e/stub-server.mjs.
   "/dashboard/properties/p1",
@@ -205,6 +206,14 @@ const MISSING_ROW = /\/bff\/(lists|vendors|documents|files|recipes|guides|people
 async function applyFixtures(page: Page, path: string) {
   for (const [pattern, body] of FIXTURES[path] ?? []) {
     await page.route(pattern, (route) => route.fulfill(body()));
+  }
+  if (path === "/welcome") {
+    // #5409: /welcome shows the onboarding wizard only to somebody with NO
+    // family, and sends a member to Today. The sweep's session has the stub's
+    // seed household, so without this the scan would quietly scan Today twice
+    // and never look at this page at all. The empty list is the page's real
+    // precondition, so this is the state under test, not a convenience.
+    await page.route("**/bff/me/households", (route) => route.fulfill({ json: { data: [] } }));
   }
   if (path.startsWith("/login")) {
     // The page hands off to the OIDC start at once (login.spec.ts intercepts it
