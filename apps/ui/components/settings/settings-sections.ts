@@ -15,18 +15,27 @@
  * rendered at all, because an entry that opens a 403 teaches someone to tap a
  * dead control. The API enforces; this only decides what is drawn.
  *
- * Agent tokens (#4580) and the phone-calendar rebuild (#4583) are separate
- * tickets. Agent tokens has no UI yet, so it is deliberately absent here rather
- * than shipped as a link to nowhere (#5199's rule); the phone-calendar section
- * carries the app-password block that already works, so #4583 can replace its
- * body without moving the route.
+ * Agent tokens (#4580) sits between Phone calendar and Credentials, where the
+ * settings mockup puts it (artifact #103 v1). Its role gate is the API's:
+ * ResAgentTokens ActRead is every role, but ActCreate is rolesReaders, so
+ * housesitter and vendor are not offered it at all and a viewer sees a
+ * read-only page (the form disables the write choice and says why). The
+ * phone-calendar section still carries the app-password block that already
+ * works, so #4583 can replace its body without moving the route.
  *
  * Plain data and pure helpers only (no JSX), so `npm test` covers the role
  * table in settings-sections.test.mjs.
  */
 
 import type { Icon } from "@tabler/icons-react";
-import { IconDeviceMobile, IconHome, IconKey, IconUser, IconUsers } from "@tabler/icons-react";
+import {
+  IconDeviceMobile,
+  IconHome,
+  IconKey,
+  IconRobot,
+  IconUser,
+  IconUsers,
+} from "@tabler/icons-react";
 
 /** Household roles, as the API names them (membership_role enum). */
 export type SettingsRole = "owner" | "family_manager" | "family_member" | "viewer" | "housesitter" | "vendor";
@@ -50,8 +59,20 @@ const FAMILY: readonly SettingsRole[] = ["owner", "family_manager", "family_memb
  * login is about the house and its jobs).
  */
 const SITTERS: readonly SettingsRole[] = [...FAMILY, "viewer", "housesitter"];
+/**
+ * Roles that may hold an agent token (API: ResAgentTokens ActCreate is
+ * rolesReaders, and the mockup lists the section for family + viewer). A
+ * housesitter or vendor cannot create one, so the section is not offered.
+ */
+const TOKEN_HOLDERS: readonly SettingsRole[] = [...FAMILY, "viewer"];
 
-export type SettingsSectionId = "household" | "members" | "credentials" | "phone-calendar" | "account";
+export type SettingsSectionId =
+  | "household"
+  | "members"
+  | "credentials"
+  | "phone-calendar"
+  | "agent-tokens"
+  | "account";
 
 export interface SettingsSection {
   id: SettingsSectionId;
@@ -101,6 +122,14 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     hint: "Add the family calendars to your phone's Calendar app",
     path: `${SETTINGS_BASE}/phone-calendar`,
     icon: IconDeviceMobile,
+  },
+  {
+    id: "agent-tokens",
+    label: "Agent tokens",
+    hint: "Tokens for your own AI agent, like Moltis or Claude",
+    path: `${SETTINGS_BASE}/agent-tokens`,
+    icon: IconRobot,
+    roles: TOKEN_HOLDERS,
   },
   {
     id: "account",

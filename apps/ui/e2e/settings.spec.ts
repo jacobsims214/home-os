@@ -76,14 +76,13 @@ test("an owner's phone: the index lists every section and each one opens", async
   await routeMe(page);
   await page.goto("/dashboard/settings");
 
-  // The index: one row per section, no agent-tokens row (#4580 is not built).
+  // The index: one row per section, Agent tokens included since #4580.
   await expect(index(page)).toBeVisible();
   const rows = index(page).getByRole("link");
-  await expect(rows).toHaveCount(5);
-  for (const name of ["Household", "Members", "Credentials", "Phone calendar", "Account"]) {
+  await expect(rows).toHaveCount(6);
+  for (const name of ["Household", "Members", "Credentials", "Phone calendar", "Agent tokens", "Account"]) {
     await expect(index(page).getByRole("link", { name: `${name} settings` })).toBeVisible();
   }
-  await expect(index(page).getByRole("link", { name: /agent token/i })).toHaveCount(0);
 
   // Household: the manager form, pre-filled from GET /me/households.
   await index(page).getByRole("link", { name: "Household settings" }).click();
@@ -197,8 +196,11 @@ test("a viewer is offered no credentials section, and its URL renders no vault",
 
   await page.goto("/dashboard/settings");
   const rows = index(page).getByRole("link");
-  await expect(rows).toHaveCount(4);
+  // Everything except Credentials, plus Agent tokens (a viewer may hold a
+  // read-only one: the API grants ResAgentTokens ActCreate to rolesReaders).
+  await expect(rows).toHaveCount(5);
   await expect(index(page).getByRole("link", { name: "Credentials settings" })).toHaveCount(0);
+  await expect(index(page).getByRole("link", { name: "Agent tokens settings" })).toBeVisible();
 
   // Deep-linking the gated section is refused in the UI too: no probe of the
   // vault happens, because the section is not rendered.
@@ -331,4 +333,160 @@ test("mismatched new passwords never reach the API", async ({ loggedInPage: page
   await page.getByRole("button", { name: "Change password" }).click();
   await expect(page.getByText(/don't match/)).toBeVisible();
   expect(posts).toEqual([]);
+});
+
+// ── 5. Agent tokens (#4580) ──────────────────────────────────────────────────
+//
+// The one thing this surface must never do is show a token it was not just
+// given: POST is the only response with the plaintext (the API sets no-store),
+// every read carries token_prefix only. So the assertions are about which
+// characters are on screen, not about a happy path:
+//
+//  1. the full token appears exactly once, in the dialog straight after
+//     creation, and is gone from the DOM once that dialog closes;
+//  2. a list row shows the prefix, never the whole value;
+//  3. revoking asks first, and only the confirmed tap sends the DELETE.
+
+/** The API's Create shape: metadata plus the one-time plaintext. */
+const NEW_TOKEN =
+  "hos_Pq7Lm2Xc9vB4nR8tK1wZ6yH3jF5dG0sA2eU7iO4pQ9r";
+
+const SEED_TOKENS = [
+  {
+    id: "t1",
+    name: "Moltis on the home server",
+    token_prefix: "hos_k3Fq9aZx",
+    scopes: ["read", "write"],
+    last_used_at: "2026-11-18T17:56:00Z",
+    expires_at: null,
+    revoked_at: null,
+    created_at: "2026-11-01T10:00:00Z",
+  },
+  {
+    id: "t2",
+    name: "Old laptop",
+    token_prefix: "hos_2Lr0bTnv",
+    scopes: ["read"],
+    last_used_at: null,
+    expires_at: null,
+    revoked_at: "2026-11-02T12:00:00Z",
+    created_at: "2026-10-01T10:00:00Z",
+  },
+];
+
+/** Serves the token endpoints; the create echoes NEW_TOKEN as the API does. */
+async function routeTokens(page: Page, rows = SEED_TOKENS) {
+  const calls: string[] = [];
+  await page.route("**/bff/agent-tokens", async (route) => {
+    if (route.request().method() === "POST") {
+      calls.push(`POST ${await route.request().postData()}`);
+      return route.fulfill({
+        status: 201,
+        json: {
+          data: {
+            id: "t3",
+            name: "Moltis on my phone",
+            token_prefix: NEW_TOKEN.slice(0, 12),
+            scopes: ["read"],
+            last_used_at: null,
+            expires_at: null,
+            revoked_at: null,
+            created_at: "2026-11-18T18:00:00Z",
+            token: NEW_TOKEN,
+          },
+        },
+      });
+    }
+    return route.fulfill({ json: { data: rows } });
+  });
+  await page.route("**/bff/agent-tokens/*", (route) => {
+    calls.push(`${route.request().method()} ${route.request().url()}`);
+    return route.fulfill({ status: 204, body: "" });
+  });
+  return calls;
+}
+
+test("a token is shown once, then only its prefix is on screen", async ({
+  loggedInPage: page,
+  stubSid,
+  request,
+}) => {
+  await seedFamily(request, stubSid!, "owner");
+  const calls = await routeTokens(page);
+  await page.goto("/dashboard/settings/agent-tokens");
+
+  // The list draws prefixes, and never the value of a token it was not given.
+  await expect(page.getByText("Moltis on the home server")).toBeVisible();
+  await expect(page.getByText("hos_k3Fq9aZx…")).toBeVisible();
+  await expect(page.getByText(NEW_TOKEN)).toHaveCount(0);
+  await expect(page.getByText("Read & write")).toBeVisible();
+  // The revoked token is kept, under its own group, not in the active list.
+  await expect(page.getByText("Revoked", { exact: false }).first()).toBeVisible();
+
+  // Create: name, then the read-only choice is the default.
+  await page.getByRole("button", { name: "Create token" }).first().click();
+  const form = page.getByRole("dialog");
+  await form.getByLabel("Name").fill("Moltis on my phone");
+  await form.getByRole("radio", { name: /Read only/ }).click();
+  await form.getByRole("button", { name: "Create token" }).click();
+
+  // The one chance to copy it: the full value, with the warning.
+  const shown = page.getByRole("dialog", { name: "Copy your token" });
+  await expect(shown).toBeVisible();
+  await expect(shown.getByText(NEW_TOKEN)).toBeVisible();
+  await expect(shown.getByText(/only time you'll see it/i)).toBeVisible();
+  expect(calls.some((c) => c.startsWith("POST"))).toBe(true);
+
+  // Closing it drops the value: no copy is left anywhere in the page — and it
+  // was never written to localStorage.
+  await shown.getByRole("button", { name: /I've copied it/ }).click();
+  await expect(shown).toBeHidden();
+  await expect(page.getByText(NEW_TOKEN)).toHaveCount(0);
+  expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(NEW_TOKEN);
+
+  await expectNoHorizontalOverflow(page);
+});
+
+test("a viewer's write choice is disabled and explained, not silently refused", async ({
+  loggedInPage: page,
+  stubSid,
+  request,
+}) => {
+  await seedFamily(request, stubSid!, "viewer");
+  await routeTokens(page, []);
+  await page.goto("/dashboard/settings/agent-tokens");
+
+  await expect(page.getByText("No agent tokens yet")).toBeVisible();
+  await page.getByRole("button", { name: "Create token" }).first().click();
+  const form = page.getByRole("dialog");
+
+  // The API refuses `write` for a viewer (ActWriteScope is rolesFamily), so the
+  // card says so instead of letting the person submit into a 403.
+  const writeChoice = form.getByRole("radio", { name: /Read & write/ });
+  await expect(writeChoice).toHaveAttribute("aria-disabled", "true");
+  await expect(form.getByText(/can only create read-only tokens/i)).toBeVisible();
+});
+
+test("revoking asks first, and only the confirmation sends the DELETE", async ({
+  loggedInPage: page,
+  stubSid,
+  request,
+}) => {
+  await seedFamily(request, stubSid!, "owner");
+  const calls = await routeTokens(page);
+  await page.goto("/dashboard/settings/agent-tokens");
+
+  await page.getByRole("button", { name: "Revoke Moltis on the home server" }).click();
+  const confirm = page.getByRole("dialog");
+  await expect(confirm.getByRole("heading", { name: /Revoke Moltis on the home server\?/ })).toBeVisible();
+
+  // Backing out sends nothing: a revoke cannot be undone.
+  await confirm.getByRole("button", { name: "Keep token" }).click();
+  await expect(confirm).toBeHidden();
+  expect(calls.filter((c) => c.startsWith("DELETE"))).toEqual([]);
+
+  await page.getByRole("button", { name: "Revoke Moltis on the home server" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Revoke token" }).click();
+  await expect.poll(() => calls.filter((c) => c.startsWith("DELETE")).length).toBe(1);
+  expect(calls.find((c) => c.startsWith("DELETE"))).toContain("/agent-tokens/t1");
 });
