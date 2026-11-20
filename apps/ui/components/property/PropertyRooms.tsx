@@ -76,8 +76,8 @@ interface PropertyRoomsProps {
   onAddRoom: () => void;
   /** The page's Add-thing handler, optionally into a room. */
   onAddThing: (roomId?: string) => void;
-  /** Re-renders the overdue counts when the page's clock says today changed. */
-  now?: Date;
+  /** The FAMILY's civil date (#5316); null while the household loads. */
+  today: string | null;
 }
 
 export default function PropertyRooms({
@@ -88,7 +88,7 @@ export default function PropertyRooms({
   canWrite,
   onAddRoom,
   onAddThing,
-  now,
+  today,
 }: PropertyRoomsProps) {
   const headingId = useId();
   const { rooms: groups, notInARoom } = groupByRoom(rooms, things);
@@ -142,7 +142,7 @@ export default function PropertyRooms({
       ) : (
         <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 md:gap-3">
           {groups.map(({ room, things: roomThings }) => {
-            const overdue = roomOverdueCount(roomThings, tasks, now);
+            const overdue = today ? roomOverdueCount(roomThings, tasks, today) : 0;
             const body = (
               <>
                 <span className="grid size-8 shrink-0 place-items-center rounded-[9px] bg-surface-2 text-ink-2">

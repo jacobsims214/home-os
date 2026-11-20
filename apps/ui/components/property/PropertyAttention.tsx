@@ -17,10 +17,15 @@ import type { Asset } from "@/lib/types/api";
 
 const STROKE = 1.75;
 
-function daysOverdue(dueDate: string, now: Date): number {
+/**
+ * Whole days between a civil due date and the FAMILY's today (#5316). Both are
+ * civil dates anchored at T00:00:00, so no browser zone can move the difference
+ * by a day; "how many days" is the only reason a Date is used at all.
+ */
+function daysOverdue(dueDate: string, today: string): number {
   const due = new Date(`${dueDate.slice(0, 10)}T00:00:00`);
-  const today = new Date(`${now.toISOString().slice(0, 10)}T00:00:00`);
-  return Math.max(1, Math.round((today.getTime() - due.getTime()) / 86_400_000));
+  const now = new Date(`${today.slice(0, 10)}T00:00:00`);
+  return Math.max(1, Math.round((now.getTime() - due.getTime()) / 86_400_000));
 }
 
 interface PropertyAttentionProps {
@@ -28,12 +33,14 @@ interface PropertyAttentionProps {
   things: Asset[];
   /** The property's name, for a task about the whole house. */
   propertyName: string;
-  /** "View all upkeep" goes to the maintenance page. */
-  now?: Date;
+  /** The FAMILY's civil date (#5316); null while the household loads. */
+  today: string | null;
 }
 
-export default function PropertyAttention({ tasks, things, propertyName, now = new Date() }: PropertyAttentionProps) {
-  const overdue = overdueTasks(tasks, now);
+export default function PropertyAttention({ tasks, things, propertyName, today }: PropertyAttentionProps) {
+  // No day yet: claim nothing. An "overdue" badge derived from the browser's
+  // clock is the defect this consolidation removed.
+  const overdue = today ? overdueTasks(tasks, today) : [];
   if (overdue.length === 0) return null;
   const thingById = new Map(things.map((t) => [t.id, t]));
 
@@ -58,7 +65,7 @@ export default function PropertyAttention({ tasks, things, propertyName, now = n
       >
         {overdue.map((task) => {
           const thing = task.asset_id ? thingById.get(task.asset_id) : undefined;
-          const days = task.due_date ? daysOverdue(task.due_date, now) : 0;
+          const days = task.due_date && today ? daysOverdue(task.due_date, today) : 0;
           const subject = [thing?.name, thing ? null : propertyName].filter(Boolean).join(" · ");
           const body = (
             <>

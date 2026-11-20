@@ -34,8 +34,12 @@ export interface ItemRowProps {
   item: ListItem;
   /** The list's kind: decides whether a due date / assignee is shown. */
   kind: string;
-  /** Today, YYYY-MM-DD, so the due chip does not drift between renders. */
-  today: string;
+  /**
+   * The FAMILY's today, YYYY-MM-DD (#5316) — null until the household is known,
+   * and then there is no due chip: a chip derived from the browser's clock is
+   * the defect this consolidation removed.
+   */
+  today: string | null;
   /** The assignee's display name, when the list assigns people. */
   assigneeName?: string | null;
   /** This role may check items (family + housesitter; a viewer may not). */
@@ -77,7 +81,7 @@ export default function ItemRow({
 }: ItemRowProps) {
   const amount = amountLabel(item);
   const choresLike = kind === "chores" || kind === "todo";
-  const due = choresLike && item.due_date && !item.checked ? dueLabel(item.due_date, today) : "";
+  const due = choresLike && item.due_date && !item.checked && today ? dueLabel(item.due_date, today) : "";
   const overdue = due.startsWith("Overdue");
 
   // What sits under the name: who it is for, and the check's who/when.

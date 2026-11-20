@@ -30,7 +30,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { IconCheck, IconEyeOff, IconSun, IconX } from "@tabler/icons-react";
-import { groupItems, todayKey, type ItemGroup } from "@/lib/lists/model";
+import { groupItems, type ItemGroup } from "@/lib/lists/model";
 import type { ListItem, ListRow } from "@/lib/lists/types";
 import ItemRow from "./ItemRow";
 
@@ -42,7 +42,8 @@ export interface StoreModeProps {
   list: ListRow;
   items: ListItem[];
   canCheck: boolean;
-  today?: string;
+  /** The FAMILY's today (#5316); null until the household is known. */
+  today?: string | null;
   onToggle: (item: ListItem) => void;
   onClose: () => void;
 }
@@ -94,7 +95,10 @@ function useWakeLock(active: boolean): boolean {
 }
 
 export default function StoreMode({ list, items, canCheck, today, onToggle, onClose }: StoreModeProps) {
-  const day = today ?? todayKey();
+  // `today` is the household's day, passed down from the page (#5316). Falling
+  // back to the browser's clock here is what this consolidation removed: with
+  // no day yet, "bought today" simply does not claim one.
+  const day = today ?? "";
   const wakeHeld = useWakeLock(true);
   const [hideCart, setHideCart] = useState(false);
   /** Rows checked here in the last 700 ms, still drawn in place. */

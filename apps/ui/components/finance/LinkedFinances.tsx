@@ -101,7 +101,7 @@ function billDetail(b: LinkedBill): string {
         ? `due day ${b.due_day}`
         : ""
       : b.due_date
-        ? `next due ${new Date(`${b.due_date.slice(0, 10)}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`
+        ? `next due ${new Date(`${b.due_date.slice(0, 10)}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}`
         : "";
   return [frequencyLabel(b.frequency), b.category, due].filter(Boolean).join(" · ");
 }

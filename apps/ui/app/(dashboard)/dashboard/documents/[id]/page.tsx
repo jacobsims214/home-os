@@ -86,10 +86,11 @@ import {
   formatDay,
   formatSize,
   textState,
-  todayString,
   type Category,
+  type Expiry,
 } from "@/lib/documents/model";
 import { attachmentOf, documentLinks, metadataPatch } from "@/lib/documents/entity-links";
+import { useHouseholdToday } from "@/lib/today/api";
 import { CategoryIcon, categoryLabel, categoryTint } from "@/components/documents/categories";
 import type { FileRecord } from "@/lib/types/api";
 
@@ -185,9 +186,13 @@ function DocumentDetail({
   linksLoading: boolean;
 }) {
   const router = useRouter();
-  const today = todayString();
+  // The FAMILY's day (#5316), not the browser's: "expires today" vs "expired"
+  // must not depend on the device's zone.
+  const today = useHouseholdToday();
   const category = categoryOf(file);
-  const expiry = expiryOf(file, today);
+  const expiry = today
+    ? expiryOf(file, today)
+    : ({ state: "none", days: null, label: "" } satisfies Expiry);
   const state = textState(file);
   const attachment = attachmentOf(file);
   const [editing, setEditing] = useState(false);

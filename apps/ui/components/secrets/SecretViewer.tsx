@@ -374,7 +374,10 @@ export default function SecretViewer({
             </span>
             {secret?.created_at && (
               <span className="text-xs text-gray-400">
-                added {new Date(secret.created_at).toLocaleDateString()}
+                added{" "}
+                {/* An instant, read in UTC: this is provenance, not a page's
+                    "today", and a fixed zone keeps it stable (#5316). */}
+                {new Date(secret.created_at).toLocaleDateString("en-US", { timeZone: "UTC" })}
               </span>
             )}
           </div>

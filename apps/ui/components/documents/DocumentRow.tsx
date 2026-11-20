@@ -67,15 +67,20 @@ export default function DocumentRow({
   today,
 }: {
   file: FileRecord;
-  /** Injected in tests so the relative expiry is stable. */
-  today?: string;
+  /**
+   * The FAMILY's today (#5316), null until the household is known. An expiry
+   * badge derived from the browser's clock is the defect this consolidation
+   * removed, so with no day there is no badge. Injected in tests so the
+   * relative expiry is stable.
+   */
+  today: string | null;
 }) {
   const category = categoryOf(file);
   // ONE rule (#5299): the words here and the group the hub counts this
   // document in are the same decision (`documentCategoryLabel` / `isFiled`),
   // so a card can never show a category while its group calls it unfiled.
   const categoryText = documentCategoryLabel(file);
-  const expiry = expiryOf(file, today);
+  const expiry = today ? expiryOf(file, today) : null;
   const meta = rowMeta(file);
   return (
     <Link
@@ -124,7 +129,7 @@ export default function DocumentRow({
           >
             {categoryText}
           </span>
-          <ExpiryChip expiry={expiry} />
+          {expiry && <ExpiryChip expiry={expiry} />}
           <FileTextMarker file={file} />
         </span>
       </span>

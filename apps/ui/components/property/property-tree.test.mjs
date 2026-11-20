@@ -47,8 +47,12 @@ test("an empty property yields no rooms and no loose things", () => {
   assert.equal(notInARoom.length, 0);
 });
 
+// `today` is the FAMILY's civil date (#5316), a YYYY-MM-DD string: these
+// functions take no Date any more, so no browser clock can reach them.
+const TODAY = "2026-11-18";
+
 test("overdue only counts open tasks past their due date", () => {
-  const now = new Date("2026-11-18T12:00:00Z");
+  const now = TODAY;
   assert.equal(isOverdue({ id: "t1", name: "Filter", status: "pending", due_date: "2026-11-13" }, now), true);
   assert.equal(isOverdue({ id: "t2", name: "Filter", status: "done", due_date: "2026-11-13" }, now), false);
   assert.equal(isOverdue({ id: "t3", name: "Filter", status: "pending", due_date: "2026-11-18" }, now), false);
@@ -58,7 +62,7 @@ test("overdue only counts open tasks past their due date", () => {
 });
 
 test("a room's overdue count is its own things only, soonest first across the property", () => {
-  const now = new Date("2026-11-18T12:00:00Z");
+  const now = TODAY;
   const tasks = [
     { id: "t1", name: "Replace filter", status: "pending", due_date: "2026-11-13", asset_id: "a1" },
     { id: "t2", name: "Clean gutters", status: "pending", due_date: "2026-11-06", asset_id: "a1" },

@@ -34,10 +34,10 @@
  * and adding to Groceries are gated.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import dayjs from "dayjs";
+import { useHouseholdToday } from "@/lib/today/api";
 import {
   Badge,
   Button,
@@ -62,8 +62,7 @@ import {
 } from "@tabler/icons-react";
 import { useClearMeal, useMealSuggestions, usePeople, usePlanMeal, useRecipes, useMealPlans } from "@/lib/recipes/api";
 import { reportAllergies } from "@/lib/recipes/allergy";
-import { useCurrentHousehold, useNavRole } from "@/components/shared/use-nav-role";
-import { householdToday } from "@/lib/today/agenda";
+import { useNavRole } from "@/components/shared/use-nav-role";
 import SuggestionSheet from "@/components/meals/SuggestionSheet";
 import PlannedMealWarning, { MealAllergyFlag } from "@/components/meals/PlannedMealWarning";
 import RateMealSheet from "@/components/meals/RateMealSheet";
@@ -99,49 +98,27 @@ export default function MealsPage() {
   const params = useSearchParams();
   const requestedWeek = params?.get("week") ?? "";
 
-  // Today is the FAMILY's day, in the household's time zone, computed after
-  // mount (never during SSR: the server's zone is not the family's, and a week
-  // row that says "today" on the wrong day is worse than no highlight for one
-  // paint). `householdToday` is the same answer Today, Calendar, Pets, People
-  // and Bills use, so no two pages can disagree about what day it is.
+  // Today is the FAMILY's day (#5316), in the household's time zone, after
+  // mount: the server's clock (and its zone) is not the family's, and a browser
+  // on UTC at 22:30 in New York is already on tomorrow. It is `null` until the
+  // household is known, so nothing below calls a day past, or asks anyone to
+  // plan one, on a guess — and no row is highlighted "today" on the wrong day.
+  // `householdToday` is the same answer Today, Calendar, Pets, People and Bills
+  // use, so no two pages can disagree about what day it is.
   //
-  // It is not `dayjs()`: the browser's calendar is the phone's, which is not
-  // necessarily the family's, and — the half of #5305 that is easy to miss — a
-  // UTC day at 23:30 in New York is already tomorrow, which would mark tonight
-  // "past" and nag about a dinner nobody can cook yet.
-  const household = useCurrentHousehold();
-  // Unknown (the list is still loading, or it failed) is NOT the same as "no
-  // zone set": a household without a zone is a real object with an empty
-  // `timezone`, which householdToday reads as the browser's date. Only the
-  // unknown case leaves `today` null — and while it is null nothing on this page
-  // calls a day past or asks anyone to plan one. Guessing here would put the
-  // wrong day back on screen for the first paint, which is the whole bug.
-  const householdKnown = household !== null;
-  const timezone = household?.timezone ?? null;
-  const [today, setToday] = useState<string | null>(null);
+  // The panel's week: a `?week=` link wins, otherwise the family's week. With
+  // no day yet there is no week to draw (`start` is null) — the alternative,
+  // a browser-clock placeholder, is the defect this consolidation removed.
+  const today = useHouseholdToday();
   const [weekOffset, setWeekOffset] = useState(0);
+  const start = useMemo(() => {
+    const anchor = requestedWeek || today;
+    if (!anchor) return null;
+    return addWeek(weekStart(anchor), weekOffset);
+  }, [requestedWeek, today, weekOffset]);
 
-  useEffect(() => {
-    if (!householdKnown) {
-      setToday(null);
-      return;
-    }
-    setToday(householdToday(timezone));
-    // A parent leaves this page open across midnight (or a tab is restored a
-    // day later); the nag must follow the day it is, not the day it loaded.
-    const id = setInterval(() => setToday(householdToday(timezone)), 60_000);
-    return () => clearInterval(id);
-  }, [householdKnown, timezone]);
-  // Which week to show. A `?week=` link wins; otherwise the family's week. The
-  // browser's date is only a one-paint placeholder for the anchor (it is what
-  // SSR can see at all) and only ever chooses WHICH week is drawn — the past and
-  // nag decisions below read `today`, which is null until the household's day is
-  // known, so no row is called "gone" on a guess.
-  const anchor = requestedWeek || today || dayjs().format("YYYY-MM-DD");
-  const start = useMemo(() => addWeek(weekStart(anchor), weekOffset), [anchor, weekOffset]);
-
-  const range = useMemo(() => ({ from: start, to: addDays(start, 6) }), [start]);
-  const mealsQuery = useMealPlans(range);
+  const range = useMemo(() => (start ? { from: start, to: addDays(start, 6) } : null), [start]);
+  const mealsQuery = useMealPlans(range ?? { from: "", to: "" }, !!range);
   const peopleQuery = usePeople();
   const recipesQuery = useRecipes();
 
@@ -153,9 +130,10 @@ export default function MealsPage() {
   const recipes = useMemo(() => recipesQuery.data?.data ?? [], [recipesQuery.data]);
   const recipesById = useMemo(() => new Map(recipes.map((r) => [r.id, r])), [recipes]);
 
-  // "" until the family's day is known: buildWeek then marks nothing today and
-  // nothing past, rather than calling the browser's calendar "today".
-  const days = useMemo(() => buildWeek(start, meals, today ?? ""), [start, meals, today]);
+  const days = useMemo(
+    () => (start && today ? buildWeek(start, meals, today) : []),
+    [start, meals, today],
+  );
   const planned = plannedDinners(days);
   // Only a day that is today or later may be called open (#5305).
   const nextEmpty = today ? firstEmptyDay(days, today) : null;
@@ -283,10 +261,10 @@ export default function MealsPage() {
         </Button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <Text fw={600} size="lg" style={{ lineHeight: 1.2 }} data-meals-weekday>
-            {weekHeading(start, anchor)}
+            {start && today ? weekHeading(start, today) : "This week"}
           </Text>
           <Text size="xs" style={{ color: "var(--ink-3)" }} data-meals-weekrange>
-            {weekLabel(start)} · {planned} {planned === 1 ? "dinner" : "dinners"} planned
+            {start ? weekLabel(start) : "\u2014"} \u00b7 {planned} {planned === 1 ? "dinner" : "dinners"} planned
           </Text>
         </div>
         <Button
@@ -420,7 +398,7 @@ export default function MealsPage() {
                 </Group>
                 <Button
                   component={Link}
-                  href={`/dashboard/meals/grocery?from=${range.from}&to=${range.to}`}
+                  href={range ? `/dashboard/meals/grocery?from=${range.from}&to=${range.to}` : "/dashboard/meals/grocery"}
                   variant="default"
                   fullWidth
                   mt="sm"

@@ -17,7 +17,6 @@ import {
   parseQuickAdd,
   partitionLists,
   splitChecked,
-  todayKey,
   updatedLabel,
 } from "./model.ts";
 
@@ -123,10 +122,6 @@ test("dueBucket has an Overdue bucket, so a late chore is not filed under Later"
   assert.equal(dueBucket({ due_date: "2026-11-21" }, "2026-11-18"), "This week");
   assert.equal(dueBucket({ due_date: "2026-12-01" }, "2026-11-18"), "Later");
   assert.equal(dueBucket({ due_date: null }, "2026-11-18"), "No date");
-});
-
-test("todayKey is the local day, zero-padded", () => {
-  assert.equal(todayKey(new Date(2026, 10, 8)), "2026-11-08");
 });
 
 // ── grouping ───────────────────────────────────────────────

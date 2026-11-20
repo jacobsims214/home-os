@@ -24,9 +24,7 @@
 import { useMemo } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
-import { MY_HOUSEHOLDS_QUERY_KEY } from "@/components/shared/use-nav-role";
-import { currentHousehold, type MyHousehold } from "@/lib/today/api";
-import { householdToday } from "@/lib/today/agenda";
+import { useHouseholdToday } from "@/lib/today/api";
 import { canSeeEntity } from "@/lib/resource-access";
 import type { FactContext, Group, RecordFacts, SearchRole } from "./results";
 
@@ -187,18 +185,6 @@ export function useGroupFacts(
   const propertyNames = usePropertyNames(wantsProperties && canSeeEntity(role, "property"));
   const ctx = useMemo<FactContext>(() => ({ today, propertyNames }), [today, propertyNames]);
   return { records, ctx };
-}
-
-/** The role's `today` in the household's timezone (bills are dated there). */
-export function useHouseholdToday(): string | null {
-  const q = useQuery({
-    queryKey: MY_HOUSEHOLDS_QUERY_KEY,
-    queryFn: () => apiFetch<{ data: MyHousehold[] }>("/api/v1/me/households"),
-    staleTime: 5 * 60_000,
-    retry: false,
-  });
-  const hh = currentHousehold(q.data?.data);
-  return hh ? householdToday(hh.timezone) : null;
 }
 
 /**
