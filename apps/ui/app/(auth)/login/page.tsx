@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Button, Loader } from "@mantine/core";
 import { DEFAULT_RETURN_PATH, returnPath } from "@/lib/auth/return-path";
+import { RATE_LIMIT_RETRY_SECONDS, loginErrorCopy } from "@/lib/auth/login-surface";
 import { hasSessionRemnants, teardownSession } from "@/lib/session-teardown";
 
 /**
@@ -25,6 +26,12 @@ import { hasSessionRemnants, teardownSession } from "@/lib/session-teardown";
  *  - a callback that failed (`?error=`): the mockup's warning block, the same
  *    message the page has always shown, and the 48 px "Try again". It does not
  *    bounce straight back to Dex -- that loops.
+ *  - RATE LIMITED (`?error=rate_limited`, #5407): the same warning block with
+ *    the throttle's own wording and retry guidance, and NO automatic bounce.
+ *    The page that actually serves the throttle is Envoy's local reply (see
+ *    the local_reply_config in the chart's envoy ConfigMap, which renders the
+ *    same card) -- this state is what any in-app detection of a 429 hands the
+ *    person, so the two surfaces cannot disagree about what happened.
  *
  * The `?redirect=` rule is unchanged and still applied here before the link is
  * built: anyone can craft a /login?redirect= link (#4617).
@@ -90,12 +97,13 @@ export default function LoginPage() {
   }, []);
 
   if (error) {
+    const copy = loginErrorCopy(error)!;
     return (
-      <div data-auth-page="login">
+      <div data-auth-page={copy.throttled ? "rate-limited" : "login"}>
         {/* The mockup's failed sign-in keeps the screen's heading and puts the
             warning under it (".acard h1" then the .err block), so the page
             never loses its name just because the callback failed. */}
-        <h1 className={H1}>Sign in</h1>
+        <h1 className={H1}>{copy.throttled ? copy.title : "Sign in"}</h1>
         <p className={SUB}>{host ? `To your family hub at ${host}` : "To your family hub."}</p>
         <div
           role="alert"
@@ -118,19 +126,21 @@ export default function LoginPage() {
             <path d="M10.3 4.2 2.6 17.5A2 2 0 0 0 4.3 20.5h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0z" />
           </svg>
           <div className="min-w-0">
-            <p className="font-semibold">Sign-in didn&apos;t complete</p>
-            <p className="mt-0.5 text-[13px] leading-snug">
-              Something went wrong while signing you in ({error}). Please try again.
-            </p>
+            <p className="font-semibold">{copy.title}</p>
+            <p className="mt-0.5 text-[13px] leading-snug">{copy.body}</p>
           </div>
         </div>
         <Button component="a" href={startUrl} size="md" fullWidth className="min-h-12 text-[15px]">
-          Try again
+          {copy.throttled ? "Sign in again" : "Try again"}
         </Button>
         {/* The mockup's `.acard .alt`. There is no self-serve registration:
-            an account arrives as an invite from a household admin. */}
+            an account arrives as an invite from a household admin. A throttled
+            visitor gets the retry guidance here instead: it is the only thing
+            that helps them, and the throttle lifts on its own. */}
         <p className="mb-0 mt-5 text-center text-sm text-ink-2">
-          New here? Ask someone in your family for an invite link.
+          {copy.throttled
+            ? `The pause lifts on its own after about ${RATE_LIMIT_RETRY_SECONDS} seconds.`
+            : "New here? Ask someone in your family for an invite link."}
         </p>
       </div>
     );

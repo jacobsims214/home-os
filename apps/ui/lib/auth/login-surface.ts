@@ -78,24 +78,6 @@ export function loginErrorCopy(code: string | null | undefined): LoginErrorCopy 
 }
 
 /**
- * Whether a visitor who arrives signed OUT at `/auth/complete` may be handed
- * straight to their destination (#5407).
- *
- * NO. That hand-off is the dead end the ticket reports. With no session, the
- * destination's guard answers 307 to /login, whose page `location.replace()`s
- * into /api/auth/login, which 307s to Dex -- so the person's Back press buys
- * them a second full round trip through the login chain, and if they have been
- * signing in repeatedly, the rate limiter answers that round trip with a bare
- * 429 body. The page must show the sign-in card instead, and that card's own
- * link carries `?redirect=` so retrying still returns them here.
- *
- * A signed-IN visitor is handed off as before (#5304).
- */
-export function shouldHandOff(signedIn: boolean): boolean {
-  return signedIn;
-}
-
-/**
  * The destination `/auth/complete` offers as a "sign in again" step.
  *
  * It is the page the person was trying to reach (already sanitised by

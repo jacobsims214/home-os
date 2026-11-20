@@ -216,15 +216,23 @@ test("/auth/complete cannot be aimed at another origin through ?to=", async ({ l
   }
 });
 
-test("/auth/complete does not auto-forward when it is reached by Back", async ({ page }) => {
-  // The revisit guard, asserted without a login: load the page with a
-  // destination, let it hand off, then come back. If the revisit did not
-  // detect itself it would forward again and Back would be unusable -- the
-  // person would be pinned forward, a worse dead end than the Dex page.
+test("/auth/complete does not auto-forward when it is reached by Back", async ({ loggedInPage: page }) => {
+  // The revisit guard. Load the page with a destination, let it hand off, then
+  // come back. If the revisit did not detect itself it would forward again and
+  // Back would be unusable -- the person would be pinned forward, a worse dead
+  // end than the Dex page.
+  //
+  // SIGNED IN (#5407). This must be a session-bearing page now: /auth/complete
+  // only hands off for a signed-in visitor, because forwarding a signed-out one
+  // sends them through the destination's 307 /login into the Dex login chain --
+  // the dead end #5407 reports (see e2e/auth-back-session.spec.ts). Signed out
+  // there is no first hand-off to come back from, so the guard under test would
+  // never run.
   //
   // The destination is /register because it is a real page that loads without
-  // a session. A protected one (/dashboard) would be 307'd to /login, which
-  // itself location.replace()s into the Dex flow, and the Back under test would
+  // its own guard doing anything interesting. A protected one (/dashboard)
+  // would render the dashboard; a signed-out one would 307 to /login, whose
+  // page location.replace()s into the Dex flow, and the Back under test would
   // then measure that bounce instead of this page's guard.
   const destination = "/register";
   const onDestination = (u: URL) => u.pathname === destination;

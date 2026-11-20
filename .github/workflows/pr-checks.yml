@@ -309,3 +309,7 @@ jobs:
       # reaches the ConfigMap is exactly the bug that cost the family agents
       # their headless auth (#4357, #4886).
       - run: deploy/helm/home-os/tests/dex-config.sh
+      # A throttled sign-in must be a page, not Envoy's bare local-reply body
+      # (#5407). Also asserted on the rendered output: the 429 is produced by
+      # Envoy itself, so nothing in apps/ui can restyle it.
+      - run: deploy/helm/home-os/tests/envoy-local-reply.sh
