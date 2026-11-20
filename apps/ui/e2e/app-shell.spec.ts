@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { test, expect, expectNoHorizontalOverflow, onlyOn, pressOpener } from "./fixtures";
+import { test, expect, expectNoHorizontalOverflow, onlyOn, pressOpener, SEED_HOUSEHOLD_NAME } from "./fixtures";
 
 /**
  * Responsive app shell (#4528), per KB design/app-shell.md:
@@ -38,8 +38,10 @@ for (const width of [375, 390]) {
       await expect(header.getByRole("button", { name: /^Notifications/ })).toBeVisible();
       await expect(header.getByRole("button", { name: /^Account menu/ })).toBeVisible();
       // The family chip (#4574): this account has one family in the stub, so it
-      // is a plain label naming it, not a switcher button.
-      await expect(header.getByText("Your family", { exact: true })).toBeVisible();
+      // is a plain label naming it, not a switcher button. It names the SEED
+      // household: "Your family" is the unknown-household placeholder, so
+      // asserting that would pass on an empty GET /me/households (#5322).
+      await expect(header.getByText(SEED_HOUSEHOLD_NAME, { exact: true })).toBeVisible();
       await expect(header.getByRole("button", { name: /^Family:/ })).toHaveCount(0);
 
       // The bug from the audit: the navbar rendered open over every page.
