@@ -53,6 +53,11 @@ envoy:
     requestsPerMinute: 10
     # Bucket size: requests a client may make at once before the rate applies.
     burst: 20
+    # How long a throttled client is told to wait (#5407), in seconds: the
+    # bucket's fill interval, which is what Envoy's 429 retry-after header and
+    # the styled rate-limit page both quote. Keep it equal to the fill_interval
+    # in templates/envoy/configmap.yaml (60s); the page says "about N seconds".
+    retryAfterSeconds: 60
     # IPv6 clients are keyed per prefix of this length, because one host
     # usually owns a whole /64. IPv4 clients are keyed per address.
     ipv6PrefixLen: 64
