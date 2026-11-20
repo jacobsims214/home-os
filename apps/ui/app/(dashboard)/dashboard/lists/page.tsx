@@ -230,6 +230,7 @@ export default function ListsPage() {
           onClick={() => setNewOpen(true)}
           aria-label="New list"
           data-floating-action=""
+          data-testid="lists-fab"
           className="fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-4 z-30 grid size-14 place-items-center rounded-token-lg bg-accent-fill text-white shadow-token-lg md:hidden"
         >
           <IconPlus size={26} stroke={2} />

@@ -1,5 +1,15 @@
 import type { Page } from "@playwright/test";
 import { test, expect, onlyOn } from "./fixtures";
+import { NAV_SECTIONS } from "../components/shared/nav-config";
+
+/**
+ * How many section rows a nav surface draws, derived from nav-config rather than
+ * hand-kept. The previous literal (7) had already drifted from the 8 sections
+ * in the list and was red for good; #5408 added Guides, making it 9. A section
+ * added or removed in nav-config now updates this with no edit here, which is
+ * the rule app-shell.spec.ts states for its own fixture.
+ */
+const SECTION_ROW_COUNT = NAV_SECTIONS.length;
 
 /**
  * No placeholder copy in the shell (#5199).
@@ -94,7 +104,7 @@ test.describe("phone 390px", () => {
     const drawer = page.getByRole("dialog", { name: /Home OS menu/ });
     await expect(drawer).toBeVisible();
     expect(await placeholderCopy(page), "placeholder copy with the drawer open").toEqual([]);
-    await expect(drawer.locator("ul li > a")).toHaveCount(8);
+    await expect(drawer.locator("ul li > a")).toHaveCount(SECTION_ROW_COUNT);
     await expect(drawer.locator("[aria-disabled]")).toHaveCount(0);
   });
 });
@@ -113,7 +123,7 @@ for (const width of [820, 1440]) {
       // Today, Calendar, Meals, Lists | Documents, People & House, Money,
       // Guides | Settings.
       const rows = nav.locator("ul li > a, ul li > span[aria-disabled=\"true\"]");
-      await expect(rows).toHaveCount(8);
+      await expect(rows).toHaveCount(SECTION_ROW_COUNT);
       await expect(nav.locator("[aria-disabled]")).toHaveCount(0);
       await expect(nav.getByRole("link", { name: "Meals" })).toBeVisible();
       // Every section has a page (#5408 completed the set: Guides was the last
