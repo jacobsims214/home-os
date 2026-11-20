@@ -2,7 +2,6 @@ package asset
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -88,7 +87,9 @@ func (r *Repo) Get(ctx context.Context, assetID, householdID uuid.UUID) (*Asset,
 	return asset, nil
 }
 
-// Create inserts a new asset and writes an outbox event in a single transaction.
+// Create inserts a new asset. The asset.created outbox event is written by
+// the assets_enqueue_outbox trigger (migration 075), not here, so every write
+// path -- this one and the MCP tool layer -- enqueues exactly one event.
 func (r *Repo) Create(ctx context.Context, asset *Asset) (*Asset, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -129,26 +130,6 @@ rows, err := tx.Query(ctx,
 		return nil, fmt.Errorf("create asset: collect: %w", err)
 	}
 
-	// Build outbox payload.
-	payload, err := json.Marshal(map[string]any{
-		"asset_id":      created.ID.String(),
-		"name":          created.Name,
-		"category":      created.Category,
-		"household_id":  created.HouseholdID.String(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create asset: marshal outbox payload: %w", err)
-	}
-
-	_, err = tx.Exec(ctx,
-		`INSERT INTO outbox_events (household_id, type, payload)
-		 VALUES ($1, $2, $3)`,
-		created.HouseholdID, "asset.created", payload,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create asset: outbox: %w", err)
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("create asset: commit: %w", err)
 	}
@@ -156,7 +137,8 @@ rows, err := tx.Query(ctx,
 	return created, nil
 }
 
-// Update modifies an existing asset and writes an outbox event in a single transaction.
+// Update modifies an existing asset. The asset.updated outbox event is written
+// by the assets_enqueue_outbox trigger (migration 075), not here.
 // Only non-nil fields in the input asset are applied (partial update).
 func (r *Repo) Update(ctx context.Context, assetID, householdID uuid.UUID, updates *Asset) (*Asset, error) {
 	tx, err := r.pool.Begin(ctx)
@@ -237,26 +219,6 @@ func (r *Repo) Update(ctx context.Context, assetID, householdID uuid.UUID, updat
 	).Scan(&existing.PropertyID, &existing.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("update asset: exec: %w", err)
-	}
-
-	// Build outbox payload.
-	payload, err := json.Marshal(map[string]any{
-		"asset_id":      assetID.String(),
-		"name":          existing.Name,
-		"category":      existing.Category,
-		"household_id":  householdID.String(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("update asset: marshal outbox payload: %w", err)
-	}
-
-	_, err = tx.Exec(ctx,
-		`INSERT INTO outbox_events (household_id, type, payload)
-		 VALUES ($1, $2, $3)`,
-		householdID, "asset.updated", payload,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("update asset: outbox: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
