@@ -23,9 +23,20 @@ import type { Page } from "@playwright/test";
  * /welcome is a PROTECTED path (middleware.ts): the person is signed in and
  * simply has no family yet, so the guard must let them through on their
  * session cookie rather than bounce them to /login. The spec reaches it with a
- * signed-in stub session and nothing seeded — which is exactly the no-family
- * state the stub answers by default (an empty household list).
+ * signed-in stub session seeded with NO families — the empty household list is
+ * what marks somebody as a newcomer, and it is the only state that may show
+ * the wizard (#5409: every other session keeps the stub's seed household, so
+ * without this the page would (correctly) send them to Today).
+ *
+ * What this spec pins about that rule:
+ *  5. A MEMBER IS NEVER TOLD THEY HAVE NO FAMILY. Opening /welcome with a
+ *     family lands on Today; the wizard is not shown at all.
+ *  6. ONE PRIMARY CTA. The first screen has the card's "Start a family hub"
+ *     and no second identical button pinned at the bottom until the page is
+ *     scrolled (#5409's duplicate-CTA defect).
  */
+
+import { seedHouseholds, SESSION_COOKIE } from "./fixtures";
 
 const PHONE = { width: 390, height: 844 };
 
@@ -60,8 +71,21 @@ async function openWizard(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
-test.beforeEach(async ({ page }) => {
+/**
+ * Makes this session an account with no family yet — the only state the wizard
+ * is for (#5409). Every other session keeps the stub's seed household.
+ */
+async function seedNoFamily(page: Page, request: Parameters<typeof seedHouseholds>[0]): Promise<void> {
+  const token = (await page.context().cookies()).find((c) => c.name === SESSION_COOKIE)?.value ?? "";
+  const sid = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8")).sid as string;
+  await seedHouseholds(request, sid, []);
+}
+
+test.beforeEach(async ({ page, request, stubSid }) => {
   await page.setViewportSize(PHONE);
+  // Stub mode only: a familyless account is created per session, and external
+  // mode has only the one seeded member (the member test at the end covers it).
+  if (stubSid) await seedNoFamily(page, request);
 });
 
 test("a new family is created from the wizard and the person lands on Today", async ({
@@ -214,3 +238,62 @@ test("every step fits a phone and its actions are finger-sized", async ({ logged
     expect(box!.height).toBeGreaterThanOrEqual(44);
   }
 });
+
+/**
+ * #5409 defect 1. The page used to state "you're not part of a family yet" to
+ * everyone who reached it, because nothing checked membership. An owner who
+ * came back (Back, a bookmark, a stale link) was offered a second hub.
+ */
+test("a member who opens /welcome is sent to Today, never told they have no family", async ({
+  loggedInPage: page,
+  request,
+  stubSid,
+}) => {
+  test.skip(!stubSid, "seeds the session's families in the stub");
+  // Give this session a real family: the state an established member is in.
+  await seedFamily(page, request);
+
+  await page.goto("/welcome");
+  await page.waitForURL(/\/dashboard(\/|\?|$)/, { timeout: 30_000 });
+
+  // And the lie is gone from the DOM, not merely behind a redirect.
+  await expect(page.getByText(/not part of a family yet/i)).toHaveCount(0);
+  await expect(page.getByRole("heading", { level: 1, name: /Welcome to Home OS/i })).toHaveCount(0);
+  // Today, with the family they already have.
+  await expect(page.locator("header").getByRole("heading", { level: 1, name: "Today" })).toBeVisible();
+});
+
+/**
+ * #5409 defect 2. On the welcome step the card and the pinned bottom bar both
+ * said "Start a family hub" one screen apart, which pushed everyone toward a
+ * new hub — including people invited to an existing one. The card is above the
+ * fold, so the bar simply does not draw on this step (the ticket allowed
+ * "after scroll, or drop it"; the first screen does not scroll at 390x844, so
+ * a bar that only appears after scrolling would never appear at all).
+ */
+test("the first screen has exactly one Start button, and it is the card", async ({ loggedInPage: page }) => {
+  onlyOn("phone");
+  await openWizard(page);
+
+  const start = page.getByRole("button", { name: /Start a family hub/i });
+  await expect(start).toHaveCount(1);
+  await expect(start).toBeVisible();
+  // The card is the one that carries the explanation, so that is the one kept.
+  await expect(start).toContainText(/Start a family hub/);
+  await expect(page.getByText(/For your household\. You'll be its owner/i)).toBeVisible();
+
+  // The pinned action bar is for WIZARD steps, where the action can scroll away.
+  // Nothing is pinned over this screen even at the bottom of the document.
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await page.waitForTimeout(300);
+  await expect(start).toHaveCount(1);
+});
+
+/** Seeds one family into this session, the way an established member's looks. */
+async function seedFamily(page: Page, request: Parameters<typeof seedHouseholds>[0]): Promise<void> {
+  const token = (await page.context().cookies()).find((c) => c.name === SESSION_COOKIE)?.value ?? "";
+  const sid = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8")).sid as string;
+  await seedHouseholds(request, sid, [
+    { id: "0b9d4f1e-6a3c-4b8e-9f52-1c7d2a5e8b10", name: "Sims family", role: "owner", timezone: "America/Chicago" },
+  ]);
+}

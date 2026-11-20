@@ -40,10 +40,20 @@
  * does too (#4574): every cached query and the BFF's household header belong
  * to the family that no longer exists, and a reload is the cheapest way to be
  * certain none of them survive.
+ *
+ * WHO THIS SCREEN IS FOR (#5409). Only someone who really has no family. The
+ * page used to assume it, so an owner who came back — the Back button, a
+ * bookmark, a stale notification link — was told "you're not part of a family
+ * yet" and offered a second hub. Membership is read from the app's one
+ * household source, GET /api/v1/me/households (useMyHouseholds), and never
+ * from the `home-os-household` cookie: the auth callback CLEARS that cookie on
+ * every sign-in (#4574, the #5307 race), so it is exactly the thing that is
+ * unknown right after signing in. A member is sent to Today; a read that
+ * failed says so rather than guessing "no family" (welcomeState, lib/welcome).
  */
 
-import { useCallback, useMemo, useRef, useState } from "react";
-import { Button } from "@mantine/core";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button, Skeleton } from "@mantine/core";
 import {
   IconAlertTriangle,
   IconCheck,
@@ -54,9 +64,11 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import HomeMark from "@/components/shared/HomeMark";
+import { useMyHouseholds } from "@/components/shared/use-nav-role";
 import { apiFetch, ApiError } from "@/lib/api";
 import { writeHouseholdCookie } from "@/lib/household-cookie";
 import { householdToday } from "@/lib/today/agenda";
+import { welcomeState } from "@/lib/welcome/membership";
 import { personCreateBody } from "@/components/person/person-facts";
 
 const STROKE = 1.75;
@@ -146,6 +158,26 @@ export default function WelcomePage() {
   const [acceptUrl, setAcceptUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // Who is asking (#5409). `useMyHouseholds` is the one household source; its
+  // list is a fact about the CALLER, so it is not household-scoped data and
+  // needs no X-Household-ID to be right.
+  const households = useMyHouseholds();
+  const families = Array.isArray(households.data?.data)
+    ? households.data.data.length
+    : null;
+  const state = welcomeState({
+    isLoading: households.isLoading,
+    isError: households.isError,
+    families,
+  });
+
+  // A member does not belong on this screen: the wizard would create a second
+  // hub. A full navigation, not router.push, for the same reason the submit
+  // uses one — nothing cached here belongs to their family.
+  useEffect(() => {
+    if (state === "member") window.location.replace("/dashboard");
+  }, [state]);
+
   const patch = useCallback((changes: Partial<Draft>) => {
     setDraft((d) => ({ ...d, ...changes }));
     setError(null);
@@ -153,6 +185,12 @@ export default function WelcomePage() {
 
   const zones = useMemo(() => zoneOptions(draft.timezone), [draft.timezone]);
   const stepIndex = STEPS.indexOf(step);
+
+  // A read that failed is not a verdict (#5409): someone genuinely new must
+  // still be able to start, so the unknown screen offers the wizard explicitly
+  // rather than trapping them behind a failed request.
+  const [startAnyway, setStartAnyway] = useState(false);
+  const showWizard = state === "newcomer" || (state === "unknown" && startAnyway);
 
   const goTo = (next: Step) => {
     setError(null);
@@ -346,6 +384,17 @@ export default function WelcomePage() {
       </header>
 
       <main className="mx-auto w-full max-w-[640px] flex-1 px-4 py-6">
+        {/* ── Who is asking (#5409) ──────────────────────────────
+            Only a real newcomer is offered the wizard. "Checking" is the
+            first paint (the list has not answered), "unknown" is a read that
+            failed: neither may say anything about the family, because
+            "we don't know" is not "you have no family". */}
+        {!showWizard ? (
+          // `state` cannot be "newcomer" here (showWizard would be true), so
+          // the gate gets the three states it draws; a member is mid-redirect.
+          <WelcomeGate state={state} onStartAnyway={() => setStartAnyway(true)} />
+        ) : (
+        <>
         {/* ── Welcome ─────────────────────────────────────────────── */}
         {step === "start" && (
           <section aria-labelledby="ob-h">
@@ -663,53 +712,105 @@ export default function WelcomePage() {
             {error}
           </p>
         )}
+        </>
+        )}
       </main>
 
       {/* The artifact's `.onb-act`: on a phone it is pinned to the bottom with
-          the safe-area inset, so the primary action never scrolls away. */}
-      <div className="sticky bottom-0 border-t border-line bg-surface px-4 pb-[calc(12px+env(safe-area-inset-bottom,0px))] pt-3 md:static md:border-0 md:bg-transparent md:pb-8 md:pt-0">
-        <div className="mx-auto flex max-w-[608px] items-center gap-2">
-          {step === "start" ? (
-            <Button fullWidth size="md" onClick={() => goTo("family")} className="min-h-12">
-              Start a family hub
+          the safe-area inset, so a wizard step's action never scrolls away.
+          NOT on the first screen (#5409). There the card above is already a
+          full-size "Start a family hub", and a second identical handler one
+          screen below it was two primary CTAs for one job — and the pinned one
+          biased everyone toward creating a new hub, including the people who
+          had been invited to an existing one. The card is above the fold, so
+          nothing is lost by not repeating it. */}
+      {showWizard && step !== "start" && (
+        <div className="sticky bottom-0 border-t border-line bg-surface px-4 pb-[calc(12px+env(safe-area-inset-bottom,0px))] pt-3 md:static md:border-0 md:bg-transparent md:pb-8 md:pt-0">
+          <div className="mx-auto flex max-w-[608px] items-center gap-2">
+            <Button
+              variant="default"
+              onClick={() => goTo(STEPS[stepIndex - 1])}
+              disabled={submitting}
+              leftSection={<IconChevronLeft size={18} />}
+              aria-label="Back"
+              className="min-h-12"
+            >
+              <span className="max-md:hidden">Back</span>
             </Button>
-          ) : (
-            <>
+            <span className="flex-1" />
+            {/* Optional steps can be left empty; the family step cannot. */}
+            {step !== "family" && step !== "done" && (
               <Button
-                variant="default"
-                onClick={() => goTo(STEPS[stepIndex - 1])}
+                variant="subtle"
+                onClick={() => goTo(STEPS[stepIndex + 1])}
                 disabled={submitting}
-                leftSection={<IconChevronLeft size={18} />}
-                aria-label="Back"
                 className="min-h-12"
               >
-                <span className="max-md:hidden">Back</span>
+                Skip
               </Button>
-              <span className="flex-1" />
-              {/* Optional steps can be left empty; the family step cannot. */}
-              {step !== "family" && step !== "done" && (
-                <Button
-                  variant="subtle"
-                  onClick={() => goTo(STEPS[stepIndex + 1])}
-                  disabled={submitting}
-                  className="min-h-12"
-                >
-                  Skip
-                </Button>
-              )}
-              <Button
-                onClick={doneAction}
-                loading={submitting}
-                disabled={submitting || acceptUrl !== null}
-                className="min-h-12 md:min-w-40"
-              >
-                {primaryLabel()}
-              </Button>
-            </>
-          )}
+            )}
+            <Button
+              onClick={doneAction}
+              loading={submitting}
+              disabled={submitting || acceptUrl !== null}
+              className="min-h-12 md:min-w-40"
+            >
+              {primaryLabel()}
+            </Button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
+  );
+}
+
+/**
+ * The first screen when this person may not be offered the wizard (#5409).
+ *
+ * "checking" is the first paint and renders a skeleton, not a claim: the list
+ * has not answered, so nothing is known about the family. "unknown" says the
+ * read failed and gives a way to try again — never "start a hub", which is how
+ * an owner with a family got told they had none. A member is already being
+ * sent to Today by the page's effect; it renders nothing while that happens.
+ */
+function WelcomeGate({
+  state,
+  onStartAnyway,
+}: {
+  /** Never "newcomer": that state renders the wizard instead of this gate. */
+  state: "checking" | "unknown" | "member";
+  /** Only the unknown screen offers it: a failed read must not trap a newcomer. */
+  onStartAnyway: () => void;
+}) {
+  if (state === "member") return null;
+  if (state === "checking") {
+    return (
+      <div aria-busy="true" data-welcome-checking>
+        <span className="sr-only">Checking whether you already have a family…</span>
+        <Skeleton height={30} width={220} radius="sm" mb="md" />
+        <Skeleton height={72} radius="md" mb="sm" />
+        <Skeleton height={72} radius="md" />
+      </div>
+    );
+  }
+  return (
+    <section aria-labelledby="ob-h" data-welcome-unknown>
+      <h1 id="ob-h" className={H1}>
+        We can&apos;t tell which family you&apos;re in
+      </h1>
+      <p className={SUB}>
+        Home OS couldn&apos;t read your families just now, so this screen won&apos;t guess. If
+        you already belong to one, trying again usually fixes it.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button onClick={() => window.location.reload()} className="min-h-11">
+          Try again
+        </Button>
+        <Button variant="default" onClick={onStartAnyway} className="min-h-11">
+          Start a family hub
+        </Button>
+      </div>
+    </section>
   );
 }
 

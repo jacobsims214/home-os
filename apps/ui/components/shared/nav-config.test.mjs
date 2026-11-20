@@ -121,6 +121,38 @@ test("pageTitle", () => {
   assert.equal(pageTitle("/somewhere"), "Home OS");
 });
 
+// #5409: the shell draws every page's h1 from pageTitle, so a route with no
+// entry here shipped the wrong one — /dashboard/guides read "Home OS" (the
+// app's name) and every settings sub-route read "Settings" (the parent's),
+// which named the same page six times over in the document outline.
+test("pageTitle names each page, not its section or the app", () => {
+  assert.equal(pageTitle("/dashboard/guides"), "Guides");
+  assert.equal(pageTitle("/dashboard/guides/abc-123"), "Guides");
+  for (const [path, title] of [
+    ["/dashboard/settings/household", "Household"],
+    ["/dashboard/settings/members", "Members"],
+    ["/dashboard/settings/credentials", "Credentials"],
+    ["/dashboard/settings/phone-calendar", "Phone calendar"],
+    ["/dashboard/settings/agent-tokens", "Agent tokens"],
+    ["/dashboard/settings/account", "Account"],
+  ]) {
+    assert.equal(pageTitle(path), title, path);
+  }
+  // A segment that is not a section keeps the parent's title (the page says
+  // "that section doesn't exist" and is still Settings).
+  assert.equal(pageTitle("/dashboard/settings/not-a-section"), "Settings");
+});
+
+// The header's title and the section page's own heading must not disagree:
+// both name the section with the same word (settings-sections.ts is the list
+// the SettingsFrame and the index render from).
+test("each settings sub-route's title is its section's label", async () => {
+  const { SETTINGS_SECTIONS } = await import("../settings/settings-sections.ts");
+  for (const section of SETTINGS_SECTIONS) {
+    assert.equal(pageTitle(section.path), section.label, section.path);
+  }
+});
+
 test("every section has an icon and a /dashboard href", () => {
   for (const s of NAV_SECTIONS) {
     assert.ok(s.icon, s.id);

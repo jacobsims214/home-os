@@ -241,6 +241,22 @@ const ROUTE_TITLES: ReadonlyArray<[prefix: string, title: string]> = [
   // section of its own — the header still reads "Family activity", and the tab
   // bar keeps Today current (activeSection falls back to Today for it).
   ["/dashboard/activity", "Family activity"],
+  // Guides (#4570) is a real page with no nav section of its own (#5199), so
+  // without this entry the header h1 fell through to "Home OS" — the app's
+  // name instead of the page's, which is what #5409 found. It sits below
+  // Documents here because a guide keeps the list's title, like a recipe.
+  ["/dashboard/guides", "Guides"],
+  // Settings' sub-routes (#4560). Each section page draws its body under this
+  // header, so without these the h1 read "Settings" on all six and the
+  // document outline named the same page everywhere (#5409). The labels are
+  // the ones in SETTINGS_SECTIONS (components/settings/settings-sections.ts),
+  // which is what the section page's own h2 shows — keep the two in step.
+  ["/dashboard/settings/household", "Household"],
+  ["/dashboard/settings/members", "Members"],
+  ["/dashboard/settings/credentials", "Credentials"],
+  ["/dashboard/settings/phone-calendar", "Phone calendar"],
+  ["/dashboard/settings/agent-tokens", "Agent tokens"],
+  ["/dashboard/settings/account", "Account"],
 ];
 
 function underPrefix(pathname: string, prefix: string): boolean {

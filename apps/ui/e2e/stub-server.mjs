@@ -28,6 +28,10 @@
  *                          first), /households/me answers the active one and
  *                          /bills returns the active household's rows. Without
  *                          it, every session keeps the single seed household.
+ *                          An EMPTY list is allowed and means "this account
+ *                          belongs to no family yet" — the state /welcome's
+ *                          wizard is for (#5409), which no other session can
+ *                          produce.
  *                          householdHeaders in /e2e/stats is what the API saw:
  *                          one {sid, path, household} per API request, so a spec
  *                          can prove the BFF scoped a request to a family.
@@ -401,8 +405,11 @@ const server = createServer(async (req, res) => {
 
   if (path === "/e2e/households" && req.method === "POST") {
     const { sid, households } = JSON.parse((await readBody(req)) || "{}");
-    if (!sid || !Array.isArray(households) || households.length === 0) {
-      return send(res, 400, { error: "sid and a non-empty households list are required" });
+    // An empty list is a real state, not a mistake: an account that belongs to
+    // no family yet (#5409). Requiring a non-empty list made "familyless"
+    // unreachable, which is how /welcome went on assuming everybody was new.
+    if (!sid || !Array.isArray(households)) {
+      return send(res, 400, { error: "sid and a households list are required" });
     }
     sessionHouseholds.set(sid, households);
     return send(res, 201, { ok: true });
