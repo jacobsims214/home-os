@@ -264,23 +264,29 @@ test("a member who opens /welcome is sent to Today, never told they have no fami
 });
 
 /**
- * #5409 defect 2. Signed out/in on the welcome step, the card and the pinned
- * bottom bar both said "Start a family hub" one screen apart, which pushed
- * everyone toward a new hub — including people invited to an existing one.
+ * #5409 defect 2. On the welcome step the card and the pinned bottom bar both
+ * said "Start a family hub" one screen apart, which pushed everyone toward a
+ * new hub — including people invited to an existing one. The card is above the
+ * fold, so the bar simply does not draw on this step (the ticket allowed
+ * "after scroll, or drop it"; the first screen does not scroll at 390x844, so
+ * a bar that only appears after scrolling would never appear at all).
  */
-test("the first screen has one Start button until the page is scrolled", async ({ loggedInPage: page }) => {
+test("the first screen has exactly one Start button, and it is the card", async ({ loggedInPage: page }) => {
   onlyOn("phone");
   await openWizard(page);
 
   const start = page.getByRole("button", { name: /Start a family hub/i });
-  // One primary CTA, and it is the card above the fold.
   await expect(start).toHaveCount(1);
   await expect(start).toBeVisible();
+  // The card is the one that carries the explanation, so that is the one kept.
+  await expect(start).toContainText(/Start a family hub/);
+  await expect(page.getByText(/For your household\. You'll be its owner/i)).toBeVisible();
 
-  // The pinned bar is for "the action scrolled away": it comes back only then.
+  // The pinned action bar is for WIZARD steps, where the action can scroll away.
+  // Nothing is pinned over this screen even at the bottom of the document.
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  await page.waitForFunction(() => window.scrollY > 24, undefined, { timeout: 5_000 });
-  await expect(start).toHaveCount(2);
+  await page.waitForTimeout(300);
+  await expect(start).toHaveCount(1);
 });
 
 /** Seeds one family into this session, the way an established member's looks. */
