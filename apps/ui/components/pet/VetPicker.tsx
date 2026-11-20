@@ -149,7 +149,7 @@ function VetSheet({
       <form onSubmit={submit} noValidate>
         <Stack gap="sm">
           {loading && (
-            <div aria-busy="true" aria-label="Loading vet contacts" className="space-y-2">
+            <div role="status" aria-busy="true" aria-label="Loading vet contacts" className="space-y-2">
               {[1, 2].map((i) => (
                 <Skeleton key={i} height={52} radius="md" />
               ))}

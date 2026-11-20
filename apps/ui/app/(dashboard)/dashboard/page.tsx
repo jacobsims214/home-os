@@ -1255,7 +1255,7 @@ function parseCivilSafe(d: string): number | null {
 
 function TodaySkeleton() {
   return (
-    <div className="flex flex-col gap-6" aria-busy="true" aria-label="Loading Today" data-testid="today-skeleton">
+    <div className="flex flex-col gap-6" role="status" aria-busy="true" aria-label="Loading Today" data-testid="today-skeleton">
       <div className="flex flex-col gap-3.5 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <Skeleton width={230} height={26} radius="sm" />

@@ -118,7 +118,7 @@ export default function BillPage() {
 
   if (!access.known) {
     return (
-      <div aria-busy="true" aria-label="Loading bill">
+      <div role="status" aria-busy="true" aria-label="Loading bill">
         <Skeleton height={28} width="60%" radius="sm" mb="md" />
         <Skeleton height={160} radius="md" />
       </div>
@@ -150,7 +150,7 @@ export default function BillPage() {
 
   if (billQuery.isLoading || !bill) {
     return (
-      <div aria-busy="true" aria-label="Loading bill">
+      <div role="status" aria-busy="true" aria-label="Loading bill">
         <Skeleton height={28} width="60%" radius="sm" mb="md" />
         <Skeleton height={160} radius="md" />
       </div>
@@ -371,12 +371,15 @@ export default function BillPage() {
                 />
               )}
               {bill.notes && <Field label="Notes" value={bill.notes} />}
-              {!bill.account_number && !bill.notes && !bill.payment_url && (
-                <div className="px-4 py-3 text-[13px] text-ink-3 md:px-0" data-testid="bill-fields-empty">
-                  Nothing else recorded on this bill yet. {access.canWrite ? "Edit it to add an account number, a payment link or a note." : ""}
-                </div>
-              )}
             </dl>
+            {/* Outside the <dl>: a <dl> may only hold dt/dd (and div wrappers
+                around them), so this empty-state <div> inside it was a
+                definition-list violation (#4588). */}
+            {!bill.account_number && !bill.notes && !bill.payment_url && (
+              <div className="px-4 py-3 text-[13px] text-ink-3 md:px-0" data-testid="bill-fields-empty">
+                Nothing else recorded on this bill yet. {access.canWrite ? "Edit it to add an account number, a payment link or a note." : ""}
+              </div>
+            )}
           </section>
         </div>
 

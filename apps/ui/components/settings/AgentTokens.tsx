@@ -473,7 +473,7 @@ export default function AgentTokensSection() {
       />
 
       {isLoading && (
-        <div aria-busy="true" aria-label="Loading agent tokens">
+        <div role="status" aria-busy="true" aria-label="Loading agent tokens">
           <div className={classes.card}>
             <div className={classes.cardBody}>
               <Skeleton height={16} width="45%" radius="sm" />

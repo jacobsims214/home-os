@@ -520,7 +520,7 @@ export default function PersonDetailPage() {
       {!isEditing && head}
 
       {personQuery.isLoading && (
-        <Stack aria-busy="true" aria-label="Loading person">
+        <Stack role="status" aria-busy="true" aria-label="Loading person">
           <Skeleton height={64} radius="sm" />
           <Skeleton height={140} radius="sm" />
         </Stack>

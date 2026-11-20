@@ -232,7 +232,7 @@ export default function PetsPage() {
       </div>
 
       {petsQuery.isLoading && (
-        <div aria-busy="true" aria-label="Loading pets" className="space-y-2">
+        <div role="status" aria-busy="true" aria-label="Loading pets" className="space-y-2">
           {[1, 2, 3].map((i) => (
             <div key={i} className="space-y-2 rounded-token-md border border-line bg-surface p-4 shadow-token-sm">
               <Skeleton height={14} width="45%" radius="sm" />

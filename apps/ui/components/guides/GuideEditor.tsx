@@ -432,7 +432,7 @@ export default function GuideEditor({
       {tab === "history" && (
         <div className="min-w-0">
           {revisions.isLoading && (
-            <div aria-busy="true" aria-label="Loading history" className="space-y-2">
+            <div role="status" aria-busy="true" aria-label="Loading history" className="space-y-2">
               {[1, 2].map((i) => (
                 <div key={i} className="rounded-token-md border border-line bg-surface p-3">
                   <Skeleton height={12} width="45%" radius="sm" />

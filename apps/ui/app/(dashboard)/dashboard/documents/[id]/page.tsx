@@ -897,7 +897,7 @@ function DownloadButton({ file }: { file: FileRecord }) {
 
 function DetailSkeleton() {
   return (
-    <div className="mx-auto w-full max-w-4xl" aria-busy="true" aria-label="Loading document">
+    <div className="mx-auto w-full max-w-4xl" role="status" aria-busy="true" aria-label="Loading document">
       <Skeleton height={16} width={110} mb="md" radius="sm" />
       <Group gap={14} mb="md" align="flex-start">
         <Skeleton height={56} width={56} radius="md" />

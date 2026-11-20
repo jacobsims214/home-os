@@ -251,7 +251,7 @@ export default function GuidePage() {
 
   if (isLoading) {
     return (
-      <div className="mx-auto w-full max-w-3xl" aria-busy="true" aria-label="Loading guide">
+      <div className="mx-auto w-full max-w-3xl" role="status" aria-busy="true" aria-label="Loading guide">
         <Skeleton height={20} width="60%" radius="sm" />
         <div className="mt-4 space-y-3">
           {[1, 2, 3].map((i) => (

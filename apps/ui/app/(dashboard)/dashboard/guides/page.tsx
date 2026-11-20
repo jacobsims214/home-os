@@ -253,7 +253,7 @@ export default function GuidesPage() {
       )}
 
       {isLoading && (
-        <div aria-busy="true" aria-label="Loading guides" className="space-y-2 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">
+        <div role="status" aria-busy="true" aria-label="Loading guides" className="space-y-2 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">
           {[1, 2, 3, 4].map((i) => (
             <div key={i} className="space-y-2 rounded-token-md border border-line bg-surface p-4 shadow-token-sm">
               <Skeleton height={14} width="55%" radius="sm" />

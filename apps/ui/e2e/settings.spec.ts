@@ -80,12 +80,14 @@ test("an owner's phone: the index lists every section and each one opens", async
   await expect(index(page)).toBeVisible();
   const rows = index(page).getByRole("link");
   await expect(rows).toHaveCount(6);
+  // A row is named by its own text — title, then hint (#4588 removed the
+  // aria-label that replaced it, which also dropped the hint from the name).
   for (const name of ["Household", "Members", "Credentials", "Phone calendar", "Agent tokens", "Account"]) {
-    await expect(index(page).getByRole("link", { name: `${name} settings` })).toBeVisible();
+    await expect(index(page).getByRole("link", { name: new RegExp(`^${name}`) })).toBeVisible();
   }
 
   // Household: the manager form, pre-filled from GET /me/households.
-  await index(page).getByRole("link", { name: "Household settings" }).click();
+  await index(page).getByRole("link", { name: /^Household/ }).click();
   await expect(page).toHaveURL(/\/dashboard\/settings\/household$/);
   await expect(page.getByRole("heading", { level: 2, name: "Household" })).toBeVisible();
   await expect(page.getByLabel("Family name")).toHaveValue("Sims family");
@@ -105,13 +107,13 @@ test("an owner's phone: the index lists every section and each one opens", async
   // index -> section -> back, so Back must not strand anyone.
   await page.getByRole("link", { name: "Back to Settings" }).click();
   await expect(page).toHaveURL(/\/dashboard\/settings$/);
-  await index(page).getByRole("link", { name: "Account settings" }).click();
+  await index(page).getByRole("link", { name: /^Account/ }).click();
   await expect(page).toHaveURL(/\/dashboard\/settings\/account$/);
   await expect(page.getByRole("heading", { level: 2, name: "Account" })).toBeVisible();
   await expect(page.getByLabel("Email")).toHaveValue("e2e@homeos.test");
 
   await page.getByRole("link", { name: "Back to Settings" }).click();
-  await index(page).getByRole("link", { name: "Phone calendar settings" }).click();
+  await index(page).getByRole("link", { name: /^Phone calendar/ }).click();
   await expect(page.getByRole("button", { name: "Generate app password" })).toBeVisible();
 
   await expectNoHorizontalOverflow(page);
@@ -226,8 +228,8 @@ test("a family member sees the household settings read-only and cannot save", as
 
   // Sections this role cannot use are not in the index at all.
   await page.goto("/dashboard/settings");
-  await expect(index(page).getByRole("link", { name: "Credentials settings" })).toBeVisible();
-  await expect(index(page).getByRole("link", { name: "Members settings" })).toBeVisible();
+  await expect(index(page).getByRole("link", { name: /^Credentials/ })).toBeVisible();
+  await expect(index(page).getByRole("link", { name: /^Members/ })).toBeVisible();
 
   expect(writes).toEqual([]);
 });
@@ -244,8 +246,8 @@ test("a viewer is offered no credentials section, and its URL renders no vault",
   // Everything except Credentials, plus Agent tokens (a viewer may hold a
   // read-only one: the API grants ResAgentTokens ActCreate to rolesReaders).
   await expect(rows).toHaveCount(5);
-  await expect(index(page).getByRole("link", { name: "Credentials settings" })).toHaveCount(0);
-  await expect(index(page).getByRole("link", { name: "Agent tokens settings" })).toBeVisible();
+  await expect(index(page).getByRole("link", { name: /^Credentials/ })).toHaveCount(0);
+  await expect(index(page).getByRole("link", { name: /^Agent tokens/ })).toBeVisible();
 
   // Deep-linking the gated section is refused in the UI too: no probe of the
   // vault happens, because the section is not rendered.

@@ -375,7 +375,7 @@ export default function AssetDetailPage() {
       isSaving={save.isPending}
     >
       {assetQuery.isLoading && (
-        <Stack aria-busy="true" aria-label="Loading asset">
+        <Stack role="status" aria-busy="true" aria-label="Loading asset">
           <Skeleton height={72} radius="sm" />
           <Skeleton height={140} radius="sm" />
         </Stack>

@@ -41,9 +41,13 @@ export default function AuthLayout({
             Home OS
           </span>
         </div>
-        <div className="w-full max-w-[420px] md:rounded-token-lg md:border md:border-line md:bg-surface md:p-8 md:shadow-token-sm">
+        {/* <main>, not <div>: every page under (auth) is a standalone screen
+            with no other landmark, so without one there is nothing for "skip
+            to content" or a screen reader's landmark list to land on
+            (axe landmark-one-main, #4588). Same element box, same classes. */}
+        <main className="w-full max-w-[420px] md:rounded-token-lg md:border md:border-line md:bg-surface md:p-8 md:shadow-token-sm">
           {children}
-        </div>
+        </main>
         {/* The artifact's `.afoot`: it names the product and says the instance
             is self-hosted, which is the reassurance a family member signing in
             to someone's home server actually needs. The mockup writes "by the

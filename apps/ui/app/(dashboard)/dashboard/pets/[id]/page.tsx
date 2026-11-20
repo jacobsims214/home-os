@@ -379,7 +379,7 @@ export default function PetDetailPage() {
       {!isEditing && head}
 
       {petQuery.isLoading && (
-        <Stack aria-busy="true" aria-label="Loading pet">
+        <Stack role="status" aria-busy="true" aria-label="Loading pet">
           <Skeleton height={64} radius="sm" />
           <Skeleton height={140} radius="sm" />
         </Stack>

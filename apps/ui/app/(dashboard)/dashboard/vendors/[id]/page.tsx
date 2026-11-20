@@ -199,7 +199,7 @@ export default function ContactDetailPage() {
 
   if (contactQuery.isLoading) {
     return (
-      <div aria-busy="true" aria-label="Loading contact" className="mx-auto w-full max-w-2xl space-y-3">
+      <div role="status" aria-busy="true" aria-label="Loading contact" className="mx-auto w-full max-w-2xl space-y-3">
         <Skeleton height={20} width="55%" radius="sm" />
         <Skeleton height={14} width="35%" radius="sm" />
         <Skeleton height={96} radius="md" />

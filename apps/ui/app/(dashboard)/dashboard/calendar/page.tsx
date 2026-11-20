@@ -540,7 +540,7 @@ export default function CalendarPage() {
 
 function CalendarShellSkeleton() {
   return (
-    <div className="flex flex-col gap-4" aria-busy="true">
+    <div className="flex flex-col gap-4" role="status" aria-busy="true">
       <Skeleton height={40} radius="sm" />
       <Skeleton height={220} radius="md" />
       <Skeleton height={120} radius="md" />

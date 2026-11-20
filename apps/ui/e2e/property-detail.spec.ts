@@ -150,7 +150,8 @@ test("phone 390: add a room, then a thing in it", async ({ loggedInPage: page },
   await expect(kitchen).toContainText("0 things");
   await expect(utility).toContainText("1 thing");
   // A thing that belongs to the house itself is kept, not dropped.
-  await expect(main.getByRole("button", { name: /Not in a room, 1 thing/ })).toBeVisible();
+  // The card is named by its own text (#4588 dropped a paraphrasing aria-label).
+  await expect(main.getByRole("button", { name: /Not in a room\s+1 thing/ })).toBeVisible();
   for (const card of [kitchen, utility]) {
     const box = (await card.boundingBox())!;
     expect(box.height).toBeGreaterThanOrEqual(43.5);
@@ -230,7 +231,7 @@ test("phone 390: a thing with no room is added without room_id", async ({ logged
 
   // room_id absent, not "" — the API treats an empty string as a value.
   expect(writes.things).toEqual([{ name: "Sump pump", property_id: "p1" }]);
-  await expect(main.getByRole("button", { name: /Not in a room, 2 things/ })).toBeVisible();
+  await expect(main.getByRole("button", { name: /Not in a room\s+2 things/ })).toBeVisible();
 });
 
 test("phone 390: a house with no rooms yet says how to start", async ({ loggedInPage: page }, testInfo) => {

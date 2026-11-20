@@ -255,7 +255,7 @@ export default function PeoplePage() {
       </div>
 
       {peopleQuery.isLoading && (
-        <div aria-busy="true" aria-label="Loading people" className="space-y-2">
+        <div role="status" aria-busy="true" aria-label="Loading people" className="space-y-2">
           {[1, 2, 3].map((i) => (
             <div key={i} className="space-y-2 rounded-token-md border border-line bg-surface p-4 shadow-token-sm">
               <Skeleton height={14} width="50%" radius="sm" />

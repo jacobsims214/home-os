@@ -402,7 +402,7 @@ export default function LoanDetailPage() {
       isSaving={save.isPending}
     >
       {loanQuery.isLoading && (
-        <Stack aria-busy="true" aria-label="Loading loan">
+        <Stack role="status" aria-busy="true" aria-label="Loading loan">
           <Skeleton height={72} radius="sm" />
           <Skeleton height={140} radius="sm" />
         </Stack>

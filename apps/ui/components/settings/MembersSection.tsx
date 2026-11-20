@@ -37,7 +37,6 @@ export default function MembersSection() {
             icon={IconUsers}
             title="Members and invites"
             hint={canManage ? "See everyone, invite someone, change a role" : "See who's in the family"}
-            label="Open Members"
           />
         </li>
       </ul>

@@ -604,7 +604,7 @@ export default function MaintenanceKanban({ canChangeStatus = true, canEdit = tr
 
   if (isLoading) {
     return (
-      <div className="mx-auto w-full max-w-3xl" aria-busy="true" aria-label="Loading maintenance tasks">
+      <div className="mx-auto w-full max-w-3xl" role="status" aria-busy="true" aria-label="Loading maintenance tasks">
         <Skeleton height={28} width={140} radius="sm" mb="md" />
         <Skeleton height={220} radius="md" />
       </div>

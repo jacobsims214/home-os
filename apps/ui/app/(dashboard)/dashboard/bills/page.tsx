@@ -84,7 +84,7 @@ export default function BillsPage() {
   // at a housesitter (#4574's rule for every role-gated page).
   if (!access.known) {
     return (
-      <div className="mx-auto w-full max-w-3xl" aria-busy="true" aria-label="Loading bills">
+      <div className="mx-auto w-full max-w-3xl" role="status" aria-busy="true" aria-label="Loading bills">
         <Skeleton height={28} width={140} radius="sm" mb="md" />
         <Skeleton height={120} radius="md" />
       </div>

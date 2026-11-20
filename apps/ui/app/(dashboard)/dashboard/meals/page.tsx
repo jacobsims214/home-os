@@ -512,8 +512,11 @@ function DayRow({
         borderBottom: isLast ? "none" : "1px solid var(--line)",
         background: day.isToday ? "var(--surface-2)" : "transparent",
         // A gone day is history: it stays readable (it is what the family ate)
-        // but stops competing with the days that can still be planned.
-        opacity: day.isPast ? 0.72 : 1,
+        // but stops competing with the days that can still be planned. It used
+        // to be dimmed with opacity 0.72, which dropped its 12 px labels to
+        // 3.05:1 and 3.93:1 on white — under WCAG AA's 4.5:1 (#4588). The
+        // de-emphasis is now the token colours the row already carries
+        // (--ink-2 / --ink-3), which pass on their own.
       }}
     >
       <div style={{ paddingTop: 4 }} aria-label={day.isToday ? `Today, ${day.long}` : day.long}>

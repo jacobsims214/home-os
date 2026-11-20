@@ -546,7 +546,7 @@ function RenameModal({
 
 function ListSkeleton() {
   return (
-    <div aria-busy="true" className="min-w-0">
+    <div role="status" aria-busy="true" className="min-w-0">
       <div className="flex items-start gap-3">
         <span className="size-10 shrink-0 rounded-token-md bg-surface-2" />
         <div className="flex-1">

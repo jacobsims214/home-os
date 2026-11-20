@@ -590,7 +590,7 @@ export default function AdminPage() {
   // admin console for an account that may not have it.
   if (me.isLoading) {
     return (
-      <div className="mx-auto w-full max-w-6xl" aria-busy="true" aria-label="Loading">
+      <div className="mx-auto w-full max-w-6xl" role="status" aria-busy="true" aria-label="Loading">
         <Skeleton height={28} width={220} radius="sm" mb="md" />
         <Skeleton height={120} radius="md" />
       </div>
@@ -707,7 +707,7 @@ export default function AdminPage() {
           </div>
 
           {loading && (
-            <div aria-busy="true" aria-label="Loading users" className="space-y-2">
+            <div role="status" aria-busy="true" aria-label="Loading users" className="space-y-2">
               {[1, 2, 3].map((i) => (
                 <div key={i} className="rounded-token-md border border-line bg-surface p-4 shadow-token-sm">
                   <Skeleton height={14} width="45%" radius="sm" />

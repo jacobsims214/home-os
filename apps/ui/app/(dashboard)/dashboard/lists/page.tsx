@@ -480,7 +480,7 @@ function NewListSheet({
 
 function IndexSkeleton() {
   return (
-    <div aria-busy="true">
+    <div role="status" aria-busy="true">
       <div className="mb-4 flex gap-1.5">
         {[72, 88, 74, 66].map((w, i) => (
           <span key={i} className="h-9 rounded-full bg-surface-2" style={{ width: w }} />

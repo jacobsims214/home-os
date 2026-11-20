@@ -273,7 +273,9 @@ function CategoryRow({
           leftSection={<IconEdit size={15} />}
           onClick={() => onEdit(group)}
           className="mt-2 max-md:min-h-11"
-          aria-label={`Edit the ${group.name} budget`}
+          /* The visible words first: WCAG 2.5.3 wants the text a person reads
+             inside the accessible name (axe label-content-name-mismatch). */
+          aria-label={`Edit budget, ${group.name}`}
         >
           Edit budget
         </Button>
@@ -468,7 +470,7 @@ export default function MoneyPage() {
   // at a housesitter (#4574's rule for every role-gated page).
   if (!access.known) {
     return (
-      <div className="mx-auto w-full max-w-5xl" aria-busy="true" aria-label="Loading money">
+      <div className="mx-auto w-full max-w-5xl" role="status" aria-busy="true" aria-label="Loading money">
         <Skeleton height={28} width={140} radius="sm" mb="md" />
         <Skeleton height={180} radius="md" />
       </div>
@@ -494,7 +496,11 @@ export default function MoneyPage() {
             onClick={() => shownMonth && setMonth(stepMonth(shownMonth, -1))}
             disabled={!shownMonth}
             aria-label={shownMonth ? `Previous month, ${monthLabel(stepMonth(shownMonth, -1))}` : "Previous month"}
-            className="size-11 px-0"
+            /* 44 px, set on the element: Mantine's compact-md height (30 px)
+               wins over the size-11 utility, and this is the control a thumb
+               hits most on this page (#4588, target-size). */
+            style={{ width: 44, height: 44 }}
+            className="px-0"
           >
             <IconChevronLeft size={18} stroke={STROKE} aria-hidden />
           </Button>
@@ -510,7 +516,8 @@ export default function MoneyPage() {
             onClick={() => shownMonth && setMonth(stepMonth(shownMonth, 1))}
             disabled={!shownMonth}
             aria-label={shownMonth ? `Next month, ${monthLabel(stepMonth(shownMonth, 1))}` : "Next month"}
-            className="size-11 px-0"
+            style={{ width: 44, height: 44 }}
+            className="px-0"
           >
             <IconChevronRight size={18} stroke={STROKE} aria-hidden />
           </Button>
@@ -518,7 +525,7 @@ export default function MoneyPage() {
       </div>
 
       {obligations.isLoading && (
-        <div aria-busy="true" aria-label="Loading this month's numbers" className="mb-6 space-y-3">
+        <div role="status" aria-busy="true" aria-label="Loading this month's numbers" className="mb-6 space-y-3">
           <Skeleton height={180} radius="md" />
           <Skeleton height={92} radius="md" />
         </div>

@@ -264,7 +264,7 @@ export default function SearchPage() {
 
       {/* ── Loading ──────────────────────────────────────────── */}
       {state === "loading" && (
-        <Stack gap="sm" aria-busy="true" aria-label="Searching" data-search-state="loading">
+        <Stack gap="sm" role="status" aria-busy="true" aria-label="Searching" data-search-state="loading">
           {[0, 1].map((i) => (
             <div key={i}>
               <Skeleton height={16} width={110} radius="sm" mb={8} />

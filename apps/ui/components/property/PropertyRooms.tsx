@@ -188,7 +188,9 @@ export default function PropertyRooms({
             <button
               type="button"
               data-room-loose
-              aria-label={`Not in a room, ${thingsLabel(notInARoom.length)}`}
+              /* No aria-label: the card's own text (name, count and the
+                 things in it) is its accessible name, which is what WCAG
+                 2.5.3 asks for and what it reads out loud anyway (#4588). */
               onClick={() => setOpenKey(LOOSE_KEY)}
               className="flex min-h-24 w-full flex-col items-start gap-2 rounded-token-md border border-dashed border-line p-3.5 text-left transition-colors hover:bg-surface-2 active:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
             >

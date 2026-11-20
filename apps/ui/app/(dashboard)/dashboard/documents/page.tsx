@@ -507,7 +507,7 @@ function SectionHeading({ id, title, count }: { id: string; title: string; count
 
 function LoadingHub() {
   return (
-    <div aria-busy="true" aria-label="Loading documents" data-documents-loading>
+    <div role="status" aria-busy="true" aria-label="Loading documents" data-documents-loading>
       <Skeleton height={16} width={140} mb="sm" radius="sm" />
       <Skeleton height={200} radius="md" mb="lg" />
       <Skeleton height={16} width={110} mb="sm" radius="sm" />
