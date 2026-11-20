@@ -11,11 +11,16 @@
  * Lists, Documents and Guides with `comingSoon: true`, which the shell rendered
  * as a "Soon" pill / "Coming soon" tile: placeholder copy shipped to a family,
  * advertising features the build did not have (artifact #168, D7/D8; the
- * approved artifact has no such badge anywhere). Guides and Lists still have no
- * page, so they are simply not in the list — a hidden destination is honest, a
- * badge saying "soon" is a promise. There is deliberately no flag for
- * "planned but unbuilt": a section is added back when its route exists, and a
- * test walks the filesystem to prove every href resolves.
+ * approved artifact has no such badge anywhere). There is deliberately no flag
+ * for "planned but unbuilt": a section is added back when its route exists, and
+ * a test walks the filesystem to prove every href resolves.
+ *
+ * Every one of those three has come back since, each when its page landed:
+ * Lists in #4566, Documents in #4569, and Guides in #5408. Guides is the case
+ * that made the rule hurt: /dashboard/guides shipped in #4570 and was reachable
+ * only by typing the URL, because the shell draws itself from this list and the
+ * list had no entry for it. A page that exists and a section that is defined
+ * are one decision, so add them together (#5408).
  *
  * Documents came back in #4569, when /dashboard/documents landed: it sits in
  * the Household group between Meals and People & House, exactly as the approved
@@ -27,6 +32,7 @@
  */
 import type { Icon } from "@tabler/icons-react";
 import {
+  IconBook,
   IconCalendar,
   IconChecklist,
   IconFiles,
@@ -70,6 +76,7 @@ export type NavSectionId =
   | "documents"
   | "people"
   | "money"
+  | "guides"
   | "settings";
 
 export interface NavSection {
@@ -185,6 +192,25 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     group: "household",
     matches: ["/dashboard/money", "/dashboard/loans"],
     roles: READERS,
+  },
+  {
+    // #5408: Guides is the family's how-tos and runbooks (/dashboard/guides,
+    // #4570). It sits last in the Household group, where the approved shell
+    // draws it (artifact #75 v1), and it is the tile the More sheet was missing:
+    // before this, no nav surface anywhere in the app linked to the page.
+    //
+    // The roles are the page's own read grant, not a guess: guides read is
+    // ResGuides = rolesSitter in apps/api/internal/auth/roles.go, i.e. family +
+    // viewer + housesitter, and writes are family only (#4689). A housesitter
+    // reading "reset the router" is the whole reason guides exist, so the
+    // section is SITTERS — the same grant as Calendar, Meals and Lists. A vendor
+    // has no read grant and does not see the section.
+    id: "guides",
+    label: "Guides",
+    href: "/dashboard/guides",
+    icon: IconBook,
+    group: "household",
+    roles: SITTERS,
   },
   { id: "settings", label: "Settings", href: "/dashboard/settings", icon: IconSettings, group: "you", matches: ["/dashboard/admin"] },
 ];
