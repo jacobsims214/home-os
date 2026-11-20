@@ -235,12 +235,19 @@ export function guideSubtitle(guide: Pick<Guide, "summary" | "body">): string | 
   return first ?? null;
 }
 
-/** "Nov 18, 2026" — a save date, never a time a reader has to convert. */
+/**
+ * "Nov 18, 2026" — a save date, never a time a reader has to convert.
+ *
+ * `timeZone: "UTC"` because this renders a stored CIVIL date, not a moment in
+ * the reader's day: without it the same revision would read as a different day
+ * for a browser west of UTC (the defect class #5316 guards). Same rule as
+ * notification-model.ts's date label.
+ */
 export function formatGuideDate(iso: string | null | undefined): string | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
-  return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
 }
 
 /**

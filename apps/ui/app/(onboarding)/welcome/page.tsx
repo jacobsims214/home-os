@@ -42,7 +42,7 @@
  * certain none of them survive.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Button } from "@mantine/core";
 import {
   IconAlertTriangle,
@@ -56,6 +56,7 @@ import {
 import HomeMark from "@/components/shared/HomeMark";
 import { apiFetch, ApiError } from "@/lib/api";
 import { writeHouseholdCookie } from "@/lib/household-cookie";
+import { householdToday } from "@/lib/today/agenda";
 import { personCreateBody } from "@/components/person/person-facts";
 
 const STROKE = 1.75;
@@ -462,7 +463,11 @@ export default function WelcomePage() {
               Add everyone, kids included, so events, allergies and school things have someone to
               belong to. This doesn&apos;t give anyone a login.
             </p>
-            <PeopleEditor people={draft.people} onChange={(people) => patch({ people })} />
+            <PeopleEditor
+              people={draft.people}
+              onChange={(people) => patch({ people })}
+              timezone={draft.timezone}
+            />
           </section>
         )}
 
@@ -733,14 +738,22 @@ function SummaryRow({ label, meta }: { label: string; meta: string }) {
 function PeopleEditor({
   people,
   onChange,
+  timezone,
 }: {
   people: DraftPerson[];
   onChange: (people: DraftPerson[]) => void;
+  /** The family's zone from step 1: an age is a civil-day fact (#5316). */
+  timezone: string;
 }) {
   const [name, setName] = useState("");
   const [relationship, setRelationship] = useState("");
   const [birthdate, setBirthdate] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // A row key only has to be unique for this list's lifetime, so a counter is
+  // enough — and unlike `Date.now()` it cannot collide when two people are
+  // added inside the same millisecond, which is what a fast typist doing
+  // "add, add" actually hits. (#5316: no page reads the clock.)
+  const nextKey = useRef(0);
 
   const add = () => {
     const who = name.trim();
@@ -752,7 +765,7 @@ function PeopleEditor({
     onChange([
       ...people,
       {
-        key: `${Date.now()}-${people.length}`,
+        key: `person-${nextKey.current++}`,
         name: who,
         relationship: relationship.trim(),
         birthdate,
@@ -786,7 +799,7 @@ function PeopleEditor({
                   {person.name}
                 </b>
                 <span className="block text-[13px] text-ink-3">
-                  {relationshipLine(person.relationship, person.birthdate)}
+                  {relationshipLine(person.relationship, person.birthdate, timezone)}
                 </span>
               </span>
               <button
@@ -876,20 +889,28 @@ function initials(name: string): string {
 }
 
 /** "Daughter · 8" when there is a birthday, else just the relationship. */
-function relationshipLine(relationship: string, birthdate: string): string {
-  const years = birthdate ? ageFrom(birthdate) : null;
+function relationshipLine(relationship: string, birthdate: string, timezone: string): string {
+  const years = birthdate ? ageFrom(birthdate, timezone) : null;
   const who = relationship || "Family";
   return years === null ? who : `${who} · ${years}`;
 }
 
-function ageFrom(birthdate: string): number | null {
-  const born = new Date(`${birthdate}T00:00:00`);
+/**
+ * Whole years since `birthdate`, as of the FAMILY's day (#5316).
+ *
+ * A birthday is a civil date, so "has their birthday happened yet this year?"
+ * must be asked in the family's zone — `householdToday(timezone)` is the one
+ * helper that answers what day it is for them. Reading the clock here would
+ * make a child's age depend on the device's zone (a browser on UTC at 22:30 in
+ * New York is already on tomorrow, so a birthday can arrive a day early).
+ */
+function ageFrom(birthdate: string, timezone: string): number | null {
+  const born = new Date(`${birthdate}T00:00:00Z`);
   if (Number.isNaN(born.getTime())) return null;
-  const now = new Date();
-  let age = now.getFullYear() - born.getFullYear();
-  const beforeBirthday =
-    now.getMonth() < born.getMonth() ||
-    (now.getMonth() === born.getMonth() && now.getDate() < born.getDate());
-  if (beforeBirthday) age -= 1;
+  const today = householdToday(timezone);
+  let age = Number(today.slice(0, 4)) - born.getUTCFullYear();
+  const monthDay = today.slice(5);
+  const bornMonthDay = `${String(born.getUTCMonth() + 1).padStart(2, "0")}-${String(born.getUTCDate()).padStart(2, "0")}`;
+  if (monthDay < bornMonthDay) age -= 1;
   return age >= 0 && age < 130 ? age : null;
 }

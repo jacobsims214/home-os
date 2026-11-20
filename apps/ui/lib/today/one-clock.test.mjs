@@ -144,6 +144,18 @@ const INSTANT_FILES = [
     "components/settings/TimezoneField.tsx",
     "Zone NAME only, same as HouseholdSection: the day is never read.",
   ],
+  [
+    "components/settings/agent-tokens.ts",
+    "Token labels are INSTANT arithmetic: lastUsedLabel/expiryLabel/expiresSoon/revokedLabel compare a stored instant against now ('Used 4 min ago'), and expiryFromDays writes a future instant. Civil dates they render go through shortDate with timeZone: UTC.",
+  ],
+  [
+    "lib/guides/model.ts",
+    "revisionWhen compares a revision's instant against now ('30 min ago'); formatGuideDate renders a stored date with timeZone: UTC.",
+  ],
+  [
+    "app/(onboarding)/welcome/page.tsx",
+    "zoneLabel(): zone NAME only, the same call admin/page.tsx and HouseholdSection make (the date is discarded). The one civil day this page decides — a child's age — reads householdToday(draft.timezone).",
+  ],
 ];
 
 const norm = (p) => p.split(sep).join("/");

@@ -139,16 +139,24 @@ export function revokedLabel(iso: string | null | undefined, now: number = Date.
   return `Revoked ${shortDate(iso as string, now)}`;
 }
 
-/** "Nov 12", with the year once it is not this one. */
+/**
+ * "Nov 12", with the year once it is not this one.
+ *
+ * `timeZone: "UTC"` because this renders a stored CIVIL date, not a moment in
+ * the reader's day: without it a token used at 23:30 UTC would read as the next
+ * day for a browser west of UTC (the defect class #5316 guards). Same rule as
+ * notification-model.ts's date label.
+ */
 function shortDate(iso: string, now: number): string {
   const t = Date.parse(iso);
   if (!Number.isFinite(t)) return "";
   const date = new Date(t);
-  const sameYear = date.getFullYear() === new Date(now).getFullYear();
+  const sameYear = new Date(now).getUTCFullYear() === date.getUTCFullYear();
   return date.toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
     ...(sameYear ? {} : { year: "numeric" }),
+    timeZone: "UTC",
   });
 }
 
