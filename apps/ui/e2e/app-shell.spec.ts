@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+import { sectionsForRole, type NavSection } from "../components/shared/nav-config";
 import { test, expect, expectNoHorizontalOverflow, onlyOn, pressOpener } from "./fixtures";
 
 /**
@@ -147,7 +148,16 @@ test.describe("desktop 1440px", () => {
 
 // #5199: only sections with a real page are in the nav, so each row is a link
 // and there is no "Soon" tag to strip.
-const ALL_SECTIONS = ["Today", "Calendar", "Meals", "Documents", "People & House", "Money", "Settings"];
+//
+// #5313: the expected labels come FROM the nav config, never a copy of it. The
+// hand-kept list here had drifted (#4566 restored Lists; this fixture kept
+// asserting seven sections), which left these cases red for good. A section
+// added to nav-config.ts now appears here without an edit, and one removed
+// fails loudly instead of quietly leaving a stale expectation behind.
+const navLabels = (sections: readonly NavSection[]) => sections.map((s) => s.label);
+
+/** Every section in nav order: what an owner — or an unknown role — sees. */
+const ALL_SECTIONS = navLabels(sectionsForRole(null));
 
 /** Section names in a nav surface, in order. */
 async function sectionNames(scope: ReturnType<Page["locator"]>) {
@@ -200,7 +210,8 @@ test.describe("role-aware navigation", () => {
   // member sees it and a housesitter does not, the same as Money.
   test("housesitter: no Money or Documents in the sidebar, drawer, rail or More sheet", async ({ loggedInPage: page }) => {
     await asRole(page, "housesitter");
-    const expected = ["Today", "Calendar", "Meals", "People & House", "Settings"];
+    // Also from nav-config (#5313): Lists is SITTERS, like Calendar and Meals.
+    const expected = navLabels(sectionsForRole("housesitter"));
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await gotoHome(page);
