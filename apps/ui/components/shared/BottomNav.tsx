@@ -59,6 +59,9 @@ const TILE_HINTS: Partial<Record<NavSectionId, string>> = {
   documents: "Insurance, school forms, receipts",
   people: "Family, home, cars, pets, vendors",
   money: "Bills and loans",
+  // #5408: the tile that was missing entirely — the More sheet was the only
+  // phone surface that could have carried Guides and it had no tile to show.
+  guides: "How-tos, repairs, routines",
 };
 
 interface BottomNavProps {
