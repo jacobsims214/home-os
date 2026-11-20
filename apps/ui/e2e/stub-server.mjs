@@ -300,6 +300,26 @@ const SEED = {
   ],
 };
 
+/**
+ * The single seed household every session keeps unless it POSTed
+ * /e2e/households (see the header contract). It is what the Go API answers for
+ * an account with one family: a name, the caller's role in it, its zone, and its
+ * own rows. The bills are SEED.bills, so a session that never seeded families
+ * gets the same list it always got.
+ */
+const SEED_HOUSEHOLD = {
+  id: SEED_USER.household_id,
+  // The same convention the API's bootstrap uses for a first household
+  // (apps/api/internal/seed/bootstrap.go: "<AdminName>'s Home"). It must NOT be
+  // the UI's "Your family" placeholder: that string means "the household is not
+  // known", and a spec that cannot tell a known family from an unknown one is
+  // how the empty-list bug went unnoticed.
+  name: `${SEED_USER.name}'s Home`,
+  role: "owner",
+  timezone: "UTC",
+  bills: SEED.bills,
+};
+
 async function readBody(req) {
   const chunks = [];
   for await (const c of req) chunks.push(c);
@@ -403,7 +423,12 @@ const server = createServer(async (req, res) => {
     // sid so parallel specs (one stub process) can read only their own.
     const headerHousehold = req.headers["x-household-id"] ?? null;
     stats.householdHeaders.push({ sid: claims.sid ?? null, path: resource, household: headerHousehold });
-    const households = sessionHouseholds.get(claims.sid ?? "");
+    // The documented contract (header, POST /e2e/households): without a seeded
+    // list, every session keeps the single seed household. This used to be
+    // `sessionHouseholds.get(...)` alone, so a session that never seeded one
+    // fell through to `SEED[resource] ?? []` and /me/households answered
+    // {"data":[]} — no role, and every role-gated page stuck in its skeleton.
+    const households = sessionHouseholds.get(claims.sid ?? "") ?? [SEED_HOUSEHOLD];
     const activeHousehold =
       households?.find((h) => h.id === headerHousehold) ?? households?.[0] ?? null;
     let body = {};

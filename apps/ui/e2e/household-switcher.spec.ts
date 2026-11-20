@@ -7,6 +7,7 @@ import {
   onlyOn,
   pressOpener,
   seedHouseholds,
+  SEED_HOUSEHOLD_NAME,
 } from "./fixtures";
 
 /**
@@ -318,8 +319,10 @@ test.describe("family switcher, phone 390", () => {
     await page.goto("/dashboard/bills");
     await expect(page.locator("main").getByRole("heading", { level: 2, name: "Bills" })).toBeVisible();
 
-    // The name is still there (where am I), but there is nothing to open.
-    const c = header(page).getByText("Your family", { exact: true });
+    // The name is still there (where am I), but there is nothing to open. It is
+    // the SEED household's name — not "Your family", which is the placeholder for
+    // a household that is not known (#5322).
+    const c = header(page).getByText(SEED_HOUSEHOLD_NAME, { exact: true });
     await expect(c).toBeVisible();
     await expect(header(page).getByRole("button", { name: /^Family:/ })).toHaveCount(0);
 
