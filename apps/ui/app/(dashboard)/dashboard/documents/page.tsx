@@ -532,7 +532,7 @@ function EmptyHub({
   if (categoryView) {
     return (
       <div data-documents-empty data-documents-empty-category>
-        <Title order={3} mt="md" className="text-xl font-semibold text-ink">
+        <Title order={2} mt="md" className="text-xl font-semibold text-ink">
           Nothing in {CATEGORY_LABELS[categoryView]} yet
         </Title>
         <Text size="sm" mt={6} style={{ color: "var(--ink-2)", lineHeight: 1.55, maxWidth: 560 }}>
@@ -549,7 +549,7 @@ function EmptyHub({
   }
   return (
     <div data-documents-empty>
-      <Title order={3} mt="md" className="text-xl font-semibold text-ink">
+      <Title order={2} mt="md" className="text-xl font-semibold text-ink">
         No documents yet
       </Title>
       <Text size="sm" mt={6} style={{ color: "var(--ink-2)", lineHeight: 1.55, maxWidth: 620 }}>

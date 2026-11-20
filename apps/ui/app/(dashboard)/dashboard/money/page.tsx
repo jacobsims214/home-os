@@ -684,8 +684,12 @@ export default function MoneyPage() {
             </Card>
           </div>
 
+          {/* min-w-0 on both items (#4588): a grid item's default min-width is
+              auto, i.e. its min-content, and at 320 px the min-content was
+              310 px inside a 288 px column — a 6 px sideways scroll on the
+              whole page (WCAG 1.4.10). */}
           <div className="grid gap-6 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] md:items-start">
-            <section aria-labelledby="money-due-heading">
+            <section aria-labelledby="money-due-heading" className="min-w-0">
               <div className="mb-2 flex items-baseline justify-between gap-3">
                 <h3 id="money-due-heading" className="text-base font-semibold text-ink">
                   Due soon
@@ -774,7 +778,7 @@ export default function MoneyPage() {
               </p>
             </section>
 
-            <section aria-labelledby="money-budget-heading">
+            <section aria-labelledby="money-budget-heading" className="min-w-0">
               <div className="mb-2 flex items-baseline justify-between gap-3">
                 <h3 id="money-budget-heading" className="text-base font-semibold text-ink">
                   Budget
