@@ -480,8 +480,15 @@ export default function CalendarPage() {
           stays away when the empty card is up: that card already carries the
           one action, and two Add buttons on top of each other is exactly the
           kind of duplication a careful screen avoids. */}
+      {/* data-floating-action marks the FAB for the shared shell's bottom
+          padding (#5408), so the last card scrolls clear of it instead of
+          ending underneath. The geometry is --shell-fab-* in
+          DashboardShell.module.css; this row only positions the button. */}
       {canWrite && !(empty && reason) && (
-        <div className="pointer-events-none sticky bottom-[calc(72px+env(safe-area-inset-bottom))] z-30 flex h-0 justify-end md:hidden">
+        <div
+          data-floating-action=""
+          className="pointer-events-none sticky bottom-[calc(72px+env(safe-area-inset-bottom))] z-30 flex h-0 justify-end md:hidden"
+        >
           <button
             type="button"
             onClick={() => setEditing({ series: null, occurrence: null })}

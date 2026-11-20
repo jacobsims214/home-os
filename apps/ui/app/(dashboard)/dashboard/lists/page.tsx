@@ -219,12 +219,17 @@ export default function ListsPage() {
         </div>
       )}
 
-      {/* Phone: the FAB. Desktop: the header button. One create flow, two entry points. */}
+      {/* Phone: the FAB. Desktop: the header button. One create flow, two entry points.
+          data-floating-action marks it for the shared shell's bottom padding
+          (#5408), so the last list card scrolls clear of the button instead of
+          ending underneath it. The geometry is --shell-fab-* in
+          DashboardShell.module.css; this only positions the button. */}
       {canManage && !nothingAtAll && (
         <button
           type="button"
           onClick={() => setNewOpen(true)}
           aria-label="New list"
+          data-floating-action=""
           className="fixed bottom-[calc(72px+env(safe-area-inset-bottom))] right-4 z-30 grid size-14 place-items-center rounded-token-lg bg-accent-fill text-white shadow-token-lg md:hidden"
         >
           <IconPlus size={26} stroke={2} />
