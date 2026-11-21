@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,13 +19,27 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// newMigratedPool starts a throwaway Postgres 16 container (random host port),
-// applies every packages/db/migrations/*.up.sql, and returns a pool to it.
-// The container is terminated when t finishes. Requires Docker.
+// serverEnv points the harness at an already-running PostgreSQL instead of
+// starting a container (#5500). It is read as a conn string or URL
+// ("host=/tmp/pg port=55432 user=postgres dbname=postgres" or
+// "postgres://user:pass@host:5432/db?sslmode=disable"), and the migrations are
+// applied to a template database on it, which every test then clones. It exists
+// because the container path needs Docker, and a machine without a working
+// daemon should not be a machine with no database tests: the MCP harness
+// (apps/mcp/internal/testutil) honours the same variable for the same reason.
+const serverEnv = "HOMEOS_TEST_POSTGRES"
+
+// newMigratedPool returns a pool to a database with every
+// packages/db/migrations/*.up.sql applied: a throwaway Postgres 16 container by
+// default, or a database on the server in HOMEOS_TEST_POSTGRES when that is
+// set. Either way the database is dropped/terminated when t finishes.
 func newMigratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	if testing.Short() {
-		t.Skip("needs Docker; skipped with -short")
+		t.Skip("needs a database; skipped with -short")
+	}
+	if server := os.Getenv(serverEnv); server != "" {
+		return newServerPool(t, server)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -85,6 +101,97 @@ func newMigratedPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// newServerPool is newMigratedPool's other half: a fresh database on the server
+// in HOMEOS_TEST_POSTGRES, cloned from a migrated template built once per test
+// binary. One template per binary, because `go test ./...` runs one binary per
+// package in parallel and two of them building the same template would drop it
+// under each other.
+func newServerPool(t *testing.T, server string) *pgxpool.Pool {
+	t.Helper()
+	ctx := context.Background()
+
+	cfg, err := pgx.ParseConfig(server)
+	if err != nil {
+		t.Fatalf("%s: %v", serverEnv, err)
+	}
+	adminCfg := cfg.Copy()
+	adminCfg.Database = "postgres"
+	admin, err := pgx.ConnectConfig(ctx, adminCfg)
+	if err != nil {
+		t.Fatalf("%s: connect %s: %v", serverEnv, server, err)
+	}
+	defer admin.Close(ctx)
+
+	// The migrations GRANT to the application role, which a fresh server lacks.
+	if _, err := admin.Exec(ctx, `DO $$ BEGIN
+		IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app') THEN CREATE ROLE app; END IF;
+	END $$`); err != nil {
+		t.Fatalf("create app role: %v", err)
+	}
+
+	tpl := fmt.Sprintf("homeos_tpl_%d", os.Getpid())
+	if _, err := admin.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", tpl)); err != nil {
+		t.Fatalf("drop template: %v", err)
+	}
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+tpl); err != nil {
+		t.Fatalf("create template: %v", err)
+	}
+	tplCfg := cfg.Copy()
+	tplCfg.Database = tpl
+	conn, err := pgx.ConnectConfig(ctx, tplCfg)
+	if err != nil {
+		t.Fatalf("connect template: %v", err)
+	}
+	files, err := filepath.Glob(filepath.Join(migrationsDir(t), "*.up.sql"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no migrations found (err=%v)", err)
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		sql, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		if _, err := conn.Exec(ctx, string(sql)); err != nil {
+			t.Fatalf("apply %s: %v", filepath.Base(f), err)
+		}
+	}
+	if err := conn.Close(ctx); err != nil {
+		t.Fatalf("close template: %v", err)
+	}
+
+	// A fresh database per call, cloned from the template: tests in this package
+	// share one process and truncate their own tables, but a caller that wants a
+	// database nobody else has touched gets one.
+	name := fmt.Sprintf("homeos_%d_%d", os.Getpid(), testDBCounter.Add(1))
+	if _, err := admin.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s TEMPLATE %s", name, tpl)); err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+	dbCfg, err := pgxpool.ParseConfig(server)
+	if err != nil {
+		t.Fatalf("%s: %v", serverEnv, err)
+	}
+	dbCfg.ConnConfig.Database = name
+	pool, err := pgxpool.NewWithConfig(ctx, dbCfg)
+	if err != nil {
+		t.Fatalf("pool %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		conn, err := pgx.ConnectConfig(ctx, adminCfg)
+		if err != nil {
+			return
+		}
+		defer conn.Close(ctx)
+		_, _ = conn.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", name))
+	})
+	return pool
+}
+
+var testDBCounter atomic.Int64
+
 // migrationsDir walks up from this file to packages/db/migrations.
 func migrationsDir(t *testing.T) string {
 	t.Helper()
@@ -126,6 +233,26 @@ func seedBill(t *testing.T, pool *pgxpool.Pool, hh, name string, dueDay int) str
 	return id
 }
 
+// seedBillWithAccount is a MANUAL bill that has an account on record: the
+// bills.account_number column a pre-075 row carries, which
+// billdue.AttentionFor reads as "a person pays this, and the family knows from
+// where" (due_soon). Without it a manual bill is needs_setup and is reminded
+// earlier (#5500), which is a different test.
+//
+// createdAt is when the row appeared, which the overdue rule reads: a due date
+// that passed before the row existed is unknowable, not late. A test that
+// simulates a future "now" must say so, or the bill is (correctly) overdue for
+// every month between the real date and the simulated one.
+func seedBillWithAccount(t *testing.T, pool *pgxpool.Pool, hh, name string, dueDay int, createdAt time.Time) string {
+	t.Helper()
+	id := seedBill(t, pool, hh, name, dueDay)
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE bills SET account_number = 'legacy-4471', created_at = $2 WHERE id = $1`, id, createdAt); err != nil {
+		t.Fatalf("set account_number: %v", err)
+	}
+	return id
+}
+
 func seedTask(t *testing.T, pool *pgxpool.Pool, hh, name, status, due string) string {
 	t.Helper()
 	var id string
@@ -134,6 +261,21 @@ func seedTask(t *testing.T, pool *pgxpool.Pool, hh, name, status, due string) st
 		 VALUES ($1, $2, $3::task_status, $4::date) RETURNING id::text`,
 		hh, name, status, due).Scan(&id); err != nil {
 		t.Fatalf("insert task: %v", err)
+	}
+	return id
+}
+
+// seedBillCreatedOn is seedBill for a bill that has been on the books since
+// createdAt: the overdue rule (billdue.AttentionFor) treats a due date that
+// passed before the row existed as unknowable rather than late, so a test that
+// wants "not overdue" has to say when the row appeared. A bill seeded with the
+// table default (NOW()) is created today, which also reads as not overdue.
+func seedBillCreatedOn(t *testing.T, pool *pgxpool.Pool, hh, name string, dueDay int, createdAt time.Time) string {
+	t.Helper()
+	id := seedBill(t, pool, hh, name, dueDay)
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE bills SET created_at = $2 WHERE id = $1`, id, createdAt); err != nil {
+		t.Fatalf("set created_at: %v", err)
 	}
 	return id
 }
@@ -198,7 +340,7 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 					t.Fatal(err)
 				}
 				hh := seedHousehold(t, pool)
-				billID := seedBill(t, pool, hh, "Power", tc.dueDay)
+				billID := seedBillWithAccount(t, pool, hh, "Power", tc.dueDay, day(tc.today))
 
 				got, err := insertDueNotifications(ctx, pool, day(tc.today))
 				if err != nil {
@@ -251,7 +393,7 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 					t.Fatal(err)
 				}
 				hh := seedHousehold(t, pool)
-				billID := seedBill(t, pool, hh, "Electric", 20)
+				billID := seedBillWithAccount(t, pool, hh, "Electric", 20, day("2026-11-18"))
 				if tc.paidDate != "" {
 					if _, err := pool.Exec(ctx, `UPDATE bills SET paid_date = $2::date, paid_for_due_date = NULLIF($3, '')::date WHERE id = $1`,
 						billID, tc.paidDate, tc.paidFor); err != nil {
@@ -303,9 +445,9 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 				}
 				hh := seedHousehold(t, pool)
 				if _, err := pool.Exec(ctx,
-					`INSERT INTO bills (household_id, name, amount, frequency, due_date, paid_date)
-					 VALUES ($1, 'Insurance', 42.50, $2, NULLIF($3, '')::date, NULLIF($4, '')::date)`,
-					hh, tc.frequency, tc.dueDate, tc.paidDate); err != nil {
+					`INSERT INTO bills (household_id, name, amount, frequency, due_date, paid_date, account_number, created_at)
+					 VALUES ($1, 'Insurance', 42.50, $2, NULLIF($3, '')::date, NULLIF($4, '')::date, 'legacy-4471', $5)`,
+					hh, tc.frequency, tc.dueDate, tc.paidDate, day("2026-11-18")); err != nil {
 					t.Fatalf("insert bill: %v", err)
 				}
 				got, err := insertDueNotifications(ctx, pool, day("2026-11-18"))
@@ -347,7 +489,7 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 				if _, err := pool.Exec(ctx, `UPDATE households SET timezone = $2 WHERE id = $1`, hh, tc.tz); err != nil {
 					t.Fatal(err)
 				}
-				seedBill(t, pool, hh, "Gas", tc.dueDay)
+				seedBillWithAccount(t, pool, hh, "Gas", tc.dueDay, now)
 
 				got, err := insertDueNotifications(ctx, pool, now)
 				if err != nil {
@@ -441,13 +583,13 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 		}
 	})
 
-	t.Run("dedupe within 24h and maintenance window", func(t *testing.T) {
+	t.Run("dedupe by key and the maintenance window", func(t *testing.T) {
 		ctx := context.Background()
 		if _, err := pool.Exec(ctx, `TRUNCATE notifications, bills, maintenance_tasks CASCADE`); err != nil {
 			t.Fatal(err)
 		}
 		hh := seedHousehold(t, pool)
-		billID := seedBill(t, pool, hh, "Water", 1)
+		billID := seedBillWithAccount(t, pool, hh, "Water", 1, day("2026-11-29"))
 		dueToday := seedTask(t, pool, hh, "Filters", "pending", "2026-11-29")
 		dueIn7 := seedTask(t, pool, hh, "Gutters", "pending", "2026-12-06")
 		seedTask(t, pool, hh, "Too late", "pending", "2026-12-07")
@@ -479,17 +621,45 @@ func TestGenerateNotifications_Postgres(t *testing.T) {
 			t.Errorf("maintenance_due = %v, want one each for %s (today) and %s (+7d)", maint, dueToday, dueIn7)
 		}
 
-		// Once the earlier notification is older than 24h, a new one is allowed.
+		// A reminder is keyed on (bill, date, attention), NOT on a rolling
+		// window: the same bill in the same state for the same date is never
+		// re-sent, however long ago the first one was (#5500). Time passing
+		// alone must not produce a second push.
 		if _, err := pool.Exec(ctx,
 			`UPDATE notifications SET created_at = NOW() - INTERVAL '25 hours' WHERE entity_id = $1`, billID); err != nil {
 			t.Fatal(err)
 		}
-		later, err := insertDueNotifications(ctx, pool, now)
+		later, err := insertDueNotifications(ctx, pool, now.AddDate(0, 0, 1))
 		if err != nil {
-			t.Fatalf("after 24h: %v", err)
+			t.Fatalf("a day later: %v", err)
 		}
-		if len(later) != 1 || later[0].Type != "bill_due" {
-			t.Errorf("after 24h got %+v, want one new bill_due", later)
+		for _, n := range later {
+			if n.Type == "bill_due" || n.Type == "bill_digest" {
+				t.Errorf("a day later produced %+v, want nothing for the same bill, date and state", n)
+			}
+		}
+
+		// What does earn a new reminder is the state changing: this bill is
+		// still unpaid when its date arrives, so it is now overdue and the
+		// family is told again, in those words.
+		overdueRun, err := insertDueNotifications(ctx, pool, day("2026-12-02"))
+		if err != nil {
+			t.Fatalf("after the due date: %v", err)
+		}
+		var overdue *notif
+		for i := range overdueRun {
+			if overdueRun[i].Type == "bill_due" {
+				overdue = &overdueRun[i]
+			}
+		}
+		if overdue == nil {
+			t.Fatalf("after the due date got %+v, want one bill_due saying it is overdue", overdueRun)
+		}
+		if !strings.Contains(overdue.Title, "overdue") {
+			t.Errorf("title = %q, want the overdue state in it", overdue.Title)
+		}
+		if n := notifiedEntities(t, pool, "bill_due")[billID]; n != 2 {
+			t.Errorf("bill_due rows for %s = %d, want 2 (due_soon, then overdue), not one per run", billID, n)
 		}
 	})
 }

@@ -9,6 +9,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
 	home-os/api v0.0.0
 	home-os/billcal v0.0.0
+	home-os/billdue v0.0.0
 	home-os/icalx v0.0.0
 )
 
@@ -76,5 +77,6 @@ require (
 replace (
 	home-os/api => ../api
 	home-os/billcal => ../../packages/billcal
+	home-os/billdue => ../../packages/billdue
 	home-os/icalx => ../../packages/icalx
 )
