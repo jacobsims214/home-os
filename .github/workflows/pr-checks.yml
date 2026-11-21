@@ -297,6 +297,25 @@ jobs:
           path: ${{ runner.temp }}/bench-report.md
           if-no-files-found: ignore
 
+  # The war-game harness's own guards (#4946, #4948, #4949). They existed and
+  # were never run by CI, so none of them prevented anything: a guard CI does not
+  # run is the "test that cannot fail" this project has shipped four times.
+  #
+  # Each script's --selftest is offline (no server, no cluster, no credentials)
+  # and exits non-zero when a case fails, so a broken guard is a red build. Every
+  # one of these was revert-checked by breaking the guard it covers (#5479).
+  wargame-tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # chat.sh's selftest is bash; the two Python tools need only the stdlib.
+      - name: chat.sh message guard (the $35 -> 5 shell corruption, #4948)
+        run: tools/wargame/chat.sh --selftest
+      - name: mcpcall.py transport and diagnosis (#4949)
+        run: python3 tools/wargame/mcpcall.py --selftest
+      - name: api.py agent-token refusal (#4946)
+        run: python3 tools/wargame/api.py --selftest
+
   helm-template:
     runs-on: ubuntu-latest
     steps:

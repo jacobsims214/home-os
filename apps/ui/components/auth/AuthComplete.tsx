@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@mantine/core";
+import { authCompleteAction } from "@/lib/auth/complete-decision";
 import { signInAgainHref } from "@/lib/auth/login-surface";
 
 /**
@@ -99,14 +100,14 @@ export default function AuthComplete({ to, signedIn }: { to: string; signedIn: b
   const [state, setState] = useState<State>(signedIn ? "handing-off" : "signed-out");
 
   useEffect(() => {
-    if (!signedIn) {
-      setState("signed-out");
-      return;
-    }
+    // The decision itself is pure and lives in lib/auth/complete-decision.ts,
+    // where complete-decision.test.mjs pins it (#5304, #5407). This effect is
+    // the paint: it asks the decision what to do and does it. Nothing here
+    // decides WHETHER to navigate — that is the part that regressed twice.
     const { marked, type } = arrival.current!;
-    const backOrForward = type === "back_forward" || type === "prerender";
-    if (marked || backOrForward) {
-      setState("revisited");
+    const action = authCompleteAction({ signedIn, marked, navigationType: type });
+    if (action !== "hand-off") {
+      setState(action);
       return;
     }
     if (handedOff.current) return;
