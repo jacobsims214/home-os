@@ -115,20 +115,20 @@ type updateVendorRequest struct {
 }
 
 type vendorResponse struct {
-	ID          string   `json:"id"`
-	HouseholdID string   `json:"household_id"`
-	Name        string   `json:"name"`
+	ID          string `json:"id"`
+	HouseholdID string `json:"household_id"`
+	Name        string `json:"name"`
 	// Kind is "service_provider", "payee" or "both" (080, #5529).
-	Kind        string   `json:"kind"`
-	Trades      []string `json:"trades"`
-	Specialty   *string  `json:"specialty,omitempty"`
-	Phone       *string  `json:"phone,omitempty"`
-	Email       *string  `json:"email,omitempty"`
-	Website     *string  `json:"website,omitempty"`
-	Address     *string  `json:"address,omitempty"`
-	Notes       *string  `json:"notes,omitempty"`
-	CreatedAt   string   `json:"created_at"`
-	UpdatedAt   string   `json:"updated_at"`
+	Kind      string   `json:"kind"`
+	Trades    []string `json:"trades"`
+	Specialty *string  `json:"specialty,omitempty"`
+	Phone     *string  `json:"phone,omitempty"`
+	Email     *string  `json:"email,omitempty"`
+	Website   *string  `json:"website,omitempty"`
+	Address   *string  `json:"address,omitempty"`
+	Notes     *string  `json:"notes,omitempty"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
 }
 
 func toVendorResponse(v *Vendor) vendorResponse {
