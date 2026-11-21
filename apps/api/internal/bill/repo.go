@@ -124,7 +124,11 @@ func (r *Repo) Create(ctx context.Context, b *Bill) (*Bill, error) {
 		                    category, vendor_id, rrule, notes,
 		                    vehicle_id, asset_id, is_autopay, account_number, payment_url,
 		                    frequency, due_date, budget_category_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+		         -- A caller that says nothing about autopay gets false, not NULL
+		         -- (075: bills.is_autopay is NOT NULL, and false is the value
+		         -- that asks a person to pay instead of staying silent).
+		         COALESCE($12, false), $13, $14,
 		         COALESCE(NULLIF($15, ''), 'monthly'), $16, $17)
 		 RETURNING `+billColumns,
 		b.HouseholdID, b.PropertyID, b.Name, b.Amount, b.DueDay,
@@ -183,7 +187,8 @@ func (r *Repo) Update(ctx context.Context, b *Bill) (*Bill, error) {
 		                                OR due_date IS DISTINCT FROM $17::date
 		                              THEN NULL ELSE paid_for_due_date END,
 		     category = $6, vendor_id = $7, rrule = $8, notes = $9,
-		     vehicle_id = $10, asset_id = $11, is_autopay = $12,
+		     -- absent keeps the current value; the column is NOT NULL (075).
+		     vehicle_id = $10, asset_id = $11, is_autopay = COALESCE($12, is_autopay),
 		     account_number = $13, payment_url = $14,
 		     frequency = $16, due_date = $17, budget_category_id = $18,
 		     updated_at = NOW()
