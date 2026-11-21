@@ -10,6 +10,16 @@ you check what actually landed in Home OS with direct MCP calls.
 | `mcpcall.py` | Ground truth: calls one Home OS MCP tool as a household member and prints the result, over Streamable HTTP at `POST <HOMEOS_MCP_URL>/mcp` — the only MCP transport Home OS serves. `--selftest` runs its transport tests with no network. |
 | `api.py` | Same idea for the REST API (`/api/v1/...`). **Dex id_token only** — a `hos_` agent token 401s there by design; see [Two kinds of token](#two-kinds-of-token-agent-tokens-are-mcp-scoped). |
 | `personas.md` | The household, the two personas (Jacob, Amber), their scenarios and sample turns, and the agent system-prompt snippet. |
+| `REGRESSION-COVERAGE.md` | **Every R1–R3 finding, its regression test, and whether that test was proved to fail.** Read it before adding a check: a test never seen red is not a test. |
+| `KNOWN-MANUAL.md` | The findings that genuinely cannot be automated, each with its reason (live-only / judgment / physical / agent-prose) and its manual procedure. A gap here is deliberate; a gap anywhere else is a bug. |
+
+**A round's findings must leave the next round less work, not the same work.** When a
+round produces a defect, the ticket that fixes it owes a regression test at the cheapest
+faithful level (unit > integration > e2e > live-smoke) — and that test must be
+**revert-checked**: apply the defect back, watch it go red, restore it, watch it go green.
+#5304 is the cautionary case: fixed after R2, re-found by all three R3 reports, and fixed
+again, because nothing executable guarded it. If a finding cannot be automated, it goes in
+`KNOWN-MANUAL.md` with the reason, so the next round does not rediscover it as a mystery.
 
 ## Never put a `$` through your shell — always single-quote, or better use `--stdin`
 
