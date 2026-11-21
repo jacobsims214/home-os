@@ -1,0 +1,138 @@
+# tools/wargame/verify.yaml — the war-game environment, declared.
+#
+# Run it with:  ./verify.py            (add --json for machine-readable output)
+#
+# This file names things; it never holds a credential VALUE. Every password and
+# token is read from the Secret named here with kubectl at run time, into memory,
+# and never printed. Nothing in this file is a secret, so it is safe to commit.
+#
+# The syntax is a deliberately small YAML subset: block maps, block sequences,
+# `- key: value` list items, scalars, and `${ENV:-default}` expansion. verify.py
+# reads it with a built-in parser (standard library only, no PyYAML), so anchors,
+# multi-line strings, flow maps ({a: b}) and flow sequences ([a, b]) are NOT
+# supported and are rejected loudly instead of being parsed wrongly.
+#
+# What "pass" means is in each check's `expect_*` field, and every failure prints
+# the `why` line so a worker who has never seen this stack knows where to look.
+# README section "Verifying the environment" explains how to read a failure.
+
+version: 1
+
+# The cluster the whole war game runs on. See README "Cluster access" — the
+# kubeconfig path is fragile (it lives in another ticket's scratch folder) and a
+# worker who cannot find it reports "the cluster is down". It is a setup step,
+# not a constant.
+cluster:
+  kubeconfig: ${KUBECONFIG:-/Volumes/external-data/development/simstech/talos/pve-1/amp-work/5319/kube/admin.kubeconfig}
+  control_plane: https://192.168.8.226:6443
+  expect_nodes_ready: 5
+
+# The deployed product the personas play against.
+site:
+  base_url: ${HOMEOS_SITE:-https://homeos.simstech.cloud}
+  expect_status: 200
+
+# Dex is the identity provider behind the site. Its discovery document 200ing
+# proves the issuer is reachable and that interactive login can work at all.
+dex:
+  discovery_url: ${HOMEOS_SITE:-https://homeos.simstech.cloud}/dex/.well-known/openid-configuration
+  expect_status: 200
+
+# The MCP the agents talk through; ground-truth reads (mcpcall.py) go here.
+# The probe tool must be a read that any household member can call.
+mcp:
+  url: ${HOMEOS_SITE:-https://homeos.simstech.cloud}/mcp
+  probe_tool: family_overview
+
+# Every war-game persona: their Dex identity, the moltis instance they chat
+# through, and the three Secrets that belong to them.
+#
+#   token_secret            the `hos_` agent token that instance's MCP is wired with
+#   moltis_password_secret  that instance's own web-UI login password
+#   dex_password_secret     the password the persona types in a browser at Dex
+#
+# The namespaces are NOT interchangeable, and mixing them up is how two runs
+# reported working credentials as "rotated":
+#   wargame Dex passwords, agent tokens, moltis logins -> namespace moltis
+#   the site admin's own Dex password                  -> namespace home-os
+personas:
+  - name: jacob
+    dex_email: jacob.sims@simstech.cloud
+    moltis_service: moltis-wg-jacob
+    token_secret:
+      namespace: moltis
+      name: home-os-token-wg-jacob
+      key: token
+    moltis_password_secret:
+      namespace: moltis
+      name: moltis-wg-jacob-password
+      key: password
+    dex_password_secret:
+      namespace: home-os
+      name: home-os-secrets
+      key: adminPassword
+  - name: amber
+    dex_email: amber.wargame@simstech.cloud
+    moltis_service: moltis-wg-amber
+    token_secret:
+      namespace: moltis
+      name: home-os-token-wg-amber
+      key: token
+    moltis_password_secret:
+      namespace: moltis
+      name: moltis-wg-amber-password
+      key: password
+    dex_password_secret:
+      namespace: moltis
+      name: home-os-amber-wargame-password
+      key: password
+
+# The checks, in the order they are worth failing in.
+# `kind` picks the prober, and each kind documents itself in README:
+#   nodes_ready   kubectl get nodes; counts Ready against `expect`
+#   http          GET `url` (following 3xx when follow_redirects); compares `expect_status`
+#   mcp_tool      reads the persona's agent token, calls the MCP probe tool; passes when
+#                 the JSON-RPC result carries no error and the tool did not report isError
+#   moltis_login  POSTs the persona's moltis password to their instance; a 200 proves the
+#                 instance is up AND that its password Secret still matches it
+checks:
+  - id: cluster-reachable
+    kind: nodes_ready
+    expect: 5
+    why: kubectl cannot reach the control plane, or the kubeconfig path in `cluster` is wrong or expired.
+
+  - id: site-up
+    kind: http
+    url: ${HOMEOS_SITE:-https://homeos.simstech.cloud}/
+    follow_redirects: true
+    expect_status: 200
+    why: the site or its ingress is down, so nothing downstream is worth testing.
+
+  - id: dex-reachable
+    kind: http
+    url: ${HOMEOS_SITE:-https://homeos.simstech.cloud}/dex/.well-known/openid-configuration
+    follow_redirects: true
+    expect_status: 200
+    why: Dex is down, so no persona can log in to the UI.
+
+  - id: persona-jacob-mcp
+    kind: mcp_tool
+    persona: jacob
+    why: jacob's agent token is missing or revoked, or moltis-wg-jacob is wired with a stale one.
+
+  - id: persona-amber-mcp
+    kind: mcp_tool
+    persona: amber
+    why: amber's agent token is missing or revoked. It is home-os-token-wg-amber; home-os-token-amber is dead.
+
+  - id: moltis-jacob-up
+    kind: moltis_login
+    persona: jacob
+    expect_status: 200
+    why: moltis-wg-jacob is down, or moltis-wg-jacob-password no longer matches it.
+
+  - id: moltis-amber-up
+    kind: moltis_login
+    persona: amber
+    expect_status: 200
+    why: moltis-wg-amber is down, or moltis-wg-amber-password no longer matches it.
