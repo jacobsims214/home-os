@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/budgetcat"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
@@ -249,7 +250,7 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		))
 		switch {
 		case err == nil:
-			b := dup.data(today)
+			b := dup.data(today, auth.CanSeeMoney(claims.Role))
 			b.Duplicate = true
 			return respond.OK(
 				fmt.Sprintf("Bill %s (%s, %s) was already created a few minutes ago; returned it instead of adding a second one.",
@@ -289,7 +290,7 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return respond.Failed("create the bill", err), nil
 		}
 
-		b := r.data(today)
+		b := r.data(today, auth.CanSeeMoney(claims.Role))
 		next := []string{fmt.Sprintf("Mark it paid with bill_pay bill_id=%s.", b.ID)}
 		if check != nil && !check.agreed() && len(check.Doc.Lines) > 0 {
 			next = append(next, fmt.Sprintf("Read the source with document_get document_id=%s, then correct the "+
@@ -541,7 +542,7 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return respond.Failed("update the bill", err), nil
 		}
 
-		b := r.data(today)
+		b := r.data(today, auth.CanSeeMoney(claims.Role))
 		summary := fmt.Sprintf("Updated bill %s (%s).", b.Name, strings.Join(in.params, ", "))
 		if d := b.dueText(); d != "" {
 			summary = fmt.Sprintf("Updated bill %s (%s); next %s.", b.Name, strings.Join(in.params, ", "), d)
@@ -627,7 +628,7 @@ func NewBillDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return respond.Failed("delete the bill", err), nil
 		}
 
-		b := r.data(today)
+		b := r.data(today, auth.CanSeeMoney(claims.Role))
 		return respond.OK(fmt.Sprintf("Deleted bill %s.", b.Name), b,
 			"See the remaining bills with bill_find."), nil
 	}
@@ -770,7 +771,7 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 		// next unpaid due date as of today (never in the past, even for a
 		// back-dated payment), status is due/paid, and paid_for_due_date is
 		// the due date this payment covers (#4653).
-		b := r.data(today)
+		b := r.data(today, auth.CanSeeMoney(claims.Role))
 		b.AlreadyPaid = &alreadyPaid
 		b.AmountPaid = in.amount
 		if b.AmountPaid == nil {

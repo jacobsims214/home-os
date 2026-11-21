@@ -19,13 +19,20 @@ import (
 	"encoding/json"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+
+	"home-os/api/internal/auth"
 )
+
+// amountTestToday pins the date the amount tests serialise against: these
+// tests are about the amount, and the date only decides the attention state.
+var amountTestToday = time.Date(2026, time.November, 1, 0, 0, 0, 0, time.UTC)
 
 func amountOf(t *testing.T, b *Bill) any {
 	t.Helper()
-	body, err := json.Marshal(toResponse(b))
+	body, err := json.Marshal(toResponse(b, auth.RoleOwner, amountTestToday))
 	if err != nil {
 		t.Fatalf("marshal bill response: %v", err)
 	}

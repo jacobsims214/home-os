@@ -20,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/billdue"
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 )
@@ -40,6 +42,7 @@ const exampleBillID = "3f2b8c1e-5d4a-4b7e-9c2a-1e6f0a9b8d7c"
 // The subject name is a scalar subquery, not a join, so the same list works
 // in RETURNING clauses.
 const billColumns = `id, name, amount, due_day, category, COALESCE(is_autopay, false),
+	account_number,
 	vendor_id, property_id, vehicle_id, asset_id, payment_url, notes,
 	created_at, updated_at, paid_date, paid_for_due_date, frequency, due_date,
 	COALESCE((SELECT a.name FROM assets a WHERE a.id = bills.asset_id),
@@ -47,26 +50,45 @@ const billColumns = `id, name, amount, due_day, category, COALESCE(is_autopay, f
 	         (SELECT p.name FROM properties p WHERE p.id = bills.property_id)),
 	budget_category_id, (SELECT bc.name FROM budget_categories bc WHERE bc.id = bills.budget_category_id),
 	source_document_id,
-	(SELECT COALESCE(NULLIF(btrim(x.title), ''), x.name) FROM files x WHERE x.id = bills.source_document_id)`
+	(SELECT COALESCE(NULLIF(btrim(x.title), ''), x.name) FROM files x WHERE x.id = bills.source_document_id),
+	-- #5498: the payment account (masked: last four only, never a full
+	-- number) and the payee. Scalar subqueries on primary keys, so this one
+	-- list still works in a RETURNING clause.
+	autopay_account_id, payee_name,
+	(SELECT pa.name FROM payment_accounts pa WHERE pa.id = bills.autopay_account_id),
+	(SELECT pa.institution FROM payment_accounts pa WHERE pa.id = bills.autopay_account_id),
+	(SELECT pa.last_four FROM payment_accounts pa WHERE pa.id = bills.autopay_account_id),
+	(SELECT pa.account_type::text FROM payment_accounts pa WHERE pa.id = bills.autopay_account_id),
+	(SELECT v.name FROM vendors v WHERE v.id = bills.vendor_id),
+	(SELECT v.phone FROM vendors v WHERE v.id = bills.vendor_id),
+	(SELECT v.email FROM vendors v WHERE v.id = bills.vendor_id),
+	(SELECT v.website FROM vendors v WHERE v.id = bills.vendor_id)`
 
 // billRow is a bills row as the tools load it. amount and due_day are
 // pointers because API-created rows can leave them NULL.
 type billRow struct {
-	ID         uuid.UUID
-	Name       string
-	Amount     *float64
-	DueDay     *int
-	Category   *string
-	AutoPay    bool
-	VendorID   *uuid.UUID
-	PropertyID *uuid.UUID
-	VehicleID  *uuid.UUID
-	AssetID    *uuid.UUID
-	PaymentURL *string
-	Notes      *string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-	PaidDate   *time.Time
+	ID       uuid.UUID
+	Name     string
+	Amount   *float64
+	DueDay   *int
+	Category *string
+	AutoPay  bool
+	// AccountNumber is the pre-075 free-text bills.account_number. It is NOT
+	// serialized anywhere: it exists only so hasPaymentSource answers exactly
+	// what the API's answer is (075 keeps the column for old rows, and a
+	// manual bill cannot hold an autopay_account_id at all -- the
+	// bills_autopay_account_check -- so this is the only way a manual bill can
+	// be "manual with an account on record").
+	AccountNumber *string
+	VendorID      *uuid.UUID
+	PropertyID    *uuid.UUID
+	VehicleID     *uuid.UUID
+	AssetID       *uuid.UUID
+	PaymentURL    *string
+	Notes         *string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	PaidDate      *time.Time
 	// PaidFor is bills.paid_for_due_date: the due date paid_date covers,
 	// nil when not stored (coverage is then inferred from paid_date).
 	PaidFor *time.Time
@@ -88,15 +110,33 @@ type billRow struct {
 	// SourceDocumentTitle is that document's title (its name when it has
 	// none), for the output.
 	SourceDocumentTitle *string
+	// AutopayAccountID and PayeeName are the links added by 075 (#5498).
+	AutopayAccountID *uuid.UUID
+	PayeeName        *string
+	// AccountName, AccountInstitution, AccountLastFour and AccountType are
+	// the linked payment account, resolved by the query. LAST FOUR ONLY:
+	// payment_accounts has no column for a full number.
+	AccountName        *string
+	AccountInstitution *string
+	AccountLastFour    *string
+	AccountType        *string
+	// PayeeVendorName/Phone/Email/Website are the payee vendors row.
+	PayeeVendorName *string
+	PayeePhone      *string
+	PayeeEmail      *string
+	PayeeWebsite    *string
 }
 
 // scanBill reads one row of billColumns.
 func scanBill(row pgx.Row) (billRow, error) {
 	var r billRow
 	err := row.Scan(&r.ID, &r.Name, &r.Amount, &r.DueDay, &r.Category, &r.AutoPay,
-		&r.VendorID, &r.PropertyID, &r.VehicleID, &r.AssetID, &r.PaymentURL, &r.Notes,
+		&r.AccountNumber, &r.VendorID, &r.PropertyID, &r.VehicleID, &r.AssetID, &r.PaymentURL, &r.Notes,
 		&r.CreatedAt, &r.UpdatedAt, &r.PaidDate, &r.PaidFor, &r.Frequency, &r.DueDate, &r.SubjectName,
-		&r.BudgetCategoryID, &r.BudgetCategory, &r.SourceDocumentID, &r.SourceDocumentTitle)
+		&r.BudgetCategoryID, &r.BudgetCategory, &r.SourceDocumentID, &r.SourceDocumentTitle,
+		&r.AutopayAccountID, &r.PayeeName,
+		&r.AccountName, &r.AccountInstitution, &r.AccountLastFour, &r.AccountType,
+		&r.PayeeVendorName, &r.PayeePhone, &r.PayeeEmail, &r.PayeeWebsite)
 	return r, err
 }
 
@@ -126,39 +166,70 @@ func (r billRow) hasSchedule() bool {
 // read as success: the assistant answered "all filed" for a paper bill whose
 // result had only ever said "Created bill …".
 type billData struct {
-	ID                  string    `json:"id" jsonschema_description:"The bill_id to pass to bill_update, bill_pay or bill_delete."`
-	Name                string    `json:"name"`
-	Amount              *float64  `json:"amount" jsonschema_description:"Amount due each time, in the family's currency."`
-	Frequency           string    `json:"frequency" jsonschema_description:"monthly, quarterly, semiannual, annual or once."`
-	DueDay              *int      `json:"due_day" jsonschema_description:"Monthly bills: day of the month it is due (1-31); a short month uses its last day."`
-	DueDate             *string   `json:"due_date" jsonschema_description:"Other bills: a due date, YYYY-MM-DD; it repeats on that day every 3, 6 or 12 months."`
-	MonthlyAmount       *float64  `json:"monthly_amount" jsonschema_description:"amount spread per month: quarterly /3, semiannual /6, annual /12; null for once."`
-	Category            *string   `json:"category" jsonschema_description:"The bill's own label, e.g. Utilities (not the budget category)."`
-	BudgetCategoryID    *string   `json:"budget_category_id" jsonschema_description:"Budget category budget_summary files it under; null is uncategorized."`
-	BudgetCategory      *string   `json:"budget_category" jsonschema_description:"Name of that budget category, e.g. Housing."`
-	SourceDocumentID    *string   `json:"source_document_id" jsonschema_description:"The document the bill was taken from; read it with document_get to check the amount."`
-	SourceDocumentTitle *string   `json:"source_document_title" jsonschema_description:"Title of that document."`
-	Autopay             bool      `json:"autopay"`
-	ContactID           *string   `json:"contact_id" jsonschema_description:"The contact (vendor) the bill is paid to."`
-	PropertyID          *string   `json:"property_id" jsonschema_description:"The house or other property the bill is for (an asset's property for an asset bill)."`
-	VehicleID           *string   `json:"vehicle_id" jsonschema_description:"The car or other vehicle the bill is for."`
-	AssetID             *string   `json:"asset_id" jsonschema_description:"The thing the bill is for."`
-	SubjectType         *string   `json:"subject_type" jsonschema_description:"property, vehicle or asset; null for a family-level bill."`
-	SubjectName         *string   `json:"subject_name" jsonschema_description:"Name of the property, vehicle or asset."`
-	PaymentURL          *string   `json:"payment_url"`
-	Notes               *string   `json:"notes"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
-	NextDueDate         *string   `json:"next_due_date" jsonschema_description:"Next unpaid due date, YYYY-MM-DD in the family's timezone."`
-	NextDueWeekday      *string   `json:"next_due_weekday" jsonschema_description:"Weekday of next_due_date, e.g. Thu."`
-	DaysUntilDue        *int      `json:"days_until_due" jsonschema_description:"Whole days from today (family timezone) to next_due_date."`
-	Status              string    `json:"status,omitempty" jsonschema_description:"due, or paid when the current due date is already paid."`
-	PaidDate            *string   `json:"paid_date" jsonschema_description:"Date of the last recorded payment, YYYY-MM-DD."`
-	PaidForDueDate      *string   `json:"paid_for_due_date" jsonschema_description:"The due date the last payment covered, YYYY-MM-DD."`
-	AmountPaid          *float64  `json:"amount_paid,omitempty" jsonschema_description:"bill_pay only: the amount paid."`
-	AlreadyPaid         *bool     `json:"already_paid,omitempty" jsonschema_description:"bill_pay only: true when that due date was already paid and nothing changed."`
-	Duplicate           bool      `json:"duplicate,omitempty" jsonschema_description:"bill_create only: true when the same bill was created minutes ago and was returned instead."`
-	DocumentFiled       bool      `json:"document_filed" jsonschema_description:"true only when a document for this bill exists and is linked. When false nothing was filed, so never say the bill is filed."`
+	ID                  string   `json:"id" jsonschema_description:"The bill_id to pass to bill_update, bill_pay or bill_delete."`
+	Name                string   `json:"name"`
+	Amount              *float64 `json:"amount" jsonschema_description:"Amount due each time, in the family's currency."`
+	Frequency           string   `json:"frequency" jsonschema_description:"monthly, quarterly, semiannual, annual or once."`
+	DueDay              *int     `json:"due_day" jsonschema_description:"Monthly bills: day of the month it is due (1-31); a short month uses its last day."`
+	DueDate             *string  `json:"due_date" jsonschema_description:"Other bills: a due date, YYYY-MM-DD; it repeats on that day every 3, 6 or 12 months."`
+	MonthlyAmount       *float64 `json:"monthly_amount" jsonschema_description:"amount spread per month: quarterly /3, semiannual /6, annual /12; null for once."`
+	Category            *string  `json:"category" jsonschema_description:"The bill's own label, e.g. Utilities (not the budget category)."`
+	BudgetCategoryID    *string  `json:"budget_category_id" jsonschema_description:"Budget category budget_summary files it under; null is uncategorized."`
+	BudgetCategory      *string  `json:"budget_category" jsonschema_description:"Name of that budget category, e.g. Housing."`
+	SourceDocumentID    *string  `json:"source_document_id" jsonschema_description:"The document the bill was taken from; read it with document_get to check the amount."`
+	SourceDocumentTitle *string  `json:"source_document_title" jsonschema_description:"Title of that document."`
+	Autopay             bool     `json:"autopay" jsonschema_description:"true when the bill pays itself (autopay). Same fact as autopay_enabled on the REST API."`
+	// Attention is billdue.AttentionFor's answer, the same field the REST API
+	// and the notification policy read (#5498). See the type comment.
+	Attention string `json:"attention" jsonschema_description:"Which of automatic (pays itself; nothing to do), needs_setup (nothing will pay it and no account is set), due_soon (a person pays it and an account is on record) or overdue (past due and unpaid) describes this bill. Use this to answer \"which bills will not pay themselves?\" instead of working it out from autopay."`
+	// PaymentAccount is where it is paid from: name, institution, type and the
+	// LAST FOUR digits, never a full number. Absent for a role without money
+	// (auth.CanSeeMoney) and when no account is linked.
+	PaymentAccount *billPaymentAccount `json:"payment_account,omitempty" jsonschema_description:"The account an autopay bill is paid from: name, institution, account_type and the last four digits. Absent when no account is linked, and for a role that may not see money."`
+	// Payee is who the bill is paid to.
+	Payee          *billPayee `json:"payee,omitempty" jsonschema_description:"Who the bill is paid to: name, plus phone, email and website when it is a known contact."`
+	ContactID      *string    `json:"contact_id" jsonschema_description:"The contact (vendor) the bill is paid to."`
+	PropertyID     *string    `json:"property_id" jsonschema_description:"The house or other property the bill is for (an asset's property for an asset bill)."`
+	VehicleID      *string    `json:"vehicle_id" jsonschema_description:"The car or other vehicle the bill is for."`
+	AssetID        *string    `json:"asset_id" jsonschema_description:"The thing the bill is for."`
+	SubjectType    *string    `json:"subject_type" jsonschema_description:"property, vehicle or asset; null for a family-level bill."`
+	SubjectName    *string    `json:"subject_name" jsonschema_description:"Name of the property, vehicle or asset."`
+	PaymentURL     *string    `json:"payment_url"`
+	Notes          *string    `json:"notes"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	NextDueDate    *string    `json:"next_due_date" jsonschema_description:"Next unpaid due date, YYYY-MM-DD in the family's timezone."`
+	NextDueWeekday *string    `json:"next_due_weekday" jsonschema_description:"Weekday of next_due_date, e.g. Thu."`
+	DaysUntilDue   *int       `json:"days_until_due" jsonschema_description:"Whole days from today (family timezone) to next_due_date."`
+	Status         string     `json:"status,omitempty" jsonschema_description:"due, or paid when the current due date is already paid."`
+	PaidDate       *string    `json:"paid_date" jsonschema_description:"Date of the last recorded payment, YYYY-MM-DD."`
+	PaidForDueDate *string    `json:"paid_for_due_date" jsonschema_description:"The due date the last payment covered, YYYY-MM-DD."`
+	AmountPaid     *float64   `json:"amount_paid,omitempty" jsonschema_description:"bill_pay only: the amount paid."`
+	AlreadyPaid    *bool      `json:"already_paid,omitempty" jsonschema_description:"bill_pay only: true when that due date was already paid and nothing changed."`
+	Duplicate      bool       `json:"duplicate,omitempty" jsonschema_description:"bill_create only: true when the same bill was created minutes ago and was returned instead."`
+	DocumentFiled  bool       `json:"document_filed" jsonschema_description:"true only when a document for this bill exists and is linked. When false nothing was filed, so never say the bill is filed."`
+}
+
+// billPaymentAccount is a payment account as the tools show it. LAST FOUR
+// ONLY: payment_accounts (075) has no column for a full account number and none
+// for a routing number, and the bank login is a `secrets` row that only the
+// family can read -- it is never named here.
+type billPaymentAccount struct {
+	ID          string  `json:"id" jsonschema_description:"The payment account id."`
+	Name        string  `json:"name" jsonschema_description:"The family's name for it, e.g. Joint checking."`
+	Institution *string `json:"institution" jsonschema_description:"The bank or card issuer."`
+	LastFour    *string `json:"last_four" jsonschema_description:"The last four digits only; there is no full number to show."`
+	AccountType string  `json:"account_type" jsonschema_description:"checking, savings, credit_card or other."`
+}
+
+// billPayee is who a bill is paid to: a vendors row when bills.vendor_id is
+// set, otherwise the free-text bills.payee_name (075).
+type billPayee struct {
+	VendorID *string `json:"vendor_id" jsonschema_description:"The contact (vendor) id, when the payee is a known contact."`
+	Name     string  `json:"name"`
+	Phone    *string `json:"phone" jsonschema_description:"Phone to reach them, when saved."`
+	Email    *string `json:"email" jsonschema_description:"Email to reach them, when saved."`
+	Website  *string `json:"website" jsonschema_description:"Their website or payment portal, when saved."`
 }
 
 // dateOnly formats t as YYYY-MM-DD.
@@ -183,7 +254,14 @@ func uuidString(id *uuid.UUID) *string {
 }
 
 // data builds the output for r as of today, applying BillDue.
-func (r billRow) data(today time.Time) billData {
+//
+// canSeeMoney is auth.CanSeeMoney(role): a role without money (housesitter,
+// vendor) gets no payment_account, because account names and last fours are
+// money-adjacent. The payee is not money -- contacts are readable by a
+// housesitter -- so it is always included. The attention state is
+// billdue.AttentionFor's answer under the SAME visibility rule, so a hidden
+// account cannot show through the state.
+func (r billRow) data(today time.Time, canSeeMoney bool) billData {
 	b := billData{
 		ID: r.ID.String(), Name: r.Name, Amount: r.Amount, Frequency: r.Frequency, DueDay: r.DueDay,
 		Category: r.Category, Autopay: r.AutoPay, ContactID: uuidString(r.VendorID),
@@ -208,6 +286,12 @@ func (r billRow) data(today time.Time) billData {
 	if r.PaidDate != nil {
 		b.PaidDate = dateOnly(*r.PaidDate)
 	}
+	b.PaymentAccount = r.paymentAccount(canSeeMoney)
+	b.Payee = r.payee()
+	// ONE derivation (#5498): billdue.AttentionFor, the same call the API's
+	// bill response makes. Nothing here re-derives "is this on me?".
+	b.Attention = billdue.AttentionFor(today, r.schedule(), r.PaidDate, r.PaidFor,
+		r.CreatedAt, r.AutoPay, r.hasPaymentSource(canSeeMoney))
 	due, ok := BillDueFor(today, r.schedule(), r.PaidDate, r.PaidFor)
 	if !ok {
 		return b
@@ -221,6 +305,52 @@ func (r billRow) data(today time.Time) billData {
 		b.PaidForDueDate = dateOnly(*due.PaidFor)
 	}
 	return b
+}
+
+// paymentAccount is the masked account, nil when none is linked or the caller
+// may not see money.
+func (r billRow) paymentAccount(canSeeMoney bool) *billPaymentAccount {
+	if !canSeeMoney || r.AutopayAccountID == nil || r.AccountName == nil {
+		return nil
+	}
+	return &billPaymentAccount{
+		ID: r.AutopayAccountID.String(), Name: *r.AccountName, Institution: r.AccountInstitution,
+		LastFour: r.AccountLastFour, AccountType: strOr(r.AccountType, "checking"),
+	}
+}
+
+// payee is the vendors row when one is linked, otherwise the free-text name.
+func (r billRow) payee() *billPayee {
+	switch {
+	case r.VendorID != nil && r.PayeeVendorName != nil && *r.PayeeVendorName != "":
+		return &billPayee{VendorID: uuidString(r.VendorID), Name: *r.PayeeVendorName,
+			Phone: r.PayeePhone, Email: r.PayeeEmail, Website: r.PayeeWebsite}
+	case r.PayeeName != nil && *r.PayeeName != "":
+		return &billPayee{Name: *r.PayeeName}
+	}
+	return nil
+}
+
+// hasPaymentSource reports whether an account is on record for this bill: the
+// linked payment_accounts row, or the legacy free-text bills.account_number.
+// False when the caller may not see account details, so the state cannot
+// reveal that an account is linked.
+func (r billRow) hasPaymentSource(canSeeMoney bool) bool {
+	if !canSeeMoney {
+		return false
+	}
+	if r.AutopayAccountID != nil {
+		return true
+	}
+	return r.AccountNumber != nil && *r.AccountNumber != ""
+}
+
+// strOr is s, or def when s is nil.
+func strOr(s *string, def string) string {
+	if s == nil {
+		return def
+	}
+	return *s
 }
 
 // dueText describes when b is next due, e.g. "due Thu Nov 20", or "" when
@@ -360,7 +490,7 @@ func NewBillFindTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Con
 
 		bills := make([]billData, 0, len(loaded))
 		for _, r := range loaded {
-			b := r.data(today)
+			b := r.data(today, auth.CanSeeMoney(claims.Role))
 			if in.dueWithinDays != nil && (b.DaysUntilDue == nil || *b.DaysUntilDue < 0 || *b.DaysUntilDue > *in.dueWithinDays) {
 				continue
 			}

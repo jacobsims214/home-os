@@ -562,7 +562,10 @@ func TestBillUpdate_LegacyNullFields(t *testing.T) {
 
 	var id uuid.UUID
 	if err := pool.QueryRow(context.Background(),
-		`INSERT INTO bills (household_id, name, is_autopay) VALUES ($1, 'Old', NULL) RETURNING id`,
+		// is_autopay is false, not NULL: migration 075 made it NOT NULL DEFAULT
+		// false (#5497). What this test is about is the legacy NULL amount and
+		// due_day an API-created bill could have.
+		`INSERT INTO bills (household_id, name, is_autopay) VALUES ($1, 'Old', false) RETURNING id`,
 		hh.HouseholdID,
 	).Scan(&id); err != nil {
 		t.Fatalf("insert bill: %v", err)
@@ -832,7 +835,10 @@ func TestBillDelete_LegacyNullFields(t *testing.T) {
 
 	var id uuid.UUID
 	if err := pool.QueryRow(context.Background(),
-		`INSERT INTO bills (household_id, name, is_autopay) VALUES ($1, 'Old', NULL) RETURNING id`,
+		// is_autopay is false, not NULL: migration 075 made it NOT NULL DEFAULT
+		// false (#5497). What this test is about is the legacy NULL amount and
+		// due_day an API-created bill could have.
+		`INSERT INTO bills (household_id, name, is_autopay) VALUES ($1, 'Old', false) RETURNING id`,
 		hh.HouseholdID,
 	).Scan(&id); err != nil {
 		t.Fatalf("insert bill: %v", err)
@@ -1204,7 +1210,10 @@ func TestBillPay_LegacyNullFields(t *testing.T) {
 	ctx, hh := testutil.SeedHousehold(t, pool)
 	var id uuid.UUID
 	if err := pool.QueryRow(context.Background(),
-		`INSERT INTO bills (household_id, name, is_autopay) VALUES ($1, 'Old', NULL) RETURNING id`,
+		// is_autopay is false, not NULL: migration 075 made it NOT NULL DEFAULT
+		// false (#5497). What this test is about is the legacy NULL amount and
+		// due_day an API-created bill could have.
+		`INSERT INTO bills (household_id, name, is_autopay) VALUES ($1, 'Old', false) RETURNING id`,
 		hh.HouseholdID,
 	).Scan(&id); err != nil {
 		t.Fatalf("insert bill: %v", err)
