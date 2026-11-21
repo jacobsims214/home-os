@@ -289,6 +289,21 @@ def selftest():
         ("the server's own words are kept",
          lambda: "405 page" in diagnose("http://h/mcp", 418, "405 page")),
     ]
+    # THE TRANSPORT FUNCTIONS MUST BE THE ONES THE CLIENT CALLS.
+    #
+    # Every case above tests a function in isolation. The failure mode that
+    # leaves them green is drift: Client.post stops calling parse_response (or
+    # main stops calling rpc_url) and the script speaks the wrong transport
+    # again while the selftest still passes -- the same shape as #5140's wrong
+    # fixture and the envoy grep check (#5420). So this reads the module's own
+    # source and requires each wiring to still be there.
+    import inspect
+    post_src = inspect.getsource(Client.post)
+    main_src = inspect.getsource(main)
+    cases.append(("Client.post still parses the reply with parse_response",
+                  lambda: "parse_response" in post_src and "content_type" in post_src))
+    cases.append(("main still builds its URL with rpc_url", lambda: "rpc_url" in main_src))
+
     failed = 0
     for name, case in cases:
         try:

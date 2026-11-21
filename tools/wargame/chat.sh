@@ -204,6 +204,43 @@ selftest() {
   else echo 'FAIL allow-dollar did not suppress the warning' >&2; fails=$((fails + 1)); fi
   allows_dollar=0
 
+  # THE GUARD MUST BE WIRED IN, NOT JUST DEFINED.
+  #
+  # #4948's defect is the SHAPE "chat.sh ate $2,340". Every case above calls
+  # `guard_message` directly, so deleting the call site in main() would leave this
+  # selftest green while the script sent the corrupted message — the "guard CI
+  # does not run" failure in its subtler form: a guard the RUN does not run. So
+  # this case executes the real script on the real argv path and requires the
+  # refusal to reach a person as exit 2 and a sentence naming the reason.
+  #
+  # It needs no server: the refusal happens before the transport, so a missing
+  # WG_*_URL can never be what produces the exit code. This test FAILS if the
+  # `guard_message "$MSG_RAW" "$SRC"` call or the `exit 2` after it is removed.
+  # (Both lines below swallow a non-zero status: this script runs under `set -e`,
+  # so a bare assignment from a failing run would abort the selftest itself.)
+  local out rc=0
+  out=$("$0" nosuchpersona nosuchsession 'mortgage is ,340 and electric 80' 2>&1) || rc=$?
+  n=$((n + 1))
+  if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'REFUSING to send this message'; then
+    echo 'ok   refuse the argv path end to end (the call site is wired in)'
+  else
+    echo "FAIL the run is not refusing a comma residue: exit=$rc out=$(printf '%s' "$out" | head -1)" >&2
+    fails=$((fails + 1))
+  fi
+
+  # ...and the same run must NOT refuse an ordinary message before reaching the
+  # transport (it fails later on the missing WG_*_URL, exit 2, with a different
+  # sentence). Without this half, "refuse everything" would pass the case above.
+  rc=0
+  out=$("$0" nosuchpersona nosuchsession 'kid soccer tue 5:30' 2>&1) || rc=$?
+  n=$((n + 1))
+  if printf '%s' "$out" | grep -q 'REFUSING to send this message'; then
+    echo 'FAIL an ordinary message was refused by the guard' >&2
+    fails=$((fails + 1))
+  else
+    echo 'ok   an ordinary message is not refused (the guard is not a blanket)'
+  fi
+
   echo "--- $((n - fails))/$n passed"
   [ "$fails" -eq 0 ]
 }

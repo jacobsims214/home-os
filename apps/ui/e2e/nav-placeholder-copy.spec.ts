@@ -98,7 +98,37 @@ test.describe("phone 390px", () => {
     await expect(sheet.locator('[aria-disabled="true"]')).toHaveCount(0);
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
+  });
 
+  /**
+   * #5408, REACHED THE WAY IT WAS REPORTED.
+   *
+   * The finding was "Guides is unreachable from the mobile nav": the route worked
+   * and no nav surface linked to it. A visible tile asserts half of that, and a
+   * tile is a proxy — it would still pass if the tile led nowhere, which is the
+   * other half of "unreachable". So this test starts where the report starts (the
+   * phone's More sheet), takes the one tap a person takes, and requires the page
+   * that tap promised: the destination's own h1.
+   *
+   * FAILS ON REGRESSION because the pre-fix build has no Guides tile to click, and
+   * because a tile added back as a dead link lands nowhere.
+   */
+  test("#5408: Guides is one tap from the phone's More sheet, and lands on the page", async ({ loggedInPage: page }) => {
+    await gotoHome(page);
+    const bar = page.getByTestId("tab-bar");
+    await bar.getByRole("button", { name: "More" }).click();
+    const sheet = page.getByRole("dialog", { name: "More" });
+    await expect(sheet).toBeVisible();
+
+    await sheet.getByRole("link", { name: /Guides/ }).click();
+    await expect(page).toHaveURL(/\/dashboard\/guides$/, { timeout: 15_000 });
+    // Not just the URL: the page a person sees, with its own title.
+    await expect(page.getByRole("heading", { level: 1, name: "Guides" })).toBeVisible();
+    await expect(sheet, "the sheet closes on navigation, leaving no scrim").toBeHidden();
+  });
+
+  test("the drawer opens on a real row for every section, with no pills", async ({ loggedInPage: page }) => {
+    await gotoHome(page);
     // Drawer: the same nav, as links, with no pills.
     await page.locator("header").getByRole("button", { name: "Open menu" }).click();
     const drawer = page.getByRole("dialog", { name: /Home OS menu/ });
@@ -131,6 +161,12 @@ for (const width of [820, 1440]) {
       for (const name of ["Lists", "Documents", "Guides"]) {
         await expect(nav.getByRole("link", { name, exact: true })).toBeVisible();
       }
+      // A row is a proxy; the tap is the finding. #5408 was reported at 390 px,
+      // so the phone case above walks it end to end; here it must at least lead
+      // to the destination's own page rather than a 404 or a redirect loop.
+      await nav.getByRole("link", { name: "Guides", exact: true }).click();
+      await expect(page).toHaveURL(/\/dashboard\/guides$/, { timeout: 15_000 });
+      await expect(page.getByRole("heading", { level: 1, name: "Guides" })).toBeVisible();
     });
   });
 }
