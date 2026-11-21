@@ -124,6 +124,7 @@ var wantToolClass = map[string]toolClass{
 	"note_get":                classR,
 	"note_update":             classU,
 	"notification_find":       classR,
+	"notification_get":        classR,
 	"notification_mark_read":  classU,
 	"person_create":           classC,
 	"person_delete":           classX,

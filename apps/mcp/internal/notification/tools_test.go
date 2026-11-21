@@ -27,6 +27,8 @@ func toolDef(name string) mcp.Tool {
 	switch name {
 	case "notification_find":
 		_, tool, _ = NewNotificationFindTool(nil)
+	case "notification_get":
+		_, tool, _ = NewNotificationGetTool(nil)
 	case "notification_mark_read":
 		_, tool, _ = NewNotificationMarkReadTool(nil)
 	}
@@ -189,8 +191,10 @@ func TestToolDefinitions(t *testing.T) {
 		params, required  []string
 		readOnly          bool
 	}{
-		{"notification_find", "List your notifications (reminders, changes others made). Always includes unread_count.",
-			"Find notifications", []string{"unread_only", "limit", "cursor"}, nil, true},
+		{"notification_find", "List your notifications (reminders, changes). Poll unread_only=true to watch for new ones; needs_you tells you which need your person. Always includes unread_count.",
+			"Find notifications", []string{"unread_only", "type", "since", "limit", "cursor"}, nil, true},
+		{"notification_get", "Get one notification in full: its whole body and the call that opens what it is about. needs_you says whether it still needs a person.",
+			"Get a notification", []string{"notification_id"}, []string{"notification_id"}, true},
 		{"notification_mark_read", "Mark the notifications you just told the user about read, by id. There is no mark-all.",
 			"Mark notifications read", []string{"notification_ids"}, []string{"notification_ids"}, false},
 	}

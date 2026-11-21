@@ -203,6 +203,9 @@ func benchCases(f benchFixtures, today time.Time) []benchCase {
 			return map[string]any{"note_id": f.Note, "append_text": fmt.Sprintf("line %d", i)}
 		}},
 		{"notification_find", static(map[string]any{"unread_only": true})},
+		{"notification_get", func(i int) map[string]any {
+			return map[string]any{"notification_id": pick(f.UnreadNotifications, i)}
+		}},
 		{"notification_mark_read", func(i int) map[string]any {
 			return map[string]any{"notification_ids": []string{pick(f.UnreadNotifications, i)}}
 		}},
