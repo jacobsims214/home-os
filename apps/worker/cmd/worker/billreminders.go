@@ -21,7 +21,7 @@ package main
 // # Idempotency
 //
 // A reminder is keyed on (bill, date, attention state) — billdue.AdviceFor's
-// DedupeKey — and written into notifications.dedupe_key. Migration 078's
+// DedupeKey — and written into notifications.dedupe_key. Migration 081's
 // idx_notifications_dedupe_family makes that unique per household for the
 // family-wide rows this job writes (user_id NULL, which 056's per-member index
 // cannot cover), so a second worker tick, a restart mid-run or a second replica

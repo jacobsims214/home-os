@@ -125,7 +125,7 @@ func (a Advice) Due(daysUntil int) bool {
 // attention state. Re-running the job (it ticks every few seconds) is a no-op;
 // a bill that moves to a new state or a new due date earns a new reminder. It
 // is stored in notifications.dedupe_key, unique per family for the family-wide
-// rows this job writes (migration 078), so a second replica or a restart cannot
+// rows this job writes (migration 081), so a second replica or a restart cannot
 // duplicate it either.
 func (a Advice) DedupeKey(billID uuid.UUID, date time.Time) string {
 	return fmt.Sprintf("bill_due:%s:%s:%s", billID, Midnight(date).Format(time.DateOnly), a.Attention)

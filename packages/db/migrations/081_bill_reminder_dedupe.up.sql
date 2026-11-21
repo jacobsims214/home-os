@@ -1,4 +1,6 @@
--- 078_bill_reminder_dedupe.up.sql (#5500)
+-- 081_bill_reminder_dedupe.up.sql (#5500)
+-- Renumbered 078 -> 081 on landing (#5534): 078 is #5509's activity entity-kind
+-- migration and 079 is #5533's. Content unchanged.
 --
 -- The notification policy keys a bill reminder on (bill, due date, attention
 -- state), and stores that key in notifications.dedupe_key (056). 056's
