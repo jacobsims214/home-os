@@ -1,4 +1,4 @@
--- 075_kb_docs.down.sql (#5502)
+-- 076_kb_docs.down.sql (#5502)
 
 BEGIN;
 

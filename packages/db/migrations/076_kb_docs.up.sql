@@ -1,4 +1,4 @@
--- 075_kb_docs.up.sql (#5502)
+-- 076_kb_docs.up.sql (#5502)
 --
 -- The family's own knowledge base: durable, household-scoped knowledge that a
 -- person or an agent can write once and anyone can find later.
@@ -103,7 +103,7 @@ AS $$
                   WHEN 'meal_plan'            THEN 'meals'
                   WHEN 'meal_feedback'        THEN 'meals'
                   WHEN 'guide'                THEN 'guides'
-                  -- 075
+                  -- 076
                   WHEN 'kb_doc'               THEN 'kb'
               END)
             -- policy[resource][ActRead]
@@ -126,7 +126,7 @@ AS $$
             WHEN 'lists'        THEN ARRAY['owner', 'family_manager', 'family_member', 'viewer', 'housesitter']   -- rolesSitter
             WHEN 'meals'        THEN ARRAY['owner', 'family_manager', 'family_member', 'viewer', 'housesitter']   -- rolesSitter
             WHEN 'guides'       THEN ARRAY['owner', 'family_manager', 'family_member', 'viewer', 'housesitter']   -- rolesSitter
-            -- 075: the KB is everyone's, a housesitter's included.
+            -- 076: the KB is everyone's, a housesitter's included.
             WHEN 'kb'           THEN ARRAY['owner', 'family_manager', 'family_member', 'viewer', 'housesitter', 'vendor'] -- rolesEveryone
             -- Unknown kind: family roles only (fails closed).
             ELSE ARRAY['owner', 'family_manager', 'family_member']

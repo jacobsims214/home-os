@@ -1,5 +1,5 @@
 {
-  "note": "Household role policy contract (#4689). apps/api/internal/auth/roles.go and apps/mcp/internal/auth/policy.go each mirror this table; TestRolePolicyMatchesFixture in both packages fails when either drifts. Edit both tables, this file and KB decisions/2026-11-15-role-policy.md together. 075 (#5502) adds policy.kb (every role reads the knowledge base, family roles write) and entity_resources.kb_doc -> kb.",
+  "note": "Household role policy contract (#4689). apps/api/internal/auth/roles.go and apps/mcp/internal/auth/policy.go each mirror this table; TestRolePolicyMatchesFixture in both packages fails when either drifts. Edit both tables, this file and KB decisions/2026-11-15-role-policy.md together. 076 (#5502) adds policy.kb (every role reads the knowledge base, family roles write) and entity_resources.kb_doc -> kb.",
   "roles": [
     "owner",
     "family_manager",

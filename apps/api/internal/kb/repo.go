@@ -1,4 +1,4 @@
-// Package kb is the family's own knowledge base (migration 075, #5502):
+// Package kb is the family's own knowledge base (migration 076, #5502):
 // durable, household-scoped knowledge a person OR an agent writes once and
 // anyone can find later.
 //
@@ -301,7 +301,7 @@ func (r *Repo) AllInHousehold(ctx context.Context, householdID string, fn func(*
 // --- validation -------------------------------------------------------------
 
 // pathSegment matches one segment of a path: lower-case letters, digits, and
-// '.', '_' or '-' inside a segment. It is the same rule migration 075's CHECK
+// '.', '_' or '-' inside a segment. It is the same rule migration 076's CHECK
 // enforces, restated so a bad path is a clear 400 rather than a 500 from the
 // database.
 var pathSegment = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)

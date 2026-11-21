@@ -208,7 +208,7 @@ func cannotWrite(role, tool string) *mcp.CallToolResult {
 
 // --- validation -------------------------------------------------------------
 
-// pathSegment is migration 075's CHECK, restated so a bad path is a clear
+// pathSegment is migration 076's CHECK, restated so a bad path is a clear
 // argument error instead of a database error.
 var pathSegment = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 
