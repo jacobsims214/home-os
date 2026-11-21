@@ -14,6 +14,12 @@ export interface Contact {
   id: string;
   household_id: string;
   name: string;
+  /**
+   * Service provider, payee or both (#5529, migration 080). The contacts list
+   * only returns rows that do work, so this is never `payee` here -- it is
+   * `both` when the contact is also paid.
+   */
+  kind: "service_provider" | "payee" | "both";
   /** Always an array, never null, never omitted. Stored snake_case. */
   trades: string[];
   specialty?: string | null;

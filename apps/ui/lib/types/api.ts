@@ -43,11 +43,22 @@ export interface Asset {
 }
 
 /** POST /api/v1/assets request body */
+/**
+ * What a vendor row is for (#5529, migration 080). `service_provider` does
+ * work for the family (the contacts list); `payee` is paid by the family (the
+ * bill payee picker); `both` is both.
+ *
+ * GET /api/v1/vendors already excludes payee-only rows, so anything this type
+ * describes came from the contacts list. Use `?kind=payee` for the payee side.
+ */
+export type VendorKind = "service_provider" | "payee" | "both";
+
 /** GET /api/v1/vendors response item (a family contact). `trades` is always an array. */
 export interface Vendor {
   id: string;
   household_id: string;
   name: string;
+  kind: VendorKind;
   trades: string[];
   specialty?: string;
   phone?: string;

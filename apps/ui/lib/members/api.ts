@@ -141,11 +141,20 @@ export function useInvites(enabled: boolean) {
   });
 }
 
-/** The family's vendor contacts, for linking a vendor login to its company. */
+/**
+ * The family's vendor contacts, for linking a vendor login to its company.
+ *
+ * kind=service_provider is explicit (#5529): a vendor login belongs to a
+ * company that does work for the family, never to a utility that is only a
+ * bill payee.
+ */
 export function useVendors(enabled: boolean) {
   return useQuery({
     queryKey: memberKeys.vendors(),
-    queryFn: () => apiFetch<{ data: VendorRow[] }>("/api/v1/vendors"),
+    queryFn: () =>
+      apiFetch<{ data: VendorRow[] }>("/api/v1/vendors", {
+        params: { kind: "service_provider" },
+      }),
     enabled,
     staleTime: 5 * 60_000,
     retry: false,

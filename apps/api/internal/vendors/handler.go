@@ -82,7 +82,11 @@ func (h *Handler) deleteVendorIndex(ctx context.Context, id string) {
 // --- request / response types ---
 
 type createVendorRequest struct {
-	Name      string   `json:"name"`
+	Name string `json:"name"`
+	// Kind is what the row is for (080, #5529): service_provider (default),
+	// payee or both. A contacts-path client omits it and gets
+	// service_provider, which is where a contact belongs.
+	Kind      string   `json:"kind"`
 	Trades    []string `json:"trades"`
 	Specialty *string  `json:"specialty"`
 	Phone     *string  `json:"phone"`
@@ -96,7 +100,11 @@ type createVendorRequest struct {
 // (or null) trades keep the stored trades, [] clears them; an omitted
 // address keeps the stored one, null or "" clears it.
 type updateVendorRequest struct {
-	Name      string    `json:"name"`
+	Name string `json:"name"`
+	// Kind reclassifies the row (080, #5529). A pointer so an omitted kind
+	// keeps the stored one -- a client that predates 080 must never silently
+	// reset a payee back to service_provider.
+	Kind      *string   `json:"kind"`
 	Trades    *[]string `json:"trades"`
 	Specialty *string   `json:"specialty"`
 	Phone     *string   `json:"phone"`
@@ -107,18 +115,20 @@ type updateVendorRequest struct {
 }
 
 type vendorResponse struct {
-	ID          string   `json:"id"`
-	HouseholdID string   `json:"household_id"`
-	Name        string   `json:"name"`
-	Trades      []string `json:"trades"`
-	Specialty   *string  `json:"specialty,omitempty"`
-	Phone       *string  `json:"phone,omitempty"`
-	Email       *string  `json:"email,omitempty"`
-	Website     *string  `json:"website,omitempty"`
-	Address     *string  `json:"address,omitempty"`
-	Notes       *string  `json:"notes,omitempty"`
-	CreatedAt   string   `json:"created_at"`
-	UpdatedAt   string   `json:"updated_at"`
+	ID          string `json:"id"`
+	HouseholdID string `json:"household_id"`
+	Name        string `json:"name"`
+	// Kind is "service_provider", "payee" or "both" (080, #5529).
+	Kind      string   `json:"kind"`
+	Trades    []string `json:"trades"`
+	Specialty *string  `json:"specialty,omitempty"`
+	Phone     *string  `json:"phone,omitempty"`
+	Email     *string  `json:"email,omitempty"`
+	Website   *string  `json:"website,omitempty"`
+	Address   *string  `json:"address,omitempty"`
+	Notes     *string  `json:"notes,omitempty"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
 }
 
 func toVendorResponse(v *Vendor) vendorResponse {
@@ -126,6 +136,7 @@ func toVendorResponse(v *Vendor) vendorResponse {
 		ID:          v.ID.String(),
 		HouseholdID: v.HouseholdID.String(),
 		Name:        v.Name,
+		Kind:        v.Kind,
 		Trades:      nonNil(v.Trades),
 		Specialty:   v.Specialty,
 		Phone:       v.Phone,
@@ -156,9 +167,24 @@ func householdID(r *http.Request) (uuid.UUID, error) {
 }
 
 // List returns the vendors for the authenticated household.
-// GET /api/v1/vendors[?trade=plumber]
+// GET /api/v1/vendors[?trade=plumber][&kind=payee]
+//
 // trade is normalized like stored trades ("Plumbing" finds plumber) and
 // matched exactly; blank means no filter.
+//
+// kind (080, #5529) chooses WHICH list, and the two lists do not mix:
+//
+//	(none)             the contacts list -- everyone who does work. This is
+//	                   the default and it excludes payee-only rows, so the
+//	                   list of plumbers and gardeners never fills with
+//	                   utilities and mortgage servicers.
+//	service_provider   the same contacts list, named explicitly.
+//	payee              the bill payee picker -- payee and both, never a
+//	                   gardener who is not also paid.
+//	both               only rows that are both.
+//
+// An unrecognised kind is a 400, not a silent fallback: a client that
+// mistypes must not be handed the contacts list and think it has payees.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	hid, err := householdID(r)
 	if err != nil {
@@ -172,7 +198,13 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vendors, err := h.repo.List(r.Context(), hid, trade)
+	kind, msg := normalizeKindFilter(r.URL.Query().Get("kind"))
+	if msg != "" {
+		apierr.BadRequest(w, msg)
+		return
+	}
+
+	vendors, err := h.repo.List(r.Context(), hid, trade, kind)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
@@ -233,6 +265,11 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	kind, msg := normalizeKind(req.Kind)
+	if msg != "" {
+		apierr.BadRequest(w, msg)
+		return
+	}
 	trades, msg := normalizeTrades(req.Trades)
 	if msg != "" {
 		apierr.BadRequest(w, msg)
@@ -246,6 +283,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	v := &Vendor{
 		Name:      req.Name,
+		Kind:      kind,
 		Trades:    trades,
 		Specialty: req.Specialty,
 		Phone:     req.Phone,
@@ -299,9 +337,17 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, msg)
 		return
 	}
+	var kind string
+	if req.Kind != nil {
+		if kind, msg = normalizeKind(*req.Kind); msg != "" {
+			apierr.BadRequest(w, msg)
+			return
+		}
+	}
 
 	v := &Vendor{
 		Name:      req.Name,
+		Kind:      kind, // "" keeps the stored kind (see updateVendorRequest)
 		Specialty: req.Specialty,
 		Phone:     req.Phone,
 		Email:     req.Email,
@@ -402,6 +448,30 @@ func normalizeAddress(in *string) (*string, string) {
 		return nil, "address must be at most 500 characters"
 	}
 	return &a, ""
+}
+
+// --- kind (080, #5529) ---
+
+// normalizeKind validates a kind on a write. Blank means "not given": on
+// create the database default (service_provider) applies, on update the
+// stored kind is kept. Anything else must be an enum value.
+func normalizeKind(k string) (string, string) {
+	k = strings.ToLower(strings.TrimSpace(k))
+	if k == "" || ValidKind(k) {
+		return k, ""
+	}
+	return "", "kind must be service_provider, payee or both"
+}
+
+// normalizeKindFilter validates the ?kind= list filter. Blank is the
+// contacts list, which is the pre-080 behaviour.
+func normalizeKindFilter(k string) (string, string) {
+	k = strings.ToLower(strings.TrimSpace(k))
+	switch k {
+	case "", KindServiceProvider, KindPayee, KindBoth:
+		return k, ""
+	}
+	return "", "kind must be service_provider, payee or both"
 }
 
 // --- trades ---

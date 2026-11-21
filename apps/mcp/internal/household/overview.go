@@ -363,7 +363,9 @@ func loadCounts(ctx context.Context, pool *pgxpool.Pool, hh string) (areaCounts,
 		(SELECT count(*) FROM assets    WHERE household_id = $1),
 		(SELECT count(*) FROM vehicles  WHERE household_id = $1),
 		(SELECT count(*) FROM pets      WHERE household_id = $1),
-		(SELECT count(*) FROM vendors   WHERE household_id = $1),
+		-- contacts excludes payee-only rows (080, #5529): the count must mean
+		-- the same thing the contacts list shows, not "every row in vendors".
+		(SELECT count(*) FROM vendors   WHERE household_id = $1 AND kind <> 'payee'),
 		(SELECT count(*) FROM notes     WHERE household_id = $1),
 		(SELECT count(*) FROM lists     WHERE household_id = $1 AND NOT archived AND NOT is_template),
 		(SELECT count(*) FROM recipes   WHERE household_id = $1),

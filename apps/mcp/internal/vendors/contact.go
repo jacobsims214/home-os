@@ -72,6 +72,7 @@ type contactCounts struct {
 type contactData struct {
 	ID        string        `json:"id" jsonschema_description:"The contact_id to pass to bill_create, maintenance_create and others."`
 	Name      string        `json:"name"`
+	Kind      string        `json:"kind" jsonschema_description:"service_provider: does work for the family (the contacts list). payee: is paid by the family (a bill payee). both: both."`
 	Trades    []string      `json:"trades" jsonschema_description:"What they do, lower case, e.g. [\"plumber\"] or [\"vet\"]. May be empty."`
 	Specialty *string       `json:"specialty" jsonschema_description:"Free-text specialty as the family typed it; null when not set."`
 	Phone     *string       `json:"phone"`
