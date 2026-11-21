@@ -70,7 +70,11 @@ BEGIN;
 -- 1. One implementation
 -- ---------------------------------------------------------------------------
 
-CREATE FUNCTION set_updated_at() RETURNS TRIGGER
+-- CREATE OR REPLACE, and the trigger loop replaces rather than stacks, so
+-- running this migration twice is a no-op instead of an error. The migration
+-- runner applies each file once, but a person re-running it by hand (or a
+-- test applying it to an already-077 database) should not be punished for it.
+CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
@@ -112,6 +116,15 @@ BEGIN
                       AND tgname  = v_table || '_touch_updated_at') THEN
             EXECUTE format('DROP TRIGGER %I ON %I',
                            v_table || '_touch_updated_at', v_table);
+        END IF;
+
+        -- Same for a previous run of this migration: replace the trigger
+        -- rather than fail on CREATE TRIGGER's duplicate-name error.
+        IF EXISTS (SELECT 1 FROM pg_trigger
+                    WHERE tgrelid = format('public.%I', v_table)::regclass
+                      AND tgname  = v_table || '_set_updated_at') THEN
+            EXECUTE format('DROP TRIGGER %I ON %I',
+                           v_table || '_set_updated_at', v_table);
         END IF;
 
         EXECUTE format(
@@ -156,8 +169,20 @@ $$;
 -- 3. The bespoke bodies are gone, not just unused
 -- ---------------------------------------------------------------------------
 
-DROP FUNCTION IF EXISTS lists_touch_updated_at();
-DROP FUNCTION IF EXISTS recipes_touch_updated_at();
-DROP FUNCTION IF EXISTS guides_touch_updated_at();
+-- Dropped by name lookup rather than DROP FUNCTION IF EXISTS, which prints a
+-- NOTICE for each one on a re-run (when they are already gone).
+DO $$
+DECLARE
+    v_fn TEXT;
+BEGIN
+    FOREACH v_fn IN ARRAY ARRAY[
+        'lists_touch_updated_at()', 'recipes_touch_updated_at()', 'guides_touch_updated_at()'
+    ] LOOP
+        IF to_regprocedure(v_fn) IS NOT NULL THEN
+            EXECUTE format('DROP FUNCTION %s', v_fn);
+        END IF;
+    END LOOP;
+END
+$$;
 
 COMMIT;
