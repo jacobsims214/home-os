@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/billdue"
 	"home-os/mcp/internal/respond"
 )
 
@@ -63,6 +64,21 @@ type notificationData struct {
 	AboutType *string `json:"about_type" jsonschema_description:"What it is about, e.g. bill or maintenance; null if nothing."`
 	AboutID   *string `json:"about_id" jsonschema_description:"The id of what it is about; null if nothing."`
 	Open      *string `json:"open" jsonschema_description:"The tool call that reads what it is about; null if none."`
+	// NeedsYou is the field that answers "what needs my attention right now?".
+	// It is always present and always a boolean, because a model reading this
+	// JSON must never have to infer "no value means yes": false ONLY for a bill
+	// that pays itself (billdue.AttentionFor says automatic). Everything else,
+	// including a notification that is not about a bill at all, is true: a
+	// reminder about a maintenance task or a calendar event is a thing nothing
+	// has handled. A bill_due whose bill row cannot be read (deleted, or a role
+	// that cannot see it) is true too: telling a person about it is the cheap
+	// mistake, staying quiet about a real bill is the expensive one.
+	NeedsYou bool `json:"needs_you" jsonschema_description:"true when a person still has to act on this; false only when what it is about is handled automatically (a bill that pays itself) and the reminder is noise. Always present."`
+	// Attention is billdue.AttentionFor's answer for the bill this is about:
+	// automatic | needs_setup | due_soon | overdue. The SAME derivation the UI
+	// and bill_find use (#5498); never re-derived here. Null when not about a
+	// bill.
+	Attention *string `json:"attention,omitempty" jsonschema_description:"For a bill: automatic (pays itself, nothing to do), needs_setup (nothing will pay it and no account is set), due_soon (a person pays it), or overdue. Null when not about a bill."`
 }
 
 // aboutKinds maps a notifications.entity_type to its catalog about_type and
@@ -99,10 +115,16 @@ type row struct {
 	createdAt  time.Time
 	entityType *string
 	entityID   *uuid.UUID
+	// bill is the row's bill when the notification is about one and the caller
+	// may see it (nil for another kind of record, or a bill the role may not
+	// see). It is what turns "there is a bill_due reminder" into "this bill
+	// still needs a person" or "this bill pays itself".
+	bill *billRow
 }
 
-// data turns a row into output, with times in loc.
-func (r row) data(loc *time.Location) notificationData {
+// data turns a row into output, with times in loc. today is the family's date
+// as midnight UTC, for the bill attention rule.
+func (r row) data(loc *time.Location, today time.Time) notificationData {
 	created := r.createdAt.In(loc)
 	d := notificationData{
 		ID:        r.id.String(),
@@ -123,6 +145,13 @@ func (r row) data(loc *time.Location) notificationData {
 		d.ReadAt = &s
 	}
 	d.AboutType, d.AboutID, d.Open = about(r.entityType, r.entityID)
+	// Default true: everything that is not a self-paying bill needs a person.
+	d.NeedsYou = true
+	if r.bill != nil {
+		attention := r.bill.attention(today)
+		d.Attention = &attention
+		d.NeedsYou = attention != billdue.AttentionAutomatic
+	}
 	return d
 }
 
@@ -167,9 +196,11 @@ func callerUser(userID string) *uuid.UUID {
 	return &id
 }
 
-// querier is the subset of pgxpool.Pool and pgx.Tx the queries use.
+// querier is the subset of pgxpool.Pool and pgx.Tx the queries use. Query is
+// there for the bill page load, which reads many rows at once.
 type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 // counts returns the caller's unread and total visible notifications; role
