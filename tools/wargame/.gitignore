@@ -1,0 +1,52 @@
+# Scratch outputs and credentials from a war-game round. Nothing here is ever
+# committed: a round produces screenshots, turn logs, shell step-files and
+# password files, and more than one of those has held a live credential.
+# Keep the `.gitkeep`-style emptiness of this folder: the tracked files are
+# README.md, personas.md, chat.sh, mcpcall.py, api.py, verify.yaml, verify.py
+# and this .gitignore.
+
+# --- credentials: never ---
+.env
+.env.*
+!.env.example
+*.pw
+*.password
+*.token
+*.secret
+*.kubeconfig
+admin.crt
+admin.key
+ca.crt
+*.pem
+*.jks
+.uicreds
+*creds*
+
+# --- round scratch ---
+logs/
+shots/
+screenshots/
+captures/
+*.log
+*.har
+trace.zip
+steps-*.json
+msg-*.txt
+run-*.sh
+*.cookies
+cookies.txt
+profile/
+chrome-profile/
+user-data-dir/
+
+# --- verify.py / runner output ---
+verify.out.json
+verify.stdout
+results/
+
+# --- python / OS / editor noise ---
+__pycache__/
+*.pyc
+.DS_Store
+*.swp
+*~
