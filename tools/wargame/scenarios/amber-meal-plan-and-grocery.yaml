@@ -1,0 +1,28 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (A5), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-meal-plan-and-grocery
+persona: amber
+surface: meals
+intent: |
+  Plan four dinners - no peanuts for one kid, no tomato for the other - and build the
+  grocery list.
+steps:
+  - chat.sh amber r2-dinner --file msg (4 dinners with two dietary constraints + grocery list)
+  - "mcpcall.py search_all --query 'tacos' as amber"
+  - "mcpcall.py person_get <kid> as amber (allergy notes)"
+assertion: |
+  Four recipes exist, none contains an excluded ingredient, the grocery list carries
+  quantities, and unplanned days are reported as left open rather than filled in.
+tags:
+  - meals
+  - lists
+  - agent
+  - write
+  - allergies
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: A5
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: pass

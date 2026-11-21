@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-jacob.md (reminder), #4584.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-reminder-from-text
+persona: jacob
+surface: calendar
+intent: |
+  Dentist next Tuesday 4pm - remind me 30 minutes before.
+steps:
+  - chat.sh jacob wg-jacob-reminder --file msg (dentist next Tue 4pm + 30-min reminder)
+  - "mcpcall.py event_find --from <tue> --to <tue+1d> as jacob"
+assertion: |
+  The event exists at 16:00 with reminder_minutes [30] stored in Home OS, and the
+  reply anchors the claim to the tool result rather than to an agent-local cron.
+tags:
+  - calendar
+  - agent
+  - reminders
+  - write
+origin:
+  round: r2
+  source: discoveries/war-game-r2-jacob.md
+  ref: reminder
+  ticket: "#4584"
+  date: "2026-11-18"
+  verdict: pass

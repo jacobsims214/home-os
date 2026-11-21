@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (calendar), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-mobile-calendar
+persona: jacob
+surface: calendar
+intent: |
+  Does the calendar work on a phone?
+steps:
+  - open /dashboard/calendar as jacob at 390px
+  - switch Agenda/Day/Month
+  - read a recurring event and a bill projection
+assertion: |
+  All three views work at 390px, recurrence is described in words, and projections
+  show their paid-for state.
+tags:
+  - calendar
+  - ui
+  - mobile
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: calendar
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: pass

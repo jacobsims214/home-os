@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (agreement-agent-token-roundtrip), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-agent-token-roundtrip
+persona: jacob
+surface: settings
+intent: |
+  Does the token the app shows me actually work against the MCP?
+steps:
+  - read the active token row on /dashboard/settings/agent-tokens as jacob
+  - use that token with mcpcall.py -list and a read call
+  - "reload the page and read 'Used N min ago'"
+assertion: |
+  The listed token authenticates to the MCP, returns the full tool list, and its
+  last-used time advances.
+tags:
+  - settings
+  - agent-tokens
+  - mcp
+  - agreement
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: agreement-agent-token-roundtrip
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: pass

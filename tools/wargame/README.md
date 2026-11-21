@@ -11,6 +11,8 @@ you check what actually landed in Home OS with direct MCP calls.
 | `api.py` | Same idea for the REST API (`/api/v1/...`). **Dex id_token only** — a `hos_` agent token 401s there by design; see [Two kinds of token](#two-kinds-of-token-agent-tokens-are-mcp-scoped). |
 | `personas.md` | The household, the two personas (Jacob, Amber), their scenarios and sample turns, and the agent system-prompt snippet. |
 | `seed/household.py` | The household itself: 12 bills whose mix puts all four `billdue.AttentionFor` states on the board at once (6 autopay-with-account incl. one due in 2 days, 4 manual-with-account, 1 manual with no account due soon, 1 overdue), 3 last-4 payment accounts, 13 contacts with phone/email/website, 4 **`kb_docs`** KB docs, people, pets, vehicles, property. Dates are computed from today in the household's timezone. Idempotent, refuses anything that is not the war-game household. **[`seed/README.md`](seed/README.md)** |
+| `scenarios/` | The scenario corpus: one YAML file per scenario, with the persona, surface, intent, steps, assertion and the round that found it. See [`scenarios/README.md`](scenarios/README.md). |
+| `scenarios_load.py` | Loads and validates `scenarios/`: schema, duplicate ids, missing ids, and the count report per persona, surface and round. `--selftest` needs no corpus. |
 
 ## Never put a `$` through your shell — always single-quote, or better use `--stdin`
 
@@ -269,7 +271,10 @@ no header the oldest membership is used, and a malformed value is a 400.
    ./mcpcall.py note_find
    ```
 
-2. **Play a persona turn.** Pick a scenario from `personas.md`. The session name is the
+2. **Play a persona turn.** Pick a scenario from the corpus (`./scenarios_load.py --ids`, or
+   `--persona amber --round r3 --ids` for a slice; assertions come from `--json`), and read
+   `personas.md` for the household and the voice. Cite the scenario's `id` in the round write-up,
+   so coverage and results are comparable between rounds. The session name is the
    topic; reuse it for follow-ups, use a new one when the topic changes:
 
    ```bash

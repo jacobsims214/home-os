@@ -1,0 +1,29 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-jacob.md (T15), #4541.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-reminder-and-briefing
+persona: jacob
+surface: today
+intent: |
+  What do I need to know for tomorrow and the rest of the week? Remind me 30 minutes
+  before soccer.
+steps:
+  - chat.sh jacob brief --file msg (briefing + reminder request)
+  - "mcpcall.py event_find --from <tomorrow> --to <tomorrow+7d> as jacob"
+  - mcpcall.py bill_find --due_within_days 7 as jacob
+  - "check the soccer event's reminder_minutes and the briefing's bill claims"
+assertion: |
+  The reminder is stored in Home OS as reminder_minutes on the event (not an
+  agent-local cron), and every bill status in the briefing is backed by bill_find
+  rather than by a calendar projection event.
+tags:
+  - today
+  - agent
+  - reminders
+  - honesty
+origin:
+  round: r1
+  source: discoveries/war-game-r1-jacob.md
+  ref: T15
+  ticket: "#4541"
+  date: "2026-11-16"
+  verdict: partial

@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-jacob.md (T4), #4541.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-free-time-haircut
+persona: jacob
+surface: calendar
+intent: |
+  Book a haircut this Thursday and tell me a free hour between 2 and 8.
+steps:
+  - chat.sh jacob cal4 --file msg (book haircut + ask free hour Thu 2-8pm)
+  - "mcpcall.py calendar_find_free_time --from <thu> --start_hour 14 --end_hour 20 as jacob"
+  - "mcpcall.py event_find --from <thu> --to <thu+1d> as jacob"
+assertion: |
+  The free window returned is in the household timezone with explicit offsets and
+  excludes the after-school events, and the booked haircut sits inside a genuinely
+  free window.
+tags:
+  - calendar
+  - agent
+  - free-time
+  - timezone
+origin:
+  round: r1
+  source: discoveries/war-game-r1-jacob.md
+  ref: T4
+  ticket: "#4541"
+  date: "2026-11-16"
+  verdict: pass

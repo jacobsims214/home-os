@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U9), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-documents-provenance
+persona: amber
+surface: documents
+intent: |
+  Is what I'm reading the actual bill, or something the app typed out?
+steps:
+  - open /dashboard/documents as amber
+  - "open a text-filed document and an OCR'd one"
+  - read the provenance label on each
+assertion: |
+  Text-filed documents are labelled as the original unaltered wording and OCR'd ones
+  carry a 'may differ - check the file' warning.
+tags:
+  - documents
+  - ui
+  - honesty
+  - provenance
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U9
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: pass

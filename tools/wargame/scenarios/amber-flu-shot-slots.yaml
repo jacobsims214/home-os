@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T4), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-flu-shot-slots
+persona: amber
+surface: calendar
+intent: |
+  When can we all get flu shots the first week of December? Just suggest, don't book.
+steps:
+  - "chat.sh amber r1-flu --file msg (ask: flu shots first week of Dec, suggest only)"
+  - mcpcall.py calendar_find_free_time --from 2026-12-01 --to 2026-12-07 as amber
+  - compare the suggested slot with the free-time result
+assertion: |
+  The suggested slot is genuinely free per calendar_find_free_time, and no event is
+  created for it (the ask was suggest-only).
+tags:
+  - calendar
+  - agent
+  - free-time
+  - read
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T4
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: pass
