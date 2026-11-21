@@ -122,6 +122,13 @@ var ToolPolicy = map[string]Requirement{
 		Note: "guides are readable by everyone but vendor (API ResGuides read)"},
 	"guide_get": {Any: []Grant{grant(ResGuides, ActRead)},
 		Note: "guides are readable by everyone but vendor"},
+	// The family knowledge base (#5502): every role reads it, a housesitter and
+	// a vendor included, because the point of the fixture is that the
+	// babysitter can find the router doc. Writes are the family roles.
+	"kb_list": {Any: []Grant{grant(ResKB, ActRead)},
+		Note: "the KB is readable by every household role (API ResKB read = rolesEveryone)"},
+	"kb_search": {Any: []Grant{grant(ResKB, ActRead)},
+		Note: "the KB is readable by every household role"},
 	"list_find": {Any: []Grant{grant(ResLists, ActRead)},
 		Note: "lists are readable by everyone but vendor (API ResLists read)"},
 	"list_get": {Any: []Grant{grant(ResLists, ActRead)},
@@ -196,6 +203,10 @@ var ToolPolicy = map[string]Requirement{
 		Note: "renaming the family or changing its timezone is family-only"},
 	"guide_create": {Any: []Grant{grant(ResGuides, ActWrite)},
 		Note: "guides are family-only to write"},
+	"kb_get": {Any: []Grant{grant(ResKB, ActRead)},
+		Note: "the KB is readable by every household role"},
+	"kb_write": {Any: []Grant{grant(ResKB, ActWrite)},
+		Note: "the KB is family-only to write; a housesitter reads it and cannot change it"},
 	"guide_delete": {Any: []Grant{grant(ResGuides, ActWrite)},
 		Note: "guides are family-only to write"},
 	"guide_update": {Any: []Grant{grant(ResGuides, ActWrite)},

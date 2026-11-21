@@ -121,6 +121,7 @@ const (
 	ResMeals         Resource = "meals"         // recipes, meal plans, meal feedback
 	ResActivity      Resource = "activity"      // the family activity feed
 	ResGuides        Resource = "guides"        // guides
+	ResKB            Resource = "kb"            // the family knowledge base (kb_docs, #5502)
 	// ResPassword is the caller's own sign-in password. The resource is
 	// self-scoped: no route and no handler ever names another account, so a
 	// grant here only ever changes the caller's own credential (#4822).
@@ -262,6 +263,11 @@ var policy = map[Resource]map[Action][]string{
 	ResActivity: {ActRead: rolesReaders},
 	ResGuides:   {ActRead: rolesSitter, ActWrite: rolesFamily},
 
+	// The family knowledge base (#5502) is the one area EVERY role reads, a
+	// housesitter and a vendor included: its whole point is that the
+	// babysitter can find the router doc. Writes are ordinary family writes.
+	ResKB: {ActRead: rolesEveryone, ActWrite: rolesFamily},
+
 	// Changing your own password is every role's own business, including a
 	// viewer, a housesitter and a vendor: it grants nothing beyond the
 	// credential the caller already signs in with. The handler verifies the
@@ -314,6 +320,7 @@ var entityResources = map[string]Resource{
 	"meal_plan":            ResMeals,
 	"meal_feedback":        ResMeals,
 	"guide":                ResGuides,
+	"kb_doc":               ResKB,
 }
 
 // EntityResource returns the resource guarding entity kind kind, and false

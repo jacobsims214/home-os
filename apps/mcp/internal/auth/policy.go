@@ -27,10 +27,11 @@ package auth
 //     credential tools refuse, and credential records (and notes and
 //     documents attached to them) are dropped from search.
 //   - housesitter: reads pets, properties/rooms/assets, guides, vendors
-//     (contacts), calendar, lists, meals and notes; may add and check off
-//     list items and add notes on pets. People: names, relationship and
-//     allergies only. No money, vehicles, files/documents, credentials or
-//     activity feed. Search is allowed but returns only those areas.
+//     (contacts), calendar, lists, meals, notes and the knowledge base; may add
+//     and check off list items and add notes on pets. People: names,
+//     relationship and allergies only. No money, vehicles, files/documents,
+//     credentials or activity feed. Search is allowed but returns only those
+//     areas.
 //   - vendor: reads properties/rooms/assets and maintenance tasks and
 //     schedules (their own jobs when the membership is linked to a vendors
 //     row); may update a maintenance task's status, completion and notes.
@@ -77,6 +78,7 @@ const (
 	ResMeals         Resource = "meals"         // recipes, meal plans, meal feedback
 	ResActivity      Resource = "activity"      // the family activity feed
 	ResGuides        Resource = "guides"        // guides
+	ResKB            Resource = "kb"            // the family knowledge base (kb_docs, #5502)
 	// ResPassword is the caller's own sign-in password (#4822). No MCP tool
 	// uses it; it is here so this mirror matches roles.go, which the shared
 	// fixture enforces.
@@ -214,6 +216,11 @@ var Policy = map[Resource]map[Action][]string{
 	ResActivity: {ActRead: rolesReaders},
 	ResGuides:   {ActRead: rolesSitter, ActWrite: rolesFamily},
 
+	// The family knowledge base (#5502) is the one area EVERY role reads, a
+	// housesitter and a vendor included: its whole point is that the
+	// babysitter can find the router doc. Writes are ordinary family writes.
+	ResKB: {ActRead: rolesEveryone, ActWrite: rolesFamily},
+
 	// Changing your own sign-in password is every role's own business,
 	// including a viewer, a housesitter and a vendor (#4822). Nothing in the
 	// MCP offers it: the route is the API's POST /auth/change-password, which
@@ -277,6 +284,7 @@ var EntityResources = map[string]Resource{
 	"meal_plan":            ResMeals,
 	"meal_feedback":        ResMeals,
 	"guide":                ResGuides,
+	"kb_doc":               ResKB,
 }
 
 // EntityResource returns the resource guarding entity kind kind, and false
