@@ -210,9 +210,13 @@ Honesty about the suite's own gaps matters more than its headline number.
 
 **Revert-checked in #5482** (defect applied back, suite red, restored, green):
 
-- **#5408's new tap case.** Removing Guides from `NAV_SECTIONS` turns the phone
-  case red on `getByRole("link", {name: /Guides/})` and the desktop case red on
-  its nav row — the tile is gone, so the tap cannot start.
+- **#5408's new tap case.** (Pre-reading note: the tile's *presence* assertions
+  also go red, as they should — but that is not what makes this test worth
+  having. Removing Guides from `NAV_SECTIONS` turns **4 of the 5** cases red
+  (`4 failed / 1 passed`, of which two are the pre-existing tile checks); the
+  case that matters is the tap, which cannot start because there is no tile.
+  What the tap adds over the tile check is the half a tile cannot assert: that
+  the tap *arrives*. Proven separately below.)
 - **#4948's end-to-end case.** Deleting `guard_message "$MSG_RAW" "$SRC"` from
   the run leaves `--- 23/24 passed` and exits **1** with `FAIL the run is not
   refusing a comma residue: exit=2 out=set WG_NOSUCHPERSONA_URL`. Restored:
@@ -221,6 +225,15 @@ Honesty about the suite's own gaps matters more than its headline number.
   parse_response(raw, content_type)` with `return raw` exits **1** with `FAIL
   Client.post still parses the reply with parse_response`. Restored: **14/14**,
   exit 0.
+
+**#5408's tap, proven to fail for the right reason.** A tile that leads nowhere
+is the other way to be "unreachable", and the tile assertions cannot see it. So
+the tap case was run against a build whose Guides row points at a page that does
+not exist (`href: "/dashboard/guides-missing"`): the phone case fails on
+`toHaveURL(/\/dashboard\/guides$/)` and the desktop case on the same assertion —
+i.e. the *arrival*, not the presence. Restored, 5/5 green. Recorded as a
+separate control because "the four tile checks went red" would have been the
+easy, weaker claim.
 
 **The four still counted SUBSYSTEM, and deliberately not rounded up:**
 #5407's e2e (§0, #5481), #5410(a)'s source-only escape rule (§3), #5306's field
