@@ -49,7 +49,15 @@ regressed twice.
   auto-forward-on-Back back and 4 go red.
 - The *history behaviour* is pinned by `apps/ui/e2e/auth-back-session.spec.ts`
   against the stub (Back lands on an app page, the session survives, no raw error
-  body).
+  body) — **but that spec cannot reach the reported failure** (#5482's audit,
+  §0 of the coverage doc): it signs in through a `page.route` intercept of
+  `/api/auth/login`, so there is no spent `state` and no Dex document behind the
+  Back press, which is the whole mechanism. **#5481 owns making it start where
+  the repro starts.** Until it lands, the executable coverage of #5407 is the
+  unit-level decision plus the Envoy 429 page, and this manual check below is
+  the only *end-to-end* one. `apps/ui/e2e/auth-back.spec.ts` (#5304) is the
+  faithful sibling — it drives a real Dex stand-in with a single-use state — so
+  read that one as the model for the fix.
 
 **What is still manual, and why:** the real failure is the interaction between
 the app and **Dex's** login rate limiter — Dex's own `local_rate_limited` 429
@@ -181,4 +189,8 @@ reasons** applies and **what the manual check is**. "Too hard" is not a reason;
 learns the behaviour, a runner gets a device), move it to a test and delete the
 entry — this file should shrink over time, not grow.
 
-Last reviewed: 2026-11-20 (#5479).
+Last reviewed: 2026-11-21 (#5482). #5482's audit added no finding to this file:
+every entry below is still manual for the reason given, and the two tests that
+merely *looked* like they covered their finding (#5408's visible tile, #4948's
+never-called guard) were fixed rather than demoted. What it changed here is
+§2.1's honesty about which executable check is the faithful one.
