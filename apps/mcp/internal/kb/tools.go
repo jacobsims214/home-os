@@ -93,9 +93,9 @@ func NewKBSearchTool(pool *pgxpool.Pool, ts *typesense) (string, mcp.Tool, toolH
 	tool := mcp.NewTool("kb_search",
 		append([]mcp.ToolOption{
 			mcp.WithDescription(
-				"Search the family's knowledge base by MEANING, not by path: \"what do we do if the dog is sick at night?\" finds how-to/pets/vet-after-hours. "+
-					"Read this BEFORE saying you don't know how this family does something — another agent or family member may already have written it up for exactly this. "+
-					"The family's durable how-tos, phone numbers and routines live here (distinct from notes, which are transient, and files, which are uploads). "+
+				"Search the family's knowledge base by MEANING, not by path: \"what do we do if the dog is sick at night?\" finds how-to/pets/vet-after-hours. " +
+					"Read this BEFORE saying you don't know how this family does something — another agent or family member may already have written it up for exactly this. " +
+					"The family's durable how-tos, phone numbers and routines live here (distinct from notes, which are transient, and files, which are uploads). " +
 					"Returns each doc's path, title, excerpt, when it last changed and who changed it. Use kb_get with a path to read the whole doc."),
 			mcp.WithString("query",
 				mcp.Description("What you want to know, in the caller's own words — a question works better than keywords, e.g. \"the dog is sick at night, who do we call\"."),
@@ -177,8 +177,8 @@ func NewKBGetTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("kb_get",
 		append([]mcp.ToolOption{
 			mcp.WithDescription(
-				"Read one knowledge base doc in full, by its path (e.g. how-to/pets/vet-after-hours). "+
-					"Use kb_search first when you don't know the path — it finds docs by meaning. "+
+				"Read one knowledge base doc in full, by its path (e.g. how-to/pets/vet-after-hours). " +
+					"Use kb_search first when you don't know the path — it finds docs by meaning. " +
 					"A doc is the family's durable how-to, written by one agent or family member for the next one to read."),
 			mcp.WithString("path",
 				mcp.Description("The doc's path from kb_search or kb_list, e.g. how-to/pets/vet-after-hours. Case and spaces are normalized."),
@@ -240,11 +240,11 @@ func NewKBWriteTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("kb_write",
 		append([]mcp.ToolOption{
 			mcp.WithDescription(
-				"Write durable knowledge into the family's knowledge base for another agent or family member to find later. "+
-					"The doc is addressed by PATH, so writing to a path that already exists REPLACES that doc entirely: its previous title, body and tags are gone. "+
-					"Read it with kb_get first if you only mean to add to it. "+
-					"Use this for how-this-family-does-it knowledge (routines, who to call, what the sitter needs), not for one-off notes. "+
-					"Never put a password, key or account number in a doc: store it in the secrets feature and say where it is. "+
+				"Write durable knowledge into the family's knowledge base for another agent or family member to find later. " +
+					"The doc is addressed by PATH, so writing to a path that already exists REPLACES that doc entirely: its previous title, body and tags are gone. " +
+					"Read it with kb_get first if you only mean to add to it. " +
+					"Use this for how-this-family-does-it knowledge (routines, who to call, what the sitter needs), not for one-off notes. " +
+					"Never put a password, key or account number in a doc: store it in the secrets feature and say where it is. " +
 					"The doc becomes searchable by meaning (kb_search) as soon as the index catches up."),
 			mcp.WithString("path",
 				mcp.Description("Where the doc lives in the family's namespace, e.g. how-to/networking/router-reset, pets/vet-after-hours, sitters/what-the-babysitter-needs-to-know. Lower-case segments separated by '/'."),
@@ -259,7 +259,7 @@ func NewKBWriteTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 				mcp.Description("Optional tags, e.g. [\"pets\", \"vets\", \"emergency\"]."),
 				mcp.WithStringItems()),
 			respond.Schema[writeData](),
-		}, annotations("Write a knowledge base doc", false, true, true)...)...)
+		}, annotations("Write a knowledge base doc", false, false, true)...)...)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		c, bad := callerOf(ctx, pool)
@@ -343,8 +343,8 @@ func NewKBListTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	tool := mcp.NewTool("kb_list",
 		append([]mcp.ToolOption{
 			mcp.WithDescription(
-				"List the family's knowledge base: every doc's path and title, with a short excerpt. "+
-					"Use this to see WHAT the family has written down before asking a question or writing a doc — it tells you which paths already exist, so you extend a doc instead of creating a near-duplicate of it. "+
+				"List the family's knowledge base: every doc's path and title, with a short excerpt. " +
+					"Use this to see WHAT the family has written down before asking a question or writing a doc — it tells you which paths already exist, so you extend a doc instead of creating a near-duplicate of it. " +
 					"kb_search finds docs by meaning; kb_list shows the whole shelf."),
 			mcp.WithString("prefix",
 				mcp.Description("Optional namespace to browse, e.g. \"how-to\" or \"pets\". Omit for everything.")),
@@ -416,6 +416,19 @@ type typesense struct {
 	baseURL string
 	apiKey  string
 	client  *http.Client
+	// collection is the household_search collection to query. Empty means the
+	// default; a test sets its own so it never shares an index with another
+	// run (see WithCollection).
+	collection string
+}
+
+// collectionName returns the collection to query: the default, or the one a
+// test pinned.
+func (t *typesense) collectionName() string {
+	if t.collection != "" {
+		return t.collection
+	}
+	return collectionName
 }
 
 // newTypesense returns nil when Typesense is not configured.
@@ -468,7 +481,7 @@ func searchByMeaning(ctx context.Context, pool *pgxpool.Pool, ts *typesense, hou
 		} `json:"hits"`
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		ts.baseURL+"/collections/"+collectionName+"/documents/search?"+v.Encode(), nil)
+		ts.baseURL+"/collections/"+ts.collectionName()+"/documents/search?"+v.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}
