@@ -313,3 +313,12 @@ jobs:
       # (#5407). Also asserted on the rendered output: the 429 is produced by
       # Envoy itself, so nothing in apps/ui can restyle it.
       - run: deploy/helm/home-os/tests/envoy-local-reply.sh
+      # ...and Envoy must be able to LOAD that render (#5421). The check above
+      # only greps the text, so on dc01ab9 it passed while Envoy refused the
+      # config outright: `text_format_source.inline_string` is a substitution-
+      # format string, and the 429 page's `width: 100%;` read as a bogus `%`
+      # command. Envoy is the ingress, so that took the site down (503) and the
+      # deploy was rolled back (#5420). This step runs the real binary, at the
+      # image tag the chart pins, in `--mode validate`: no cluster, ~2 seconds,
+      # and it carries a negative control so it cannot silently stop working.
+      - run: deploy/helm/home-os/tests/envoy-config-validate.sh
