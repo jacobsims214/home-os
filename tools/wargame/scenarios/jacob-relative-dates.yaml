@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-jacob.md (T1), #4541.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-relative-dates
+persona: jacob
+surface: calendar
+intent: |
+  Dentist next Wednesday 3:40, preschool party Dec 18 10am, date night a week from
+  Saturday 7pm.
+steps:
+  - chat.sh jacob cal --file msg (three bookings with relative dates)
+  - "mcpcall.py event_find --from <today> --to 2026-12-31 as jacob"
+assertion: |
+  Each relative date resolves to the correct absolute date, and a date that collides
+  with a known family commitment is held for a decision instead of silently booked.
+tags:
+  - calendar
+  - agent
+  - write
+  - relative-dates
+origin:
+  round: r1
+  source: discoveries/war-game-r1-jacob.md
+  ref: T1
+  ticket: "#4541"
+  date: "2026-11-16"
+  verdict: pass

@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-jacob.md (T6), #4541.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-mark-electric-paid
+persona: jacob
+surface: money
+intent: |
+  Electric is paid - what's due in the next two weeks, and what's the monthly total?
+steps:
+  - chat.sh jacob bills2 --file msg (mark electric paid + ask due-in-2-weeks + monthly total)
+  - mcpcall.py bill_find --due_within_days 14 as jacob
+  - mcpcall.py budget_summary --sections obligations as jacob
+assertion: |
+  The paid bill rolls forward (status paid, next_due_date next month) and both the
+  due-in-14 list and the monthly total match the MCP reads exactly.
+tags:
+  - money
+  - bills
+  - agent
+  - write
+origin:
+  round: r1
+  source: discoveries/war-game-r1-jacob.md
+  ref: T6
+  ticket: "#4541"
+  date: "2026-11-16"
+  verdict: pass

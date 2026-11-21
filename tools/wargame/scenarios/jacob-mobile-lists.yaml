@@ -1,0 +1,24 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (lists), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-mobile-lists
+persona: jacob
+surface: lists
+intent: |
+  Can I get to the lists from my phone?
+steps:
+  - open /dashboard/lists as jacob at 390px
+  - read templates and item counts
+assertion: |
+  The lists page renders with templates and real item counts, reachable from the tab
+  bar.
+tags:
+  - lists
+  - ui
+  - mobile
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: lists
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: pass

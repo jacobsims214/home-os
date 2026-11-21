@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T12), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-find-plumber
+persona: amber
+surface: people
+intent: |
+  Who's our plumber? Add Mike's Plumbing if he isn't in there.
+steps:
+  - "chat.sh amber r1-plumber --file msg (ask: who's our plumber + add Mike's Plumbing)"
+  - mcpcall.py contact_find --trade plumber as amber
+assertion: |
+  The contact is found by trade filter afterwards, carries trades [plumber], and the
+  reply searched before creating (no duplicate contact).
+tags:
+  - people
+  - contacts
+  - agent
+  - write
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T12
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: pass

@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-jacob.md (T2), #4541.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-multi-ask-update-loop
+persona: jacob
+surface: calendar
+intent: |
+  Move the dentist to 4:20 and book the conferences on Dec 3.
+steps:
+  - chat.sh jacob cal2 --file msg (two-part ask in one message)
+  - "mcpcall.py event_find --from <dentist day> --to <dentist day+1d> as jacob"
+  - mcpcall.py event_find --from 2026-12-03 --to 2026-12-03 as jacob
+assertion: |
+  Both halves of the ask landed: the dentist is at 16:20 and a conference event exists
+  on Dec 3; if only one landed the reply says which part failed instead of claiming
+  both.
+tags:
+  - calendar
+  - agent
+  - write
+  - multi-ask
+origin:
+  round: r1
+  source: discoveries/war-game-r1-jacob.md
+  ref: T2
+  ticket: "#4541"
+  date: "2026-11-16"
+  verdict: partial

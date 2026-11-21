@@ -1,0 +1,32 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N8), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-account-menu
+persona: amber
+surface: settings
+intent: |
+  Where do I log out or change the theme?
+steps:
+  - tap the account avatar as amber at 390px
+  - read the sheet entries
+assertion: |
+  The sheet opens with Profile, Theme, Notification settings and Log out, and every
+  entry leads somewhere.
+tags:
+  - settings
+  - ui
+  - account
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N8
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-jacob.md
+      ref: N4
+      ticket: "#4595"
+      date: "2026-11-20"
+      verdict: partial
+      note: popover contents not observable in headless Chrome (3 attempts)

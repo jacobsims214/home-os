@@ -1,0 +1,33 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N4), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-guides-page
+persona: amber
+surface: guides
+intent: |
+  Where do I write down how the water heater works?
+steps:
+  - sign in as amber and open /dashboard/guides
+  - read the empty state and the New guide dialog
+  - open the More sheet and look for a Guides entry
+assertion: |
+  The Guides page renders with a usable empty state and a New guide form, and it is
+  reachable from the mobile navigation.
+tags:
+  - guides
+  - ui
+  - navigation
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N4
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-usability.md
+      ref: feature-1
+      ticket: "#4594"
+      date: "2026-11-20"
+      verdict: fail
+      note: no path to /dashboard/guides from the mobile UI at all

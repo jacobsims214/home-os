@@ -1,0 +1,24 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (feature-5), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-account-menu-label
+persona: designer
+surface: settings
+intent: |
+  I'm using a screen reader - can I tell what the account button does?
+steps:
+  - open the app at 390px
+  - query the avatar button for an accessible name
+assertion: |
+  The account button exposes an aria-label naming the account.
+tags:
+  - ui
+  - mobile
+  - a11y
+  - account
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: feature-5
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: fail

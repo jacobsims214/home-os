@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T6), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-what-changed-today
+persona: amber
+surface: activity
+intent: |
+  What has Jacob added or changed in the house today?
+steps:
+  - "chat.sh amber r1-changed --file msg (ask: what has Jacob added/changed today)"
+  - mcpcall.py activity_find --from today as amber
+  - check each item the reply lists against the activity rows and their attribution
+assertion: |
+  Every change the reply attributes to Jacob exists in activity_find with that actor;
+  the reply adds nothing that is not in the feed.
+tags:
+  - activity
+  - agent
+  - cross-member
+  - read
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T6
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: pass

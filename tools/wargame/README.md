@@ -10,6 +10,8 @@ you check what actually landed in Home OS with direct MCP calls.
 | `mcpcall.py` | Ground truth: calls one Home OS MCP tool as a household member and prints the result, over Streamable HTTP at `POST <HOMEOS_MCP_URL>/mcp` — the only MCP transport Home OS serves. `--selftest` runs its transport tests with no network. |
 | `api.py` | Same idea for the REST API (`/api/v1/...`). **Dex id_token only** — a `hos_` agent token 401s there by design; see [Two kinds of token](#two-kinds-of-token-agent-tokens-are-mcp-scoped). |
 | `personas.md` | The household, the two personas (Jacob, Amber), their scenarios and sample turns, and the agent system-prompt snippet. |
+| `scenarios/` | The scenario corpus: one YAML file per scenario, with the persona, surface, intent, steps, assertion and the round that found it. See [`scenarios/README.md`](scenarios/README.md). |
+| `scenarios_load.py` | Loads and validates `scenarios/`: schema, duplicate ids, missing ids, and the count report per persona, surface and round. `--selftest` needs no corpus. |
 
 ## Never put a `$` through your shell — always single-quote, or better use `--stdin`
 
@@ -268,7 +270,10 @@ no header the oldest membership is used, and a malformed value is a 400.
    ./mcpcall.py note_find
    ```
 
-2. **Play a persona turn.** Pick a scenario from `personas.md`. The session name is the
+2. **Play a persona turn.** Pick a scenario from the corpus (`./scenarios_load.py --ids`, or
+   `--persona amber --round r3 --ids` for a slice; assertions come from `--json`), and read
+   `personas.md` for the household and the voice. Cite the scenario's `id` in the round write-up,
+   so coverage and results are comparable between rounds. The session name is the
    topic; reuse it for follow-ups, use a new one when the topic changes:
 
    ```bash

@@ -1,0 +1,28 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-jacob.md (T11), #4541.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-add-people-pets-vehicles
+persona: jacob
+surface: people
+intent: |
+  Put the three kids, the dog and the minivan in so Amber sees them.
+steps:
+  - "chat.sh jacob family --file msg (add 3 kids, dog, minivan)"
+  - mcpcall.py person_find as jacob
+  - mcpcall.py pet_find as jacob
+  - mcpcall.py vehicle_find as jacob
+  - mcpcall.py maintenance_find as jacob
+assertion: |
+  All five records exist and are visible to the other adult, and the pre-existing
+  oil-change task is linked to the new vehicle rather than duplicated.
+tags:
+  - people
+  - agent
+  - write
+  - cross-member
+origin:
+  round: r1
+  source: discoveries/war-game-r1-jacob.md
+  ref: T11
+  ticket: "#4541"
+  date: "2026-11-16"
+  verdict: pass

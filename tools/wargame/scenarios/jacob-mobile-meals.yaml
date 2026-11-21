@@ -1,0 +1,23 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (meals), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-mobile-meals
+persona: jacob
+surface: meals
+intent: |
+  What's for dinner, and what's missing?
+steps:
+  - open /dashboard/meals as jacob at 390px
+  - "read the week strip, per-day plan affordances and the nudge"
+assertion: |
+  The week strip covers today, and the only nudge is about a day from today forward.
+tags:
+  - meals
+  - ui
+  - mobile
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: meals
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: pass

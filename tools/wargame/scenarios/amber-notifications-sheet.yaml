@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U10), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-notifications-sheet
+persona: amber
+surface: notifications
+intent: |
+  What are these notices, and does reading one hide the others?
+steps:
+  - open the notifications sheet as amber
+  - read the empty-state and per-notice copy
+  - mark one read; reload
+  - mcpcall.py notification_find as amber
+assertion: |
+  The sheet explains what lands there, and marking one notice read leaves the others
+  unread in notification_find.
+tags:
+  - notifications
+  - ui
+  - honesty
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U10
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: pass

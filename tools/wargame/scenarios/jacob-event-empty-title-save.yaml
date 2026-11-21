@@ -1,0 +1,24 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (N1), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-event-empty-title-save
+persona: jacob
+surface: calendar
+intent: |
+  I hit Save before typing anything.
+steps:
+  - "open Today -> Add event as jacob at 390px"
+  - tap Save with an empty title
+assertion: |
+  Save with an empty title shows a validation message (or disables Save); silence is a
+  fail.
+tags:
+  - calendar
+  - ui
+  - validation
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: N1
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: fail

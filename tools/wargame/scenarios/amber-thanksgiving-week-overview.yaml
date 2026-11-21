@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T5), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-thanksgiving-week-overview
+persona: amber
+surface: calendar
+intent: |
+  What does Thanksgiving week look like, day by day?
+steps:
+  - "chat.sh amber r1-thanksgiving --file msg (ask: Thanksgiving week day by day)"
+  - mcpcall.py agenda_get --from 2026-11-23 as amber
+  - mcpcall.py bill_find --due_within_days 7 as amber
+  - "diff every time, name and 'nothing due' claim in the reply against those two reads"
+assertion: |
+  Every event time quoted matches agenda_get for that day, and a 'no bills due' claim
+  is only made when bill_find returns none for the window.
+tags:
+  - calendar
+  - bills
+  - agent
+  - read
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T5
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: partial

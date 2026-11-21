@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (cross-cutting-2), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-h1-per-route
+persona: designer
+surface: app-shell
+intent: |
+  Which page am I on? (document outline / screen reader)
+steps:
+  - visit /dashboard/guides and the settings sub-pages at 390px
+  - read the document h1
+assertion: |
+  Each route's h1 names that route (Guides, Agent tokens, ...) rather than 'Home OS'
+  or 'Settings'.
+tags:
+  - ui
+  - mobile
+  - a11y
+  - headings
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: cross-cutting-2
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: fail

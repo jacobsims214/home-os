@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U16), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-doubletap-add-event
+persona: amber
+surface: today
+intent: |
+  I tapped Add event twice because it felt slow.
+steps:
+  - open Today as amber
+  - "double-tap 'Add event' ~120ms apart with real touch events"
+  - count the forms/modals that open
+assertion: |
+  A double tap opens one form, not two - no duplicate dialogs and no duplicate
+  navigation.
+tags:
+  - today
+  - ui
+  - double-tap
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U16
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: pass

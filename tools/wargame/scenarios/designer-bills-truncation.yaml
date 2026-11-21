@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (cross-cutting-5), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-bills-truncation
+persona: designer
+surface: money
+intent: |
+  Which bill is this? Every name on the row is cut off.
+steps:
+  - "open Money and Today -> Bills and upkeep at 390px"
+  - read the truncated bill names
+assertion: |
+  Truncated bill names are still distinguishable, or the full name is available on the
+  row.
+tags:
+  - ui
+  - mobile
+  - money
+  - typography
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: cross-cutting-5
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: fail

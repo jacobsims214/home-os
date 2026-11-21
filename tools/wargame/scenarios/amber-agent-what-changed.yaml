@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N16), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-agent-what-changed
+persona: amber
+surface: activity
+intent: |
+  What changed around here this week?
+steps:
+  - chat.sh amber r3-changed --file msg (what changed this week?)
+  - "mcpcall.py activity_find --from <7 days ago> as amber"
+  - mcpcall.py family_overview as amber
+assertion: |
+  Every change the reply reports is in activity_find with attribution, the counts it
+  quotes match family_overview, and it says what it verified against.
+tags:
+  - activity
+  - agent
+  - read
+  - honesty
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N16
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass

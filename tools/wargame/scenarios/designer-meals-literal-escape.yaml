@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (cross-cutting-6), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-meals-literal-escape
+persona: designer
+surface: meals
+intent: |
+  Does the copy on Meals read like English?
+steps:
+  - open /dashboard/meals at 390px as amber
+  - read the week header text
+assertion: |
+  No raw unicode escape (\u00b7) is rendered to the user; the separator renders as the
+  intended character.
+tags:
+  - ui
+  - mobile
+  - meals
+  - copy
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: cross-cutting-6
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: fail

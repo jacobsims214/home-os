@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-jacob.md (PWA), #4584.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-pwa-offline
+persona: jacob
+surface: app-shell
+intent: |
+  The network cut out - is the app still usable?
+steps:
+  - sign in as jacob and load a few pages
+  - cut the network with CDP emulation
+  - hard-navigate and SPA-navigate
+  - restore the network
+assertion: |
+  The shell loads from the service worker with an honest offline banner, cached
+  documents and calendar stay readable, and manifest plus /sw.js return 200.
+tags:
+  - app-shell
+  - ui
+  - offline
+origin:
+  round: r2
+  source: discoveries/war-game-r2-jacob.md
+  ref: PWA
+  ticket: "#4584"
+  date: "2026-11-18"
+  verdict: pass

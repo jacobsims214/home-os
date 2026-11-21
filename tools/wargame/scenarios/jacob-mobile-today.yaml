@@ -1,0 +1,24 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (today), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-mobile-today
+persona: jacob
+surface: today
+intent: |
+  Is the Today page actually usable at phone size?
+steps:
+  - open /dashboard as jacob at 390px
+  - "read greeting, quick actions, day/agenda, needs-you, bills, dinner, activity, people"
+assertion: |
+  Every section renders without clipping, the money on the bills card is correct, and
+  the honesty footers are present.
+tags:
+  - today
+  - ui
+  - mobile
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: today
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: pass
