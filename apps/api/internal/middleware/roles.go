@@ -240,6 +240,14 @@ var routeRules = map[string]RouteRule{
 	"GET /api/v1/guides/{id}/revisions":                       rr(auth.ResGuides, auth.ActRead),
 	"GET /api/v1/guides/{id}/revisions/{revisionId}":          rr(auth.ResGuides, auth.ActRead),
 	"POST /api/v1/guides/{id}/revisions/{revisionId}/restore": rr(auth.ResGuides, auth.ActWrite),
+
+	// The family knowledge base (#5502). Every role reads it — a housesitter
+	// included, because the babysitter needs the router doc — and the family
+	// roles write. The {path...} wildcard carries the doc's namespaced slug.
+	"GET /api/v1/kb":        rr(auth.ResKB, auth.ActRead),
+	"GET /api/v1/kb/*":      rr(auth.ResKB, auth.ActRead),
+	"PUT /api/v1/kb/*":      rr(auth.ResKB, auth.ActWrite),
+	"DELETE /api/v1/kb/*":   rr(auth.ResKB, auth.ActWrite),
 }
 
 // RuleFor returns the rule for a route (HEAD is looked up as GET).

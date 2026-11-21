@@ -35,6 +35,7 @@ import (
 
 	"home-os/api/internal/file"
 	"home-os/api/internal/guides"
+	"home-os/api/internal/kb"
 	"home-os/api/internal/search"
 )
 
@@ -388,7 +389,13 @@ func Documents(ctx context.Context, pool *pgxpool.Pool, householdID string) ([]s
 	if err != nil {
 		return nil, err
 	}
-	return append(docs, guideDocs...), nil
+	docs = append(docs, guideDocs...)
+
+	kbDocs, err := kbDocuments(ctx, pool, householdID)
+	if err != nil {
+		return nil, err
+	}
+	return append(docs, kbDocs...), nil
 }
 
 // scanSource runs one source's query and builds its documents.
@@ -457,6 +464,27 @@ func guideDocuments(ctx context.Context, pool *pgxpool.Pool, householdID string)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("guides: %w", err)
+	}
+	return out, nil
+}
+
+// kbDocuments indexes the family's knowledge base (#5502). It uses kb's own
+// document builder, reached through a household-scoped read of LIVE docs
+// only: a soft-deleted doc leaves the index on the next pass, because the
+// reconciler prunes any document whose row it did not build.
+//
+// The write path never has to index for a doc to be findable. That is the
+// point of #5298 applied here: agents write KB docs through the MCP, people
+// write them through the REST API, and both become searchable from the same
+// Postgres rows.
+func kbDocuments(ctx context.Context, pool *pgxpool.Pool, householdID string) ([]search.SearchDocument, error) {
+	var out []search.SearchDocument
+	err := kb.NewRepo(pool).AllInHousehold(ctx, householdID, func(d *kb.Doc) error {
+		out = append(out, kb.Document(d))
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kb: %w", err)
 	}
 	return out, nil
 }
