@@ -1,0 +1,32 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U7), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-meals-past-week
+persona: amber
+surface: meals
+intent: |
+  What's for dinner this week?
+steps:
+  - open /dashboard/meals on a day after Monday
+  - "read the week range and every 'is open' nag"
+assertion: |
+  The default week contains today, and no nag asks the user to plan a day that has
+  already passed.
+tags:
+  - meals
+  - ui
+  - nag
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U7
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: partial
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-amber.md
+      ref: G8
+      ticket: "#4596"
+      date: "2026-11-20"
+      verdict: pass
+      note: nag names today (Nov 20); past days are plain rows

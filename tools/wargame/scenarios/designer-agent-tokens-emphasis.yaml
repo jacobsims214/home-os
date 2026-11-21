@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (feature-3), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-agent-tokens-emphasis
+persona: designer
+surface: settings
+intent: |
+  Can I tell which credential is which, and that it never expires?
+steps:
+  - open /dashboard/settings/agent-tokens at 390px as amber
+  - "read the token identifier, last-used and expiry treatment"
+assertion: |
+  The token identifier is enough to recognise a token without exposing most of it, and
+  'Never expires' carries visual weight appropriate to a non-expiring credential.
+tags:
+  - ui
+  - mobile
+  - settings
+  - security
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: feature-3
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: partial

@@ -1,0 +1,33 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (N2), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-login-rate-limited
+persona: jacob
+surface: auth
+intent: |
+  I mistyped my password a few times - what do I see?
+steps:
+  - "sign in at https://homeos.simstech.cloud/login"
+  - repeat sign-in attempts ~5-6 times within ~3 minutes
+  - read what replaces the login form
+assertion: |
+  A rate-limited login renders a styled page that explains the limit and when to
+  retry, not a bare internal error string.
+tags:
+  - auth
+  - ui
+  - rate-limit
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: N2
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: fail
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-usability.md
+      ref: cross-cutting-7
+      ticket: "#4594"
+      date: "2026-11-20"
+      verdict: fail
+      note: bare local_rate_limited text page at 320px

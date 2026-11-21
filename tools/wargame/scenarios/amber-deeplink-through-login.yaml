@@ -1,0 +1,24 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U15), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-deeplink-through-login
+persona: amber
+surface: auth
+intent: |
+  I tapped a link to the calendar and had to sign in.
+steps:
+  - open /dashboard/calendar signed out in a fresh profile
+  - sign in as amber
+  - observe where the app lands
+assertion: |
+  After sign-in the app returns to the deep-linked page, not the dashboard home.
+tags:
+  - auth
+  - ui
+  - deeplink
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U15
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: pass

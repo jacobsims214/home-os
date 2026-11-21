@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N10), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-doubletap-save-event
+persona: amber
+surface: today
+intent: |
+  I tapped Save twice on the new event.
+steps:
+  - "open Today -> Add event as amber"
+  - fill a title and time
+  - double-tap Save ~120ms apart
+  - "mcpcall.py event_find --from <date> --to <date> as amber"
+assertion: |
+  Exactly one event is created for the double tap.
+tags:
+  - today
+  - calendar
+  - ui
+  - double-tap
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N10
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass

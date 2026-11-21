@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N15), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-agent-add-kid-event
+persona: amber
+surface: calendar
+intent: |
+  Put the older one's piano recital rehearsal on the calendar, Saturday 10 to 11.
+steps:
+  - "chat.sh amber r3-kids --file msg (add the rehearsal Sat 10:00-11:00)"
+  - "mcpcall.py event_find --from <sat> --to <sat+1d> as amber"
+  - "mcpcall.py event_find --from <sat 09:00> --to <sat 10:30> as amber (the overlap)"
+assertion: |
+  The event exists at the asked-for time, and the pre-existing 09:00-10:30 overlap is
+  flagged in the reply rather than silently double-booked.
+tags:
+  - calendar
+  - agent
+  - write
+  - conflict
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N15
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass

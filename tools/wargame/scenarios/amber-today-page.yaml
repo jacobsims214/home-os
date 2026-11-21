@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N1), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-today-page
+persona: amber
+surface: today
+intent: |
+  What's going on today?
+steps:
+  - sign in as amber at 390x844 and land on /dashboard
+  - "read greeting, agenda, lists summary, bills card, tonight's dinner, activity, people"
+  - mcpcall.py family_overview as amber
+  - mcpcall.py bill_find as amber
+assertion: |
+  The page states the right event count and the right money for the next two weeks,
+  list counts match the list records, and the limitations note (who's away) is
+  present.
+tags:
+  - today
+  - ui
+  - mobile
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N1
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass

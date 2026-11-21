@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T11), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-monthly-spend-and-afford
+persona: amber
+surface: money
+intent: |
+  How much do the bills come to each month, and can we afford $600 a kid for
+  Christmas?
+steps:
+  - "chat.sh amber r1-budget --file msg (ask: fixed monthly bills + can we afford $600/kid)"
+  - mcpcall.py budget_summary --sections obligations as amber
+assertion: |
+  The monthly total quoted equals budget_summary, the per-kid figure used in any
+  arithmetic is the $600 that was asked (not a substituted number), and the
+  affordability question is refused rather than answered without income data.
+tags:
+  - money
+  - budget
+  - agent
+  - read
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T11
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: partial

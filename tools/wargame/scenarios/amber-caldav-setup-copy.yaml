@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N7), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-caldav-setup-copy
+persona: amber
+surface: settings
+intent: |
+  I want my phone calendar to show the family's stuff.
+steps:
+  - open /dashboard/settings/phone-calendar as amber at 390px
+  - generate an app password
+  - "read the server, user name and per-platform steps"
+assertion: |
+  The page shows a phone-reachable server, warns that generating a password replaces
+  the old one everywhere, and gives per-platform steps with real troubleshooting.
+tags:
+  - settings
+  - caldav
+  - ui
+  - copy
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N7
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass

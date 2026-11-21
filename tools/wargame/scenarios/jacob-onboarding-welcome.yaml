@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (N3), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-onboarding-welcome
+persona: jacob
+surface: onboarding
+intent: |
+  I'm already in a family - what does /welcome tell me?
+steps:
+  - "sign in as jacob, an existing owner"
+  - open /welcome
+  - also try /onboarding
+assertion: |
+  An established member is not told they have no family; /onboarding either works or
+  is not the linked route.
+tags:
+  - onboarding
+  - ui
+  - copy
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: N3
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: partial

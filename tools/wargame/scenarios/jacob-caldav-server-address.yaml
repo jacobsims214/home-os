@@ -1,0 +1,34 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-jacob.md (F-SET-1), #4584.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-caldav-server-address
+persona: jacob
+surface: settings
+intent: |
+  I'm setting up my phone's calendar - what server do I type in?
+steps:
+  - open /dashboard/settings/phone-calendar as jacob
+  - read the Server field
+  - compare with the public origin
+assertion: |
+  The Server field shows a URL reachable from a phone (the public origin or a
+  per-family sync URL), never localhost.
+tags:
+  - settings
+  - caldav
+  - ui
+  - copy
+origin:
+  round: r2
+  source: discoveries/war-game-r2-jacob.md
+  ref: F-SET-1
+  ticket: "#4584"
+  date: "2026-11-18"
+  verdict: fail
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-jacob.md
+      ref: "5289"
+      ticket: "#4595"
+      date: "2026-11-20"
+      verdict: pass
+      note: "shows https://homeos.simstech.cloud/dav/"

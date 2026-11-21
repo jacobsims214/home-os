@@ -1,0 +1,23 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (settings), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-mobile-settings
+persona: jacob
+surface: settings
+intent: |
+  What can I configure from my phone?
+steps:
+  - open Settings as jacob at 390px
+  - "walk Household, Members, Credentials, Phone calendar, Agent tokens, Account"
+assertion: |
+  Every settings entry renders and opens its section at 390px.
+tags:
+  - settings
+  - ui
+  - mobile
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: settings
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: pass

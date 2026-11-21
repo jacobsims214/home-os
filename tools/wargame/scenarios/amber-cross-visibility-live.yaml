@@ -1,0 +1,24 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N18), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-cross-visibility-live
+persona: amber
+surface: activity
+intent: |
+  Did Jacob's stuff show up on my phone?
+steps:
+  - "have the jacob round write an event, a guide and a note deletion"
+  - "read amber's Today and Activity feed"
+assertion: |
+  The other adult's writes appear immediately with agent attribution ('via
+  moltis-wg-jacob').
+tags:
+  - activity
+  - cross-member
+  - ui
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N18
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass

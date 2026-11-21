@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-jacob.md (T10), #4541.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-household-overview
+persona: jacob
+surface: settings
+intent: |
+  What's our household timezone, and give me the bird's eye view.
+steps:
+  - chat.sh jacob overview --file msg (ask timezone + overview)
+  - mcpcall.py family_overview as jacob
+assertion: |
+  The timezone and every count in the reply equal family_overview, and gaps (things
+  not yet in Home OS) are stated rather than filled in.
+tags:
+  - settings
+  - agent
+  - read
+  - honesty
+origin:
+  round: r1
+  source: discoveries/war-game-r1-jacob.md
+  ref: T10
+  ticket: "#4541"
+  date: "2026-11-16"
+  verdict: pass

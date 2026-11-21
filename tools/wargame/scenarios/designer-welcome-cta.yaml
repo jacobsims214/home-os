@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (feature-2), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-welcome-cta
+persona: designer
+surface: onboarding
+intent: |
+  I was invited to a family - can I tell at a glance which path is mine?
+steps:
+  - open /welcome at 390px as amber
+  - "count the primary CTAs for 'Start a family hub'"
+assertion: |
+  Exactly one primary CTA per action; the invite-link path is not visually demoted by
+  a duplicate sticky button.
+tags:
+  - ui
+  - mobile
+  - onboarding
+  - hierarchy
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: feature-2
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: fail

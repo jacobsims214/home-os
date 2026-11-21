@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N9), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-doubletap-checkbox
+persona: amber
+surface: lists
+intent: |
+  I'm in the store tapping items off quickly.
+steps:
+  - open the grocery list as amber at 390px
+  - "double-tap one item's checkbox ~120ms apart with real touch events"
+  - read the list header count and Activity
+  - "mcpcall.py search_all --query 'Groceries' as amber"
+assertion: |
+  A double tap checks exactly one item; the second tap does not land on whatever moved
+  into the first item's place.
+tags:
+  - lists
+  - ui
+  - double-tap
+  - data-loss
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N9
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: fail

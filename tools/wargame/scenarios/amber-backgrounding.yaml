@@ -1,0 +1,33 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U14), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-backgrounding
+persona: amber
+surface: app-shell
+intent: |
+  I put the phone down and picked it up again.
+steps:
+  - open a list as amber
+  - "freeze the page with Page.setWebLifecycleState('frozen') for 8s"
+  - "restore to 'active' and navigate"
+assertion: |
+  State is intact after the freeze, navigation works, and the user is not bounced to
+  login.
+tags:
+  - app-shell
+  - ui
+  - backgrounding
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U14
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: pass
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-amber.md
+      ref: N12
+      ticket: "#4596"
+      date: "2026-11-20"
+      verdict: pass
+      note: "4s freeze, counts and navigation intact"

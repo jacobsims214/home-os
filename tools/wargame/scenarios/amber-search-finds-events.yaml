@@ -1,0 +1,33 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U2), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-search-finds-events
+persona: amber
+surface: search
+intent: |
+  When's the dentist? Let me search for it.
+steps:
+  - open /dashboard/search as amber
+  - "type 'soccer' and wait 5s; repeat with 'dentist' and 'preschool'"
+  - mcpcall.py event_find --from 2026-11-16 --to 2026-12-31 as amber
+assertion: |
+  Search returns the events whose titles match the query, and the result count is
+  consistent with event_find for the same term.
+tags:
+  - search
+  - ui
+  - events
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U2
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: fail
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-amber.md
+      ref: G2
+      ticket: "#4596"
+      date: "2026-11-20"
+      verdict: pass
+      note: "'soccer' -> 10 results, 'dentist' -> 6 results in 3 areas"

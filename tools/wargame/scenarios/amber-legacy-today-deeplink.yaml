@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N2), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-legacy-today-deeplink
+persona: amber
+surface: today
+intent: |
+  My bookmark to the Today page - does it still work?
+steps:
+  - sign in as amber
+  - open /dashboard/today
+assertion: |
+  The old Today URL either renders the Today page or redirects to it; a 404 dead-ends
+  anyone with a saved bookmark or an old shared link.
+tags:
+  - today
+  - ui
+  - routing
+  - deeplink
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N2
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: partial

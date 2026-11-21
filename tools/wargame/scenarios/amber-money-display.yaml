@@ -1,0 +1,35 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U1), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-money-display
+persona: amber
+surface: money
+intent: |
+  How much is the mortgage? I'm looking at the Money page on my phone.
+steps:
+  - "open https://homeos.simstech.cloud as amber at 390x844"
+  - "tap More -> Money (and Today -> Bills and upkeep)"
+  - read every amount on screen
+  - mcpcall.py bill_find as amber
+assertion: |
+  Every amount rendered in the UI equals the corresponding bill_find amount formatted
+  as dollars (no x100 scaling), including the monthly total.
+tags:
+  - money
+  - ui
+  - mobile
+  - formatting
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U1
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: fail
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-amber.md
+      ref: G1
+      ticket: "#4596"
+      date: "2026-11-20"
+      verdict: pass
+      note: Bills page and Today card now match bill_find exactly
