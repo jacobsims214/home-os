@@ -325,6 +325,44 @@ func TestUpdatedAt077_Reversible(t *testing.T) {
 	}
 }
 
+// TestUpdatedAt077_TriggerFiresLast is the ordering assertion. set_authorship()
+// decides "only bookkeeping columns changed" by comparing the whole row, so if
+// set_updated_at() ran first it would make every no-op look like an edit and
+// rewrite updated_by -- blaming whoever ran a statement that changed nothing.
+// Proved both ways on a live cluster before this test existed: with the name
+// below, updated_by survives a no-op; renamed to fire earlier, it is set to
+// NULL.
+func TestUpdatedAt077_TriggerFiresLast(t *testing.T) {
+	pool := NewPool(t)
+	ctx := context.Background()
+	f := seedV2Family(t, pool)
+	alex := newUser(t, pool, "Alex")
+
+	var bill uuid.UUID
+	asActor(t, pool, actor{user: alex.String()}, func(tx pgx.Tx) {
+		bill = txInsertID(t, tx, `INSERT INTO bills (household_id, name, amount) VALUES ($1, 'Netflix', 15.99) RETURNING id`, f.household)
+	})
+	var owner *uuid.UUID
+	mustScan(t, pool.QueryRow(ctx, `SELECT updated_by FROM bills WHERE id = $1`, bill), &owner)
+	if !eqID(owner, alex) {
+		t.Fatalf("setup: updated_by = %v, want %s", owner, alex)
+	}
+
+	// No actor on this write at all. If set_updated_at() fired before
+	// bills_authorship, the authorship trigger would see a "changed" row and
+	// rewrite updated_by to NULL.
+	asActor(t, pool, actor{}, func(tx pgx.Tx) {
+		txExec(t, tx, `UPDATE bills SET amount = amount WHERE id = $1`, bill)
+	})
+
+	var after *uuid.UUID
+	mustScan(t, pool.QueryRow(ctx, `SELECT updated_by FROM bills WHERE id = $1`, bill), &after)
+	if !eqID(after, alex) {
+		t.Errorf("updated_by = %v after a no-op UPDATE with no actor, want it unchanged at %s: "+
+			"set_updated_at() must fire after bills_authorship (name order)", after, alex)
+	}
+}
+
 // TestUpdatedAt077_UpIsIdempotentOnTheCatalogueGuard asserts that re-running
 // up on an already-077 schema does not double the triggers: DROP-then-CREATE
 // in the loop means it replaces, never stacks.

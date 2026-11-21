@@ -38,14 +38,23 @@
 --     timestamp, so the trigger here writes the identical value; removing
 --     the dead line is a cleanup, not part of this fix.
 --
--- TRIGGER ORDER. Postgres fires BEFORE row triggers in name order.
--- <table>_set_updated_at is the last of each table's BEFORE triggers ('s'
--- sorts after every authorship/derive/enforce/default/before_write/checked_by
--- trigger name in this schema, and after calendar_objects_set_event_times
--- because 'e' < 'u'). That matters: set_authorship() decides "only
--- bookkeeping columns changed" by comparing the whole row, and it must see
--- the row before updated_at moves, or every no-op UPDATE would be attributed
--- to whoever ran it.
+-- TRIGGER ORDER IS LOAD-BEARING, AND THIS NAME IS WHAT MAKES IT WORK.
+-- Postgres fires BEFORE row triggers in name order. <table>_set_updated_at is
+-- the last of each table's BEFORE triggers: 's' sorts after every
+-- authorship/derive/enforce/default/before_write/checked_by trigger name in
+-- this schema, and after calendar_objects_set_event_times because 'e' < 'u'.
+--
+-- Why it matters: set_authorship() decides "only bookkeeping columns changed,
+-- this is not an edit by anyone" by comparing the whole row with the
+-- authorship columns removed. If updated_at moved BEFORE it ran, that
+-- comparison would see a change on every no-op UPDATE, and updated_by would
+-- be rewritten to the actor (or to NULL when no actor is set) -- silently
+-- blaming whoever ran a query that changed nothing.
+--
+-- Proved both ways on a live cluster: with this name, a no-op UPDATE leaves
+-- bills.updated_by exactly as it was; renaming the trigger to fire before
+-- bills_authorship makes the same statement set updated_by to NULL. Do not
+-- rename this trigger to something that sorts earlier.
 --
 -- NO-OP UPDATES STAY SILENT. log_activity() ignores updated_at when it
 -- builds changed_fields, so the unconditional bump still leaves a no-op
