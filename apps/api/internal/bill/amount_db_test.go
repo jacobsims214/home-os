@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"home-os/api/internal/auth"
 )
 
 // TestBillAmountFromDatabaseIsDollars is the ticket's own reproduction: the
@@ -69,7 +71,7 @@ func TestBillAmountFromDatabaseIsDollars(t *testing.T) {
 		if b.Amount.Int == nil || b.Amount.Exp != -2 {
 			t.Fatalf("%s: scanned as Int=%v Exp=%d, want a -2 exponent (NUMERIC(12,2))", b.Name, b.Amount.Int, b.Amount.Exp)
 		}
-		body, err := json.Marshal(toResponse(b))
+		body, err := json.Marshal(toResponse(b, auth.RoleOwner, amountTestToday))
 		if err != nil {
 			t.Fatalf("%s: marshal: %v", b.Name, err)
 		}
@@ -98,7 +100,7 @@ func TestBillAmountFromDatabaseIsDollars(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: %v %v", got, err)
 	}
-	body, _ := json.Marshal(toResponse(got))
+	body, _ := json.Marshal(toResponse(got, auth.RoleOwner, amountTestToday))
 	var decoded struct {
 		Amount *string `json:"amount"`
 	}
