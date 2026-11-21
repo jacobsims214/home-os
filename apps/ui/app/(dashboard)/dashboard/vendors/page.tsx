@@ -306,7 +306,14 @@ export default function ContactsPage() {
 
   const { data, isLoading, isError, refetch, isRefetching } = useQuery({
     queryKey: vendorKeys.lists(),
-    queryFn: () => apiFetch<{ data: Contact[] }>("/api/v1/vendors"),
+    // kind=service_provider is explicit (#5529): this is the contacts list --
+    // plumbers, gardeners, people who do work. It is also the endpoint's
+    // default, so payee-only rows (utilities, mortgage servicers) stay out
+    // even if a client forgets the parameter.
+    queryFn: () =>
+      apiFetch<{ data: Contact[] }>("/api/v1/vendors", {
+        params: { kind: "service_provider" },
+      }),
   });
 
   const contacts = useMemo(() => data?.data ?? [], [data]);
