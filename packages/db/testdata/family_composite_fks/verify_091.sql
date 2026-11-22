@@ -1,8 +1,8 @@
--- verify_090.sql (#5519) -- proves the composite same-family FKs of migration 090.
+-- verify_091.sql (#5519) -- proves the composite same-family FKs of migration 091.
 --
--- Run against a database at 090, from THIS directory:
+-- Run against a database at 091, from THIS directory:
 --     cd packages/db/testdata/family_composite_fks
---     psql -d <db> -f verify_090.sql
+--     psql -d <db> -f verify_091.sql
 --
 -- Every case is a subtransaction, so one expected rejection does not abort the
 -- run. Each row prints ok / <-- FAIL; a passing run has no <-- FAIL and no
@@ -88,7 +88,7 @@ SELECT fk.cid::regclass::text AS child, fk.conname, fk.pid::regclass::text AS pa
 \echo ''
 \echo '==================== AC2: DELETE ACTIONS UNCHANGED ===================='
 -- Expected values were read from pg_constraint.confdeltype on a database at
--- 089, BEFORE 090 ran (pasted in the ticket). 'n' = SET NULL, 'c' = CASCADE.
+-- 089, BEFORE 091 ran (pasted in the ticket). 'n' = SET NULL, 'c' = CASCADE.
 WITH want(tbl, conname, want_del) AS (VALUES
   ('bills','bills_property_id_fkey','n'),('bills','bills_asset_id_fkey','n'),('bills','bills_vehicle_id_fkey','n'),
   ('maintenance_schedules','maintenance_schedules_property_id_fkey','c'),
@@ -160,6 +160,68 @@ SELECT 'AC3 rows left behind' AS check,
      + (SELECT count(*) FROM assets WHERE name LIKE 'ac3 %') AS leftovers;
 
 \echo ''
+\echo '==================== AC7: CASCADE PARENTS FIRE BEFORE TRIGGER-DERIVED SET NULL ===================='
+-- This is the regression guard. A property delete fires its children's ON DELETE
+-- actions in TRIGGER OID order. bills.property_id is re-derived from asset_id by
+-- derive_subject_property(), so the asset must already be GONE when bills'
+-- property_id is nulled -- that is, assets_property_id_fkey's action trigger must
+-- have a LOWER OID than bills_property_id_fkey's. If a later migration drops and
+-- re-adds either constraint, this fails here instead of failing a family's
+-- attempt to delete a property.
+DO $$
+DECLARE
+    v_assets INT;
+    v_bills  INT;
+BEGIN
+    SELECT t.oid INTO v_assets
+      FROM pg_trigger t JOIN pg_constraint c ON c.oid = t.tgconstraint
+     WHERE t.tgrelid = 'properties'::regclass
+       AND c.conname = 'assets_property_id_fkey' AND (t.tgtype & 8) <> 0;
+    SELECT t.oid INTO v_bills
+      FROM pg_trigger t JOIN pg_constraint c ON c.oid = t.tgconstraint
+     WHERE t.tgrelid = 'properties'::regclass
+       AND c.conname = 'bills_property_id_fkey' AND (t.tgtype & 8) <> 0;
+
+    IF v_assets IS NULL OR v_bills IS NULL THEN
+        RAISE WARNING 'AC7 FAIL: action trigger missing (assets=%, bills=%)', v_assets, v_bills;
+    ELSIF v_assets > v_bills THEN
+        RAISE WARNING 'AC7 FAIL: assets action trigger OID % is AFTER bills % -- deleting a property that an asset sits in will fail on bills_property_id_fkey', v_assets, v_bills;
+    ELSE
+        RAISE NOTICE 'AC7 ok: assets_property_id_fkey action trigger (%) fires before bills_property_id_fkey (%)', v_assets, v_bills;
+    END IF;
+END $$;
+
+-- And the behaviour, not just the OIDs: the bill must end at NULL/NULL, which is
+-- what 089 produced. AC3 covers the column; this covers the whole cascade.
+DO $$
+DECLARE
+    v_h    UUID := 'a7100000-0000-0000-0000-000000000001';
+    v_p    UUID := 'a7100000-0000-0000-0000-000000000002';
+    v_a    UUID := 'a7100000-0000-0000-0000-000000000003';
+    v_b    UUID := 'a7100000-0000-0000-0000-000000000004';
+    v_prop UUID;
+    v_ast  UUID;
+BEGIN
+    INSERT INTO households (id, name) VALUES (v_h, 'AC7 family') ON CONFLICT (id) DO NOTHING;
+    INSERT INTO properties (id, household_id, name) VALUES (v_p, v_h, 'AC7 house');
+    INSERT INTO assets (id, household_id, property_id, name) VALUES (v_a, v_h, v_p, 'AC7 furnace');
+    INSERT INTO bills (id, household_id, property_id, asset_id, name) VALUES (v_b, v_h, v_p, v_a, 'AC7 bill');
+
+    DELETE FROM properties WHERE id = v_p;
+
+    SELECT property_id, asset_id INTO v_prop, v_ast FROM bills WHERE id = v_b;
+    IF v_prop IS NULL AND v_ast IS NULL THEN
+        RAISE NOTICE 'AC7 ok: deleting the property left the bill at property_id=NULL, asset_id=NULL (the 089 end state)';
+    ELSE
+        RAISE WARNING 'AC7 FAIL: bill left at property_id=%, asset_id=% (want NULL, NULL)', v_prop, v_ast;
+    END IF;
+    DELETE FROM bills WHERE id = v_b;
+    DELETE FROM assets WHERE id = v_a;
+    DELETE FROM households WHERE id = v_h;
+EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'AC7 FAIL: DELETE FROM properties raised % (%)', SQLERRM, SQLSTATE;
+END $$;
+
 \echo '==================== AC4: TRIGGER DISABLED, CROSS-FAMILY STILL REJECTED ===================='
 -- This is the point of the ticket: the database, not derive_subject_property(),
 -- refuses the reference. Each case is its own subtransaction. Only SQLSTATE

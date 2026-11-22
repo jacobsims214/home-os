@@ -431,6 +431,7 @@ func TestDomainV2_Backfill039(t *testing.T) {
 	apply("064_membership_vendor_link.down.sql")                         // newest first: 064's memberships FK needs 043's vendors key
 	apply("061_notify_creator_role.down.sql")                            // newest first: restores 054's notify_entity_creator
 	apply("060_drop_pet_vet_columns.down.sql")                           // newest first: restores pets.vet_name / vet_phone
+	apply("091_family_composite_fks.down.sql")                           // newest first: since 091 its composite FKs ride on 058/084's keys
 	apply("058_same_family_fks.down.sql")                                // newest first: 058's FKs need 043's vendors key
 	apply("057_secret_agent_share.down.sql")
 	apply("056_domain_v2_cleanup.down.sql")

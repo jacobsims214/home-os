@@ -1,6 +1,6 @@
--- 090_family_composite_fks.down.sql (#5519)
+-- 091_family_composite_fks.down.sql (#5519)
 --
--- Restores every FK the up replaced to its exact pre-090 definition, delete
+-- Restores every FK the up replaced to its exact pre-091 definition, delete
 -- action included, and drops the seven indexes the up added. Rows repaired by
 -- the up stay repaired: the cross-family links were never valid and are not
 -- reconstructible.
