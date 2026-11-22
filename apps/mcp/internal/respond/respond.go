@@ -83,6 +83,29 @@ type Range struct {
 	Note        string `json:"note,omitempty" jsonschema_description:"One line about what was searched, for the model to tell the user."`
 }
 
+// FallbackRange is the Range of a search that could NOT use its index and
+// answered some other way instead (literal words, substrings).
+//
+// It exists because the alternative — returning the fallback's results as if
+// they were the real search — is the most dangerous output this codebase can
+// produce (#5621): kb_search lost its TYPESENSE_* env vars, quietly searched by
+// words, and reported a normal empty result for a paraphrase of a document that
+// existed. The agent believed it and would have told the family the document
+// does not exist. MayHaveMore is true and Note says plainly what was missed, so
+// a caller cannot reach that conclusion without contradicting what it was told.
+//
+// fallback names what was searched instead ("literal words"); reason is the
+// error that made the index unusable. Both are quoted in Note, so the summary
+// and the machine-readable field carry the same sentence.
+func FallbackRange(fallback, reason string) *Range {
+	return &Range{
+		MayHaveMore: true,
+		Note: fmt.Sprintf("Not a meaning-based search: the search index is unavailable (%s), so only %s were matched. "+
+			"A record worded differently was never looked for — never say one does not exist without checking the full list.",
+			reason, fallback),
+	}
+}
+
 // AllDatesRange is the Range of a search that covered every date.
 func AllDatesRange(note string) *Range {
 	return &Range{AllDates: true, Note: note}

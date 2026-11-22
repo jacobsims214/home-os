@@ -32,6 +32,7 @@ spec:
           value: "{{ .Values.mcp.metadataPort }}"
         {{- include "home-os.databaseEnv" . | nindent 8 }}
         {{- include "home-os.agentCredentialsEnv" . | nindent 8 }}
+        {{- include "home-os.typesenseEnv" . | nindent 8 }}
         - name: LOG_LEVEL
           value: "info"
         - name: DEX_JWKS_URL

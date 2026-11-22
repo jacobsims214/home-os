@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -125,7 +126,17 @@ func NewKBSearchTool(pool *pgxpool.Pool, ts *typesense) (string, mcp.Tool, toolH
 		}
 		limit := argLimit(req)
 
+		// Search by MEANING. A failed semantic search must never pass for
+		// "nothing matched" (#5621): the word fallback below is a lesser
+		// search, so when the index is unreachable the result says so in the
+		// summary AND in searched_range, and when there is nothing usable to
+		// return at all the call FAILS. The alternative is what cost the family
+		// this bug — the MCP pod shipped without TYPESENSE_* env vars, every
+		// meaning search errored here, the error was dropped, and a paraphrase
+		// of a doc that existed came back as a normal empty list. An agent read
+		// that as "there is no such document" and would have said so.
 		searchedBy := "meaning"
+		var searched *respond.Range
 		hits, err := searchByMeaning(ctx, pool, ts, c.householdID, query, limit)
 		if err != nil || len(hits) == 0 {
 			// No Typesense, a collection without an embedding field, or an
@@ -135,9 +146,32 @@ func NewKBSearchTool(pool *pgxpool.Pool, ts *typesense) (string, mcp.Tool, toolH
 			if werr != nil {
 				return respond.Failed("search the knowledge base", werr), nil
 			}
+			if err != nil {
+				// Degraded: words answered instead of the index.
+				if len(wordHits) == 0 {
+					// ...and they found nothing either. An empty list here is
+					// the exact output that made an agent tell a family a
+					// document did not exist, so refuse instead of returning it.
+					slog.Error("kb_search: meaning search unavailable and no word matches; failing rather than reporting an empty result",
+						"household_id", c.householdID, "error", err)
+					return respond.Fail(respond.Error{
+						Message: fmt.Sprintf("Could not search the knowledge base by meaning: %v. Matching by words found no doc either, so this result says nothing about whether one exists.", err),
+						Fix:     "Tell the user that knowledge base search is impaired right now, and call kb_list to read the doc paths and titles directly. Never tell them the family has no such document.",
+					}), nil
+				}
+				slog.Warn("kb_search: meaning search unavailable; answering with word matches",
+					"household_id", c.householdID, "error", err)
+				searchedBy = "words"
+				searched = respond.FallbackRange("literal words", err.Error())
+			}
 			if len(wordHits) > 0 {
 				hits = wordHits
-				searchedBy = "words"
+				if searchedBy == "meaning" {
+					// The index was fine and simply had no match; the words
+					// only add a doc it has not indexed yet. Still say which
+					// search answered, as kb_search always has.
+					searchedBy = "words"
+				}
 			}
 		}
 
@@ -150,7 +184,11 @@ func NewKBSearchTool(pool *pgxpool.Pool, ts *typesense) (string, mcp.Tool, toolH
 			next = append(next, fmt.Sprintf("Read the whole doc with kb_get path=%q.", hits[0].Path))
 		}
 		summary := fmt.Sprintf("Found %s by %s for %q.", plural(len(hits), "knowledge base doc"), searchedBy, query)
-		return respond.List(summary, toHits(hits), respond.Page{Total: len(hits), Narrow: "Add more words from the doc you expect, or call kb_list to browse."}, next...), nil
+		if searched != nil {
+			summary = fmt.Sprintf("Semantic search is unavailable, so this is a WORD match only: found %s by %s for %q. A doc worded differently was never looked for.",
+				plural(len(hits), "knowledge base doc"), searchedBy, query)
+		}
+		return respond.ListIn(summary, toHits(hits), respond.Page{Total: len(hits), Narrow: "Add more words from the doc you expect, or call kb_list to browse."}, searched, next...), nil
 	}
 	return "kb_search", tool, handler
 }
