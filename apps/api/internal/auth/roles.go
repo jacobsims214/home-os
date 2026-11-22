@@ -96,6 +96,7 @@ type Resource string
 const (
 	ResHousehold     Resource = "household"     // the household record and the caller's households
 	ResMembers       Resource = "members"       // memberships (people who log in) and their roles
+	ResMemberAudit   Resource = "member_audit"  // the audit of membership changes (#5518)
 	ResInvites       Resource = "invites"       // invitations
 	ResAgentTokens   Resource = "agent_tokens"  // the caller's own agent tokens
 	ResAssets        Resource = "assets"        // assets
@@ -197,7 +198,12 @@ var policy = map[Resource]map[Action][]string{
 	// ordinary write (#4820).
 	ResHousehold: {ActRead: rolesEveryone, ActWrite: rolesManagers},
 	ResMembers:   {ActRead: rolesSitter, ActWrite: rolesManagers},
-	ResInvites:   {ActRead: rolesManagers, ActWrite: rolesManagers},
+	// The audit trail of membership changes (#5518, finding F24): who granted,
+	// demoted or removed whom. Managers only -- a demotion must not be readable
+	// in the shared feed by the member being demoted. activity_log has no
+	// per-row visibility, so the decision lives here, where every reader asks.
+	ResMemberAudit: {ActRead: rolesManagers},
+	ResInvites:     {ActRead: rolesManagers, ActWrite: rolesManagers},
 	ResAgentTokens: {
 		ActRead:       rolesEveryone, // list one's own tokens
 		ActRevoke:     rolesEveryone, // revoke one's own tokens (e.g. after a demotion)
@@ -321,6 +327,9 @@ var entityResources = map[string]Resource{
 	"meal_feedback":        ResMeals,
 	"guide":                ResGuides,
 	"kb_doc":               ResKB,
+	// 086 (#5518): the membership audit. NOT ResMembers -- members.read is
+	// rolesSitter, so reusing it would let a housesitter read who demoted whom.
+	"membership": ResMemberAudit,
 }
 
 // EntityResource returns the resource guarding entity kind kind, and false

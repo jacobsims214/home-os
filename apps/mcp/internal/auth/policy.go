@@ -53,6 +53,7 @@ type Resource string
 const (
 	ResHousehold     Resource = "household"     // the household record and the caller's households
 	ResMembers       Resource = "members"       // memberships (people who log in) and their roles
+	ResMemberAudit   Resource = "member_audit"  // the audit of membership changes (#5518)
 	ResInvites       Resource = "invites"       // invitations
 	ResAgentTokens   Resource = "agent_tokens"  // the caller's own agent tokens
 	ResAssets        Resource = "assets"        // assets
@@ -161,7 +162,9 @@ var Policy = map[Resource]map[Action][]string{
 	// family_manager may change its name or timezone (#4820).
 	ResHousehold: {ActRead: rolesEveryone, ActWrite: rolesManagers},
 	ResMembers:   {ActRead: rolesSitter, ActWrite: rolesManagers},
-	ResInvites:   {ActRead: rolesManagers, ActWrite: rolesManagers},
+	// Managers only: a demotion must not be readable by the member demoted.
+	ResMemberAudit: {ActRead: rolesManagers},
+	ResInvites:     {ActRead: rolesManagers, ActWrite: rolesManagers},
 	ResAgentTokens: {
 		ActRead:       rolesEveryone, // list one's own tokens
 		ActRevoke:     rolesEveryone, // revoke one's own tokens (e.g. after a demotion)
@@ -285,6 +288,9 @@ var EntityResources = map[string]Resource{
 	"meal_feedback":        ResMeals,
 	"guide":                ResGuides,
 	"kb_doc":               ResKB,
+	// 086 (#5518): the membership audit, managers only. See policy.go's
+	// ResMemberAudit and apps/api/internal/auth/roles.go.
+	"membership": ResMemberAudit,
 }
 
 // EntityResource returns the resource guarding entity kind kind, and false

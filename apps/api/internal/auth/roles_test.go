@@ -1,6 +1,9 @@
 package auth
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestRoleRules(t *testing.T) {
 	roles := []string{RoleOwner, RoleFamilyManager, RoleFamilyMember, RoleViewer, RoleHousesitter, RoleVendor}
@@ -138,11 +141,27 @@ func TestPolicy_Entities(t *testing.T) {
 			t.Errorf("CanAnnotateEntity(%s, %s) = %v, want %v", tc.role, tc.kind, got, tc.annotate)
 		}
 	}
-	if hidden := HiddenEntityKinds(RoleViewer); len(hidden) != 1 || hidden[0] != "secret" {
-		t.Errorf("viewer hidden kinds = %v, want [secret]", hidden)
+	// A viewer is kept from credentials AND from the membership audit (#5518):
+	// who granted, demoted or removed whom is management data, not family news.
+	if hidden := HiddenEntityKinds(RoleViewer); len(hidden) != 2 ||
+		!slices.Contains(hidden, "secret") || !slices.Contains(hidden, "membership") {
+		t.Errorf("viewer hidden kinds = %v, want [secret membership]", hidden)
 	}
 	if hidden := HiddenEntityKinds(RoleOwner); len(hidden) != 0 {
 		t.Errorf("owner hidden kinds = %v, want none", hidden)
+	}
+	// The membership audit must be hidden from everyone a demotion could be
+	// about who is not a manager.
+	for _, role := range []string{RoleFamilyMember, RoleViewer, RoleHousesitter, RoleVendor} {
+		if CanSeeEntity(role, "membership") {
+			t.Errorf("%s can read the membership audit; it is owner/family_manager only", role)
+		}
+		// members.read is unchanged (rolesSitter): a housesitter may still list
+		// the family's members. Only the AUDIT of how they got their roles is
+		// managers-only. Asserted so the two are not collapsed later.
+		if !Can(role, ResMembers, ActRead) && role == RoleHousesitter {
+			t.Errorf("%s can no longer read members; the audit decision must not have narrowed members", role)
+		}
 	}
 	for _, role := range []string{"", "admin"} {
 		if Can(role, ResHousehold, ActRead) {

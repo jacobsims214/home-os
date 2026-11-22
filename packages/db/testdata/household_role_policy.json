@@ -456,6 +456,12 @@
         "family_manager",
         "family_member"
       ]
+    },
+    "member_audit": {
+      "read": [
+        "owner",
+        "family_manager"
+      ]
     }
   },
   "entity_resources": {
@@ -487,6 +493,7 @@
     "room": "properties",
     "secret": "secrets",
     "vehicle": "vehicles",
-    "vendor": "vendors"
+    "vendor": "vendors",
+    "membership": "member_audit"
   }
 }

@@ -156,8 +156,9 @@ func TestActivityEntityKind078_DomainIsEntityKindPlusFeedOnlyKinds(t *testing.T)
 		t.Fatalf("entity_kind has %d members, want 23: %v", len(base), base)
 	}
 
-	// The three kinds only the audit feed writes, each with a real table.
-	feedOnly := []string{"list_item", "meal_feedback", "person_preference"}
+	// The kinds only the audit feed writes, each with a real table.
+	// membership was added by 086 (#5518); 078 named it as this ticket's job.
+	feedOnly := []string{"list_item", "meal_feedback", "person_preference", "membership"}
 
 	want := map[string]bool{}
 	for _, k := range base {

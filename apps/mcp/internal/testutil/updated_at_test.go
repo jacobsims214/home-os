@@ -38,10 +38,16 @@ var updatedAtTablesAt074 = []string{
 // noUpdatedAtTables are the 14 tables without the column. 077 must not add
 // one -- activity_log, the credential tables and the link tables are
 // append-only by design, rooms simply never got the column.
+//
+// memberships USED to be on this list and was removed by 086 (#5518): it is
+// not append-only (a role changes), and F18's complaint was precisely that the
+// row recorded nothing about its own last change. 086 gives it updated_at and
+// updated_by under the same set_updated_at()/set_authorship() mechanism as the
+// other tables, so it now belongs with them, not here.
 var noUpdatedAtTables = []string{
 	"activity_log", "agent_tokens", "calendar_changes", "document_links",
 	"file_blobs", "file_search_deletions", "guide_revisions", "invitations",
-	"memberships", "notifications", "outbox_events", "password_reset_tokens",
+	"notifications", "outbox_events", "password_reset_tokens",
 	"rooms", "secret_keys",
 }
 

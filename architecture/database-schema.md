@@ -124,6 +124,18 @@ only writer.
 a household. `AT TIME ZONE` on a bad value fails the whole query, which is why
 the due rule does date arithmetic in Go after reading the value.
 
-**`activity_log`** is written by `log_activity(kind)` triggers on 25 tables, so
-it does not depend on the caller remembering. `outbox_events` is the opposite:
-it is written by handler code, so its coverage is only as good as the handlers.
+**`activity_log`** is written by `log_activity(kind)` triggers on 26 tables
+(`memberships` added by 086, #5518), so it does not depend on the caller
+remembering -- which is why a REST write and an MCP write of the same
+membership change produce identical rows. `outbox_events` is the opposite: it is
+written by handler code, so its coverage is only as good as the handlers.
+
+**Membership changes are audited, and that audit is managers-only.**
+`memberships` is the one table added to the activity feed at 086, because a
+grant, a demotion or a removal decides what a person can see (money,
+credentials, documents) and left no record before. `activity_log` has no
+per-row visibility, so the restriction lives in `role_can_see_entity`: the
+`membership` kind maps to a `member_audit` resource granted to `owner` and
+`family_manager` only (not `members`, which stays `rolesSitter`). A demotion is
+therefore not readable in the shared feed by the person demoted -- they find out
+when their permissions change, not by reading the log.
