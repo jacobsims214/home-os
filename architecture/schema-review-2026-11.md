@@ -142,6 +142,25 @@ migrations is a member of the new domain and has a `role_can_see_entity` branch.
 
 ### F2 — A bill's subject is three nullable FKs where it should be one
 
+> **STATUS — corrected and resolved by migration 083 (#5515). Read this before
+> acting on the finding below.** The recommended expression
+> `num_nonnulls(property_id, asset_id, vehicle_id) <= 1` is **wrong and was not
+> shipped**. `derive_subject_property()` (038) is a BEFORE INSERT/UPDATE trigger
+> on all five tables and sets `NEW.property_id` from `asset_id`, so every
+> asset-subject row legitimately has **both** set (`num_nonnulls` = 2). That
+> expression cannot be added to a database holding one such row, and it would
+> make every asset-subject insert impossible. 083 installs
+> `num_nonnulls(asset_id, vehicle_id) <= 1 AND num_nonnulls(property_id, vehicle_id) <= 1`
+> on all five, which is **provably equivalent** to the old CHECK on all eight
+> null combinations (verified on PG16) — a restatement plus a per-constraint
+> `COMMENT`, not a behaviour change. Also, the "`asset_id` plus a *stale*
+> `property_id`" hazard this finding names is **not reachable**: the same
+> trigger overwrites a disagreeing property on any subject-column write, and
+> `assets_propagate_property` realigns all five tables when an asset moves. A
+> composite FK was evaluated as the declarative version and is redundant. The
+> backfill found **0** rows of either shape on a full 001→082 build. The rule
+> now lives in `database-schema.md` § "The subject pattern".
+
 **Where:** `007_bills.up.sql` (`property_id`), `028_add_vehicle_to_maintenance.up.sql`
 (`vehicle_id`), `038` (`asset_id`). The guard is
 `bills_subject_check CHECK (vehicle_id IS NULL OR (property_id IS NULL AND asset_id IS
