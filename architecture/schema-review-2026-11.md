@@ -142,14 +142,14 @@ migrations is a member of the new domain and has a `role_can_see_entity` branch.
 
 ### F2 — A bill's subject is three nullable FKs where it should be one
 
-> **STATUS — corrected and resolved by migration 083 (#5515). Read this before
+> **STATUS — corrected and resolved by migration 089 (#5515). Read this before
 > acting on the finding below.** The recommended expression
 > `num_nonnulls(property_id, asset_id, vehicle_id) <= 1` is **wrong and was not
 > shipped**. `derive_subject_property()` (038) is a BEFORE INSERT/UPDATE trigger
 > on all five tables and sets `NEW.property_id` from `asset_id`, so every
 > asset-subject row legitimately has **both** set (`num_nonnulls` = 2). That
 > expression cannot be added to a database holding one such row, and it would
-> make every asset-subject insert impossible. 083 installs
+> make every asset-subject insert impossible. 089 installs
 > `num_nonnulls(asset_id, vehicle_id) <= 1 AND num_nonnulls(property_id, vehicle_id) <= 1`
 > on all five, which is **provably equivalent** to the old CHECK on all eight
 > null combinations (verified on PG16) — a restatement plus a per-constraint
