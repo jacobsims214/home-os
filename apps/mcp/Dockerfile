@@ -11,12 +11,14 @@ COPY packages/allergen/go.mod packages/allergen/go.sum /src/packages/allergen/
 COPY packages/icalx/go.mod packages/icalx/go.sum /src/packages/icalx/
 COPY packages/billcal/go.mod packages/billcal/go.sum /src/packages/billcal/
 COPY packages/billdue/go.mod /src/packages/billdue/
+COPY packages/notify/go.mod /src/packages/notify/
 COPY apps/mcp/go.mod apps/mcp/go.sum ./
 RUN go mod download
 COPY packages/allergen/ /src/packages/allergen/
 COPY packages/icalx/ /src/packages/icalx/
 COPY packages/billcal/ /src/packages/billcal/
 COPY packages/billdue/ /src/packages/billdue/
+COPY packages/notify/ /src/packages/notify/
 COPY apps/mcp/ ./
 RUN CGO_ENABLED=0 GOOS=linux go build -o /mcp ./cmd/mcp
 

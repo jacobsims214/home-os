@@ -234,7 +234,7 @@ func TestDomainV2_DeleteRehomesReferences(t *testing.T) {
 	})
 
 	t.Run("vehicle delete clears notifications, cascades maintenance, nulls bills", func(t *testing.T) {
-		notif := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'x', 'Registration due', 'vehicle', $2) RETURNING id`, f.household, f.vehicle)
+		notif := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'bill_due', 'Registration due', 'vehicle', $2) RETURNING id`, f.household, f.vehicle)
 		task := insertID(t, pool, `INSERT INTO maintenance_tasks (household_id, name, vehicle_id) VALUES ($1, 'Oil', $2) RETURNING id`, f.household, f.vehicle)
 		bill := insertID(t, pool, `INSERT INTO bills (household_id, name, vehicle_id) VALUES ($1, 'Insurance', $2) RETURNING id`, f.household, f.vehicle)
 		mustExec(t, pool, `DELETE FROM vehicles WHERE id = $1`, f.vehicle)

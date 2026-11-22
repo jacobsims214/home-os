@@ -211,7 +211,7 @@ func seedBusyFamily(t testing.TB, pool *pgxpool.Pool, hh, owner uuid.UUID, dispo
 
 		// Notifications: a third unread.
 		`INSERT INTO notifications (household_id, user_id, type, title, body, read_at, created_at)
-		 SELECT $1, CASE WHEN g % 2 = 0 THEN $2::uuid END, 'reminder', 'Reminder ' || g, 'Something needs attention ' || g,
+		 SELECT $1, CASE WHEN g % 2 = 0 THEN $2::uuid END, 'bill_due', 'Reminder ' || g, 'Something needs attention ' || g,
 		        CASE WHEN g % 3 <> 0 THEN now() - g * interval '1 hour' END, now() - g * interval '3 hours'
 		   FROM generate_series(1, 300) g`,
 

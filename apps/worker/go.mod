@@ -11,6 +11,7 @@ require (
 	home-os/billcal v0.0.0
 	home-os/billdue v0.0.0
 	home-os/icalx v0.0.0
+	home-os/notify v0.0.0
 )
 
 require (
@@ -80,3 +81,5 @@ replace (
 	home-os/billdue => ../../packages/billdue
 	home-os/icalx => ../../packages/icalx
 )
+
+replace home-os/notify => ../../packages/notify

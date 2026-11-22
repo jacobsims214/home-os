@@ -293,7 +293,7 @@ func TestNotificationFind(t *testing.T) {
 	if _, err := pool.Exec(context.Background(), `UPDATE notifications SET dedupe_key = 'firing-1' WHERE id IN ($1, $2)`, alarmMine, alarmAmber); err != nil {
 		t.Fatal(err)
 	}
-	readN := notify(t, pool, hh.HouseholdID, "", "info", "Welcome", "", nil, 48*time.Hour)
+	readN := notify(t, pool, hh.HouseholdID, "", "item_changed", "Welcome", "", nil, 48*time.Hour)
 	if _, err := pool.Exec(context.Background(), `UPDATE notifications SET read_at = NOW() - interval '1 day' WHERE id = $1`, readN); err != nil {
 		t.Fatal(err)
 	}

@@ -124,10 +124,10 @@ func TestDomainV2Cleanup056_AlarmDedupeAndEventLink(t *testing.T) {
 	}
 	// Family-wide rows (user_id NULL) and rows without a key are not limited.
 	for i := 0; i < 2; i++ {
-		mustExec(t, pool, `INSERT INTO notifications (household_id, type, title, dedupe_key) VALUES ($1, 'info', 'x', 'k1')`, f.household)
-		mustExec(t, pool, `INSERT INTO notifications (household_id, user_id, type, title) VALUES ($1, $2, 'info', 'x')`, f.household, user)
+		mustExec(t, pool, `INSERT INTO notifications (household_id, type, title, dedupe_key) VALUES ($1, 'bill_due', 'x', 'k1')`, f.household)
+		mustExec(t, pool, `INSERT INTO notifications (household_id, user_id, type, title) VALUES ($1, $2, 'bill_due', 'x')`, f.household, user)
 	}
-	_, err = pool.Exec(ctx, `INSERT INTO notifications (household_id, type, title, dedupe_key) VALUES ($1, 'info', 'x', ' ')`, f.household)
+	_, err = pool.Exec(ctx, `INSERT INTO notifications (household_id, type, title, dedupe_key) VALUES ($1, 'bill_due', 'x', ' ')`, f.household)
 	wantSQLState(t, err, sqlstateCheckViolation)
 
 	// Deleting the event clears the link and keeps the reminder.

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"home-os/notify"
 )
 
 // The notification policy: autopay means silence.
@@ -44,9 +46,14 @@ const DigestThreshold = 3
 // values the job writes. A single reminder keeps the type bill_due it has
 // always had, so the existing client icons, email template and read filters
 // keep working (#5500 requirement 3: no parallel delivery path).
+//
+// They are the vocabulary's own values (home-os/notify, migration 079) rather
+// than literals: the database refuses a type outside it, so a typo here would
+// be a failed insert at run time. Keeping the local names means every existing
+// caller and test reads the same, while the value has one definition.
 const (
-	NotificationTypeBill   = "bill_due"
-	NotificationTypeDigest = "bill_digest"
+	NotificationTypeBill   = string(notify.TypeBillDue)
+	NotificationTypeDigest = string(notify.TypeBillDigest)
 )
 
 // Advice is what the notification job should do about one bill.

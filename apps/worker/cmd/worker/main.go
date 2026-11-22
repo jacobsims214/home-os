@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/api/pkg/smtp"
+	"home-os/notify"
 	"home-os/worker/internal/alarms"
 	"home-os/worker/internal/billmirror"
 	"home-os/worker/internal/config"
@@ -187,7 +188,7 @@ const maintenanceCandidatesSQL = `
 	AND mt.due_date BETWEEN $1::date - 1 AND $1::date + $2::int + 1
 	AND NOT EXISTS (
 		SELECT 1 FROM notifications n
-		WHERE n.entity_id = mt.id AND n.type = 'maintenance_due'
+		WHERE n.entity_id = mt.id AND n.type = $3::notification_type
 		AND n.created_at > NOW() - INTERVAL '24 hours'
 	)
 `
@@ -198,7 +199,7 @@ const maintenanceCandidatesSQL = `
 // one maintenance_due per task per 24 hours.
 const maintenanceDueSQL = `
 	INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
-	SELECT mt.household_id, 'maintenance_due', mt.name || ' due soon',
+	SELECT mt.household_id, $2::notification_type, mt.name || ' due soon',
 	       COALESCE(mt.description, ''),
 	       'maintenance_task', mt.id
 	FROM unnest($1::uuid[]) AS d(task_id)
@@ -206,7 +207,7 @@ const maintenanceDueSQL = `
 	WHERE mt.status = 'pending'
 	AND NOT EXISTS (
 		SELECT 1 FROM notifications n
-		WHERE n.entity_id = mt.id AND n.type = 'maintenance_due'
+		WHERE n.entity_id = mt.id AND n.type = $2::notification_type
 		AND n.created_at > NOW() - INTERVAL '24 hours'
 	)
 	RETURNING id, household_id, type, title, body
@@ -264,7 +265,7 @@ func insertDueNotifications(ctx context.Context, pool *pgxpool.Pool, now time.Ti
 	}
 
 	rows, err := pool.Query(ctx, maintenanceCandidatesSQL,
-		now.UTC().Format(time.DateOnly), maintenanceDueWindowDays)
+		now.UTC().Format(time.DateOnly), maintenanceDueWindowDays, notify.TypeMaintenanceDue)
 	if err != nil {
 		return nil, fmt.Errorf("maintenance notifications: %w", err)
 	}
@@ -276,7 +277,7 @@ func insertDueNotifications(ctx context.Context, pool *pgxpool.Pool, now time.Ti
 	if len(ids) == 0 {
 		return allNotifs, nil
 	}
-	rows, err = pool.Query(ctx, maintenanceDueSQL, ids)
+	rows, err = pool.Query(ctx, maintenanceDueSQL, ids, notify.TypeMaintenanceDue)
 	if err != nil {
 		return nil, fmt.Errorf("maintenance notifications: %w", err)
 	}
