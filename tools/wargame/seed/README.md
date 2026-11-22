@@ -9,7 +9,8 @@ written garbage into the household.
 ```bash
 # from a pod in the home-os namespace, or through a port-forward (same as mcpcall.py)
 DATABASE_URL=postgres://... ./tools/wargame/seed/household.py     # seed / re-seed + report
-DATABASE_URL=postgres://... ./tools/wargame/seed/household.py --household-id <uuid> [--adopt]
+DATABASE_URL=postgres://... ./tools/wargame/seed/household.py --allow-household <uuid> --adopt --show-scope
+DATABASE_URL=postgres://... ./tools/wargame/seed/household.py --new-household   # create one
 DATABASE_URL=postgres://... ./tools/wargame/seed/household.py --today 2026-11-22   # pin the date
 ./tools/wargame/seed/household.py --print-sql | psql "$DATABASE_URL"   # no DB needed
 ```
@@ -107,28 +108,48 @@ re-seed. Nothing outside the target household is read or written.
 
 ## Refusing a real household
 
-The target must carry `households.settings->>'wargame_seed' =
-'wargame-household-v1'`. Naming an unmarked household with `--household-id` is
-**refused** — the script deletes bills and contacts, so it will not run on a
-household it cannot prove is the war game's. `--adopt` overrides that refusal but
-still requires the household to look like the war game's: named *The War Game
-Family*, **or** every login on it is an `@example.com` test account. A household
-with a real login is refused even with `--adopt`. If two households carry the
-marker it refuses and asks which one.
+The gate is **explicit intent**, and there are exactly two ways to pass it:
 
-**The deployed war-game household carries no marker today.** It is named
-`Sims Family (war game)` and has a real login (`jacob.sims@simstech.cloud`), so
-the seed refuses it — with and without `--adopt`. Someone has to stamp the marker
-on it first, deliberately:
+1. the household already carries `households.settings->>'wargame_seed' =
+   'wargame-household-v1'` (a previous explicit run put it there), or
+2. the operator passes **all three** of
+   `--allow-household <id> --adopt --show-scope`.
 
-```sql
-UPDATE households
-   SET settings = settings || '{"wargame_seed":"wargame-household-v1"}'::jsonb
- WHERE id = '<the war-game household id>';
+```bash
+# seed the war-game household (all three, or nothing)
+./tools/wargame/seed/household.py \
+    --allow-household <uuid> --adopt --show-scope
 ```
 
-That one statement is the point at which a person says "yes, this is the war
-game's, wipe and rebuild it", and it is why the script does not do it itself.
+| flag | what it says |
+|---|---|
+| `--allow-household <id>` | **which** household. This *is* the permission. |
+| `--adopt` | you accept its current contents being replaced. Requires `--allow-household`; it never names a household by itself. |
+| `--show-scope` | print exactly what gets deleted and what survives, before writing. |
+
+`--adopt` without an id is an error, and naming an id without `--show-scope` is an
+error, because the destructive scope has to have been shown. **No id at all is
+refused** — there is no "the only household in the database" and no name match;
+the refusal prints the household list so you can name one. To seed a brand-new
+household instead, pass `--new-household` (touches nothing that exists).
+`--dry-run` runs the gate and prints the scope without writing, which is how to
+check which ids are allowed.
+
+### Why it is not a heuristic any more (#5607)
+
+The old gate admitted a household that was named *The War Game Family* **or**
+whose every login was an `@example.com` test account. On the deployed war game
+that guess can never be true: the household is named `Sims Family (war game)`
+and its personas are real Dex identities at `@simstech.cloud`. So the seed
+refused the very household it exists for, and the only documented workaround was
+to hand-stamp the marker in SQL — which is worse than useless, because the marker
+check returns **before** every other check, so stamping it silently disarms the
+gate for all later runs.
+
+A login on a foreign domain is now a **loud warning**, not a refusal: on a
+deployment with real personas it is expected, and the operator has already said
+which household they mean. Run with `--dry-run` first if you want to see what
+that household actually contains.
 
 ## Gotchas that cost time
 

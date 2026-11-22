@@ -88,17 +88,33 @@ same four states. `--today` pins it for a reproducible round.
     kb_docs has its own UNIQUE (household_id, path); it is cleared the same way
     and written with ON CONFLICT (household_id, path) DO UPDATE, so it is
     idempotent on the key the table itself uses.
-  * NEVER TOUCHES A REAL HOUSEHOLD. The target is a household whose
-    settings->>'wargame_seed' is this script's marker. A household passed with
-    --household-id that does not carry the marker is refused unless --adopt is
-    given AND it looks like the war-game one (name match, or every login is an
-    @example.com test account).
+  * NEVER TOUCHES A REAL HOUSEHOLD BY ACCIDENT. The gate is EXPLICIT INTENT, and
+    there are exactly two ways to pass it: the household already carries
+    settings->>'wargame_seed' = this script's marker (a previous explicit run),
+    or the operator passed --allow-household <that id> --adopt --show-scope.
+    There is no name match, no "every login is an @example.com test account",
+    and no "the only household in the database": those were guesses about what a
+    household looks like, and #5607 showed the guess is wrong on the deployed
+    war game (real @simstech.cloud Dex personas, household named "Sims Family
+    (war game)"), which made the seed unrunnable there. A list of logins on a
+    foreign domain is now a LOUD WARNING, not a refusal.
   * NO REAL DATA. Emails are @example.com, phones are 555-01xx, account numbers
     are last-4 only and fictional, addresses and names are invented.
 
 usage:
-  DATABASE_URL=postgres://... ./household.py                 # seed / re-seed
-  DATABASE_URL=postgres://... ./household.py --household-id <uuid> [--adopt]
+  # re-seed the household a previous run created (it carries the marker)
+  DATABASE_URL=postgres://... ./household.py
+
+  # seed a household that does not carry the marker: all three, or nothing
+  DATABASE_URL=postgres://... ./household.py \
+      --allow-household <uuid> --adopt --show-scope
+        --allow-household <uuid>  WHICH household (the permission itself)
+        --adopt                   you accept its current contents being replaced
+        --show-scope              print what gets deleted and what survives first
+
+  # create a household from scratch (touches nothing that exists)
+  DATABASE_URL=postgres://... ./household.py --new-household
+
   DATABASE_URL=postgres://... ./household.py --today 2026-11-22
   ./household.py --print-sql                                 # SQL to stdout only
   ./household.py --print-sql --household-id <uuid> | psql ...
@@ -941,8 +957,62 @@ UNION ALL SELECT 'payment_accounts', count(*) FROM payment_accounts WHERE househ
 """
 
 
-def find_target(dsn, household_id, adopt):
-    """Resolve (household_id, created, name). Refuses anything that is not the war game's."""
+# The tables this seed CLEARS on every run, and the ones it leaves alone. Kept
+# next to the gate on purpose: the operator is asked to accept this list before
+# anything is written, and clear() is the code that carries it out, so the two
+# cannot drift apart without the file showing it.
+CLEARED_TABLES = [
+    ("calendar_objects", "the bill calendar mirrors this seed wrote"),
+    ("bills", "all bills, autopay links and account numbers"),
+    ("kb_docs", "the family knowledge base"),
+    ("guides", "only the four legacy guide ids this seed used to write (#5504)"),
+    ("payment_accounts", "all payment accounts"),
+    ("pets", "all pets"),
+    ("vendors", "all vendors and their contact details"),
+    ("vehicles", "all vehicles"),
+    ("assets", "all assets"),
+    ("rooms", "rooms of this household's properties"),
+    ("properties", "all properties"),
+    ("people", "all people"),
+]
+SURVIVES = [
+    "the household row itself (name, timezone, settings) — only the marker is stamped",
+    "memberships and users (who can sign in) — never read past the identity warning",
+    "every other household: no predicate in this script names one",
+    "lists, notes, meal plans, loans, maintenance, files, notifications, activity log",
+    "the database schema: this script writes rows, it runs no migration",
+]
+
+
+def scope_report(hid, name):
+    """What --allow-household is accepting. Printed before the write, every run."""
+    out = [f"  household: {hid}  ({name})",
+           "",
+           "  THIS SCRIPT WILL DELETE, for that household only:"]
+    out += [f"    - {t:<18} {why}" for t, why in CLEARED_TABLES]
+    out += ["", "  IT WILL NOT TOUCH:"]
+    out += [f"    - {s}" for s in SURVIVES]
+    return "\n".join(out)
+
+
+def find_target(dsn, household_id, allow_household, adopt):
+    """Resolve (household_id, created, name), or refuse.
+
+    The gate is EXPLICIT INTENT, not resemblance. The old test was
+    `name == HOUSEHOLD_NAME or every login is @example.com` -- a guess about what
+    the household looks like. On this deployment every war-game persona is a real
+    Dex identity at @simstech.cloud and the household is named "Sims Family (war
+    game)", so that guess could never be true and the seed could never run. A
+    deployment is not evidence of intent; the operator naming the id is.
+
+    So a household is the war game's when one of two things is true:
+      1. it already carries the marker this script writes (a previous seed did
+         it), or
+      2. the caller passed --allow-household <that exact id>.
+    Nothing else. There is no "the only household in the database", no name
+    match, and no demo-domain heuristic -- each of those is a way to clear a real
+    family's data while believing you proved something.
+    """
     sql = (
         "SELECT id::text, name, COALESCE(settings->>'" + MARKER_KEY + "', '') "
         "FROM households ORDER BY created_at;"
@@ -950,58 +1020,103 @@ def find_target(dsn, household_id, adopt):
     rows = psql_rows(dsn, sql)
     marked = [r for r in rows if r[2] == MARKER_VALUE]
 
-    if household_id:
-        match = [r for r in rows if r[0] == household_id]
+    if allow_household and household_id and allow_household != household_id:
+        raise SystemExit(
+            f"REFUSED: --allow-household {allow_household} does not match "
+            f"--household-id {household_id}. Name one household."
+        )
+    named = allow_household or household_id
+
+    if named:
+        match = [r for r in rows if r[0] == named]
         if not match:
-            raise SystemExit(f"--household-id {household_id}: no such household.")
+            raise SystemExit(f"REFUSED: no household with id {named} exists.")
         hid, name, marker = match[0]
+
         if marker == MARKER_VALUE:
+            # Intent is already on record in the row itself.
+            print(f"allowed: household {hid} ({name}) carries {MARKER_KEY}={MARKER_VALUE}.")
             return hid, False, name
+
+        if not allow_household:
+            raise SystemExit(
+                f"REFUSED: household {hid} ({name}) does not carry the war-game marker\n"
+                f"  {MARKER_KEY}={MARKER_VALUE}\n"
+                "and was not named explicitly. This seed DELETES the household's bills, "
+                "payment accounts, KB docs, contacts, people, pets, vehicles and "
+                "properties (full list: --show-scope).\n"
+                f"If you mean it, pass --allow-household {hid} --adopt --show-scope."
+            )
+
+        # Explicit intent given. --adopt is how the operator says "and I accept
+        # replacing what is in there", so it is required rather than implied.
         if not adopt:
             raise SystemExit(
-                f"REFUSED: household {hid} ({name}) does not carry the war-game marker "
-                f"{MARKER_KEY}={MARKER_VALUE}.\n"
-                "This seed clears the household's bills, payment accounts, KB docs, contacts, "
-                "people, pets, vehicles and properties, so it will not run against a household "
-                "it cannot prove is the war game's. If this really is the war-game household, "
-                "re-run with --adopt; it then has to look like one (see the name and login "
-                "checks)."
+                f"--allow-household {hid} ({name}) names this household, but --adopt is "
+                "missing.\n"
+                "--adopt is the second half of the intent: --allow-household says WHICH "
+                "household, --adopt says you accept its current contents being replaced.\n"
+                f"Re-run with --allow-household {hid} --adopt --show-scope."
             )
-        # --adopt: only a household that looks like the war game one.
+
+        # Loud warning, NOT a refusal: on a deployment whose personas are real
+        # Dex identities (this one), refusing here would make the seed unrunnable
+        # for the fourth time. The operator has already said what they mean.
         logins = psql_rows(
             dsn,
             f"SELECT u.email FROM memberships m JOIN users u ON u.id = m.user_id "
-            f"WHERE m.household_id = {q(hid)};",
+            f"WHERE m.household_id = {q(hid)} ORDER BY 1;",
         )
-        foreign = [e for (e,) in logins if not e.endswith("@" + TEST_EMAIL_DOMAIN)]
-        looks_like = name == HOUSEHOLD_NAME or not foreign
-        if not looks_like:
-            raise SystemExit(
-                f"REFUSED --adopt: household {hid} ({name}) has logins that are not "
-                f"@{TEST_EMAIL_DOMAIN} test accounts ({', '.join(foreign[:5])}) and is not "
-                "named " + q(HOUSEHOLD_NAME) + ". That is somebody's real household."
+        addresses = [e for (e,) in logins]
+        foreign = [e for e in addresses if not e.endswith("@" + TEST_EMAIL_DOMAIN)]
+        print(f"allowed: --allow-household {hid} ({name}), --adopt given; "
+              f"marker absent (this run will stamp {MARKER_KEY}={MARKER_VALUE}).")
+        if foreign:
+            print(
+                "\n"
+                "  ****************************************************************\n"
+                "  * WARNING: this household has logins that are NOT "
+                + "@" + TEST_EMAIL_DOMAIN + "\n"
+                "  * test accounts: " + ", ".join(foreign[:8]) + "\n"
+                "  * " + (f"({len(foreign)} in all)" if len(foreign) > 8 else "") + "\n"
+                "  *\n"
+                "  * That is expected on a deployment whose war-game personas are real\n"
+                "  * Dex identities -- this deployment's are @simstech.cloud. It is\n"
+                "  * also exactly what a real family's household looks like. You said\n"
+                "  * you meant this id, so the seed proceeds. If you did NOT mean it,\n"
+                "  * stop now: the next step deletes the rows listed by --show-scope.\n"
+                "  ****************************************************************\n",
+                file=sys.stderr,
             )
         return hid, False, name
 
+    # No id at all. The marked household, if there is exactly one, is intent
+    # enough -- the marker is a previous explicit run of this script. Anything
+    # else refuses: guessing here is how a real household loses its data.
     if len(marked) > 1:
         raise SystemExit(
             "REFUSED: more than one household carries the war-game marker "
-            f"({', '.join(r[0] for r in marked)}). Pass --household-id to say which."
+            f"({', '.join(r[0] for r in marked)}). "
+            "Pass --allow-household <id> --adopt to say which."
         )
     if marked:
+        print(f"allowed: household {marked[0][0]} ({marked[0][1]}) carries "
+              f"{MARKER_KEY}={MARKER_VALUE}.")
         return marked[0][0], False, marked[0][1]
 
-    # No marked household. Creating one is safe: a brand-new household touches
-    # nothing that exists. Refuse only if a household already has the name --
-    # then the operator must say which one they mean.
-    clash = [r for r in rows if r[1] == HOUSEHOLD_NAME]
-    if clash:
-        raise SystemExit(
-            f"REFUSED: a household is already named {q(HOUSEHOLD_NAME)} but carries no "
-            f"war-game marker (id {clash[0][0]}). Pass --household-id {clash[0][0]} --adopt "
-            "if it is the war game's."
-        )
-    return str(uuid.uuid4()), True, HOUSEHOLD_NAME
+    raise SystemExit(
+        "REFUSED: no --allow-household <id> was given and no household carries the\n"
+        f"  war-game marker ({MARKER_KEY}={MARKER_VALUE}).\n"
+        "This seed deletes a household's bills, payment accounts, KB docs, contacts,\n"
+        "people, pets, vehicles and properties. It will not choose a household for you:\n"
+        "there is no \"the only household in the database\" and no name match.\n"
+        "  - to seed the war-game household that already exists, name it:\n"
+        "      --allow-household <id> --adopt --show-scope\n"
+        "  - to create a fresh one (touches nothing that exists), pass --new-household.\n"
+        "Households:\n  " + "\n  ".join(f"{r[0]}  {r[1]}"
+                                        + (f"  [marked]" if r[2] == MARKER_VALUE else "")
+                                        for r in rows)
+    )
 
 
 def psql(dsn, sql, quiet=True, tuples=False):
@@ -1032,11 +1147,28 @@ def main(argv):
     ap.add_argument("--dsn", default=os.environ.get("DATABASE_URL", ""),
                     help="Postgres DSN (default: $DATABASE_URL)")
     ap.add_argument("--household-id", default=None,
-                    help="seed this household instead of the marked one (needs --adopt "
-                         "unless it already carries the marker)")
+                    help="the household to seed (same as --allow-household; see there)")
+    ap.add_argument("--allow-household", default=None, metavar="ID",
+                    help="write to this household. This IS the permission: the seed no "
+                         "longer guesses from the household's name or its users' email "
+                         "domain. Also needs --adopt --show-scope unless the household "
+                         "already carries the war-game marker.")
     ap.add_argument("--adopt", action="store_true",
-                    help="write to --household-id even without the marker, if it looks "
-                         "like the war-game household")
+                    help="accept replacing this household's current contents. Only "
+                         "meaningful with --allow-household/--household-id, which it "
+                         "requires: --allow-household says WHICH household, --adopt says "
+                         "you accept losing what is in it.")
+    ap.add_argument("--show-scope", action="store_true",
+                    help="print exactly what will be deleted and what survives, before "
+                         "writing. Required alongside --allow-household --adopt: the "
+                         "destructive scope has to have been shown to the operator.")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="run the gate and the scope report, print the decision, and "
+                         "stop without writing anything. The way to prove which "
+                         "household ids the gate lets through.")
+    ap.add_argument("--new-household", action="store_true",
+                    help="create a brand-new household instead of seeding an existing "
+                         "one. Touches nothing that exists.")
     ap.add_argument("--print-sql", action="store_true",
                     help="print the SQL and exit; needs no database")
     ap.add_argument("--name", default=HOUSEHOLD_NAME,
@@ -1062,11 +1194,12 @@ def main(argv):
         # "fresh household" form, with a fixed placeholder id that has to be
         # replaced (the header comment says so); with it, the re-seed form for
         # that household. Ids stay deterministic either way.
-        hid = args.household_id or PRINT_SQL_PLACEHOLDER
-        seed = Seed(hid, household_created=not args.household_id, name=args.name,
+        named = args.allow_household or args.household_id
+        hid = named or PRINT_SQL_PLACEHOLDER
+        seed = Seed(hid, household_created=not named, name=args.name,
                     tz=args.timezone, today=today)
         print("BEGIN;")
-        if not args.household_id:
+        if not named:
             print(f"-- Replace {PRINT_SQL_PLACEHOLDER} below with the target household id,\n"
                   "-- or drop the INSERT and set --household-id when running the script.")
         print(seed.build())
@@ -1076,9 +1209,45 @@ def main(argv):
     if not args.dsn:
         ap.error("--dsn or DATABASE_URL is required (or use --print-sql)")
 
-    hid, created, name = find_target(args.dsn, args.household_id, args.adopt)
-    seed = Seed(hid, household_created=created, name=name, tz=args.timezone, today=today)
+    if args.adopt and not (args.allow_household or args.household_id):
+        ap.error("--adopt needs --allow-household <id> (or --household-id <id>): it says "
+                 "you accept replacing a household's contents, so it must say which one.")
 
+    if args.new_household and (args.allow_household or args.household_id):
+        ap.error("--new-household creates a household; it does not name an existing one. "
+                 "Drop --allow-household/--household-id.")
+
+    if args.new_household:
+        hid, created, name = str(uuid.uuid4()), True, args.name
+        print(f"allowed: --new-household; creating a fresh household named {name!r} "
+              "(nothing that exists is touched).")
+    else:
+        named = args.allow_household or args.household_id
+        # The destructive scope must have been SHOWN. This is checked before the
+        # write, and it is a refusal rather than a warning because the whole point
+        # is that the operator saw the list before saying yes.
+        # --dry-run prints the same scope, so it satisfies "have it shown" too.
+        if named and not (args.show_scope or args.dry_run):
+            ap.error(f"--allow-household {named} needs --show-scope: run it once with "
+                     "--show-scope to see exactly what gets deleted and what survives, "
+                     "then again with the same flags to do it.")
+
+        hid, created, name = find_target(
+            args.dsn, args.household_id, args.allow_household, args.adopt)
+
+        if args.show_scope or args.dry_run:
+            print("\n-- destructive scope, shown before writing --")
+            print(scope_report(hid, name))
+            if args.dry_run:
+                print("-- end of scope. --dry-run: nothing was written. --\n")
+                print("gate: ALLOWED. Re-run with the same flags to do it.")
+                return 0
+            print("-- end of scope; writing now. This is the run that deletes it. --\n")
+        else:
+            print(f"marker present: household {hid} ({name}) is the war game's, so no "
+                  "--show-scope is required.\n")
+
+    seed = Seed(hid, household_created=created, name=name, tz=args.timezone, today=today)
     sql = "BEGIN;\n" + seed.build() + "\nCOMMIT;\n"
     psql(args.dsn, sql)
     print(f"{'created' if created else 're-seeded'} war-game household {hid} ({name}) "
