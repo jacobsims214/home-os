@@ -55,6 +55,7 @@ import {
 import { apiFetch } from "@/lib/api";
 import { ResponsiveModal, ResponsiveModalActions, TextInput } from "@/components/ui";
 import MoneyNoAccess from "@/components/bills/MoneyNoAccess";
+import PaymentAccountsSection from "@/components/payment-accounts/PaymentAccountsSection";
 import { useBillsAccess } from "@/lib/bills/api";
 import { dueLabel, formatMoney, frequencyLabel, type DueSoon } from "@/lib/bills/model";
 
@@ -853,6 +854,16 @@ export default function MoneyPage() {
           </div>
         </>
       )}
+
+      {/*
+        Payment accounts (#5506): the accounts a bill is paid FROM, with the
+        bank login behind each one. Placed on Money rather than in Settings
+        because it is a money fact a person comes here to check — "which
+        account does the mortgage come out of?" — and because the bill pages
+        link back to it. The section asks the API's money policy itself and
+        renders nothing for a role that would be refused.
+      */}
+      <PaymentAccountsSection />
 
       {modalOpen && (
         <CategoryModal
