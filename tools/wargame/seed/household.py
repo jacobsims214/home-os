@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed a realistic American household for the war game (#5504).
+"""Seed a realistic American household for the war game (#5504, #5544).
 
 The family-hub war game is only as good as the household it plays against. The
 handful of bills the game started with cannot find the failures that matter: a
@@ -8,49 +8,98 @@ reach. This seeds one household that can.
 
 What it creates, in the WAR-GAME household only:
 
-  bills        11, a deliberate autopay mix
-                 5 autopay ON with the account it comes out of
-                 5 manual with an account set
-                 1 manual with NO account set  <- the trap (the dental bill)
-                 1 already overdue             <- escalation (the plumber invoice)
+  bills        12, a deliberate autopay mix -- see them through
+               billdue.AttentionFor, the ONE rule (#5498), and all four states
+               are present:
+                 automatic   6 autopay ON, each linked to a payment account
+                             through bills.autopay_account_id. One of them
+                             (homeowners insurance) is due in 2 days, so
+                             "autopay means silence" has a bill to be silent
+                             about at the moment a manual one would shout.
+                 due_soon    4 manual bills with a paying account on record,
+                             two of them inside the 3-day reminder lead
+                             (water, the school field trip).
+                 needs_setup 1 manual bill with NO account, due in 3 days --
+                             inside the 7-day needs_setup lead. THE TRAP (the
+                             dental crown balance).
+                 overdue     1 already past its due date and unpaid (the
+                             plumber's invoice), with created_at backdated so
+                             the rule can see that it existed when the date
+                             passed.
                  1 payee that is a known vendor and 1 free-text payee (medical)
-  payment accounts  3, last-4 only (checking ..4821, credit card ..3312,
-                    savings ..7704) -- see SCHEMA GAP below
-  contacts     7 vendors with phone / email / website, so tap-to-contact works
-  guides       4 KB docs: router reset, pediatrician after-hours, the
-               babysitter's guide, insurance claim process
+  payment accounts  3, each with a name, an institution, an account_type and a
+                    real 4-digit last_four (checking ..4821, credit card
+                    ..3312, savings ..7704). Last-4 only, by construction:
+                    there is no field here that could hold a full number.
+  contacts     13 vendors with phone / email / website, so tap-to-contact works
+  kb docs      4 rows in kb_docs -- NOT in guides, which is a different feature
+               (a how-to attached to a property, asset or vehicle):
+                 how-to/pets/vet-after-hours               <- the acceptance case
+                 how-to/networking/router-reset
+                 sitters/what-the-babysitter-needs-to-know
+                 how-to/money/insurance-claim
   people       5 (two parents, three kids), 2 pets, 2 vehicles, 1 property,
                3 assets -- enough that every bill links to a real thing
 
-Constraints it keeps:
+## Why this ticket exists (#5544)
 
-  * IDEMPOTENT. Everything it writes carries an id derived from
-    uuid5(namespace, household_id + "/" + key), and one run clears the
-    war-game household's own seed rows before writing them again. Re-running
-    gives the same rows with the same ids, never a second copy.
+#5498's acceptance criteria were unverifiable on the deployed household, and
+#5496 measured exactly why: every bill had is_autopay = f, no
+autopay_account_id, payment_accounts was empty and kb_docs was empty. This
+script was written before migrations 075 (autopay + payment_accounts) and 076
+(kb_docs) existed, so it set none of it, and it wrote its "family knowledge"
+into `guides`. Both are fixed here: the real columns and the real table are
+written, and there is no guarded fallback left that silently does nothing.
+
+## The two facts that decide a bill's state (read from the code, not guessed)
+
+1. **A manual bill can only have a paying account through the legacy
+   `bills.account_number`.** 075's `bills_autopay_account_check` refuses
+   `autopay_account_id` on a bill with `is_autopay = false`, and
+   `apps/api/internal/bill.hasPaymentSource` (same rule in apps/mcp and in the
+   worker) counts `autopay_account_id IS NOT NULL OR btrim(account_number) <> ''`.
+   So `due_soon` is reachable only through `account_number`: the manual bills
+   below set `..<last4>` there, and only the autopay bills get a
+   `payment_accounts` link.
+
+2. **`created_at` is part of the overdue test.** `billdue.overdue` refuses to
+   call a bill late if the bill was created after the due date it missed, which
+   is right for a paper bill imported after the fact and is why an "overdue"
+   row inserted with the table default is never overdue at all. The plumber
+   invoice therefore carries an explicit `created_at` before its due date;
+   every other bill keeps NOW(), so a monthly bill whose day has already passed
+   this month is not mislabelled late on the day it is seeded.
+
+## Dates move with the day you run it
+
+`AttentionFor` answers from (autopay, paying account, schedule, today), so a
+frozen date is "due soon" on the day it was written and something else a
+fortnight later. Every non-monthly `due_date` here is therefore computed at run
+time from **today in the household's timezone** -- `due_in` is days from
+today, negative for the past -- so a round replayed on any day exercises the
+same four states. `--today` pins it for a reproducible round.
+
+## Constraints it keeps
+
+  * IDEMPOTENT. Every row carries an id derived from
+    uuid5(namespace, household_id + "/" + key), and one run clears the war-game
+    household's own seed rows before writing them again, in one transaction.
+    Re-running gives the same rows with the same ids, never a second copy.
+    kb_docs has its own UNIQUE (household_id, path); it is cleared the same way
+    and written with ON CONFLICT (household_id, path) DO UPDATE, so it is
+    idempotent on the key the table itself uses.
   * NEVER TOUCHES A REAL HOUSEHOLD. The target is a household whose
     settings->>'wargame_seed' is this script's marker. A household passed with
     --household-id that does not carry the marker is refused unless --adopt is
     given AND it looks like the war-game one (name match, or every login is an
     @example.com test account).
-  * NO REAL DATA. Emails are @example.com, phones are 555-01xx, account
-    numbers are last-4 only and fictional, addresses and names are invented.
-
-SCHEMA GAP (checked against origin/feat/family-hub, 2026-11-21):
-#5497 (payment_accounts, bills.autopay_account_id, bills.payee_vendor_id,
-bills.payee_name) has NOT landed. bills today carries is_autopay BOOLEAN and
-account_number TEXT (migration 020) and vendor_id. So this script seeds what
-exists -- is_autopay, account_number = the last-4 ("..4821"), vendor_id, and
-notes naming a free-text payee -- and, at the end, runs ONE guarded block that
-upgrades itself if #5497's table and columns are present:
-  * rows in payment_accounts for the three accounts, and
-  * bills.autopay_account_id linked by last-4, bills.payee_name filled.
-Re-run the seed after #5497 lands and the new columns fill in; nothing here
-has to be rewritten.
+  * NO REAL DATA. Emails are @example.com, phones are 555-01xx, account numbers
+    are last-4 only and fictional, addresses and names are invented.
 
 usage:
   DATABASE_URL=postgres://... ./household.py                 # seed / re-seed
   DATABASE_URL=postgres://... ./household.py --household-id <uuid> [--adopt]
+  DATABASE_URL=postgres://... ./household.py --today 2026-11-22
   ./household.py --print-sql                                 # SQL to stdout only
   ./household.py --print-sql --household-id <uuid> | psql ...
 
@@ -58,10 +107,12 @@ Needs psql on PATH to apply (the repo's own images ship it); --print-sql needs
 nothing but python3.
 """
 import argparse
+import datetime
 import os
 import subprocess
 import sys
 import uuid
+import zoneinfo
 
 # --------------------------------------------------------------------------
 # Identity of the war-game household.
@@ -139,7 +190,7 @@ ASSETS = [
          notes="50 gal gas. Flush annually."),
     dict(key="router", name="Router", category="Network", manufacturer="Netgear",
          model="RAX50", purchase_date="2023-01-08",
-         notes="In the hall closet, on the top shelf. The reset steps are a guide."),
+         notes="In the hall closet, on the top shelf. The reset steps are in the KB."),
 ]
 
 # Contacts (vendors). Every one has a phone and most an email, so a person (and
@@ -171,6 +222,11 @@ VENDORS = [
          email="help@example.com", website="https://www.example.com/streamly",
          trades=["subscription", "streaming"],
          notes="Cancel online; there is no phone number."),
+    dict(key="insurance", name="Hudson Insurance Group", specialty="Home insurance",
+         phone="555-0124", email="claims@example.com",
+         website="https://www.example.com/hudson-insurance",
+         trades=["insurance", "finance"],
+         notes="Policy 8812-4. Home and auto on one bill, quarterly."),
     dict(key="plumber", name="Orchard Plumbing", specialty="Plumber",
          phone="555-0117", email="office@example.com",
          website="https://www.example.com/orchard-plumbing", trades=["plumber"],
@@ -199,183 +255,254 @@ VENDORS = [
          notes="Loan 4402-88. Escrow covers taxes and insurance."),
 ]
 
-# Payment accounts. Last-4 only, by construction: there is no field here that
-# could hold a full number.
+# Payment accounts (migration 075). Every field the ticket asks for -- name,
+# institution, account_type, a real 4-digit last_four -- and nothing that could
+# hold a full account or routing number, because payment_accounts has no such
+# column and last_four is CHECKed to exactly four digits.
 PAYMENT_ACCOUNTS = [
-    dict(key="checking", name="Joint checking ..4821", institution="Hudson Valley Bank",
+    dict(key="checking", name="Joint checking", institution="Hudson Valley Bank",
          account_type="checking", last_four="4821",
-         notes="Both paychecks land here. Bills autopay from this one."),
-    dict(key="credit", name="Credit card ..3312", institution="Hudson Valley Bank",
+         notes="Both paychecks land here. Most bills autopay from this one."),
+    dict(key="credit", name="Credit card", institution="Hudson Valley Bank",
          account_type="credit_card", last_four="3312",
          notes="Paid in full on the 20th. Subscriptions and phone are on it."),
-    dict(key="savings", name="Savings ..7704", institution="Hudson Valley Bank",
+    dict(key="savings", name="Emergency savings", institution="Hudson Valley Bank",
          account_type="savings", last_four="7704",
          notes="Emergency fund. Nothing autopays from here."),
 ]
 
-# Bills. The MIX is the test, so each row states its intent in `why`:
-#   autopay        True  -> is_autopay, with the account it comes out of
-#   account        the last-4 of the account, or None (the trap)
-#   payee_vendor   a VENDORS key, or None when the payee is free text
-#   payee_name     the free-text payee, used when payee_vendor is None
-#   subject        ("property"|"vehicle"|"asset", key), or None
-#   frequency      monthly | quarterly | semiannual | annual | once
-#   due_day        monthly bills
-#   due_date       other bills (the anchor date); YYYY-MM-DD
+# Bills. The MIX is the test, so each row states its intent in `why`, and the
+# fields that decide the state are EXPLICIT:
+#
+#   autopay          whether the bill pays itself (bills.is_autopay, NOT NULL)
+#   autopay_account  a PAYMENT_ACCOUNTS key: the account it comes out of, which
+#                    becomes bills.autopay_account_id. Required when autopay is
+#                    on, and illegal when it is off (075's CHECK).
+#   manual_account   the last-4 a MANUAL bill is paid from, as
+#                    bills.account_number. The only way a manual bill can have
+#                    "an account on record" -- see the module docstring.
+#   payee_vendor     a VENDORS key, or None when the payee is free text
+#   payee_name       the free-text payee, used when payee_vendor is None
+#   subject          ("property"|"vehicle"|"asset", key), or None
+#   frequency        monthly | quarterly | semiannual | annual | once
+#   due_day          monthly bills: day of the month
+#   due_in           every other bill: days from TODAY (negative = past)
+#   created_days_ago backdate created_at (default 0 = now). Only the overdue
+#                    bill needs it; see the docstring.
 BILLS = [
-    # ---- autopay ON, account set (5) ----
+    # ---- autopay ON, linked to a payment account -> attention 'automatic' ----
     dict(key="mortgage", name="Mortgage", amount="2340.00", category="Housing",
-         frequency="monthly", due_day=1, autopay=True, account="4821",
+         frequency="monthly", due_day=1, autopay=True, autopay_account="checking",
          payee_vendor="mortgage", subject=("property", "house"),
          why="The one bill that must never be missed. Autopay on joint checking."),
     dict(key="electric", name="Electric", amount="182.00", category="Utilities",
-         frequency="monthly", due_day=18, autopay=True, account="4821",
+         frequency="monthly", due_day=18, autopay=True, autopay_account="checking",
          payee_vendor="electric", subject=("property", "house"),
          notes="Varies with the season: about $240 in July and August, about $150 "
                "in March and April. Budget billing is off.",
          why="Autopay on, but the amount moves -- a reminder that autopay is not "
              "the same as predictable."),
     dict(key="internet", name="Internet", amount="75.00", category="Utilities",
-         frequency="monthly", due_day=22, autopay=True, account="4821",
+         frequency="monthly", due_day=22, autopay=True, autopay_account="checking",
          payee_vendor="internet", subject=("property", "house"),
          why="Flat, autopay, boring -- the control case."),
     dict(key="phone", name="Phone family plan", amount="140.00",
          category="Utilities", frequency="monthly", due_day=12, autopay=True,
-         account="3312", payee_vendor="phone",
+         autopay_account="credit", payee_vendor="phone",
          notes="Four lines: Jacob, Amber, Maya and the house line.",
          why="Autopay off the credit card, not checking: the paying account is "
              "not always the same one."),
     dict(key="streaming", name="Streamly subscription", amount="17.99",
          category="Subscriptions", frequency="monthly", due_day=5, autopay=True,
-         account="3312", payee_vendor="streaming",
+         autopay_account="credit", payee_vendor="streaming",
          why="Small, silent, autopay. The bill a household forgets it has."),
-    # ---- manual, account set (4) ----
+    dict(key="insurance", name="Homeowners insurance", amount="486.00",
+         category="Insurance", frequency="quarterly", due_in=2, autopay=True,
+         autopay_account="checking", payee_vendor="insurance",
+         subject=("property", "house"),
+         notes="Home and auto on one policy, billed quarterly. Renews in March.",
+         why="THE SILENCE CASE (#5498): autopay on and an account linked, due in "
+             "two days -- inside the window where a manual bill would earn a "
+             "reminder -- so 'autopay means silence' has something to be silent "
+             "about. Nothing should be notified for this bill."),
+    # ---- manual WITH a paying account -> attention 'due_soon' ----
     dict(key="water", name="Water", amount="96.40", category="Utilities",
-         frequency="quarterly", due_date="2026-12-10", autopay=False, account="4821",
+         frequency="quarterly", due_in=2, autopay=False, manual_account="4821",
          payee_vendor="water", subject=("property", "house"),
          notes="Quarterly, and the amount changes every quarter (summer watering).",
-         why="Manual and variable: the amount on the statement is never the "
-             "amount from last time."),
+         why="Manual, an account on record, and due in two days: 'due_soon' "
+             "inside the 3-day reminder lead, so a reminder fires. The mirror "
+             "image of the insurance bill above."),
+    dict(key="field-trip", name="Field trip fee - Noah", amount="45.00",
+         category="School", frequency="once", due_in=3, autopay=False,
+         manual_account="4821", payee_vendor="school", subject=None,
+         notes="Permission slip due back tomorrow. Check or the school portal.",
+         why="A one-off a school sends home, on a known vendor, due in three "
+             "days: due_soon with a reminder due today."),
     dict(key="trash", name="Trash and recycling", amount="63.00",
-         category="Utilities", frequency="quarterly", due_date="2027-01-08",
-         autopay=False, account="4821", payee_vendor="trash",
-         subject=("property", "house"),
-         why="Quarterly and manual, an easy one to let slide a month."),
+         category="Utilities", frequency="quarterly", due_in=75, autopay=False,
+         manual_account="4821", payee_vendor="trash", subject=("property", "house"),
+         why="Manual with an account, but months out: still due_soon (the state "
+             "does not depend on the distance) and NOT yet reminded -- the case "
+             "that separates the state from the notification policy."),
     dict(key="copay", name="Pediatrician copay", amount="35.00", category="Medical",
-         frequency="once", due_date="2026-12-10", autopay=False, account="3312",
+         frequency="once", due_in=60, autopay=False, manual_account="3312",
          payee_vendor=None, payee_name="Riverside Pediatrics (billing: 555-0134)",
          subject=None,
          notes="Payee is free text: this one came from the statement Amber brought "
                "home, not from a saved contact. Statement 11/10.",
          why="A manual bill whose payee is NOT a vendor -- contact routing has to "
              "fall back to the payee text."),
-    dict(key="field-trip", name="Field trip fee - Noah", amount="45.00",
-         category="School", frequency="once", due_date="2026-12-01", autopay=False,
-         account="4821", payee_vendor="school", subject=None,
-         notes="Permission slip due back by 11/24. Check or the school portal.",
-         why="A one-off a school sends home, on a known vendor."),
-    # ---- the trap: manual, NO account set ----
+    # ---- the trap: manual, NO account, inside the needs_setup lead ----
     dict(key="dental", name="Maple Family Dental - crown balance", amount="412.00",
-         category="Dental", frequency="once", due_date="2026-11-28", autopay=False,
-         account=None, payee_vendor="dentist", subject=None,
+         category="Dental", frequency="once", due_in=3, autopay=False,
+         manual_account=None, payee_vendor="dentist", subject=None,
          notes="Amber entered this from the statement and never finished setting "
                "it up: no autopay, no account. Nobody knows how it gets paid.",
-         why="THE TRAP this epic exists for: autopay off, no paying account, and a "
-             "real amount. Nothing in the household says who pays it or when."),
+         why="THE TRAP this epic exists for: autopay off, no paying account, and "
+             "a real amount, due in three days -- inside the 7-day needs_setup "
+             "lead, so the family is told early that something is MISSING."),
     # ---- already overdue ----
     dict(key="plumber", name="Orchard Plumbing invoice 1042", amount="285.00",
-         category="Home repair", frequency="once", due_date="2026-11-14",
-         autopay=False, account="4821", payee_vendor="plumber",
-         subject=("property", "house"),
-         notes="Kitchen shutoff valve replaced 11/07. Invoice 1042, net 30 from "
-               "the visit -- it is already past due.",
-         why="Already past its due date and nothing paid it: the escalation case."),
+         category="Home repair", frequency="once", due_in=-8, autopay=False,
+         manual_account="4821", payee_vendor="plumber",
+         subject=("property", "house"), created_days_ago=25,
+         notes="Kitchen shutoff valve replaced last month. Invoice 1042, net 30 "
+               "from the visit -- it is already past due.",
+         why="Already past its due date and nothing paid it: the escalation "
+             "case. created_at is backdated before the due date, because "
+             "billdue.overdue refuses to call a bill late when the bill was "
+             "entered after the date it missed."),
 ]
 
-# The family's own knowledge. Four docs the personas actually need mid-round.
-GUIDES = [
-    dict(key="router-reset", title="Reset the router",
-         tags=["wifi", "network", "house"],
-         subject=("asset", "router"),
-         summary="When the wifi is out, reset the router before calling Northlight.",
+# The family's own knowledge, as rows in kb_docs (076) -- NOT guides.
+#
+# `guides` is a different feature: a how-to attached to a property, an asset or
+# a vehicle, with its own page and its own revisions table. The family's
+# "how we do this here" belongs in the KB, which is path-addressed, readable by
+# every role (a housesitter included) and indexed for search by meaning
+# (#5502). Writing the same knowledge to both would be two homes for one fact.
+#
+# paths must match kb_docs' CHECK: lower-case segments joined by '/'.
+KB_DOCS = [
+    dict(key="vet-after-hours", path="how-to/pets/vet-after-hours",
+         title="Vet: what to do when the dog or cat is sick after hours",
+         tags=["pets", "vet", "dog", "cat", "emergency", "after-hours"],
+         body="""\
+## After hours (at night, at weekends, on holidays)
+
+Our regular vet -- Warwick Animal Hospital, 555-0195 -- closes at 6pm and is shut
+on Sundays, so anything that goes wrong at night or at the weekend and cannot
+wait until morning goes to the emergency clinic:
+
+**Northside Veterinary Emergency, 555-0176.** Open 24 hours, walk-ins taken,
+ring the bell twice if the door is locked. It is 22 minutes away, past the
+route 17 on-ramp.
+
+## Go in immediately, do not wait for morning
+
+- Biscuit (the dog) vomiting and unable to keep water down for more than a few
+  hours, or a swollen belly with dry retching -- bloat is an emergency, go now.
+- Any trouble breathing, or gums that look pale, white or blue.
+- A cat that has not passed urine all day, especially Mochi, a male cat.
+- A swollen face after a sting, or a known toxin swallowed (chocolate, raisins,
+  lilies for the cat, antifreeze).
+- A wound that will not stop bleeding, or a suspected broken bone.
+
+## If it can wait until the vet opens in the morning
+
+A single episode of vomiting, a mild limp, a skipped meal, or a scratch that is
+not deep: call Warwick Animal Hospital at 8am on 555-0195 and describe what
+happened. Their front desk decides whether to squeeze us in that day.
+
+## Money
+
+Being seen at the emergency clinic is roughly $200 before anything is done.
+Biscuit and Mochi are on the pet policy in the fireproof box, folder "Pets";
+the policy number is in the vault, not in this doc. Call Hudson Insurance Group
+(555-0124) the next morning and open a claim before paying the balance.
+"""),
+    dict(key="router-reset", path="how-to/networking/router-reset",
+         title="Reset the router when the wifi is out",
+         tags=["wifi", "network", "internet", "house"],
          body="""\
 ## Reset the router
 
-The router is in the hall closet, top shelf (Netgear RAX50, on the shelf, not on
-the floor).
+The router is in the hall closet, top shelf -- a Netgear RAX50, on the shelf,
+not on the floor.
 
 1. Unplug the power, wait 30 seconds, plug it back in.
-2. Wait for the light on the front to stop blinking (about 2 minutes).
-3. Try the wifi again. The network name is `OrchardLane`, the password is on the
+2. Wait until the light on the front stops blinking (about 2 minutes).
+3. Try the wifi again. The network name is `OrchardLane`; the password is on the
    card taped inside the closet door.
 
-Still out?
+## Still out?
 
-- Check the fiber box in the basement: its status light must be green.
+- Check the fiber box downstairs, beside the boiler: its status light must be green.
 - Reboot that box the same way and wait 3 minutes.
-- Then call Northlight Fiber at 555-0175. Their support asks for the account's
-  phone number, not the router's serial number.
+- Then call Northlight Fiber on 555-0175. Their support asks for the phone
+  number on the account, not the router's serial number.
+
+## Do not
+
+Do not factory-reset the router (the pinhole on the back, held 10 seconds): it
+wipes the network name, the password and the port forwards, and nobody has
+written those down. Reset means unplug it, not erase it.
 """),
-    dict(key="pediatrician-after-hours", title="Pediatrician: after hours and when to go in",
-         tags=["health", "kids", "emergency"],
-         subject=("vendor", "pediatrician"),
-         summary="What to do when a kid is sick outside 9-5.",
-         body="""\
-## Riverside Pediatrics, after hours
-
-**Call the nurse line first: 555-0135.** It answers 5pm-8am on weekdays and all
-weekend. A nurse calls back within 30 minutes.
-
-Go straight to the ER (St. Anthony's, 12 minutes) when:
-
-- a fever over 100.4 F in Lily (under 3), or over 104 F in Maya or Noah
-- trouble breathing, a rash that does not fade under a glass, a stiff neck
-- a head injury with vomiting, or a seizure
-
-Maya: **peanut allergy.** The EpiPen is in the front pocket of her backpack and a
-second one is in the kitchen drawer by the fridge. Use it, then call 911.
-
-Office hours: Mon-Fri 9-5, Sat 9-12 for sick visits only.
-"""),
-    dict(key="babysitter-guide", title="The babysitter's guide",
-         tags=["kids", "babysitter", "house"],
-         summary="Everything a sitter needs for an evening: kids, dog, doors, wifi.",
+    dict(key="babysitter", path="sitters/what-the-babysitter-needs-to-know",
+         title="What the babysitter (or any sitter) needs to know",
+         tags=["kids", "babysitter", "sitter", "bedtime", "wifi", "house"],
          body="""\
 ## For the babysitter
 
-**The kids.** Maya (9) reads, Noah (6) needs a story, Lily (3) is in bed by 7:15
-and will ask for water twice. Dinner is in the fridge, 5 minutes in the microwave.
-No peanuts anywhere near Maya -- the EpiPen is in her backpack, front pocket.
+Whether it is our usual sitter or someone new for one evening, this is the whole
+brief: the kids, the doors, and who to reach.
 
-**The dog.** Biscuit goes out one last time at 9. He is fine in the crate if he
-gets scared of thunder; do not let him upstairs.
+**The kids.** Maya (9) reads on her own, Noah (6) needs a story at bedtime, Lily
+(3) is in bed by 7:15 and will ask for water twice. Dinner is in the fridge --
+5 minutes in the microwave. No peanuts anywhere near Maya: her EpiPen is in the
+front pocket of her backpack, and a second one is in the kitchen drawer by the
+fridge. Use it, then call 911.
 
-**The house.** Front door deadbolts from the inside, the key is back in the lock
-box by the side door. Thermostat: leave it. Trash goes out Tuesday night only.
+**Biscuit.** Biscuit goes out one last time at 9 and is fine in his crate if a
+storm scares him; do not let him upstairs.
 
-**Reaching us.** Jacob 555-0181, Amber 555-0182. If it is not an emergency, text.
-Pediatrician after hours: 555-0135 (see the pediatrician guide).
+**The house.** The front door deadbolts from the inside and the key goes back in
+the lock box by the side door. Leave the thermostat alone. The trash goes out on
+Tuesdays and nobody has to do it during an evening sitting.
+
+**Reaching us.** Jacob 555-0181, Amber 555-0182. If it is not an emergency,
+text -- we will not hear the phone over the noise. The pediatrician's after-hours
+nurse line is 555-0135 for anything medical about the kids.
 """),
-    dict(key="insurance-claim", title="Filing an insurance claim",
-         tags=["insurance", "money", "paperwork"],
-         summary="How a claim actually moves, and what to keep.",
+    dict(key="insurance-claim", path="how-to/money/insurance-claim",
+         title="Filing a home or car insurance claim",
+         tags=["insurance", "money", "paperwork", "house"],
          body="""\
 ## Filing a claim (home or car)
 
-1. **Stop the damage first.** Emergency repairs are covered to a limit -- keep
-   the receipt. Photograph everything before you clean up.
-2. **Call Hudson Insurance Group, 555-0122**, within 72 hours. Give the policy
-   number (in the fireproof box, folder "House") and the date of loss.
+1. **Stop the damage first.** Emergency repairs are covered up to a limit --
+   keep the receipt. Photograph everything before you clean up.
+2. **Call Hudson Insurance Group, 555-0124,** within 72 hours. Give the policy
+   number (fireproof box, folder "House") and the date of loss.
 3. **Keep every document.** Photos, receipts, the adjuster's name and the claim
    number, in one folder in Home OS under Documents.
 4. **The adjuster's estimate is an offer**, not a verdict. Compare it with the
    contractor's before signing anything.
-5. **Track it.** A claim that is not followed up sits. Ask for the next step
-   and the date it is due every time.
+5. **Track it.** A claim nobody follows up sits. Ask for the next step and the
+   date it is due, every time.
 
-DO NOT sign a "release" before the work is done and paid.
+Do not sign a release before the work is done and paid.
 """),
 ]
+
+# The four docs the previous version of this seed wrote into `guides` (#5504).
+# They are deleted by id on a re-seed, so a household seeded by the old script
+# does not keep a second copy of knowledge that now lives in kb_docs. Deleting
+# by these exact ids -- never by household alone -- so a guide the family wrote
+# itself is never touched.
+LEGACY_GUIDE_KEYS = ["router-reset", "pediatrician-after-hours", "babysitter-guide",
+                     "insurance-claim"]
 
 
 def q(value):
@@ -393,14 +520,30 @@ def arr(values):
     return q("{" + inner + "}")
 
 
+def today_in(tz):
+    """Today's date in the household's timezone.
+
+    The same conversion every reader makes (billdue.HouseholdToday /
+    householdToday): a bill's state is decided on the FAMILY's calendar day, not
+    the server's, so the dates this seed writes are relative to the family's
+    today too. An unknown timezone falls back to UTC, as the Go helpers do.
+    """
+    try:
+        zone = zoneinfo.ZoneInfo(tz)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        zone = datetime.timezone.utc
+    return datetime.datetime.now(zone).date()
+
+
 class Seed:
     """Builds the SQL for one war-game household."""
 
-    def __init__(self, household_id, household_created, name, tz):
+    def __init__(self, household_id, household_created, name, tz, today):
         self.hid = household_id
         self.household_created = household_created
         self.name = name
         self.tz = tz
+        self.today = today
         self.ids = {}
         self.lines = []
 
@@ -424,9 +567,9 @@ class Seed:
         self.insert_property()
         self.insert_assets()
         self.insert_vendors()
+        self.insert_payment_accounts()
         self.insert_bills()
-        self.insert_guides()
-        self.upgrade_for_5497()
+        self.insert_kb_docs()
         return "\n".join(self.lines)
 
     def resolve_household(self):
@@ -451,6 +594,7 @@ class Seed:
     def clear(self):
         """Clear this household's seeded rows, and nothing else, before writing."""
         h = q(self.hid)
+        legacy_guide_ids = ", ".join(q(self.id("guide/" + k)) for k in LEGACY_GUIDE_KEYS)
         self.add(
             "-- ------------------------------------------------------------------",
             "-- Clear the war-game household's own rows. Every predicate names the",
@@ -462,7 +606,16 @@ class Seed:
             f"DELETE FROM calendar_objects WHERE entity_type = 'bill' AND entity_id IN "
             f"(SELECT id FROM bills WHERE household_id = {h});",
             f"DELETE FROM bills WHERE household_id = {h};",
-            f"DELETE FROM guides WHERE household_id = {h};",   # revisions CASCADE
+            # The family's knowledge (#5544): the KB is the one home for it.
+            f"DELETE FROM kb_docs WHERE household_id = {h};",
+            # #5504 wrote its four docs into `guides`. Drop exactly those ids, so
+            # a household seeded by the old script does not keep two copies of
+            # the router instructions. guides' revisions CASCADE.
+            f"DELETE FROM guides WHERE household_id = {h} AND id IN ({legacy_guide_ids});",
+            # The accounts must go after the bills that point at them (075's FK
+            # is ON DELETE SET NULL, so this would work either way; the order
+            # says what the dependency is).
+            f"DELETE FROM payment_accounts WHERE household_id = {h};",
             # Pets before vendors: pets.vet_vendor_id is a composite FK to
             # (vendors.id, household_id), and whatever the database does on
             # delete, the seed must not depend on it. Order is the fix.
@@ -528,7 +681,7 @@ class Seed:
         )
 
     def insert_assets(self):
-        self.add("-- Assets: the things guides and maintenance hang off.")
+        self.add("-- Assets: the things maintenance hangs off.")
         for a in ASSETS:
             self.add(
                 "INSERT INTO assets (id, household_id, property_id, name, category, "
@@ -559,177 +712,220 @@ class Seed:
                 )
         self.add("")
 
+    def insert_payment_accounts(self):
+        """payment_accounts (075): the accounts bills are paid from.
+
+        Written before the bills, because bills.autopay_account_id is a
+        same-family composite FK to this table. Last-4 only: last_four is
+        CHAR(4) CHECKed to four digits, and there is no column for anything
+        longer. The bank login would be payment_accounts.secret_id, a link into
+        `secrets`; the war game stores none, so the column stays NULL.
+        """
+        self.add(
+            "-- ------------------------------------------------------------------",
+            "-- Payment accounts (075): name + institution + account_type + a real",
+            "-- 4-digit last_four, and nothing that could hold a full number.",
+            "-- ------------------------------------------------------------------",
+        )
+        for a in PAYMENT_ACCOUNTS:
+            self.add(
+                "INSERT INTO payment_accounts (id, household_id, name, institution, "
+                "account_type, last_four, notes) VALUES (",
+                f"    {q(self.id('account/' + a['key']))}, {q(self.hid)}, {q(a['name'])}, "
+                f"{q(a['institution'])}, {q(a['account_type'])}, {q(a['last_four'])}, "
+                f"{q(a['notes'])});",
+            )
+        self.add("")
+
     def subject_sql(self, subject):
         """The typed subject columns (038): property_id / vehicle_id / asset_id."""
         if not subject:
             return "NULL, NULL, NULL"
         kind, key = subject
-        ids = {
-            "property": ("property/" + key, "property_id"),
-            "vehicle": ("vehicle/" + key, "vehicle_id"),
-            "asset": ("asset/" + key, "asset_id"),
-        }
-        ident, _col = ids[kind]
+        ids = {"property": "property/", "vehicle": "vehicle/", "asset": "asset/"}
         slots = {"property": 0, "vehicle": 1, "asset": 2}
         out = ["NULL", "NULL", "NULL"]
-        out[slots[kind]] = q(self.id(ident))
+        out[slots[kind]] = q(self.id(ids[kind] + key))
         return ", ".join(out)
+
+    def due_sql(self, b):
+        """(due_day, due_date) for one bill.
+
+        082 makes frequency select which column is authoritative and requires
+        the other to be NULL: a monthly bill is due on due_day and may not carry
+        a due_date; every other bill is anchored on due_date and may not carry a
+        due_day. Writing both would be the three-answers-to-one-question shape
+        that migration exists to remove.
+        """
+        if b["frequency"] == "monthly":
+            if b.get("due_in") is not None:
+                raise SystemExit(f"seed bug: monthly bill {b['key']} has due_in; "
+                                 "monthly bills use due_day")
+            if b.get("due_day") is None:
+                raise SystemExit(f"seed bug: monthly bill {b['key']} has no due_day")
+            return str(b["due_day"]), "NULL"
+        if b.get("due_day") is not None:
+            raise SystemExit(f"seed bug: non-monthly bill {b['key']} has due_day; "
+                             "only monthly bills use it")
+        if b.get("due_in") is None:
+            raise SystemExit(f"seed bug: non-monthly bill {b['key']} has no due_in")
+        day = self.today + datetime.timedelta(days=b["due_in"])
+        return "NULL", q(day.isoformat()) + "::date"
+
+    def bill_payee_sql(self, b):
+        """(vendor_id, payee_name): a vendor, or the free-text payee, never both."""
+        if b.get("payee_vendor"):
+            if b.get("payee_name"):
+                raise SystemExit(f"seed bug: bill {b['key']} names both a vendor and "
+                                 "a free-text payee; a bill has ONE payee")
+            return q(self.id("vendor/" + b["payee_vendor"])), "NULL"
+        return "NULL", q(b.get("payee_name"))
+
+    def bill_paying_sql(self, b):
+        """(autopay_account_id, account_number) for one bill.
+
+        The pair is where 075's rule lives, so the seed states it explicitly and
+        refuses the combinations the database would refuse:
+
+          autopay ON   -> autopay_account_id set, account_number NULL (the
+                          masked account is payment_accounts now).
+          autopay OFF  -> autopay_account_id NULL (bills_autopay_account_check),
+                          and account_number MAY hold the last-4 the bill is paid
+                          from -- the only way a manual bill has an account on
+                          record, and therefore the only way to reach 'due_soon'.
+        """
+        if b["autopay"]:
+            key = b.get("autopay_account")
+            if not key:
+                raise SystemExit(f"seed bug: autopay bill {b['key']} has no "
+                                 "autopay_account; an autopay bill must name the "
+                                 "account it comes out of")
+            if b.get("manual_account"):
+                raise SystemExit(f"seed bug: autopay bill {b['key']} sets "
+                                 "manual_account; that column is for manual bills")
+            return q(self.id("account/" + key)), "NULL"
+        if b.get("autopay_account"):
+            raise SystemExit(f"seed bug: manual bill {b['key']} sets autopay_account; "
+                             "075's bills_autopay_account_check refuses that")
+        four = b.get("manual_account")
+        if four is not None and (len(four) != 4 or not four.isdigit()):
+            raise SystemExit(f"seed bug: bill {b['key']} manual_account {four!r} is "
+                             "not four digits")
+        return "NULL", q(".." + four) if four else "NULL"
 
     def insert_bills(self):
         self.add(
             "-- ------------------------------------------------------------------",
-            "-- Bills: the deliberate mix. autopay on/off x account set/unset,",
-            "-- one overdue, one free-text payee, one known-vendor payee each way.",
+            "-- Bills: the deliberate mix. Read through billdue.AttentionFor, these",
+            "-- rows are 6 automatic + 4 due_soon + 1 needs_setup + 1 overdue.",
             "-- ------------------------------------------------------------------",
         )
         for b in BILLS:
-            vendor = q(self.id("vendor/" + b["payee_vendor"])) if b["payee_vendor"] else "NULL"
-            due_day = "NULL" if b.get("due_day") is None else str(b["due_day"])
-            due_date = q(b.get("due_date")) + "::date" if b.get("due_date") else "NULL"
-            # account_number is last-4 only (SCHEMA GAP: #5497 replaces it with
-            # autopay_account_id; the guarded block at the end links both).
-            acct = q(".." + b["account"]) if b.get("account") else "NULL"
-            notes = b.get("notes")
-            if b["autopay"] and not b.get("account"):
-                raise SystemExit(f"seed bug: autopay bill {b['key']} has no account")
+            due_day, due_date = self.due_sql(b)
+            vendor, payee_name = self.bill_payee_sql(b)
+            account_id, account_number = self.bill_paying_sql(b)
+            created = "NOW()"
+            if b.get("created_days_ago"):
+                created = f"(NOW() - INTERVAL '{int(b['created_days_ago'])} days')"
             self.add(
                 f"-- {b['key']}: {b['why']}",
                 "INSERT INTO bills (id, household_id, name, amount, frequency, due_day, "
-                "due_date, category, is_autopay, account_number, vendor_id, notes, "
-                "property_id, vehicle_id, asset_id) VALUES (",
+                "due_date, category, is_autopay, autopay_account_id, account_number, "
+                "vendor_id, payee_name, notes, property_id, vehicle_id, asset_id, "
+                "created_at) VALUES (",
                 f"    {q(self.id('bill/' + b['key']))}, {q(self.hid)}, {q(b['name'])}, "
                 f"{b['amount']}, {q(b['frequency'])}, {due_day}, {due_date},",
-                f"    {q(b['category'])}, {'true' if b['autopay'] else 'false'}, {acct}, "
-                f"{vendor}, {q(notes)},",
-                f"    {self.subject_sql(b.get('subject'))});",
+                f"    {q(b['category'])}, {'true' if b['autopay'] else 'false'}, "
+                f"{account_id}, {account_number},",
+                f"    {vendor}, {payee_name}, {q(b.get('notes'))},",
+                f"    {self.subject_sql(b.get('subject'))}, {created});",
             )
         self.add("")
 
-    def insert_guides(self):
-        self.add("-- The family's own knowledge (guides = the household KB).")
-        for g in GUIDES:
-            subj = g.get("subject")
-            prop = veh = asset = "NULL"
-            if subj:
-                kind, key = subj
-                if kind == "property":
-                    prop = q(self.id("property/" + key))
-                elif kind == "vehicle":
-                    veh = q(self.id("vehicle/" + key))
-                elif kind == "asset":
-                    asset = q(self.id("asset/" + key))
-                elif kind == "vendor":
-                    # A guide can be about a property, asset or vehicle -- not a
-                    # vendor. Keep the link in the body and leave the subject be.
-                    pass
-            self.add(
-                "INSERT INTO guides (id, household_id, title, summary, body, tags, "
-                "property_id, vehicle_id, asset_id) VALUES (",
-                f"    {q(self.id('guide/' + g['key']))}, {q(self.hid)}, {q(g['title'])}, "
-                f"{q(g['summary'])},",
-                f"    {q(g['body'])}, {arr(g.get('tags', []))}, {prop}, {veh}, {asset});",
-            )
-            # The newest revision equals guides.body (049).
-            self.add(
-                "INSERT INTO guide_revisions (guide_id, household_id, body) VALUES (",
-                f"    {q(self.id('guide/' + g['key']))}, {q(self.hid)}, {q(g['body'])});",
-            )
-        self.add("")
+    def insert_kb_docs(self):
+        """kb_docs (076): the family's knowledge base, addressable by path.
 
-    def upgrade_for_5497(self):
-        """Fill #5497's columns if that migration has landed. No-op otherwise.
-
-        This is the whole SCHEMA GAP handling: today the table and the columns
-        do not exist, so the block does nothing; after #5497 they do, and the
-        same seed run links every bill to its payment account and payee without
-        a single line of this script changing.
+        ON CONFLICT (household_id, path) DO UPDATE -- the table's own key -- so
+        even if the DELETE above were skipped (a partial run, a hand-applied
+        fragment) a re-run replaces the doc instead of forking a second one.
+        `deleted_at` is cleared too: a doc the family soft-deleted must come back
+        live when the round is re-seeded, not stay a tombstone the search
+        reconciler skips.
         """
-        rows = ", ".join(
-            "(" + ", ".join([
-                q(a["key"]), q(a["name"]), q(a["institution"]), q(a["account_type"]),
-                q(a["last_four"]), q(a["notes"]),
-            ]) + ")"
-            for a in PAYMENT_ACCOUNTS
-        )
         self.add(
             "-- ------------------------------------------------------------------",
-            "-- #5497 upgrade, guarded. payment_accounts / bills.autopay_account_id /",
-            "-- bills.payee_name are NOT in this branch yet (checked 2026-11-21); when",
-            "-- they are, this fills them from what was seeded above and links each",
-            "-- bill by its last-4. Silently does nothing until then.",
+            "-- The family's knowledge base (076, kb_docs) -- NOT guides. Keyed by",
+            "-- the table's own UNIQUE (household_id, path), so a re-run replaces.",
             "-- ------------------------------------------------------------------",
-            "DO $seed5497$",
-            "DECLARE",
-            f"    h uuid := {q(self.hid)};",
-            "    n int;",
-            "BEGIN",
-            "    IF to_regclass('public.payment_accounts') IS NOT NULL THEN",
-            f"        INSERT INTO payment_accounts (id, household_id, name, institution, "
-            f"account_type, last_four, notes) VALUES",
-            f"        {', '.join('(' + q(self.id('account/' + a['key'])) + ', h, ' + q(a['name']) + ', ' + q(a['institution']) + ', ' + q(a['account_type']) + ', ' + q(a['last_four']) + ', ' + q(a['notes']) + ')' for a in PAYMENT_ACCOUNTS)}",
-            "        ON CONFLICT (id) DO NOTHING;",
-            "        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE "
-            "table_name = 'bills' AND column_name = 'autopay_account_id') THEN",
-            "            EXECUTE 'UPDATE bills b SET autopay_account_id = pa.id "
-            "FROM payment_accounts pa WHERE b.household_id = $1 "
-            "AND pa.household_id = $1 AND pa.last_four = b.account_number "
-            "AND b.autopay_account_id IS NULL' USING h;",
-            "        END IF;",
-            "    END IF;",
-            "    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE "
-            "table_name = 'bills' AND column_name = 'payee_name') THEN",
-            # The one bill seeded with a free-text payee.
-            "        UPDATE bills SET payee_name = COALESCE(payee_name, "
-            "'Riverside Pediatrics (billing: 555-0134)') "
-            "WHERE household_id = h AND name = 'Pediatrician copay';",
-            "    END IF;",
-            "    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE "
-            "table_name = 'bills' AND column_name = 'payee_vendor_id') THEN",
-            "        UPDATE bills SET payee_vendor_id = vendor_id "
-            "WHERE household_id = h AND vendor_id IS NOT NULL "
-            "AND payee_vendor_id IS NULL;",
-            "    END IF;",
-            "END",
-            "$seed5497$;",
-            "",
         )
+        for d in KB_DOCS:
+            self.add(
+                "INSERT INTO kb_docs (id, household_id, path, title, body, tags) VALUES (",
+                f"    {q(self.id('kb/' + d['key']))}, {q(self.hid)}, {q(d['path'])}, "
+                f"{q(d['title'])},",
+                f"    {q(d['body'])}, {arr(d.get('tags', []))})",
+                "ON CONFLICT (household_id, path) DO UPDATE SET",
+                "    title = EXCLUDED.title, body = EXCLUDED.body, tags = EXCLUDED.tags,",
+                "    deleted_at = NULL, updated_at = NOW();",
+            )
+        self.add("")
 
 
-def print_verification(hid):
+def print_verification(hid, today):
     """The counts the completion reports, straight from the database."""
     h = q(hid)
     return f"""
 -- ------------------------------------------------------------------
--- What the household now holds.
+-- What the household now holds. today = {today.isoformat()} (household timezone)
 -- ------------------------------------------------------------------
 \\echo '== war-game household =='
 SELECT h.id, h.name, h.timezone, h.settings->>'{MARKER_KEY}' AS marker
   FROM households h WHERE h.id = {h};
 
-\\echo '== bills by autopay / account / overdue =='
-SELECT CASE WHEN is_autopay THEN 'autopay' ELSE 'manual' END AS kind,
-       CASE WHEN account_number IS NULL THEN 'no account' ELSE 'account ' || account_number END AS account,
-       count(*) AS bills, to_char(sum(amount), 'FM999999.00') AS total
-  FROM bills WHERE household_id = {h}
+\\echo '== bills by autopay / paying account =='
+SELECT CASE WHEN b.is_autopay THEN 'autopay' ELSE 'manual' END AS autopay,
+       CASE WHEN b.autopay_account_id IS NOT NULL THEN 'linked ' || pa.name
+            WHEN NULLIF(btrim(b.account_number), '') IS NOT NULL
+                 THEN 'account ' || b.account_number || ' (account_number, pre-075 column)'
+            ELSE '**** NO ACCOUNT ****' END AS paying_account,
+       count(*) AS bills,
+       to_char(sum(b.amount), 'FM999999.00') AS total
+  FROM bills b LEFT JOIN payment_accounts pa ON pa.id = b.autopay_account_id
+ WHERE b.household_id = {h}
  GROUP BY 1, 2 ORDER BY 1, 2;
 
-\\echo '== the bills: name, amount, frequency, autopay, account, payee, due =='
-SELECT name, to_char(amount, 'FM999999.00') AS amount, frequency, due_day, due_date,
-       is_autopay, account_number,
-       COALESCE((SELECT v.name FROM vendors v WHERE v.id = bills.vendor_id), '(free text)') AS payee
+\\echo '== the bills: autopay, paying account, due, when entered =='
+SELECT name, to_char(amount, 'FM999999.00') AS amount, frequency,
+       COALESCE(due_day::text, due_date::text) AS due,
+       is_autopay,
+       CASE WHEN autopay_account_id IS NOT NULL THEN 'linked'
+            WHEN NULLIF(btrim(account_number), '') IS NOT NULL THEN account_number
+            ELSE 'none' END AS paying_account,
+       COALESCE((SELECT v.name FROM vendors v WHERE v.id = bills.vendor_id), payee_name) AS payee,
+       created_at::date AS entered
   FROM bills WHERE household_id = {h}
  ORDER BY is_autopay DESC, name;
 
-\\echo '== the trap: manual bills with no paying account (must be exactly 1) =='
-SELECT name, to_char(amount, 'FM999999.00') AS amount, due_date
-  FROM bills WHERE household_id = {h} AND NOT is_autopay AND account_number IS NULL;
+\\echo '== 075 constraints hold on the seeded rows (every count must be 0) =='
+SELECT 'autopay bill with no linked account' AS check, count(*) AS offenders
+  FROM bills WHERE household_id = {h} AND is_autopay AND autopay_account_id IS NULL
+UNION ALL
+SELECT 'manual bill holding an autopay account', count(*)
+  FROM bills WHERE household_id = {h} AND NOT is_autopay AND autopay_account_id IS NOT NULL
+UNION ALL
+SELECT 'bill with both a vendor and a free-text payee', count(*)
+  FROM bills WHERE household_id = {h} AND vendor_id IS NOT NULL AND payee_name IS NOT NULL;
 
-\\echo '== overdue: unpaid once bills past their date =='
-SELECT name, to_char(amount, 'FM999999.00') AS amount, due_date,
-       (CURRENT_DATE - due_date) AS days_overdue
-  FROM bills WHERE household_id = {h} AND frequency = 'once'
-   AND due_date < CURRENT_DATE AND paid_date IS NULL
- ORDER BY due_date;
+\\echo '== payment accounts (name / institution / type / last four) =='
+SELECT pa.name, pa.institution, pa.account_type, pa.last_four,
+       (SELECT count(*) FROM bills b WHERE b.autopay_account_id = pa.id) AS bills_autopaid
+  FROM payment_accounts pa WHERE pa.household_id = {h} ORDER BY pa.name;
+
+\\echo '== kb docs (kb_docs -- the family knowledge base) =='
+SELECT path, title, array_to_string(tags, ',') AS tags, length(body) AS body_chars
+  FROM kb_docs WHERE household_id = {h} AND deleted_at IS NULL ORDER BY path;
+\\echo '   guides rows for this household (must be 0: knowledge lives in kb_docs, not guides)'
+SELECT count(*) AS guides FROM guides WHERE household_id = {h};
 
 \\echo '== supporting data =='
 SELECT 'people' AS what, count(*) FROM people WHERE household_id = {h}
@@ -737,17 +933,16 @@ UNION ALL SELECT 'pets', count(*) FROM pets WHERE household_id = {h}
 UNION ALL SELECT 'vehicles', count(*) FROM vehicles WHERE household_id = {h}
 UNION ALL SELECT 'properties', count(*) FROM properties WHERE household_id = {h}
 UNION ALL SELECT 'assets', count(*) FROM assets WHERE household_id = {h}
+UNION ALL SELECT 'vendors', count(*) FROM vendors WHERE household_id = {h}
 UNION ALL SELECT 'vendors with a phone', count(*) FROM vendors WHERE household_id = {h} AND phone IS NOT NULL
 UNION ALL SELECT 'vendors with an email', count(*) FROM vendors WHERE household_id = {h} AND email IS NOT NULL
-UNION ALL SELECT 'guides', count(*) FROM guides WHERE household_id = {h};
-
-\\echo '== contacts (phone / email / website) =='
-SELECT name, phone, email, website FROM vendors WHERE household_id = {h} ORDER BY name;
+UNION ALL SELECT 'kb_docs', count(*) FROM kb_docs WHERE household_id = {h} AND deleted_at IS NULL
+UNION ALL SELECT 'payment_accounts', count(*) FROM payment_accounts WHERE household_id = {h};
 """
 
 
 def find_target(dsn, household_id, adopt):
-    """Resolve (household_id, created). Refuses anything that is not the war game's."""
+    """Resolve (household_id, created, name). Refuses anything that is not the war game's."""
     sql = (
         "SELECT id::text, name, COALESCE(settings->>'" + MARKER_KEY + "', '') "
         "FROM households ORDER BY created_at;"
@@ -766,10 +961,11 @@ def find_target(dsn, household_id, adopt):
             raise SystemExit(
                 f"REFUSED: household {hid} ({name}) does not carry the war-game marker "
                 f"{MARKER_KEY}={MARKER_VALUE}.\n"
-                "This seed clears the household's bills, contacts, guides, people, pets, "
-                "vehicles and properties, so it will not run against a household it cannot "
-                "prove is the war game's. If this really is the war-game household, re-run "
-                "with --adopt; it then has to look like one (see the name and login checks)."
+                "This seed clears the household's bills, payment accounts, KB docs, contacts, "
+                "people, pets, vehicles and properties, so it will not run against a household "
+                "it cannot prove is the war game's. If this really is the war-game household, "
+                "re-run with --adopt; it then has to look like one (see the name and login "
+                "checks)."
             )
         # --adopt: only a household that looks like the war game one.
         logins = psql_rows(
@@ -846,9 +1042,20 @@ def main(argv):
     ap.add_argument("--name", default=HOUSEHOLD_NAME,
                     help=f"household name when creating it (default: {HOUSEHOLD_NAME!r})")
     ap.add_argument("--timezone", default=HOUSEHOLD_TZ)
+    ap.add_argument("--today", default=None,
+                    help="YYYY-MM-DD to use as today when computing due dates "
+                         "(default: today in the household's timezone)")
     ap.add_argument("--no-verify", action="store_true",
                     help="skip printing the verification report")
     args = ap.parse_args(argv)
+
+    if args.today:
+        try:
+            today = datetime.date.fromisoformat(args.today)
+        except ValueError:
+            ap.error(f"--today {args.today!r} is not YYYY-MM-DD")
+    else:
+        today = today_in(args.timezone)
 
     if args.print_sql:
         # Offline: emit the SQL and exit. Without --household-id the output is the
@@ -857,7 +1064,7 @@ def main(argv):
         # that household. Ids stay deterministic either way.
         hid = args.household_id or PRINT_SQL_PLACEHOLDER
         seed = Seed(hid, household_created=not args.household_id, name=args.name,
-                    tz=args.timezone)
+                    tz=args.timezone, today=today)
         print("BEGIN;")
         if not args.household_id:
             print(f"-- Replace {PRINT_SQL_PLACEHOLDER} below with the target household id,\n"
@@ -870,14 +1077,15 @@ def main(argv):
         ap.error("--dsn or DATABASE_URL is required (or use --print-sql)")
 
     hid, created, name = find_target(args.dsn, args.household_id, args.adopt)
-    seed = Seed(hid, household_created=created, name=name, tz=args.timezone)
+    seed = Seed(hid, household_created=created, name=name, tz=args.timezone, today=today)
 
     sql = "BEGIN;\n" + seed.build() + "\nCOMMIT;\n"
     psql(args.dsn, sql)
-    print(f"{'created' if created else 're-seeded'} war-game household {hid} ({name})")
+    print(f"{'created' if created else 're-seeded'} war-game household {hid} ({name}) "
+          f"for {today.isoformat()}")
 
     if not args.no_verify:
-        print(psql(args.dsn, print_verification(hid), quiet=False))
+        print(psql(args.dsn, print_verification(hid, today), quiet=False))
     return 0
 
 

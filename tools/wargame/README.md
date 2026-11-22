@@ -10,7 +10,7 @@ you check what actually landed in Home OS with direct MCP calls.
 | `mcpcall.py` | Ground truth: calls one Home OS MCP tool as a household member and prints the result, over Streamable HTTP at `POST <HOMEOS_MCP_URL>/mcp` — the only MCP transport Home OS serves. `--selftest` runs its transport tests with no network. |
 | `api.py` | Same idea for the REST API (`/api/v1/...`). **Dex id_token only** — a `hos_` agent token 401s there by design; see [Two kinds of token](#two-kinds-of-token-agent-tokens-are-mcp-scoped). |
 | `personas.md` | The household, the two personas (Jacob, Amber), their scenarios and sample turns, and the agent system-prompt snippet. |
-| `seed/household.py` | The household itself: 11 bills in a deliberate autopay mix (including one manual bill with no paying account and one already overdue), last-4 payment accounts, 12 contacts with phone/email/website, 4 guides, people, pets, vehicles, property. Idempotent, refuses anything that is not the war-game household. **[`seed/README.md`](seed/README.md)** |
+| `seed/household.py` | The household itself: 12 bills whose mix puts all four `billdue.AttentionFor` states on the board at once (6 autopay-with-account incl. one due in 2 days, 4 manual-with-account, 1 manual with no account due soon, 1 overdue), 3 last-4 payment accounts, 13 contacts with phone/email/website, 4 **`kb_docs`** KB docs, people, pets, vehicles, property. Dates are computed from today in the household's timezone. Idempotent, refuses anything that is not the war-game household. **[`seed/README.md`](seed/README.md)** |
 
 ## Never put a `$` through your shell — always single-quote, or better use `--stdin`
 
