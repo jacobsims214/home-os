@@ -456,16 +456,24 @@ export default function BillPage() {
                 </p>
               </div>
               {access.canWrite ? (
+                // Mantine's own Switch, not components/ui/Switch: its `label`
+                // wraps the input and the words in one <label>, so the whole
+                // 44 px row is the hit area (the ui/Switch wrapper puts the
+                // words in a sibling span and only the ~20 px input toggles).
                 <Switch
                   checked={autopayOn}
                   disabled={update.isPending}
                   onChange={(e) => toggleAutopay(e.currentTarget.checked)}
-                  label={<span className="sr-only">Autopay for {bill.name}</span>}
-                  classNames={{ root: "min-h-11 flex items-center pt-1", label: "cursor-inherit" }}
+                  label={
+                    <span className="text-[13px] font-medium text-ink-2" data-testid="autopay-label">
+                      Autopay<span className="sr-only"> for {bill.name}</span>
+                    </span>
+                  }
+                  classNames={{ root: "min-h-11 flex items-center gap-2 pt-1", label: "cursor-inherit" }}
                   data-testid="autopay-toggle"
                 />
               ) : (
-                <span className="shrink-0 pt-2 text-[13px] text-ink-3">{autopayOn ? "On" : "Off"}</span>
+                <span className="shrink-0 pt-2 text-[13px] font-semibold text-ink-2">{autopayOn ? "On" : "Off"}</span>
               )}
             </div>
             <div className="px-4 pb-3 pt-1" data-testid="bill-autopay-account">

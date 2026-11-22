@@ -130,7 +130,7 @@ export function PayeeCard({
   const site = payeeWebsiteHref(payee?.website);
 
   return (
-    <section className="rounded-token-md border border-line bg-surface" aria-labelledby="payee-heading" data-payee-card>
+    <section className="rounded-token-md border border-line bg-surface" aria-labelledby="payee-heading" data-testid="payee-card">
       <div className="px-4 pt-3.5">
         <h2 id="payee-heading" className="m-0 text-[13px] font-semibold uppercase tracking-[.04em] text-ink-3">
           Who we pay
