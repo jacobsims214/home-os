@@ -2,7 +2,6 @@ package bill
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -173,8 +172,10 @@ func (r *Repo) Get(ctx context.Context, id, householdID uuid.UUID) (*Bill, error
 	return b, nil
 }
 
-// Create inserts a new bill and writes a bill.created outbox event in a single
-// transaction. Returns the created bill.
+// Create inserts a new bill and returns it. The bill.created outbox event is
+// written by the bills_outbox trigger (migration 088), not here, so every
+// write path -- this one, the MCP tools and assets_propagate_property() --
+// enqueues exactly one event.
 func (r *Repo) Create(ctx context.Context, b *Bill) (*Bill, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -212,28 +213,14 @@ func (r *Repo) Create(ctx context.Context, b *Bill) (*Bill, error) {
 		return nil, fmt.Errorf("create bill: %w", err)
 	}
 
-	payload, err := json.Marshal(billEventPayload{ID: created.ID.String(), Name: created.Name})
-	if err != nil {
-		return nil, fmt.Errorf("create bill: marshal payload: %w", err)
-	}
-
-	_, err = tx.Exec(ctx,
-		`INSERT INTO outbox_events (type, payload, household_id)
-		 VALUES ($1, $2, $3)`,
-		"bill.created", payload, created.HouseholdID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create bill: outbox event: %w", err)
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("create bill: commit: %w", err)
 	}
 	return created, nil
 }
 
-// Update updates an existing bill and writes a bill.updated outbox event in a
-// single transaction. Returns the updated bill.
+// Update updates an existing bill and returns it. The bill.updated outbox
+// event is written by the bills_outbox trigger (migration 088), not here.
 func (r *Repo) Update(ctx context.Context, b *Bill) (*Bill, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -283,28 +270,15 @@ func (r *Repo) Update(ctx context.Context, b *Bill) (*Bill, error) {
 		return nil, fmt.Errorf("update bill: %w", err)
 	}
 
-	payload, err := json.Marshal(billEventPayload{ID: updated.ID.String(), Name: updated.Name})
-	if err != nil {
-		return nil, fmt.Errorf("update bill: marshal payload: %w", err)
-	}
-
-	_, err = tx.Exec(ctx,
-		`INSERT INTO outbox_events (type, payload, household_id)
-		 VALUES ($1, $2, $3)`,
-		"bill.updated", payload, updated.HouseholdID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("update bill: outbox event: %w", err)
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("update bill: commit: %w", err)
 	}
 	return updated, nil
 }
 
-// Delete removes a bill by ID, scoped to the household. Writes a bill.deleted
-// outbox event in a single transaction.
+// Delete removes a bill by ID, scoped to the household. The bill.deleted
+// outbox event is written by the bills_outbox trigger (migration 088) from
+// the row the DELETE removed, not here.
 func (r *Repo) Delete(ctx context.Context, id, householdID uuid.UUID) error {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -330,30 +304,10 @@ func (r *Repo) Delete(ctx context.Context, id, householdID uuid.UUID) error {
 		return pgx.ErrNoRows
 	}
 
-	payload, err := json.Marshal(billEventPayload{ID: id.String()})
-	if err != nil {
-		return fmt.Errorf("delete bill: marshal payload: %w", err)
-	}
-
-	_, err = tx.Exec(ctx,
-		`INSERT INTO outbox_events (type, payload, household_id)
-		 VALUES ($1, $2, $3)`,
-		"bill.deleted", payload, householdID,
-	)
-	if err != nil {
-		return fmt.Errorf("delete bill: outbox event: %w", err)
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("delete bill: commit: %w", err)
 	}
 	return nil
-}
-
-// billEventPayload is the JSON payload written to outbox_events for bill events.
-type billEventPayload struct {
-	ID   string `json:"id"`
-	Name string `json:"name,omitempty"`
 }
 
 // isUniqueViolation returns true if the error is a PostgreSQL unique constraint

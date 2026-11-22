@@ -1,6 +1,6 @@
 # Database schema
 
-PostgreSQL 16. 39 tables across `packages/db/migrations/` (001 → 087). This
+PostgreSQL 16. 39 tables across `packages/db/migrations/` (001 → 088). This
 doc covers the conventions and the tables where the schema is not
 self-evident; the catalogue is the authority for columns.
 
@@ -283,3 +283,50 @@ per-row visibility, so the restriction lives in `role_can_see_entity`: the
 `family_manager` only (not `members`, which stays `rolesSitter`). A demotion is
 therefore not readable in the shared feed by the person demoted -- they find out
 when their permissions change, not by reading the log.
+
+**`outbox_events`** is written by `log_outbox_event()` triggers (migration
+**088**) on `bills` and `assets`, for the same reason: a side-effect in handler
+code fires only when that handler runs. Until 088 the enqueue was handler code
+in six places, and what that cost is the argument for the mechanism:
+
+- the MCP asset tools wrote the `assets` row directly and enqueued **nothing**,
+  so an asset created by a family agent left no event at all;
+- `assets_propagate_property()` (038) `UPDATE`s `bills.property_id` when an
+  asset moves property. That update went through no handler, so the bills it
+  moved changed with **no event** — a consumer could not know they had.
+
+### What `outbox_events` is, and is not
+
+It is a **delivery queue for two entities**, not a second audit log. `bills`
+and `assets` are the entities whose events already existed; they now cover
+every row change from every code path. The other 24 `activity_log` kinds —
+notes, files, lists, `maintenance_tasks`, properties, people, secrets and the
+rest — emit **nothing**, deliberately: no consumer asks for them. **Do not
+build a consumer that expects completeness here — use `activity_log`, which
+does cover all 26 tables.**
+
+Adding an entity means attaching the same function; it does not mean writing an
+`INSERT`:
+
+```sql
+CREATE TRIGGER <table>_outbox
+    AFTER INSERT OR UPDATE ON <table>
+    FOR EACH ROW EXECUTE FUNCTION log_outbox_event('<prefix>');
+```
+
+| Table | Trigger fires on | Types emitted |
+|---|---|---|
+| `bills` | INSERT, UPDATE, DELETE | `bill.created`, `bill.updated` (+`paid_date` when the row has one), `bill.deleted` |
+| `assets` | INSERT, UPDATE | `asset.created`, `asset.updated` — **no `asset.deleted`**, which has never existed |
+
+Payloads are built from the row's `jsonb`, so one function serves both tables
+and a new column cannot break it. Every event is in the writer's transaction: a
+rolled-back write leaves no event, and an event cannot exist for a write that
+did not happen. A no-op `UPDATE` *does* enqueue — the outbox is a delivery
+signal, not an audit line, and that matches what the old handler code did.
+
+**No backfill** was done, and none is needed: `outbox_events` is a log of what
+happened when it happened, and replaying history would hand a future consumer
+events it never saw. The rows missing from before 088 (MCP-created assets,
+bills moved by `assets_propagate_property()`) are all in `activity_log`, which
+covered them all along.
