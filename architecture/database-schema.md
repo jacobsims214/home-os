@@ -1,6 +1,6 @@
 # Database schema
 
-PostgreSQL 16. 39 tables across `packages/db/migrations/` (001 → 088). This
+PostgreSQL 16. 39 tables across `packages/db/migrations/` (001 → 089). This
 doc covers the conventions and the tables where the schema is not
 self-evident; the catalogue is the authority for columns.
 
