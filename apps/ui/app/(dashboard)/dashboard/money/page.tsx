@@ -55,6 +55,7 @@ import {
 import { apiFetch } from "@/lib/api";
 import { ResponsiveModal, ResponsiveModalActions, TextInput } from "@/components/ui";
 import MoneyNoAccess from "@/components/bills/MoneyNoAccess";
+import PaymentAccountsSection from "@/components/payment-accounts/PaymentAccountsSection";
 import { useBillsAccess } from "@/lib/bills/api";
 import { dueLabel, formatMoney, frequencyLabel, type DueSoon } from "@/lib/bills/model";
 
@@ -449,8 +450,15 @@ export default function MoneyPage() {
   // names them rather than adding a silent zero for each.
   const uncounted = useMemo(() => {
     if (!data) return [] as ObligationItem[];
-    return [...data.categories, data.uncategorized]
-      .flatMap((g) => g.items)
+    // Guard the spread: a response without `categories` (an empty household
+    // from a server that omits empty arrays) used to throw "Spread syntax
+    // requires ...iterable not be null or undefined" and take the whole Money
+    // page down with a runtime-error overlay (#5506). Absent reads as empty —
+    // the same rule the page already applies to amounts.
+    // `uncategorized` may be null (nothing unfiled) — filter it out rather
+    // than spreading a null, and read `items` defensively for the same reason.
+    return [...(data.categories ?? []), ...(data.uncategorized ? [data.uncategorized] : [])]
+      .flatMap((g) => g?.items ?? [])
       .filter((item) => item.monthly_amount === null);
   }, [data]);
 
@@ -853,6 +861,16 @@ export default function MoneyPage() {
           </div>
         </>
       )}
+
+      {/*
+        Payment accounts (#5506): the accounts a bill is paid FROM, with the
+        bank login behind each one. Placed on Money rather than in Settings
+        because it is a money fact a person comes here to check — "which
+        account does the mortgage come out of?" — and because the bill pages
+        link back to it. The section asks the API's money policy itself and
+        renders nothing for a role that would be refused.
+      */}
+      <PaymentAccountsSection />
 
       {modalOpen && (
         <CategoryModal

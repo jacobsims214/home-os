@@ -120,6 +120,14 @@ interface SecretEditorProps {
   entityId: string;
   /** When provided, the editor opens in edit mode for this secret id. */
   editSecretId?: string | null;
+  /**
+   * Called with the SAVED secret's id once the server has accepted the
+   * ciphertext (#5506). A parent that LINKS this credential to something — a
+   * payment account, a vendor — needs the id, which only exists after the POST,
+   * and the editor closes itself on success. Without this the parent would have
+   * to re-list /api/v1/secrets and guess which row is the one it just saved.
+   */
+  onSaved?: (secretId: string) => void;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
@@ -205,6 +213,7 @@ export default function SecretEditor({
   entityType,
   entityId,
   editSecretId = null,
+  onSaved,
 }: SecretEditorProps) {
   const queryClient = useQueryClient();
   const cryptoKey = useSecretsStore((s) => s.cryptoKey);
@@ -297,13 +306,16 @@ export default function SecretEditor({
   const createMutation = useMutation({
     mutationFn: async (req: CreateSecretRequest) =>
       apiFetch<{ data: Secret }>("/api/v1/secrets", { method: "POST", body: req }).then(r => r.data),
-    onSuccess: () => {
+    onSuccess: (secret) => {
       void queryClient.invalidateQueries({ queryKey: secretKeys.lists() });
       if (entityType && entityId) {
         void queryClient.invalidateQueries({
           queryKey: secretKeys.listByEntity(entityType, entityId),
         });
       }
+      // The id exists only now: report it to a parent that links this
+      // credential to a record (#5506), then close as before.
+      if (secret?.id) onSaved?.(secret.id);
       onClose();
     },
     onError: (err) => {
@@ -332,6 +344,9 @@ export default function SecretEditor({
           queryKey: secretKeys.listByEntity(entityType, entityId),
         });
       }
+      // An edit keeps the same secret id, so a linked parent stays linked; the
+      // parent still hears about it so it can refresh what it shows.
+      if (editSecretId) onSaved?.(editSecretId);
       onClose();
     },
     onError: (err) => {

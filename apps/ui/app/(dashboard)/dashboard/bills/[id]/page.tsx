@@ -54,8 +54,14 @@ import { PayeeCard } from "@/components/bills/payee";
 import MarkPaidSheet from "@/components/bills/MarkPaidSheet";
 import MoneyNoAccess from "@/components/bills/MoneyNoAccess";
 import EntityResources from "@/components/EntityResources";
+import LinkedLogin from "@/components/payment-accounts/LinkedLogin";
+import { PAYMENT_ACCOUNT_ENTITY } from "@/components/payment-accounts/entity";
+import {
+  useAccountCredentialFact,
+  useLinkAccountSecret,
+} from "@/lib/payment-accounts/api";
 import { useNavRole } from "@/components/shared/use-nav-role";
-import { resourceAccess } from "@/lib/resource-access";
+import { canSeeSecrets, resourceAccess } from "@/lib/resource-access";
 import {
   NO_SUBJECTS,
   useBill,
@@ -93,6 +99,11 @@ export default function BillPage() {
   const params = useParams<{ id: string }>();
   const id = typeof params?.id === "string" ? params.id : "";
   const access = useBillsAccess();
+  // Linking the account's bank login is a credential write (ResSecrets), and
+  // the API refuses it for a role without secrets -- so the control is drawn
+  // only when the role may write money AND read credentials. The API still
+  // enforces; this only avoids a dead button.
+  const linkAccountSecret = useLinkAccountSecret();
   const role = useNavRole();
   const household = useCurrentHousehold();
   const router = useRouter();
@@ -103,6 +114,12 @@ export default function BillPage() {
   const update = useUpdateBill(id);
   const remove = useDeleteBill();
   const markPaid = useMarkBillPaid();
+  // "Is a bank login stored for the account this bill is paid from?" comes from
+  // the accounts endpoint, not from the bill: the bill deliberately carries no
+  // credential fact (see useAccountCredentialFact). The account id is only
+  // known once the bill arrives, and the hook re-keys on it.
+  const paidFromId = billQuery.data?.data?.payment_account?.id ?? null;
+  const accountLogin = useAccountCredentialFact(paidFromId, access.canSee);
 
   const [editing, setEditing] = useState(false);
   const [paying, setPaying] = useState(false);
@@ -400,6 +417,15 @@ export default function BillPage() {
               {!bill.category && <Field label="Category" value="No category" />}
               <Field label="Auto-pay" value={autopayOn ? "On" : "Off"} />
               {subject && <Field label="For" value={`${subject.name} · ${subject.kind}`} />}
+              {/*
+                The account this bill is paid from (#5498/#5506): name + last-4,
+                masked by the API. Absent for a role without money read, and
+                absent when no account is linked — so it is rendered only when
+                the API sent one, and it never says "no account" to a role that
+                may not be told. `accountLine` is the ONE place the masked line
+                is built, so the bills list and the accounts page cannot drift
+                apart on how a bank account is shown.
+              */}
               {account && (
                 <Field
                   label="Paid from"
@@ -412,8 +438,33 @@ export default function BillPage() {
                   }
                 />
               )}
-              {!account && needsAction && (
-                <Field label="Paid from" value={<span className="text-ink-3">No account set up</span>} />
+              {/*
+                The login behind that account (#5506). LinkedLogin renders the
+                stored-or-not badge and the reveal path through the vault, and
+                renders NOTHING when the API withheld the credential fact
+                (a viewer) — the account details are money, the login is a
+                credential, and they follow two different policies.
+              */}
+              {account && (
+                <div className="px-4 py-2 md:px-0">
+                  <LinkedLogin
+                    noun="bank login"
+                    entityType={PAYMENT_ACCOUNT_ENTITY}
+                    entityId={account.id}
+                    stored={accountLogin.stored}
+                    secretId={accountLogin.secretId}
+                    canEdit={access.canWrite && canSeeSecrets(role)}
+                    onLink={
+                      access.canWrite && canSeeSecrets(role)
+                        ? (secretId) =>
+                            linkAccountSecret.mutateAsync({
+                              accountId: account.id,
+                              secretId,
+                            })
+                        : undefined
+                    }
+                  />
+                </div>
               )}
               {bill.account_number && <Field label="Account number" value={bill.account_number} mono />}
               {bill.payment_url && (

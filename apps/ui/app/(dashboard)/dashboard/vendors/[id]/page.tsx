@@ -41,6 +41,10 @@ import {
   IconPhone,
 } from "@tabler/icons-react";
 import { apiFetch } from "@/lib/api";
+import { useNavRole } from "@/components/shared/use-nav-role";
+import { canSeeSecrets } from "@/lib/resource-access";
+import { useLinkVendorSecret } from "@/lib/payment-accounts/api";
+import LinkedLogin from "@/components/payment-accounts/LinkedLogin";
 import { billKeys, petKeys, vendorKeys } from "@/lib/query-keys";
 import { TextInput } from "@/components/ui";
 import DetailPageLayout from "@/components/layout/DetailPageLayout";
@@ -135,6 +139,16 @@ export default function ContactDetailPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [values, setValues] = useState<ContactFormValues>(contactToFormValues({}));
   const [formError, setFormError] = useState<string | null>(null);
+
+  // The portal login (#5506) is a CREDENTIAL, and `canSeeSecrets` is the UI's
+  // existing mirror of the credential policy (ResSecrets: family only) -- the
+  // same helper EntityResources uses to decide whether the Secrets tab exists.
+  // It gates drawing the control; the API enforces. This page has never
+  // pre-checked vendor WRITE permission (it lets the API answer), so this adds
+  // the credential rule and nothing else, rather than inventing a second
+  // vendor policy here.
+  const role = useNavRole();
+  const linkVendorSecret = useLinkVendorSecret();
 
   const contactQuery = useQuery({
     queryKey: vendorKeys.detail(vendorId),
@@ -444,7 +458,41 @@ export default function ContactDetailPage() {
               />
               <Row field="address" label="Address" value={contact.address || "—"} />
               <Row field="notes" label="Notes" value={contact.notes || "—"} />
+              {/*
+                The payee's portal login (#5506): whether one is stored, and the
+                way to reach it through the vault. Rendered OUTSIDE the <dl> is
+                not possible here (Row wraps a dt/dd pair), so it is its own
+                section below the details list instead.
+              */}
             </dl>
+          </section>
+
+          {/*
+            The payee's portal login (#5506). Its own section rather than a row
+            in the <dl>: the value is a badge PLUS two 44 px buttons, which is
+            not a definition-list value. LinkedLogin owns the stored-or-not
+            rule and the vault path; this page only says which link route
+            attaches the credential.
+          */}
+          <section aria-labelledby="contact-portal" className="min-w-0">
+            <h2 id="contact-portal" className="mb-1 text-sm font-semibold text-ink-2">
+              Portal login
+            </h2>
+            <div className="rounded-token-md border border-line bg-surface px-4 py-3">
+              <LinkedLogin
+                noun="portal login"
+                entityType="vendor"
+                entityId={contact.id}
+                stored={contact.portal_login_stored}
+                secretId={contact.portal_secret_id ?? null}
+                canEdit={canSeeSecrets(role)}
+                onLink={
+                  canSeeSecrets(role)
+                    ? (secretId) => linkVendorSecret.mutateAsync({ vendorId: contact.id, secretId })
+                    : undefined
+                }
+              />
+            </div>
           </section>
 
           {/* The pets whose vet this contact is (#4703). Only for a vet, and

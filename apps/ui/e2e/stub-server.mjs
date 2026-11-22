@@ -103,6 +103,14 @@ const refreshTokens = new Map();
 const secretKeys = new Map();
 /** Credentials per session for the list/view UI (#4575): see /e2e/secrets/records. */
 const secretRecords = new Map();
+/**
+ * Payment accounts (#5506), per session: the rows, and EVERY request body the
+ * payment-accounts routes received. `requestBodies` is the evidence for the
+ * round trip's central claim -- the server never receives a plaintext
+ * credential -- so it records the raw parsed body verbatim, not a summary.
+ */
+const paymentAccounts = new Map();
+const paymentAccountBodies = [];
 const stats = { dexRefreshes: 0, apiRequests: 0, apiUnauthorized: 0, codeExchanges: 0, lastRedirectUri: null, apiWrites: [], householdHeaders: [] };
 // sid -> [{ id, name, role, timezone, bills }]. Empty: the single seed family.
 const sessionHouseholds = new Map();
@@ -205,6 +213,19 @@ const SHARE_ROLES = new Set(["owner", "family_manager"]);
  * seeded households: the first household is the active one, which is what
  * /me/households resolves to without an X-Household-ID.
  */
+/**
+ * lastFourError mirrors paymentaccount.ValidateLastFour in Go (#5506). Kept
+ * deliberately identical in WHAT IT ACCEPTS: four ASCII digits or nothing. The
+ * message is close enough to be useful in a failure, and the spec asserts the
+ * refusal, not the wording.
+ */
+function lastFourError(v) {
+  if (!v) return "";
+  if (!/^[0-9]+$/.test(v)) return "Last four must be exactly four digits.";
+  if (v.length !== 4) return "Last four must be exactly four digits (that is " + v.length + ").";
+  return "";
+}
+
 function secretsRoute(method, resource, sid, body, ctx = {}) {
   const rec = secretKeys.get(sid);
   if (method === "GET" && resource === "secrets/key") {
@@ -341,6 +362,16 @@ const server = createServer(async (req, res) => {
 
   if (path === "/healthz") return send(res, 200, { ok: true });
   if (path === "/e2e/stats") return send(res, 200, stats);
+  // What the payment-accounts routes actually received (#5506). `bodies` is
+  // the raw JSON of every request, so a spec can assert that no body ever
+  // carried a password/username -- only ciphertext or a uuid.
+  if (path === "/e2e/payment-accounts" && req.method === "GET") {
+    const sid = url.searchParams.get("sid") ?? "";
+    return send(res, 200, {
+      accounts: paymentAccounts.get(sid) ?? [],
+      bodies: paymentAccountBodies,
+    });
+  }
   if (path === "/e2e/secrets" && req.method === "GET") {
     const rec = secretKeys.get(url.searchParams.get("sid") ?? "");
     return send(res, 200, { set_up: !!rec, legacy: !!rec?.key_hash, upgraded: !!rec?.upgraded, requests: rec?.requests ?? [] });
@@ -445,6 +476,100 @@ const server = createServer(async (req, res) => {
       } catch {
         /* not JSON */
       }
+
+
+    }
+    // ── Payment accounts (#5506) ──────────────────────────────────────────
+    // Mirrors apps/api/internal/paymentaccount: last_four is validated the way
+    // the Go handler validates it, so a spec that pastes a full number gets the
+    // same 400 the real API would give (and the UI's own refusal is testable
+    // against a server that agrees with it).
+    if (resource === "payment-accounts" || resource.startsWith("payment-accounts/")) {
+      paymentAccountBodies.push({ method: req.method, resource, body });
+      const sid = jwtClaims(auth.slice(7)).sid ?? "";
+      const rows = paymentAccounts.get(sid) ?? [];
+      if (req.method === "GET") return send(res, 200, { data: rows });
+
+      if (req.method === "POST" && resource === "payment-accounts") {
+        const lf = String(body.last_four ?? "").trim();
+        const check = lastFourError(lf);
+        if (check) return send(res, 400, { error: { code: "BAD_REQUEST", message: check } });
+        if (!String(body.name ?? "").trim()) {
+          return send(res, 400, { error: { code: "BAD_REQUEST", message: "name is required" } });
+        }
+        const row = {
+          id: `pa-${rows.length + 1}`,
+          household_id: SEED_USER.household_id,
+          name: String(body.name).trim(),
+          institution: body.institution || undefined,
+          account_type: body.account_type || "checking",
+          last_four: lf || null,
+          notes: body.notes || undefined,
+          login_stored: false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        rows.push(row);
+        paymentAccounts.set(sid, rows);
+        return send(res, 201, row);
+      }
+
+      const rest = resource.slice("payment-accounts/".length);
+      const secretMatch = /^([^/]+)\/secret$/.exec(rest);
+      const id = secretMatch ? secretMatch[1] : rest;
+      const row = rows.find((r) => r.id === id);
+      if (!row) return send(res, 404, { error: { code: "NOT_FOUND", message: "payment account not found" } });
+
+      if (secretMatch && req.method === "PUT") {
+        // The body is a UUID or null -- never a credential. A linked secret
+        // makes "login stored" true without the stub ever seeing a plaintext.
+        const secretId = body.secret_id ?? null;
+        row.login_stored = !!secretId;
+        row.login_secret_id = secretId ?? undefined;
+        return send(res, 200, row);
+      }
+      if (req.method === "GET") return send(res, 200, row);
+      if (req.method === "PUT") {
+        const lf = String(body.last_four ?? "").trim();
+        const check = lastFourError(lf);
+        if (check) return send(res, 400, { error: { code: "BAD_REQUEST", message: check } });
+        row.name = String(body.name ?? row.name).trim();
+        row.institution = body.institution || undefined;
+        row.account_type = body.account_type || row.account_type;
+        row.last_four = lf || null;
+        row.notes = body.notes || undefined;
+        return send(res, 200, row);
+      }
+      if (req.method === "DELETE") {
+        paymentAccounts.set(sid, rows.filter((r) => r.id !== id));
+        return send(res, 204, undefined);
+      }
+    }
+
+    if (req.method === "POST" && resource === "secrets") {
+      paymentAccountBodies.push({ method: "POST", resource: "secrets", body });
+      // Record the credential the editor just encrypted (#5506), so the vault's
+      // viewer can fetch it back by id. The BLOB stays the placeholder the
+      // generic write echo produced: no spec here decrypts it, and the point of
+      // the round trip is that only ciphertext ever arrived.
+      const sid = jwtClaims(auth.slice(7)).sid ?? "";
+      const rows = secretRecords.get(sid) ?? [];
+      const row = {
+        id: `sec-${rows.length + 1}`,
+        entity_type: body.entity_type ?? null,
+        entity_id: body.entity_id ?? null,
+        name: body.name ?? "Untitled",
+        secret_type: body.secret_type ?? "login",
+        household_id: SEED_USER.household_id,
+        created_at: new Date().toISOString(),
+        shared_with_agents: false,
+        encrypted_data: body.encrypted_data,
+        iv: body.iv,
+        key_version: body.key_version,
+      };
+      rows.push(row);
+      secretRecords.set(sid, rows);
+      return send(res, 201, { data: secretListItem(row) });
     }
     if (resource === "secrets" || resource.startsWith("secrets/")) {
       // The active household's role is what the API reads from the claims; the
@@ -475,6 +600,21 @@ const server = createServer(async (req, res) => {
       if (req.method === "POST") return send(res, 201, { data: { id: `e2e-${stats.apiWrites.length}`, ...body } });
     }
     if (resource === "auth/me" || resource === "users/me") return send(res, 200, { data: SEED_USER });
+    // GET /budget/obligations: an EMPTY but COMPLETE payload (#5506). The Money
+    // page crashes on a response with no `categories` at all ("Spread syntax
+    // requires ...iterable not be null") — a real defect the page's own guard
+    // now fixes, and this keeps the stub honest about the API's shape: an
+    // empty household answers with empty arrays, not with absent ones.
+    if (resource === "budget/obligations") {
+      return send(res, 200, {
+        data: { month: "2026-11", currency: "USD", categories: [], uncategorized: null,
+                totals: { committed: "0.00", budgeted: "0.00", uncounted: 0 } },
+      });
+    }
+    if (resource === "budget/due-soon") {
+      return send(res, 200, { data: { from: "2026-11-01", to: "2026-11-30", days: 30, total: "0.00",
+        bill_count: 0, loan_count: 0, items: [], coverage: {} } });
+    }
     if (households) {
       // Mirrors GET /api/v1/me/households: role per household, is_default on
       // the first, current on the one X-Household-ID resolved to.
@@ -526,6 +666,7 @@ const server = createServer(async (req, res) => {
     return send(res, 200, { data: SEED[resource] ?? [] });
   }
 
+  if (process.env.E2E_STUB_DEBUG) console.error("STUB-404 path=" + path);
   send(res, 404, { error: { code: "NOT_FOUND", message: path } });
 });
 
