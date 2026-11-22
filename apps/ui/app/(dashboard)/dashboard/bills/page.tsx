@@ -34,8 +34,10 @@ import {
   IconCar,
   IconCheck,
   IconChevronRight,
+  IconCreditCard,
   IconHome,
   IconLock,
+  IconPhone,
   IconPlus,
   IconReceipt,
   IconRefresh,
@@ -43,8 +45,15 @@ import {
 import { notifications } from "@mantine/notifications";
 import BillForm, { emptyBillForm } from "@/components/bills/BillForm";
 import MoneyNoAccess from "@/components/bills/MoneyNoAccess";
+import { AttentionBadge } from "@/components/bills/attention";
+import { payeeName, payeePhones } from "@/components/bills/payee";
 import { NO_SUBJECTS, useBills, useBillsAccess, useCreateBill, useDueSoon, useSubjectNames } from "@/lib/bills/api";
 import {
+  accountLine,
+  actionCountLabel,
+  attentionLabel,
+  attentionOf,
+  attentionSplit,
   dueCount,
   dueLabel,
   dayMonth,
@@ -53,9 +62,10 @@ import {
   filterRows,
   formatMoney,
   frequencyChips,
+  frequencyLabel,
   mergeRows,
   monthlyAmount,
-  monthlyTotal,
+  splitSentence,
   scheduleLabel,
   subjectLabel,
   type BillRow,
@@ -78,7 +88,12 @@ export default function BillsPage() {
   const chips = useMemo(() => frequencyChips(rows.map((r) => r.bill)), [rows]);
   const shown = useMemo(() => filterRows(rows, filter), [rows, filter]);
   const due = dueCount(rows);
-  const perMonth = formatMoney(monthlyTotal(rows.map((r) => r.bill)));
+  // THE NUMBER A HOUSEHOLD WANTS: "$2,595/month, of which $2,340 is on autopay."
+  // Grouped by the API's `attention`, never by `is_autopay` — the split and the
+  // sentence are the model's, so this page owns no arithmetic and no rule.
+  const split = useMemo(() => attentionSplit(rows.map((r) => r.bill)), [rows]);
+  const splitLine = splitSentence(split);
+  const actions = actionCountLabel(split);
 
   // The role is still loading: a skeleton, never an owner's controls flashing
   // at a housesitter (#4574's rule for every role-gated page).
@@ -114,9 +129,19 @@ export default function BillsPage() {
               ? "Loading…"
               : rows.length === 0
                 ? "No bills yet"
-                : // A total of nothing is not a total: an empty list says so instead of "$0.00".
-                  `${rows.length} ${rows.length === 1 ? "bill" : "bills"}${perMonth ? ` · ${perMonth} a month in all` : ""}`}
+                : `${rows.length} ${rows.length === 1 ? "bill" : "bills"}`}
           </Text>
+          {/* The commitment, in the words a household uses: what we pay each
+              month, and how much of it pays itself. The split is the API's
+              `attention` grouped, not a second reading of `is_autopay`. */}
+          {splitLine && (
+            <p className="mt-1.5 text-[13px] leading-snug text-ink-2" data-testid="bills-split">
+              <b className="font-semibold text-ink">{splitLine}</b>
+              <span className="block text-ink-3" data-testid="bills-actions">
+                {actions}
+              </span>
+            </p>
+          )}
         </div>
         {access.canWrite && (
           <Button
@@ -192,16 +217,18 @@ export default function BillsPage() {
           <div className="hidden md:block" data-testid="bills-table">
             <Card withBorder radius="md" padding={0} className="overflow-x-auto">
               <table className="w-full min-w-[36rem] border-collapse text-sm">
-                <caption className="sr-only">Bills, next due, amount, how often, per month, budget category and what each is for</caption>
+                <caption className="sr-only">
+                  Bills: who pays each one, next due, amount, how often, per month, the account it draws on and what each is for
+                </caption>
                 <thead>
                   <tr className="bg-surface-2 text-left">
-                    {["Bill", "Next due", "Amount", "How often", "Per month", "Budget", "For"].map((h, i) => (
+                    {["Bill", "Paid by", "Next due", "Amount", "How often", "Per month", "Account", "For"].map((h, i) => (
                       <th
                         key={h}
                         scope="col"
                         className={[
                           "border-b border-line px-3.5 py-2.5 text-[12px] font-semibold uppercase tracking-[.04em] text-ink-3",
-                          i === 2 || i === 4 ? "text-right" : "",
+                          i === 3 || i === 5 ? "text-right" : "",
                         ].join(" ")}
                       >
                         {h}
@@ -255,14 +282,36 @@ export default function BillsPage() {
 
 // ── one row ─────────────────────────────────────────────────
 
+/**
+ * One bill in the phone list — the established row pattern (icon, name, due
+ * line, amount, chevron), with the three things this ticket exists to answer
+ * added underneath:
+ *
+ *  1. WHETHER IT PAYS ITSELF, as the API's `attention` badge. The badge is the
+ *     first thing under the name, so a family scanning the list sees "nothing
+ *     to do" and "you must act" without reading. Nothing here looks at
+ *     `is_autopay`: a bill whose switch is on but whose account is missing comes
+ *     back as `needs_setup` and must read as "you, not the bank".
+ *  2. WHO WE PAY, and how often — the payee's name and the cadence, so the
+ *     household's commitments are visible in the list itself.
+ *  3. WHICH ACCOUNT IT DRAWS ON, name and last four only. The row shows the
+ *     account only when the API sent one: a manual bill has no autopay account,
+ *     and a housesitter's payload carries no account at all (money policy).
+ */
 function BillListItem({ row, names, first }: { row: BillRow; names: Parameters<typeof subjectLabel>[1]; first: boolean }) {
   const { bill, due } = row;
   const state = dueState(row);
   const amount = formatMoney(bill.amount);
   const subject = subjectLabel(bill, names);
   const paidFor = bill.paid_for_due_date ?? null;
+  const attention = attentionOf(bill);
+  const payee = payeeName(bill.payee);
+  const account = accountLine(bill.payment_account);
+  // A phone is the point: when the payee has a number, the row's second line
+  // offers a tap-to-call link, so "how do I reach them" is one tap from the list.
+  const phone = payeePhones(bill.payee)[0] ?? null;
 
-  // The second line: what the API says, in the API's own words and dates.
+  // The due line: what the API says, in the API's own words and dates.
   const line =
     state === "due" && due
       ? `Next ${dueLabel(due)} · ${dueWhen(due.days_until_due)}`
@@ -271,15 +320,20 @@ function BillListItem({ row, names, first }: { row: BillRow; names: Parameters<t
         : `${scheduleLabel(bill)} · next date not reported`;
 
   return (
-    <Link
-      href={`/dashboard/bills/${bill.id}`}
+    <div
       data-bill-row={bill.id}
       data-due-state={state}
-      className={[
-        "flex min-h-16 items-center gap-3 px-3.5 py-2.5 transition-colors hover:bg-surface-2 active:bg-surface-2",
-        first ? "" : "border-t border-line",
-      ].join(" ")}
+      data-attention={attention ?? "unknown"}
+      className={["relative flex min-h-16 items-center gap-3 px-3.5 py-2.5 transition-colors hover:bg-surface-2 active:bg-surface-2", first ? "" : "border-t border-line"].join(" ")}
     >
+      {/* The whole row is one tap target, as the established pattern has it. The
+          Call link inside cannot be nested in this anchor (invalid HTML), so the
+          anchor is stretched over the row and the Call link sits above it. */}
+      <Link
+        href={`/dashboard/bills/${bill.id}`}
+        className="absolute inset-0 rounded-[10px]"
+        aria-label={`${bill.name}, ${attentionLabel(attention)}`}
+      />
       <span className="grid h-9 w-9 flex-none place-items-center rounded-[10px] bg-surface-2 text-ink-2" aria-hidden>
         {bill.vehicle_id ? (
           <IconCar size={18} stroke={ICON_STROKE} />
@@ -289,25 +343,50 @@ function BillListItem({ row, names, first }: { row: BillRow; names: Parameters<t
           <IconReceipt size={18} stroke={ICON_STROKE} />
         )}
       </span>
-      <span className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1">
         <b className="block truncate text-[15px] font-semibold leading-snug text-ink">{bill.name}</b>
-        {/* Two lines, not one truncated: the API's weekday plus its date is the
-            whole point of this line, and "next Tue, Dec…" says nothing. */}
-        <span className="block text-[13px] leading-snug text-ink-3">
-          {state === "paid" && <IconCheck size={13} stroke={2} className="mr-0.5 inline align-[-2px] text-[var(--ok-ink,#2b8a3e)]" aria-hidden />}
-          {line}
-        </span>
-      </span>
-      <span className="shrink-0 text-right">
+        {/* 1. The scan answer, then the API's due reading beside it. */}
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <AttentionBadge bill={bill} />
+          <span className="text-[13px] leading-snug text-ink-3">
+            {state === "paid" && <IconCheck size={13} stroke={2} className="mr-0.5 inline align-[-2px] text-[var(--ok-ink,#2b8a3e)]" aria-hidden />}
+            {line}
+          </span>
+        </div>
+        {/* 2. Who we pay and how often. 3. The account, when there is one. */}
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[12px] leading-snug text-ink-3">
+          {payee && <span className="truncate" data-payee>{payee}</span>}
+          {payee && <span aria-hidden>·</span>}
+          <span>{frequencyLabel(bill.frequency)}</span>
+          {phone && (
+            <a
+              href={phone.href}
+              data-payee-action="call"
+              aria-label={`Call ${payee ?? "the payee"} at ${phone.display}`}
+              className="relative z-10 -my-1 inline-flex min-h-6 items-center gap-1 py-1 font-semibold text-accent"
+            >
+              <IconPhone size={13} stroke={ICON_STROKE} aria-hidden />
+              Call
+            </a>
+          )}
+        </div>
+        {account && (
+          <div className="mt-0.5 flex items-center gap-1 text-[12px] leading-snug text-ink-3" data-account-line>
+            <IconCreditCard size={13} stroke={ICON_STROKE} className="shrink-0" aria-hidden />
+            <span className="truncate">{account}</span>
+          </div>
+        )}
+      </div>
+      <div className="shrink-0 text-right">
         {amount ? (
           <b className="block text-[15px] font-semibold tabular-nums text-ink">{amount}</b>
         ) : (
           <span className="block text-[13px] text-ink-3">No amount</span>
         )}
         <span className="block text-[12px] text-ink-3">{subject ? subject.name : frequencyChipLabel(bill.frequency)}</span>
-      </span>
+      </div>
       <IconChevronRight size={18} stroke={ICON_STROKE} className="shrink-0 text-ink-3" aria-hidden />
-    </Link>
+    </div>
   );
 }
 
@@ -328,6 +407,7 @@ function BillTableRow({ row, names }: { row: BillRow; names: Parameters<typeof s
     <tr
       data-bill-table-row={bill.id}
       data-due-state={state}
+      data-attention={attentionOf(bill) ?? "unknown"}
       className="border-b border-line last:border-b-0 hover:bg-surface-2"
     >
       <td className="px-3.5 py-3">
@@ -343,6 +423,9 @@ function BillTableRow({ row, names }: { row: BillRow; names: Parameters<typeof s
           </span>
           <span className="min-w-0">{bill.name}</span>
         </Link>
+      </td>
+      <td className="whitespace-nowrap px-3.5 py-3">
+        <AttentionBadge bill={bill} />
       </td>
       <td className="whitespace-nowrap px-3.5 py-3 text-ink-2">
         {state === "paid" && due ? (
@@ -366,7 +449,9 @@ function BillTableRow({ row, names }: { row: BillRow; names: Parameters<typeof s
       </td>
       <td className="whitespace-nowrap px-3.5 py-3 text-ink-2">{scheduleLabel(bill)}</td>
       <td className="whitespace-nowrap px-3.5 py-3 text-right tabular-nums text-ink-2">{perMonth ?? <span className="text-ink-3">–</span>}</td>
-      <td className="px-3.5 py-3 text-ink-2">{bill.category || <span className="text-ink-3">None</span>}</td>
+      <td className="whitespace-nowrap px-3.5 py-3 text-ink-2">
+        {accountLine(bill.payment_account) ?? <span className="text-ink-3">–</span>}
+      </td>
       <td className="px-3.5 py-3 text-ink-2">{subject ? subject.name : <span className="text-ink-3">–</span>}</td>
     </tr>
   );
