@@ -450,8 +450,15 @@ export default function MoneyPage() {
   // names them rather than adding a silent zero for each.
   const uncounted = useMemo(() => {
     if (!data) return [] as ObligationItem[];
-    return [...data.categories, data.uncategorized]
-      .flatMap((g) => g.items)
+    // Guard the spread: a response without `categories` (an empty household
+    // from a server that omits empty arrays) used to throw "Spread syntax
+    // requires ...iterable not be null or undefined" and take the whole Money
+    // page down with a runtime-error overlay (#5506). Absent reads as empty —
+    // the same rule the page already applies to amounts.
+    // `uncategorized` may be null (nothing unfiled) — filter it out rather
+    // than spreading a null, and read `items` defensively for the same reason.
+    return [...(data.categories ?? []), ...(data.uncategorized ? [data.uncategorized] : [])]
+      .flatMap((g) => g?.items ?? [])
       .filter((item) => item.monthly_amount === null);
   }, [data]);
 

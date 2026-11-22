@@ -125,8 +125,14 @@ export function looksLikeFullNumber(v: string): boolean {
   return /[0-9]{7,}/.test(v.replace(/[\s-]/g, ""));
 }
 
+/**
+ * Every call goes through `/api/v1/...`, NOT a bare path: `apiFetch` rewrites a
+ * `/api/v1/` prefix to the same-origin BFF (`/bff/...`) and leaves any other
+ * path alone — so a bare "/payment-accounts" would be fetched from the Next.js
+ * app itself and answer 404 HTML (found by payment-accounts.spec.ts).
+ */
 async function fetchAccounts(): Promise<PaymentAccount[]> {
-  const res = await apiFetch<{ data: PaymentAccount[] }>("/payment-accounts");
+  const res = await apiFetch<{ data: PaymentAccount[] }>("/api/v1/payment-accounts");
   return res.data ?? [];
 }
 
@@ -143,7 +149,7 @@ export function useCreatePaymentAccount() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: PaymentAccountInput) =>
-      apiFetch<PaymentAccount>("/payment-accounts", {
+      apiFetch<PaymentAccount>("/api/v1/payment-accounts", {
         method: "POST",
         body: JSON.stringify(sanitize(input)),
       }),
@@ -157,7 +163,7 @@ export function useUpdatePaymentAccount(id: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: PaymentAccountInput) =>
-      apiFetch<PaymentAccount>(`/payment-accounts/${id}`, {
+      apiFetch<PaymentAccount>(`/api/v1/payment-accounts/${id}`, {
         method: "PUT",
         body: JSON.stringify(sanitize(input)),
       }),
@@ -171,7 +177,7 @@ export function useDeletePaymentAccount() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) =>
-      apiFetch<void>(`/payment-accounts/${id}`, { method: "DELETE" }),
+      apiFetch<void>(`/api/v1/payment-accounts/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: paymentAccountKeys.all });
     },
@@ -187,7 +193,7 @@ export function useLinkAccountSecret() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ accountId, secretId }: { accountId: string; secretId: string | null }) =>
-      apiFetch<PaymentAccount>(`/payment-accounts/${accountId}/secret`, {
+      apiFetch<PaymentAccount>(`/api/v1/payment-accounts/${accountId}/secret`, {
         method: "PUT",
         body: JSON.stringify({ secret_id: secretId }),
       }),
@@ -205,7 +211,7 @@ export function useLinkVendorSecret() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ vendorId, secretId }: { vendorId: string; secretId: string | null }) =>
-      apiFetch<unknown>(`/vendors/${vendorId}/portal-secret`, {
+      apiFetch<unknown>(`/api/v1/vendors/${vendorId}/portal-secret`, {
         method: "PUT",
         body: JSON.stringify({ secret_id: secretId }),
       }),

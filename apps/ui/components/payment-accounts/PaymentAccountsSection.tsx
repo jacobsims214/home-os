@@ -467,9 +467,11 @@ function AccountForm({
         />
         {/*
           The ONLY digit field on the form. inputMode numeric is the phone
-          keyboard; maxLength 8 (not 4) so a paste is SEEN and refused with a
+          keyboard; maxLength 16 (not 4) so a paste is SEEN and refused with a
           message rather than silently clipped by the browser, which would hide
-          the mistake and store the wrong four digits.
+          the mistake and store the wrong four digits. 16 covers a full account
+          number AND a 9-digit routing number, so each gets its own message
+          instead of a truncated one that names the wrong problem.
         */}
         <TextInput
           label="Last four digits"
@@ -478,7 +480,7 @@ function AccountForm({
           mt="sm"
           inputMode="numeric"
           autoComplete="off"
-          maxLength={8}
+          maxLength={16}
           value={form.last_four}
           onChange={(e) => setForm({ ...form, last_four: e.currentTarget.value })}
           error={lastFourError || undefined}
