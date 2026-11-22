@@ -77,8 +77,15 @@ type paymentAccountResponse struct {
 	LastFour    *string `json:"last_four"`
 	Notes       *string `json:"notes,omitempty"`
 	LoginStored *bool   `json:"login_stored,omitempty"`
-	CreatedAt   string  `json:"created_at"`
-	UpdatedAt   string  `json:"updated_at"`
+	// LoginSecretID is the LINKED CREDENTIAL'S ID, so a caller that may see
+	// credentials can open it in the vault (GET /api/v1/secrets/{id} returns the
+	// ciphertext). It is the HANDLE, never the credential: the blob is AES-GCM
+	// ciphertext the server cannot read, and the uuid alone decrypts nothing.
+	// Gated on the same credential policy as LoginStored, so it is absent for a
+	// viewer exactly when LoginStored is.
+	LoginSecretID *string `json:"login_secret_id,omitempty"`
+	CreatedAt     string  `json:"created_at"`
+	UpdatedAt     string  `json:"updated_at"`
 }
 
 // canSeeCredentialExistence reports whether a member with role may be told that
@@ -112,6 +119,10 @@ func toResponse(a *PaymentAccount, role string) paymentAccountResponse {
 	if canSeeCredentialExistence(role) {
 		stored := a.SecretID != nil
 		resp.LoginStored = &stored
+		if a.SecretID != nil {
+			id := a.SecretID.String()
+			resp.LoginSecretID = &id
+		}
 	}
 	return resp
 }

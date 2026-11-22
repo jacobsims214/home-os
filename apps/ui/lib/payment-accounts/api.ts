@@ -55,6 +55,13 @@ export interface PaymentAccount {
    * nothing rather than "no login".
    */
   login_stored?: boolean;
+  /**
+   * The linked credential's ID — the handle the vault needs to fetch and
+   * decrypt it. Never the credential itself: GET /api/v1/secrets/{id} returns
+   * AES-GCM ciphertext, and only the in-memory vault key opens it. Absent
+   * whenever `login_stored` is absent.
+   */
+  login_secret_id?: string;
   created_at: string;
   updated_at: string;
 }
@@ -224,6 +231,32 @@ function sanitize(input: PaymentAccountInput): Record<string, unknown> {
     account_type: input.account_type,
     last_four: lastFour,
     notes: input.notes.trim(),
+  };
+}
+
+/**
+ * useAccountCredentialFact answers "is a login stored for THIS account?" for a
+ * surface that has an account id but not the whole account — a bill, which
+ * carries only the masked account.
+ *
+ * WHY NOT ON THE BILL. The bill response deliberately does not serialize the
+ * account's secret link (apps/api/internal/bill/handler.go: "'a login is
+ * stored' is a credential fact, not a bill field"). Reading it from the
+ * accounts list instead means the credential gate is the ONE the accounts
+ * endpoint already applies (login_stored absent for a role outside the
+ * credential policy), rather than a second gate on the bills route — which is
+ * the "two policies" mistake this ticket is about.
+ *
+ * Returns {stored: undefined} when the role may not know, which LinkedLogin
+ * renders as nothing.
+ */
+export function useAccountCredentialFact(accountId: string | null | undefined, enabled = true) {
+  const q = usePaymentAccounts(enabled && !!accountId);
+  const account = accountId ? q.data?.find((a) => a.id === accountId) : undefined;
+  return {
+    stored: account ? account.login_stored : undefined,
+    secretId: account?.login_secret_id ?? null,
+    isLoading: q.isLoading,
   };
 }
 

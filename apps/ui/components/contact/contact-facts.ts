@@ -29,6 +29,14 @@ export interface Contact {
   /** One line, up to 500 chars (#4766). No longer kept in notes. */
   address?: string | null;
   notes?: string | null;
+  /**
+   * Whether a PORTAL LOGIN is on file for this payee (vendors.portal_secret_id,
+   * 075 / #5506). ABSENT, not false, when the caller's role is outside the
+   * credential policy — "no login" and "you may not know" must not look alike.
+   */
+  portal_login_stored?: boolean;
+  /** The linked credential's id (the vault's handle, never a credential). */
+  portal_secret_id?: string;
   created_at?: string;
   updated_at?: string;
 }

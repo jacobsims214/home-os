@@ -56,6 +56,27 @@ export interface Bill {
   account_number?: string | null;
   payment_url?: string | null;
   notes?: string | null;
+  /**
+   * The account this bill is paid from, as the API serializes it: name,
+   * institution, type and the LAST FOUR digits (#5498/#5506). Absent for a
+   * role without money read, and absent when no account is linked — the
+   * account's secret link is never a bill field.
+   */
+  payment_account?: {
+    id: string;
+    name: string;
+    institution?: string;
+    last_four?: string;
+    account_type: string;
+  } | null;
+  /** Who is paid: a vendors row (id) or a free-text name, plus contact details. */
+  payee?: {
+    vendor_id?: string;
+    name: string;
+    phones?: string[];
+    email?: string;
+    website?: string;
+  } | null;
   /** The last payment, as stored (written by the MCP bill_pay). */
   paid_date?: string | null;
   /** The due date that payment covers (migration 052). */

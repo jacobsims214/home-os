@@ -134,9 +134,13 @@ type vendorResponse struct {
 	// username, never the password -- and it is ABSENT for a role the credential
 	// policy excludes (a viewer, a housesitter, a vendor), so the response
 	// cannot be used to tell "no login" from "not allowed to know".
-	PortalLoginStored *bool  `json:"portal_login_stored,omitempty"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
+	PortalLoginStored *bool `json:"portal_login_stored,omitempty"`
+	// PortalSecretID is the linked credential's ID (never a credential): the
+	// handle the vault needs to open it. Same credential gate as
+	// PortalLoginStored, so it is absent for a viewer.
+	PortalSecretID *string `json:"portal_secret_id,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
 }
 
 func toVendorResponse(v *Vendor, role string) vendorResponse {
@@ -162,6 +166,10 @@ func toVendorResponse(v *Vendor, role string) vendorResponse {
 	if auth.Can(role, auth.ResSecrets, auth.ActRead) {
 		stored := v.PortalSecretID != nil
 		r.PortalLoginStored = &stored
+		if v.PortalSecretID != nil {
+			id := v.PortalSecretID.String()
+			r.PortalSecretID = &id
+		}
 	}
 	return r
 }

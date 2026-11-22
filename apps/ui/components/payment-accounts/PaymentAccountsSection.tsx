@@ -86,8 +86,8 @@ import {
   type PaymentAccountType,
 } from "@/lib/payment-accounts/api";
 
-/** entityType for a secret attached to a payment account. */
-export const PAYMENT_ACCOUNT_ENTITY = "payment_account";
+export { PAYMENT_ACCOUNT_ENTITY } from "./entity";
+import { PAYMENT_ACCOUNT_ENTITY } from "./entity";
 
 const EMPTY: PaymentAccountInput = {
   name: "",
@@ -344,7 +344,7 @@ export default function PaymentAccountsSection() {
       {viewerFor && (
         <SecretViewer
           open
-          secretId={viewerFor.id}
+          secretId={viewerFor.login_secret_id ?? viewerFor.id}
           onClose={() => setViewerFor(null)}
           onEdit={() => {
             const a = viewerFor;
