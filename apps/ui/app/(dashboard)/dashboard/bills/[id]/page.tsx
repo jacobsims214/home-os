@@ -34,12 +34,13 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { Button, Menu, Skeleton } from "@mantine/core";
+import { Button, Menu, Skeleton, Switch } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import {
   IconArrowLeft,
   IconCheck,
   IconChevronDown,
+  IconCreditCard,
   IconDotsVertical,
   IconLock,
   IconPencil,
@@ -48,13 +49,14 @@ import {
   IconAlertTriangle,
 } from "@tabler/icons-react";
 import BillForm, { billToForm } from "@/components/bills/BillForm";
+import { AttentionBadge } from "@/components/bills/attention";
+import { PayeeCard } from "@/components/bills/payee";
 import MarkPaidSheet from "@/components/bills/MarkPaidSheet";
 import MoneyNoAccess from "@/components/bills/MoneyNoAccess";
 import EntityResources from "@/components/EntityResources";
 import LinkedLogin from "@/components/payment-accounts/LinkedLogin";
 import { PAYMENT_ACCOUNT_ENTITY } from "@/components/payment-accounts/entity";
 import {
-  accountLabel,
   useAccountCredentialFact,
   useLinkAccountSecret,
 } from "@/lib/payment-accounts/api";
@@ -71,6 +73,12 @@ import {
   useUpdateBill,
 } from "@/lib/bills/api";
 import {
+  accountLine,
+  accountSummary,
+  accountTypeLabel,
+  attentionHelp,
+  attentionNeedsAction,
+  attentionOf,
   dueLabel,
   dueWhen,
   formatMoney,
@@ -180,6 +188,31 @@ export default function BillPage() {
   const monthly = formatMoney(bill.frequency === "once" ? null : monthlyOf(bill));
   const isPaid = due?.status === "paid";
   const nextAfter = nextAfterPaying(due, bill.frequency);
+  // The API's answer to "what do I have to do about this bill?", and the account
+  // and payee it comes with. Nothing here re-derives the state from is_autopay:
+  // a bill whose switch is on but whose account is missing is `needs_setup`, and
+  // the API is the only thing that knows that.
+  const attention = attentionOf(bill);
+  const needsAction = attentionNeedsAction(attention);
+  const account = bill.payment_account ?? null;
+  const accountType = accountTypeLabel(account?.account_type);
+  const autopayOn = bill.autopay_enabled === true || bill.is_autopay === true;
+  const toggleAutopay = (next: boolean) => {
+    // Turning autopay OFF while an account is linked would leave the bill in the
+    // database's forbidden state (bills_autopay_account_check refuses an account
+    // on a non-autopay bill), so the account goes with it. Turning it ON leaves
+    // the account as it is; the API's answer comes back and the badge follows it.
+    const body: Record<string, unknown> = { is_autopay: next };
+    if (!next) body.autopay_account_id = null;
+    update.mutate(body, {
+      onSuccess: () => {
+        notifications.show({
+          message: next ? "Autopay turned on" : "Autopay turned off — you pay this one",
+          color: "teal",
+        });
+      },
+    });
+  };
 
   const saveEdit = (body: Record<string, unknown>) => {
     update.mutate(body, {
@@ -272,6 +305,13 @@ export default function BillPage() {
         <div className="flex min-w-0 flex-col gap-3 md:gap-4">
           {/* The big fact: when it is next due, and whether it is paid. */}
           <section className="rounded-token-md bg-accent-soft p-4" aria-labelledby="next-due" data-testid="bill-next-due">
+            {/* WHAT THE FAMILY HAS TO DO, from the API's attention field. On a
+                phone this is the first thing in the card, because "do I need to
+                do anything?" is the question the page exists to answer. */}
+            <div className="mb-2 flex flex-wrap items-center gap-2" data-testid="bill-attention">
+              <AttentionBadge bill={bill} />
+              <span className="text-[13px] leading-snug text-ink-2">{attentionHelp(attention)}</span>
+            </div>
             <span className="text-[13px] font-medium text-ink-2" id="next-due">
               {isPaid ? "Paid · next due" : due ? "Next due" : "Due date"}
             </span>
@@ -375,22 +415,27 @@ export default function BillPage() {
               {bill.frequency !== "once" && <Field label="Per month" value={monthly ?? "—"} numeric />}
               {bill.category && <Field label="Category" value={bill.category} />}
               {!bill.category && <Field label="Category" value="No category" />}
-              <Field label="Auto-pay" value={bill.is_autopay === true ? "On" : bill.is_autopay === false ? "Off" : "Not set"} />
+              <Field label="Auto-pay" value={autopayOn ? "On" : "Off"} />
               {subject && <Field label="For" value={`${subject.name} · ${subject.kind}`} />}
               {/*
                 The account this bill is paid from (#5498/#5506): name + last-4,
                 masked by the API. Absent for a role without money read, and
                 absent when no account is linked — so it is rendered only when
                 the API sent one, and it never says "no account" to a role that
-                may not be told.
+                may not be told. `accountLine` is the ONE place the masked line
+                is built, so the bills list and the accounts page cannot drift
+                apart on how a bank account is shown.
               */}
-              {bill.payment_account && (
+              {account && (
                 <Field
                   label="Paid from"
-                  value={accountLabel({
-                    name: bill.payment_account.name,
-                    last_four: bill.payment_account.last_four,
-                  })}
+                  value={
+                    <span data-testid="bill-account">
+                      {accountLine(account)}
+                      {accountType ? <span className="text-ink-3"> · {accountType}</span> : null}
+                      {account.institution ? <span className="block text-[13px] text-ink-3">{account.institution}</span> : null}
+                    </span>
+                  }
                 />
               )}
               {/*
@@ -400,12 +445,12 @@ export default function BillPage() {
                 (a viewer) — the account details are money, the login is a
                 credential, and they follow two different policies.
               */}
-              {bill.payment_account && (
+              {account && (
                 <div className="px-4 py-2 md:px-0">
                   <LinkedLogin
                     noun="bank login"
                     entityType={PAYMENT_ACCOUNT_ENTITY}
-                    entityId={bill.payment_account.id}
+                    entityId={account.id}
                     stored={accountLogin.stored}
                     secretId={accountLogin.secretId}
                     canEdit={access.canWrite && canSeeSecrets(role)}
@@ -413,7 +458,7 @@ export default function BillPage() {
                       access.canWrite && canSeeSecrets(role)
                         ? (secretId) =>
                             linkAccountSecret.mutateAsync({
-                              accountId: bill.payment_account!.id,
+                              accountId: account.id,
                               secretId,
                             })
                         : undefined
@@ -446,6 +491,64 @@ export default function BillPage() {
         </div>
 
         <div className="flex min-w-0 flex-col gap-3 md:gap-4">
+          {/* ── Autopay: the switch, and the account it draws on ──────────────
+              The switch is the WRITE (does this bill pay itself?); the badge in
+              the hero is the ANSWER (does anything actually pay it?). They are
+              not the same thing: a bill with autopay ON and no account on record
+              answers "needs_setup", and the line under the switch says so. */}
+          <section className="rounded-token-md border border-line bg-surface" aria-labelledby="autopay-heading" data-testid="bill-autopay">
+            <div className="flex items-start justify-between gap-3 px-4 pb-1 pt-3">
+              <div className="min-w-0">
+                <h2 className="m-0 text-[15px] font-semibold text-ink" id="autopay-heading">
+                  Pays itself
+                </h2>
+                <p className="m-0 mt-0.5 text-[13px] leading-snug text-ink-3">
+                  {needsAction ? "A person has to pay this one." : "Paid automatically — nothing for you to do."}
+                </p>
+              </div>
+              {access.canWrite ? (
+                // Mantine's own Switch, not components/ui/Switch: its `label`
+                // wraps the input and the words in one <label>, so the whole
+                // 44 px row is the hit area (the ui/Switch wrapper puts the
+                // words in a sibling span and only the ~20 px input toggles).
+                <Switch
+                  checked={autopayOn}
+                  disabled={update.isPending}
+                  onChange={(e) => toggleAutopay(e.currentTarget.checked)}
+                  label={
+                    <span className="text-[13px] font-medium text-ink-2" data-testid="autopay-label">
+                      Autopay<span className="sr-only"> for {bill.name}</span>
+                    </span>
+                  }
+                  classNames={{ root: "min-h-11 flex items-center gap-2 pt-1", label: "cursor-inherit" }}
+                  data-testid="autopay-toggle"
+                />
+              ) : (
+                <span className="shrink-0 pt-2 text-[13px] font-semibold text-ink-2">{autopayOn ? "On" : "Off"}</span>
+              )}
+            </div>
+            <div className="px-4 pb-3 pt-1" data-testid="bill-autopay-account">
+              {account ? (
+                <p className="m-0 flex items-start gap-2 text-[13px] leading-snug text-ink-2">
+                  <IconCreditCard size={15} stroke={ICON_STROKE} className="mt-0.5 shrink-0 text-ink-3" aria-hidden />
+                  <span>
+                    From <b className="font-semibold text-ink">{accountSummary(account)}</b>
+                    {accountType ? <span className="text-ink-3"> · {accountType}</span> : null}
+                  </span>
+                </p>
+              ) : (
+                <p className="m-0 text-[13px] leading-snug text-ink-3">
+                  {autopayOn
+                    ? "Autopay is on, but no account is linked yet — nothing will actually pay it. Add the account in the bill's edit form."
+                    : "No account on record. A person pays this one."}
+                </p>
+              )}
+            </div>
+          </section>
+
+          {/* Who we pay, how often, how much, and how to reach them. */}
+          <PayeeCard payee={bill.payee} cadence={scheduleLabel(bill)} amount={amount} frequency={frequencyLabel(bill.frequency)} />
+
           {/* The last payment, as stored */}
           <section className="rounded-token-md border border-line bg-surface" aria-label="Last payment">
             <h3 className="m-0 flex min-h-12 items-center px-4 text-[15px] font-semibold text-ink-2">Last payment</h3>

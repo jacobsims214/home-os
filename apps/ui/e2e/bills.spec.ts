@@ -27,18 +27,30 @@ const HOUSEHOLDS = (role: string) => ({
 });
 
 /** Electric is PAID for Nov 22; Water is UNPAID and due in two days. */
+/**
+ * Electric is PAID for Nov 22 and pays itself from the joint account; Water is
+ * UNPAID and a person has to pay it. The `attention` field is what tells the UI
+ * which is which (#5499) — `is_autopay` is only the switch, and the row must
+ * never read it to decide. The payees carry the contact details the family
+ * needs to reach them.
+ */
 const BILLS = [
   {
     id: "b-electric", name: "Electric", amount: "164.00", due_day: 22, frequency: "monthly", due_date: null,
-    category: "Electric", is_autopay: false, property_id: null, vehicle_id: null, asset_id: null,
+    category: "Electric", is_autopay: true, autopay_enabled: true, property_id: null, vehicle_id: null, asset_id: null,
     account_number: null, payment_url: null, notes: null,
     paid_date: "2026-11-18", paid_for_due_date: "2026-11-22",
+    attention: "automatic",
+    payment_account: { id: "pa1", name: "Joint checking", institution: "Riverside Credit Union", last_four: "4242", account_type: "checking" },
+    payee: { vendor_id: "v1", name: "Riverside Power", phones: ["555-0142"], email: "billing@riversidepower.example", website: "https://riversidepower.example" },
   },
   {
     id: "b-water", name: "Water & sewer", amount: "186.00", due_day: null, frequency: "quarterly", due_date: "2026-11-20",
-    category: "Water", is_autopay: false, property_id: null, vehicle_id: null, asset_id: null,
+    category: "Water", is_autopay: false, autopay_enabled: false, property_id: null, vehicle_id: null, asset_id: null,
     account_number: null, payment_url: null, notes: null,
     paid_date: null, paid_for_due_date: null,
+    attention: "due_soon",
+    payee: { vendor_id: "v2", name: "Riverside Water Authority", phones: ["555-0177"], email: null, website: null },
   },
 ];
 
@@ -146,6 +158,34 @@ for (const colorScheme of ["light", "dark"] as const) {
         const box = (await main.locator(`[data-bill-row="${row}"]`).boundingBox())!;
         expect(box.height).toBeGreaterThanOrEqual(43.5);
       }
+
+      // THE HEADLINE NUMBER, split by what the family has to do: the monthly
+      // total, and how much of it is on autopay. Electric $164 monthly is
+      // automatic; Water $186 quarterly spreads to $62/month and is manual.
+      const split = main.getByTestId("bills-split");
+      await expect(split).toContainText("$226.00/month");
+      await expect(split).toContainText("of which $164.00 is on autopay");
+      await expect(main.getByTestId("bills-actions")).toContainText("1 needs you");
+
+      // AUTOMATIC VS MANUAL, AT A GLANCE: the badge is the API's `attention`
+      // field, not a guess from `is_autopay`.
+      const auto = main.locator('[data-bill-row="b-electric"]');
+      await expect(auto).toHaveAttribute("data-attention", "automatic");
+      await expect(auto.getByText("Automatic", { exact: true })).toBeVisible();
+      const manual = main.locator('[data-bill-row="b-water"]');
+      await expect(manual).toHaveAttribute("data-attention", "due_soon");
+      await expect(manual.getByText("Due soon", { exact: true })).toBeVisible();
+
+      // WHICH ACCOUNT, name + last four and never a full number.
+      await expect(auto).toContainText("Joint checking ····4242");
+      await expect(auto).not.toContainText("4242424242424242");
+      // The manual bill has no autopay account, so its row shows none.
+      await expect(manual).not.toContainText("····");
+
+      // WHO WE PAY, and tap-to-call on a phone.
+      await expect(auto).toContainText("Riverside Power");
+      await expect(manual).toContainText("Riverside Water Authority");
+      await expect(manual.getByRole("link", { name: /Call Riverside Water Authority/ })).toHaveAttribute("href", "tel:5550177");
       await expectNoHorizontalOverflow(page);
       await snap(page, testInfo, `bills-390-${colorScheme}`, true);
     });
@@ -289,6 +329,79 @@ test("phone 390: adding a bill posts the monthly schedule and no due_date", asyn
   expect(body).not.toHaveProperty("due_date");
 });
 
+test("phone 390: a bill's detail says who pays it, from which account, and how to reach the payee", async ({ loggedInPage: page }, testInfo: TestInfo) => {
+  onlyOn("phone");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubBillsApi(page);
+  await page.goto("/dashboard/bills/b-electric");
+  const main = page.locator("main");
+
+  // The API's answer, in the hero, with the sentence that explains it.
+  const attention = main.getByTestId("bill-attention");
+  await expect(attention).toContainText("Automatic");
+  await expect(attention).toContainText("nothing to do");
+
+  // The switch, and the account it draws on — name + last four only.
+  const autopay = main.getByTestId("bill-autopay");
+  await expect(autopay).toContainText("Pays itself");
+  await expect(autopay.getByTestId("bill-autopay-account")).toContainText("Joint checking ····4242");
+  await expect(autopay.getByTestId("bill-autopay-account")).toContainText("Riverside Credit Union");
+  await expect(main).not.toContainText("4242424242424242");
+  await expect(autopay.getByRole("switch", { name: /Autopay for Electric/ })).toBeChecked();
+
+  // The payee card: who, how often, how much, and how to reach them.
+  const payee = main.getByTestId("payee-card");
+  await expect(payee).toContainText("Riverside Power");
+  await expect(payee).toContainText("$164.00");
+  await expect(payee.getByRole("link", { name: /Call Riverside Power/ })).toHaveAttribute("href", "tel:5550142");
+  await expect(payee.getByRole("link", { name: /Email Riverside Power/ })).toHaveAttribute("href", "mailto:billing@riversidepower.example");
+  await expect(payee.getByRole("link", { name: /Open Riverside Power's website/ })).toHaveAttribute("href", "https://riversidepower.example");
+  // Every action is a 44 px target on a phone.
+  for (const action of ["call", "email", "website"]) {
+    const a = payee.locator(`[data-payee-action="${action}"]`);
+    const b = (await a.boundingBox())!;
+    expect(b.height).toBeGreaterThanOrEqual(43.5);
+  }
+  await expectNoHorizontalOverflow(page);
+  await snap(page, testInfo, "bill-detail-automatic-390", true);
+});
+
+test("phone 390: turning autopay off sends the switch and the account goes with it", async ({ loggedInPage: page }, testInfo: TestInfo) => {
+  onlyOn("phone");
+  await page.setViewportSize({ width: 390, height: 844 });
+  const writes = await stubBillsApi(page);
+  await page.goto("/dashboard/bills/b-electric");
+  const main = page.locator("main");
+  const autopay = main.getByTestId("bill-autopay");
+  await expect(autopay.getByRole("switch", { name: /Autopay for Electric/ })).toBeChecked();
+  // The label is the hit area (Mantine's Switch wraps input + words in one
+  // <label>), so a tap on the words toggles it — the 44 px target the phone
+  // needs. The input itself is visually hidden, as all Mantine switches are.
+  await autopay.getByTestId("autopay-label").click();
+  // The write carries the switch, and clears the account with it: the database
+  // refuses an account on a bill that does not pay itself
+  // (bills_autopay_account_check), so leaving it behind would be a 400.
+  await expect.poll(() => writes.length).toBeGreaterThan(0);
+  const put = writes.find((w) => w.method === "PUT")!;
+  expect(put.body).toMatchObject({ is_autopay: false, autopay_account_id: null });
+});
+
+test("phone 390: a manual bill's detail says a person pays it, and offers no account", async ({ loggedInPage: page }, testInfo: TestInfo) => {
+  onlyOn("phone");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubBillsApi(page);
+  await page.goto("/dashboard/bills/b-water");
+  const main = page.locator("main");
+  await expect(main.getByTestId("bill-attention")).toContainText("Due soon");
+  await expect(main.getByTestId("bill-attention")).toContainText("You pay this one");
+  const autopay = main.getByTestId("bill-autopay");
+  await expect(autopay.getByTestId("bill-autopay-account")).toContainText("No account on record");
+  await expect(autopay.getByRole("switch", { name: /Autopay for Water/ })).not.toBeChecked();
+  await expect(main.getByTestId("payee-card")).toContainText("Riverside Water Authority");
+  await expectNoHorizontalOverflow(page);
+  await snap(page, testInfo, "bill-detail-manual-390", true);
+});
+
 test("desktop 1440: the list and the detail use the wider layout", async ({ loggedInPage: page }, testInfo: TestInfo) => {
   onlyOn("desktop");
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -301,6 +414,10 @@ test("desktop 1440: the list and the detail use the wider layout", async ({ logg
   await expect(main.getByTestId("bills-table")).toBeVisible();
   await expect(main.locator('[data-bill-table-row="b-electric"]')).toHaveAttribute("data-due-state", "paid");
   await expect(main.locator('[data-bill-table-row="b-water"]')).toContainText("Nov 20");
+  // The attention column says who pays each one, in the table as on the phone.
+  await expect(main.locator('[data-bill-table-row="b-electric"]')).toHaveAttribute("data-attention", "automatic");
+  await expect(main.locator('[data-bill-table-row="b-water"]')).toHaveAttribute("data-attention", "due_soon");
+  await expect(main.locator('[data-bill-table-row="b-electric"]')).toContainText("Joint checking ····4242");
   await expect(main.locator('[data-bill-table-row="b-water"]')).toContainText("in 2 days");
   // Earliest first in the table too.
   const tableOrder = await main

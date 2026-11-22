@@ -37,6 +37,49 @@
 
 export type BillFrequency = "monthly" | "quarterly" | "semiannual" | "annual" | "once";
 
+/**
+ * The four states of the ONE attention rule (`billdue.AttentionFor`, #5498),
+ * as the API sends them in `attention`.
+ *
+ * THE UI NEVER DERIVES THESE FROM `is_autopay`. A bill that says it pays itself
+ * but has no account on record is NOT automatic — it is `needs_setup`, and the
+ * family has to act. Re-deriving that here would be the second copy of the rule
+ * this codebase keeps deleting (KB architecture/bill-attention-rule.md; worker
+ * standing instructions §6, "one rule, one home"). If a component is about to
+ * write `if (autopay)`, it is wrong: read `attention`.
+ */
+export type Attention = "automatic" | "needs_setup" | "due_soon" | "overdue";
+
+/**
+ * The payment account a bill draws on, as the API serializes it (075).
+ * `last_four` is four digits and nothing else: `payment_accounts` has no column
+ * for a full number, so there is nothing longer to leak. The key is absent
+ * entirely for a role without money — the API omits it rather than blanking it,
+ * so "no account" and "not allowed to see the account" are the same shape here
+ * and the UI must never read the absence as "there is no account".
+ */
+export interface PaymentAccountRef {
+  id: string;
+  name: string;
+  institution?: string | null;
+  last_four?: string | null;
+  account_type?: string | null;
+}
+
+/**
+ * Who a bill is paid to (075). `vendor_id` is present only when the payee is a
+ * vendors row; a free-text payee has a name and no contact details, because
+ * there is nowhere to keep them. `phones` is a list in JSON although
+ * `vendors.phone` is one column, so the field can grow without a rename.
+ */
+export interface Payee {
+  vendor_id?: string | null;
+  name: string;
+  phones?: string[] | null;
+  email?: string | null;
+  website?: string | null;
+}
+
 /** A row of GET /api/v1/bills. Every field the pages use; all optional but id/name. */
 export interface Bill {
   id: string;
@@ -53,30 +96,21 @@ export interface Bill {
   asset_id?: string | null;
   vendor_id?: string | null;
   is_autopay?: boolean | null;
+  /**
+   * bills.is_autopay under the name the UI reads (#5498). This is the SWITCH
+   * ("pay this one itself?"), not the answer ("does anything actually pay it?").
+   * The answer is `attention`.
+   */
+  autopay_enabled?: boolean;
+  /** The account an autopay bill draws on. Absent when hidden or unlinked. */
+  payment_account?: PaymentAccountRef | null;
+  /** Who is paid. Present for every role that may read the bill (vendors are not money). */
+  payee?: Payee | null;
+  /** The ONE rule's answer: automatic | needs_setup | due_soon | overdue. */
+  attention?: Attention | string;
   account_number?: string | null;
   payment_url?: string | null;
   notes?: string | null;
-  /**
-   * The account this bill is paid from, as the API serializes it: name,
-   * institution, type and the LAST FOUR digits (#5498/#5506). Absent for a
-   * role without money read, and absent when no account is linked — the
-   * account's secret link is never a bill field.
-   */
-  payment_account?: {
-    id: string;
-    name: string;
-    institution?: string;
-    last_four?: string;
-    account_type: string;
-  } | null;
-  /** Who is paid: a vendors row (id) or a free-text name, plus contact details. */
-  payee?: {
-    vendor_id?: string;
-    name: string;
-    phones?: string[];
-    email?: string;
-    website?: string;
-  } | null;
   /** The last payment, as stored (written by the MCP bill_pay). */
   paid_date?: string | null;
   /** The due date that payment covers (migration 052). */
@@ -251,6 +285,200 @@ export function monthlyAmount(bill: Pick<Bill, "amount" | "frequency">): number 
 /** The total the list header states: the monthly spread of the bills shown. */
 export function monthlyTotal(bills: readonly Pick<Bill, "amount" | "frequency">[]): number {
   return bills.reduce((sum, b) => sum + monthlyAmount(b), 0);
+}
+
+// ── the attention field: what the family has to do ───────────
+//
+// The API answers "what do I have to do about this bill?" in ONE field,
+// `attention` (billdue.AttentionFor, #5498). These helpers present that answer;
+// they never recompute it. There is deliberately no `if (bill.is_autopay)`
+// anywhere in the UI: a bill whose autopay is switched on but which has no
+// account on record is NOT automatic — it is `needs_setup`, and the family has
+// to fix it. That trap is exactly why the field exists.
+
+/** The four states, in the order the API ranks them (most urgent first). */
+export const ATTENTION_ORDER: readonly Attention[] = ["overdue", "needs_setup", "due_soon", "automatic"];
+
+/** What each state is called on screen. Short: it sits in a badge at 390px. */
+export const ATTENTION_LABELS: Record<Attention, string> = {
+  automatic: "Automatic",
+  needs_setup: "Needs setup",
+  due_soon: "Due soon",
+  overdue: "Overdue",
+};
+
+/** The one-line explanation under a badge, in the family's words. */
+export const ATTENTION_HELP: Record<Attention, string> = {
+  automatic: "Paid automatically — nothing to do.",
+  needs_setup: "Nothing pays this yet — set up autopay or pay it yourself.",
+  due_soon: "You pay this one — it's coming up.",
+  overdue: "You pay this one — it's past due.",
+};
+
+/**
+ * The bill's attention state, or null when the API did not send one.
+ *
+ * Null is NOT "automatic": an older payload, or a hidden field, must not read
+ * as "nothing to do". The caller renders the unknown state as unknown.
+ */
+export function attentionOf(bill: Pick<Bill, "attention">): Attention | null {
+  const a = bill.attention;
+  return a === "automatic" || a === "needs_setup" || a === "due_soon" || a === "overdue" ? a : null;
+}
+
+/**
+ * Whether the family has to do something about this bill. True for
+ * `needs_setup`, `due_soon` and `overdue`; false for `automatic`, and false for
+ * an unknown state (the UI must not promise "nothing to do" it cannot back up).
+ *
+ * This is a grouping of the API's four answers, not a second derivation: the
+ * only question asked here is "did the API say automatic?", never "is autopay
+ * on?".
+ */
+export function attentionNeedsAction(attention: Attention | null | undefined): boolean {
+  return attention === "needs_setup" || attention === "due_soon" || attention === "overdue";
+}
+
+/** The badge's colour role. `auto` reads as calm, `action` as "you, now". */
+export type AttentionTone = "auto" | "action" | "warn" | "danger" | "unknown";
+
+export function attentionTone(attention: Attention | null | undefined): AttentionTone {
+  switch (attention) {
+    case "automatic":
+      return "auto";
+    case "needs_setup":
+      return "action";
+    case "due_soon":
+      return "warn";
+    case "overdue":
+      return "danger";
+    default:
+      return "unknown";
+  }
+}
+
+/** The label for a badge; "Unknown" when the API sent no state. */
+export function attentionLabel(attention: Attention | null | undefined): string {
+  return attention ? ATTENTION_LABELS[attention] : "Unknown";
+}
+
+/** The one-line explanation for a state; a neutral sentence when unknown. */
+export function attentionHelp(attention: Attention | null | undefined): string {
+  return attention ? ATTENTION_HELP[attention] : "This bill's state is not known yet.";
+}
+
+// ── the payment account ──────────────────────────────────────
+
+/**
+ * The account a bill draws on, as a family reads it: "Joint checking ····1234".
+ *
+ * NEVER a full number. `last_four` is the only account digits the API has
+ * (payment_accounts has no column for more), and this renders at most four.
+ * Null when the bill has no account on record — or when the role may not see
+ * one, which the API expresses by omitting the key. The caller decides which of
+ * those two it is; this function only formats.
+ */
+export function accountLine(account: PaymentAccountRef | null | undefined): string | null {
+  if (!account) return null;
+  const name = (account.name ?? "").trim();
+  // Slice to the last four even though the API promises exactly four: this
+  // function is the one place a full number could reach the screen, and the
+  // promise is not worth trusting with a bank account. A longer string can
+  // only ever lose digits here, never gain them.
+  const last4 = (account.last_four ?? "").trim().slice(-4);
+  if (name && last4) return `${name} ····${last4}`;
+  if (name) return name;
+  if (last4) return `····${last4}`;
+  return null;
+}
+
+/** The account with its institution: "Riverside Credit Union · Joint checking ····1234". */
+export function accountSummary(account: PaymentAccountRef | null | undefined): string | null {
+  if (!account) return null;
+  const line = accountLine(account);
+  const institution = (account.institution ?? "").trim();
+  if (institution && line) return `${institution} · ${line}`;
+  return line;
+}
+
+/** What kind of account it is, in words: "Checking", "Savings", "Credit card", "Other". */
+export function accountTypeLabel(type: string | null | undefined): string | null {
+  switch ((type ?? "").trim()) {
+    case "checking":
+      return "Checking";
+    case "savings":
+      return "Savings";
+    case "credit_card":
+      return "Credit card";
+    case "other":
+      return "Other";
+    default:
+      return null;
+  }
+}
+
+// ── the split a household actually wants ─────────────────────
+
+export interface AttentionSplit {
+  /** The monthly spread of every bill in the set. */
+  monthly: number;
+  /** The part of it that pays itself (the API's `automatic`). */
+  automatic: number;
+  /** The part the family has to pay (needs_setup, due_soon, overdue, unknown). */
+  manual: number;
+  /** How many bills are in each part. */
+  automaticCount: number;
+  manualCount: number;
+}
+
+/**
+ * The monthly total split by what the family has to do, keyed on the API's
+ * `attention` — never on `is_autopay`.
+ *
+ * "The number a household actually wants" is "$2,595/month, of which $2,340 is
+ * on autopay". The arithmetic is `monthlyAmount`'s, the grouping is
+ * `attention`'s; this function only adds them up, so the spread rule stays in
+ * one place.
+ */
+export function attentionSplit(bills: readonly Pick<Bill, "amount" | "frequency" | "attention">[]): AttentionSplit {
+  const split: AttentionSplit = { monthly: 0, automatic: 0, manual: 0, automaticCount: 0, manualCount: 0 };
+  for (const bill of bills) {
+    const perMonth = monthlyAmount(bill);
+    split.monthly += perMonth;
+    if (attentionOf(bill) === "automatic") {
+      split.automatic += perMonth;
+      split.automaticCount += 1;
+    } else {
+      split.manual += perMonth;
+      split.manualCount += 1;
+    }
+  }
+  return split;
+}
+
+/**
+ * The sentence the header states: "$2,595/month, of which $2,340 is on autopay."
+ * Null when there is nothing to total (no bills, or no amounts on any of them),
+ * so a page never prints "$0/month".
+ */
+export function splitSentence(split: AttentionSplit): string | null {
+  if (split.monthly <= 0) return null;
+  const total = formatMoney(split.monthly);
+  if (!total) return null;
+  if (split.automatic <= 0) return `${total}/month, none of it on autopay`;
+  if (split.manual <= 0) return `${total}/month, all of it on autopay`;
+  const auto = formatMoney(split.automatic);
+  return `${total}/month, of which ${auto} is on autopay`;
+}
+
+/**
+ * How many bills the family has to act on, in the words the list header uses.
+ * "Nothing to do" is only said when the API said `automatic` for every bill.
+ */
+export function actionCountLabel(split: AttentionSplit): string {
+  if (split.manualCount === 0) return "Nothing to do";
+  if (split.manualCount === 1) return "1 needs you";
+  return `${split.manualCount} need you`;
 }
 
 export interface SubjectNames {

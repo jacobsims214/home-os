@@ -9,10 +9,23 @@
 //  5. The role policy: housesitter/vendor see no money; a viewer reads and
 //     cannot write.
 //  6. The form's schedule rule (migration 044) and the subject rule.
+//  7. The attention field (#5499): what the family has to do comes from the
+//     API's `attention`, never from `is_autopay`. The split the header states
+//     is grouped by that field, and an account renders as name + last four
+//     only — never a full number.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  accountLine,
+  accountSummary,
+  accountTypeLabel,
+  actionCountLabel,
   addPeriods,
+  attentionLabel,
+  attentionNeedsAction,
+  attentionOf,
+  attentionSplit,
+  attentionTone,
   canSeeMoney,
   canWriteMoney,
   dayMonth,
@@ -34,6 +47,7 @@ import {
   roleKnown,
   scheduleBody,
   scheduleLabel,
+  splitSentence,
   subjectBody,
   subjectKindOf,
   subjectLabel,
@@ -312,4 +326,122 @@ test("a frequency filter keeps only its own bills", () => {
   assert.deepEqual(filterRows(rows, "annual").map((r) => r.bill.id), ["2"]);
   assert.equal(filterRows(rows, "all").length, 2);
   assert.equal(filterRows(rows, "quarterly").length, 0);
+});
+
+// ── 7. the attention field (#5499) ───────────────────────────
+//
+// The four states are the API's (billdue.AttentionFor, #5498). Every case here
+// is about NOT re-deriving them: a bill whose autopay switch is on but whose
+// account is missing is `needs_setup`, and the UI must group it with the bills
+// the family has to pay — not with the automatic ones.
+
+test("the attention state is read from the API, never from is_autopay", () => {
+  // autopay switched on, but nothing on record to pay from: the API's trap case.
+  const trap = bill({ id: "t", is_autopay: true, autopay_enabled: true, attention: "needs_setup" });
+  assert.equal(attentionOf(trap), "needs_setup");
+  assert.equal(attentionNeedsAction(attentionOf(trap)), true);
+
+  // A bill with autopay OFF that the API still calls automatic (e.g. a loan
+  // servicer that debits it): the API's answer wins, the switch does not.
+  const automatic = bill({ id: "a", is_autopay: false, autopay_enabled: false, attention: "automatic" });
+  assert.equal(attentionOf(automatic), "automatic");
+  assert.equal(attentionNeedsAction(attentionOf(automatic)), false);
+});
+
+test("a bill with no attention field is unknown, and unknown is not 'nothing to do'", () => {
+  const unknown = bill({ id: "u" });
+  assert.equal(attentionOf(unknown), null);
+  assert.equal(attentionNeedsAction(attentionOf(unknown)), false);
+  assert.equal(attentionLabel(attentionOf(unknown)), "Unknown");
+  assert.equal(attentionTone(attentionOf(unknown)), "unknown");
+  // A nonsense value from an older/newer API is unknown too, not a crash.
+  assert.equal(attentionOf(bill({ attention: "later" })), null);
+});
+
+test("each state gets its own tone and label", () => {
+  assert.equal(attentionTone("automatic"), "auto");
+  assert.equal(attentionTone("needs_setup"), "action");
+  assert.equal(attentionTone("due_soon"), "warn");
+  assert.equal(attentionTone("overdue"), "danger");
+  assert.equal(attentionLabel("automatic"), "Automatic");
+  assert.equal(attentionLabel("needs_setup"), "Needs setup");
+  assert.equal(attentionLabel("due_soon"), "Due soon");
+  assert.equal(attentionLabel("overdue"), "Overdue");
+});
+
+test("the monthly split groups by attention, not by the autopay switch", () => {
+  const split = attentionSplit([
+    // $2,340/month on autopay…
+    { id: "1", amount: "2340.00", frequency: "monthly", attention: "automatic" },
+    // …and $255/month the family pays by hand.
+    { id: "2", amount: "255.00", frequency: "monthly", attention: "due_soon" },
+    // A quarterly bill spreads to $50/month, and it is manual.
+    { id: "3", amount: "150.00", frequency: "quarterly", attention: "needs_setup" },
+    // A once bill contributes nothing to a monthly total.
+    { id: "4", amount: "400.00", frequency: "once", attention: "overdue" },
+  ]);
+  assert.equal(Math.round(split.monthly), 2645);
+  assert.equal(Math.round(split.automatic), 2340);
+  assert.equal(Math.round(split.manual), 305);
+  assert.equal(split.automaticCount, 1);
+  assert.equal(split.manualCount, 3);
+});
+
+test("the split sentence reads the way a household says it", () => {
+  const split = attentionSplit([
+    { id: "1", amount: "2340.00", frequency: "monthly", attention: "automatic" },
+    { id: "2", amount: "255.00", frequency: "monthly", attention: "due_soon" },
+  ]);
+  assert.equal(splitSentence(split), "$2,595.00/month, of which $2,340.00 is on autopay");
+
+  // Every bill automatic: say so, do not trail off with "of which".
+  const allAuto = attentionSplit([{ id: "1", amount: "40.00", frequency: "monthly", attention: "automatic" }]);
+  assert.equal(splitSentence(allAuto), "$40.00/month, all of it on autopay");
+
+  // None automatic: say so too.
+  const noneAuto = attentionSplit([{ id: "1", amount: "40.00", frequency: "monthly", attention: "overdue" }]);
+  assert.equal(splitSentence(noneAuto), "$40.00/month, none of it on autopay");
+
+  // Nothing to total: no sentence at all, rather than "$0.00".
+  assert.equal(splitSentence(attentionSplit([])), null);
+  assert.equal(splitSentence(attentionSplit([{ id: "1", amount: null, frequency: "monthly", attention: "due_soon" }])), null);
+});
+
+test("the action count counts bills the family must act on, and says nothing when there are none", () => {
+  assert.equal(actionCountLabel(attentionSplit([{ id: "1", amount: "1", frequency: "monthly", attention: "automatic" }])), "Nothing to do");
+  assert.equal(actionCountLabel(attentionSplit([{ id: "1", amount: "1", frequency: "monthly", attention: "due_soon" }])), "1 needs you");
+  assert.equal(
+    actionCountLabel(
+      attentionSplit([
+        { id: "1", amount: "1", frequency: "monthly", attention: "due_soon" },
+        { id: "2", amount: "1", frequency: "monthly", attention: "overdue" },
+        { id: "3", amount: "1", frequency: "monthly", attention: "automatic" },
+      ]),
+    ),
+    "2 need you",
+  );
+});
+
+test("an account renders as name and last four, never a full number", () => {
+  const account = { id: "a1", name: "Joint checking", institution: "Riverside Credit Union", last_four: "4242", account_type: "checking" };
+  assert.equal(accountLine(account), "Joint checking ····4242");
+  assert.equal(accountSummary(account), "Riverside Credit Union · Joint checking ····4242");
+  // A name without digits is still useful; digits without a name still render.
+  assert.equal(accountLine({ id: "a2", name: "Savings" }), "Savings");
+  assert.equal(accountLine({ id: "a3", name: "", last_four: "1234" }), "····1234");
+  // Nothing at all (no account, or a hidden one) renders nothing.
+  assert.equal(accountLine(null), null);
+  assert.equal(accountLine(undefined), null);
+  assert.equal(accountSummary(null), null);
+  assert.equal(accountTypeLabel("checking"), "Checking");
+  assert.equal(accountTypeLabel("credit_card"), "Credit card");
+  assert.equal(accountTypeLabel(""), null);
+});
+
+test("an account line can never carry more than four digits", () => {
+  // The API sends last_four only, but if a longer string ever arrived the line
+  // must not print it — the whole point is that a full number cannot appear.
+  const leaky = { id: "a1", name: "Joint checking", last_four: "424212345678" };
+  const line = accountLine(leaky);
+  assert.equal(line.includes("424212345678"), false);
 });
