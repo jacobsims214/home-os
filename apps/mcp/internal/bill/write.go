@@ -116,22 +116,6 @@ func contactExists(ctx context.Context, tx pgx.Tx, id uuid.UUID, householdID str
 	return exists, err
 }
 
-// writeOutbox records the event the API writes for the same change, so
-// outbox consumers see agent changes too.
-func writeOutbox(ctx context.Context, tx pgx.Tx, eventType, householdID string, payload map[string]string) error {
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal %s event: %w", eventType, err)
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO outbox_events (type, payload, household_id) VALUES ($1, $2, $3)`,
-		eventType, b, householdID,
-	); err != nil {
-		return fmt.Errorf("write %s event: %w", eventType, err)
-	}
-	return nil
-}
-
 // NewBillCreateTool creates the bill_create MCP tool (catalog v2, class C),
 // replacing the S1 working name create_bill.
 //
@@ -280,10 +264,6 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		}
 
 		if _, err := syncBillEvent(ctx, tx, claims.HouseholdID, r); err != nil {
-			return respond.Failed("create the bill", err), nil
-		}
-		if err := writeOutbox(ctx, tx, "bill.created", claims.HouseholdID,
-			map[string]string{"id": r.ID.String(), "name": r.Name}); err != nil {
 			return respond.Failed("create the bill", err), nil
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -534,10 +514,6 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		if _, err := syncBillEvent(ctx, tx, claims.HouseholdID, r); err != nil {
 			return respond.Failed("update the bill", err), nil
 		}
-		if err := writeOutbox(ctx, tx, "bill.updated", claims.HouseholdID,
-			map[string]string{"id": r.ID.String(), "name": r.Name}); err != nil {
-			return respond.Failed("update the bill", err), nil
-		}
 		if err := tx.Commit(ctx); err != nil {
 			return respond.Failed("update the bill", err), nil
 		}
@@ -618,12 +594,6 @@ func NewBillDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return respond.Failed("delete the bill", err), nil
 		}
 
-		// Same event type the API writes on bill delete; name added for
-		// consumers that want it without a lookup (the row is gone).
-		if err := writeOutbox(ctx, tx, "bill.deleted", claims.HouseholdID,
-			map[string]string{"id": r.ID.String(), "name": r.Name}); err != nil {
-			return respond.Failed("delete the bill", err), nil
-		}
 		if err := tx.Commit(ctx); err != nil {
 			return respond.Failed("delete the bill", err), nil
 		}
@@ -753,13 +723,6 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 			}
 			r.PaidDate, r.PaidFor = &paid, target
 
-			// The row changed, so write the event the API writes on any bill
-			// update; paid_date tells consumers what changed.
-			if err := writeOutbox(ctx, tx, "bill.updated", claims.HouseholdID, map[string]string{
-				"id": r.ID.String(), "name": r.Name, "paid_date": paid.Format(time.DateOnly),
-			}); err != nil {
-				return respond.Failed("record the payment", err), nil
-			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
