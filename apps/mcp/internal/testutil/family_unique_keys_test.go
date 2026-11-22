@@ -193,6 +193,13 @@ func TestFamilyUniqueKeys084_Scope(t *testing.T) {
 // remove exactly the 12 keys and nothing else; the up must put them back. Data
 // is untouched either way — the keys are redundant over the primary key — so
 // the seeded rows are asserted to be still there.
+//
+// Since 090 (#5519) the keys have DEPENDANTS: 18 composite FKs reference
+// (id, household_id) on these tables, so 084's down cannot drop them on its
+// own. That is not a defect — golang-migrate would run 090's down first, going
+// back from head to 083 — so this walk takes 090 down before 084 and puts 090
+// back up after, exactly the order a real down-chain uses. Walking 084 down
+// under a 090 schema is not a state that can exist.
 func TestFamilyUniqueKeys084_Reversible(t *testing.T) {
 	pool := NewPool(t)
 	f := seedV2Family(t, pool)
@@ -213,6 +220,9 @@ func TestFamilyUniqueKeys084_Reversible(t *testing.T) {
 	mustExec(t, pool, `INSERT INTO assets (household_id, name) VALUES ($1, 'Furnace')`, f.household)
 
 	for cycle := 0; cycle < 2; cycle++ {
+		// 090's composite FKs reference these keys: take them down first, as
+		// the real down-chain (090 -> 084) does.
+		applyMigration(t, pool, "090_family_composite_fks.down.sql")
 		applyMigration(t, pool, "084_family_unique_keys.down.sql")
 		wantKey(t, false)
 
@@ -232,6 +242,7 @@ func TestFamilyUniqueKeys084_Reversible(t *testing.T) {
 
 		applyMigration(t, pool, "084_family_unique_keys.up.sql")
 		wantKey(t, true)
+		applyMigration(t, pool, "090_family_composite_fks.up.sql")
 	}
 
 	// The seeded rows are the same rows: a unique key cannot have deleted them.
