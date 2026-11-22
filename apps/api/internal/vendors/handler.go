@@ -3,6 +3,7 @@ package vendors
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
@@ -127,12 +129,22 @@ type vendorResponse struct {
 	Website   *string  `json:"website,omitempty"`
 	Address   *string  `json:"address,omitempty"`
 	Notes     *string  `json:"notes,omitempty"`
-	CreatedAt string   `json:"created_at"`
-	UpdatedAt string   `json:"updated_at"`
+	// PortalLoginStored says a payee portal login is on file for this vendor
+	// (075, #5497). It is the credential fact only -- never the uuid, never the
+	// username, never the password -- and it is ABSENT for a role the credential
+	// policy excludes (a viewer, a housesitter, a vendor), so the response
+	// cannot be used to tell "no login" from "not allowed to know".
+	PortalLoginStored *bool `json:"portal_login_stored,omitempty"`
+	// PortalSecretID is the linked credential's ID (never a credential): the
+	// handle the vault needs to open it. Same credential gate as
+	// PortalLoginStored, so it is absent for a viewer.
+	PortalSecretID *string `json:"portal_secret_id,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
 }
 
-func toVendorResponse(v *Vendor) vendorResponse {
-	return vendorResponse{
+func toVendorResponse(v *Vendor, role string) vendorResponse {
+	r := vendorResponse{
 		ID:          v.ID.String(),
 		HouseholdID: v.HouseholdID.String(),
 		Name:        v.Name,
@@ -147,12 +159,25 @@ func toVendorResponse(v *Vendor) vendorResponse {
 		CreatedAt:   v.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   v.UpdatedAt.Format(time.RFC3339),
 	}
+	// The credential fact follows the EXISTING credential policy --
+	// auth.ResSecrets, which is family only -- asked through auth.Can rather
+	// than by naming roles here. A viewer reads vendors (ResVendors) and must
+	// still not learn that a portal login exists.
+	if auth.Can(role, auth.ResSecrets, auth.ActRead) {
+		stored := v.PortalSecretID != nil
+		r.PortalLoginStored = &stored
+		if v.PortalSecretID != nil {
+			id := v.PortalSecretID.String()
+			r.PortalSecretID = &id
+		}
+	}
+	return r
 }
 
-func toVendorResponses(vendors []*Vendor) []vendorResponse {
+func toVendorResponses(vendors []*Vendor, role string) []vendorResponse {
 	out := make([]vendorResponse, 0, len(vendors))
 	for _, v := range vendors {
-		out = append(out, toVendorResponse(v))
+		out = append(out, toVendorResponse(v, role))
 	}
 	return out
 }
@@ -211,7 +236,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
-		"data": toVendorResponses(vendors),
+		"data": toVendorResponses(vendors, middleware.Role(r)),
 	})
 }
 
@@ -241,7 +266,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
-		"data": toVendorResponse(vendor),
+		"data": toVendorResponse(vendor, middleware.Role(r)),
 	})
 }
 
@@ -302,7 +327,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	h.indexVendor(r.Context(), created)
 
 	apierr.JSON(w, http.StatusCreated, map[string]any{
-		"data": toVendorResponse(created),
+		"data": toVendorResponse(created, middleware.Role(r)),
 	})
 }
 
@@ -377,7 +402,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	h.indexVendor(r.Context(), updated)
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
-		"data": toVendorResponse(updated),
+		"data": toVendorResponse(updated, middleware.Role(r)),
 	})
 }
 
@@ -536,4 +561,56 @@ func normalizeTrades(in []string) ([]string, string) {
 		return nil, "at most 20 trades per vendor"
 	}
 	return out, ""
+}
+
+// LinkPortalSecret attaches or detaches the payee portal login for a vendor.
+// PUT /api/v1/vendors/{id}/portal-secret
+//
+// The body carries a SECRET UUID AND NOTHING ELSE. The credential itself was
+// encrypted in the browser and posted to /api/v1/secrets; this route never sees
+// a plaintext, a ciphertext or a password, which is what lets the UI show
+// "portal login stored" without the server ever knowing the login.
+func (h *Handler) LinkPortalSecret(w http.ResponseWriter, r *http.Request) {
+	hid, err := householdID(r)
+	if err != nil {
+		apierr.Forbidden(w, "missing household context")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		apierr.BadRequest(w, "invalid vendor id")
+		return
+	}
+	var req struct {
+		SecretID *string `json:"secret_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierr.BadRequest(w, "invalid request body")
+		return
+	}
+	var secretID *uuid.UUID
+	if req.SecretID != nil && *req.SecretID != "" {
+		parsed, perr := uuid.Parse(*req.SecretID)
+		if perr != nil {
+			apierr.BadRequest(w, "invalid secret_id")
+			return
+		}
+		secretID = &parsed
+	}
+	vendor, err := h.repo.SetPortalSecret(r.Context(), hid, id, secretID)
+	if errors.Is(err, ErrSecretNotFound) {
+		apierr.BadRequest(w, "that credential is not one of this family's — save it in the vault first")
+		return
+	}
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	if vendor == nil {
+		apierr.NotFound(w, "vendor not found")
+		return
+	}
+	apierr.JSON(w, http.StatusOK, map[string]any{
+		"data": toVendorResponse(vendor, middleware.Role(r)),
+	})
 }

@@ -43,7 +43,7 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 // (080).
 func (r *Repo) List(ctx context.Context, householdID uuid.UUID, trade, kind string) ([]*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, created_at, updated_at
+		`SELECT id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, portal_secret_id, created_at, updated_at
 		 FROM vendors
 		 WHERE household_id = $1
 		   AND ($2::text = '' OR trades @> ARRAY[$2::text])
@@ -71,7 +71,7 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID, trade, kind stri
 // Returns nil if not found.
 func (r *Repo) Get(ctx context.Context, householdID, id uuid.UUID) (*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, created_at, updated_at
+		`SELECT id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, portal_secret_id, created_at, updated_at
 		 FROM vendors WHERE id = $1 AND household_id = $2`,
 		id, householdID,
 	)
@@ -95,7 +95,7 @@ func (r *Repo) Create(ctx context.Context, householdID uuid.UUID, v *Vendor) (*V
 	rows, err := r.pool.Query(ctx,
 		`INSERT INTO vendors (household_id, name, kind, trades, specialty, phone, email, website, address, notes)
 		 VALUES ($1, $2, COALESCE(NULLIF($3::text, '')::vendor_kind, 'service_provider'), $4, $5, $6, $7, $8, $9, $10)
-		 RETURNING id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, created_at, updated_at`,
+		 RETURNING id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, portal_secret_id, created_at, updated_at`,
 		householdID, v.Name, v.Kind, nonNil(v.Trades), v.Specialty, v.Phone, v.Email, v.Website, v.Address, v.Notes,
 	)
 	if err != nil {
@@ -125,7 +125,7 @@ func (r *Repo) Update(ctx context.Context, householdID, id uuid.UUID, v *Vendor,
 		     kind = COALESCE(NULLIF($12::text, '')::vendor_kind, kind),
 		     updated_at = NOW()
 		 WHERE id = $7 AND household_id = $8
-		 RETURNING id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, created_at, updated_at`,
+		 RETURNING id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, portal_secret_id, created_at, updated_at`,
 		v.Name, v.Specialty, v.Phone, v.Email, v.Website, v.Notes,
 		id, householdID, v.Trades, keepAddress, v.Address, v.Kind,
 	)
@@ -166,4 +166,45 @@ func nonNil(trades []string) []string {
 		return []string{}
 	}
 	return trades
+}
+
+
+// ErrSecretNotFound is returned when a portal_secret_id is not a secret of this
+// household. The composite FK (vendors_portal_secret_fkey, 075) refuses the
+// write; this error turns that refusal into a 400 a person can act on.
+var ErrSecretNotFound = errors.New("secret not found in this household")
+
+// SetPortalSecret links (or, with nil, unlinks) the payee portal login for a
+// vendor. As with payment accounts, the write is a uuid against the composite
+// FK, so a secret from another family cannot be attached even if a caller skips
+// the existence check below.
+func (r *Repo) SetPortalSecret(ctx context.Context, householdID, id uuid.UUID, secretID *uuid.UUID) (*Vendor, error) {
+	if secretID != nil {
+		var exists bool
+		if err := r.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM secrets WHERE id = $1 AND household_id = $2)`,
+			*secretID, householdID).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("check secret: %w", err)
+		}
+		if !exists {
+			return nil, ErrSecretNotFound
+		}
+	}
+	rows, err := r.pool.Query(ctx,
+		`UPDATE vendors SET portal_secret_id = $3, updated_at = NOW()
+		  WHERE id = $1 AND household_id = $2
+		 RETURNING id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, portal_secret_id, created_at, updated_at`,
+		id, householdID, secretID)
+	if err != nil {
+		return nil, fmt.Errorf("link vendor portal secret: %w", err)
+	}
+	defer rows.Close()
+	v, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[Vendor])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("collect vendor: %w", err)
+	}
+	return v, nil
 }

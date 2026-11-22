@@ -26,7 +26,13 @@ type Vendor struct {
 	Website   *string
 	Address   *string // one line; 065 moved MCP's "Address: ..." notes line here
 	Notes     *string
-	CreatedAt time.Time
+	// PortalSecretID is the payee's portal login, as a row in `secrets` (075,
+	// #5497). METADATA ONLY: the ciphertext stays in `secrets`, so the API can
+	// say "a portal login is stored" without decrypting anything. Its uuid is
+	// never serialized -- only its presence, and only to a role the credential
+	// policy allows (auth.Can on ResSecrets; see handler.toVendorResponse).
+	PortalSecretID *uuid.UUID
+	CreatedAt      time.Time
 	UpdatedAt time.Time
 }
 
