@@ -32,6 +32,20 @@ func main() {
 		Level: parseLogLevel(cfg.LogLevel),
 	})))
 
+	// Say out loud whether the search index is wired (#5621). The MCP once ran
+	// in the cluster with no TYPESENSE_* env at all: kb_search's semantic
+	// search failed on every call, fell back to literal words, and looked
+	// healthy from outside. One line at startup is what a person reading
+	// `kubectl logs` should find instead of having to infer it from a
+	// paraphrase that returns nothing.
+	if cfg.Configured() {
+		slog.Info("search: Typesense configured; kb_search searches by meaning",
+			"host", cfg.TypesenseHost, "port", cfg.TypesensePort)
+	} else {
+		slog.Warn("search: Typesense NOT configured (TYPESENSE_HOST/PORT/API_KEY unset); " +
+			"kb_search will refuse to answer by words alone and will not find docs by meaning (#5621)")
+	}
+
 	// Create the pgx connection pool. Its connections carry the calling
 	// member's identity (app.user_id and friends) for the authorship
 	// triggers, so every tool's writes are attributed (#4491).

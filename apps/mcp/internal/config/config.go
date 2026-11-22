@@ -109,12 +109,18 @@ type Config struct {
 	AcceptedAudiences []string
 	// AllowedOrigins lists the browser origins (scheme://host[:port],
 	// lowercase) allowed to call /mcp.
-	AllowedOrigins  []string
-	DatabaseURL     string
-	DexJWKSURL      string
-	DexIssuer       string
-	DexGRPCAddr     string
-	LogLevel        string
+	AllowedOrigins []string
+	DatabaseURL    string
+	DexJWKSURL     string
+	DexIssuer      string
+	DexGRPCAddr    string
+	LogLevel       string
+	// SearchIndex is the Typesense the family KB is searched through
+	// (TYPESENSE_HOST/PORT/API_KEY). All three or none: a partial set is a
+	// misconfiguration and Load refuses it, because the shape that shipped in
+	// #5621 — host and port unset, key unset, nothing complained — is how
+	// kb_search came to answer by literal words and report a normal empty
+	// result. Ask Configured() rather than checking the three fields.
 	TypesenseHost   string
 	TypesensePort   string
 	TypesenseAPIKey string
@@ -145,6 +151,29 @@ type Config struct {
 	// RevealRateLimitPerMinute bounds credential_reveal calls per principal
 	// (MCP_REVEAL_RATE_LIMIT_PER_MINUTE). Zero disables it.
 	RevealRateLimitPerMinute int
+}
+
+// Configured reports whether the search index is set up, i.e. whether
+// kb_search can search by meaning. False is a legitimate way to run (a local
+// checkout without Typesense) but never a silent one: cmd/mcp logs it at
+// startup and kb_search says so in its results rather than quietly matching
+// words (#5621).
+func (c *Config) Configured() bool { return len(c.missingSearchSettings()) == 0 }
+
+// missingSearchSettings names the TYPESENSE_* settings that are empty, in the
+// order they are read.
+func (c *Config) missingSearchSettings() []string {
+	var out []string
+	for _, f := range [...]struct{ name, val string }{
+		{"TYPESENSE_HOST", c.TypesenseHost},
+		{"TYPESENSE_PORT", c.TypesensePort},
+		{"TYPESENSE_API_KEY", c.TypesenseAPIKey},
+	} {
+		if f.val == "" {
+			out = append(out, f.name)
+		}
+	}
+	return out
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -219,6 +248,17 @@ func Load() (*Config, error) {
 		}
 	} else if validateOrigin("PUBLIC_BASE_URL", cfg.PublicBaseURL) == nil {
 		cfg.AllowedOrigins = []string{strings.ToLower(cfg.PublicBaseURL)}
+	}
+
+	// Search index: all three settings or none. A deployment that sets some
+	// but not all of them is a mistake (a typo in one key, or a Secret that
+	// lost one), and the MCP's semantic search would fail while everything
+	// looked healthy — #5621. Naming the missing ones here turns a silent
+	// degradation into a pod that will not start.
+	if set := cfg.missingSearchSettings(); len(set) > 0 && len(set) < 3 {
+		errs = append(errs, fmt.Errorf(
+			"TYPESENSE_* is partly configured (missing %s): set TYPESENSE_HOST, TYPESENSE_PORT and TYPESENSE_API_KEY, or none of them. Without all three, kb_search cannot search by meaning (#5621).",
+			strings.Join(set, ", ")))
 	}
 
 	// An explicitly empty MCP_TRUSTED_PROXIES means "trust no proxy", so

@@ -26,6 +26,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"home-os/mcp/internal/auth"
+	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
 	"home-os/mcp/internal/testutil"
 )
@@ -64,12 +65,13 @@ func cleanupHousehold(t *testing.T, pool *pgxpool.Pool, hh uuid.UUID) {
 
 // env is the JSON a KB tool returns.
 type env struct {
-	OK      bool            `json:"ok"`
-	Summary string          `json:"summary"`
-	Data    json.RawMessage `json:"data"`
-	Items   []hitData       `json:"items"`
-	Next    []string        `json:"next"`
-	Error   *struct {
+	OK       bool            `json:"ok"`
+	Summary  string          `json:"summary"`
+	Data     json.RawMessage `json:"data"`
+	Items    []hitData       `json:"items"`
+	Searched *respond.Range  `json:"searched_range"`
+	Next     []string        `json:"next"`
+	Error    *struct {
 		Message string `json:"message"`
 		Fix     string `json:"fix"`
 		Field   string `json:"field"`
@@ -285,6 +287,118 @@ func TestKBTools(t *testing.T) {
 	missing := ts.get.run(t, ctx, map[string]any{"path": "how-to/pets/vet-after-hours"})
 	if missing.OK {
 		t.Error("a soft-deleted doc must not be gettable")
+	}
+}
+
+// TestKBSearchFailsLoudlyWithoutAnIndex is #5621's defect, pinned.
+//
+// THE DEFECT. The MCP pod ran without TYPESENSE_* env vars. searchByMeaning
+// returned "no search index configured" on every call, the handler folded that
+// error into the same branch as "no hits", and kb_search answered a paraphrase
+// with a normal-looking empty list. The index was correct the whole time
+// (#5607 replayed the query directly and found the doc); only the wiring was
+// missing. An agent that reads an empty list concludes the document does not
+// exist and tells the family so.
+//
+// This test starts where the person starts — a doc that exists, and a question
+// in their own words — and asserts the only two honest answers:
+//
+//	index unreachable + words find nothing -> the call FAILS, and its fix says
+//	                                          not to claim the doc is absent
+//	index unreachable + words find the doc -> the result says, in the summary
+//	                                          and in searched_range, that this
+//	                                          was a word match and a doc worded
+//	                                          differently was never looked for
+//
+// What it would catch on regression: the old code returned ok=true, items=[],
+// summary "Found 0 knowledge base docs by meaning for ...", no error, no
+// searched_range — all of which fail the assertions below. (Revert-checked;
+// see the ticket.)
+func TestKBSearchFailsLoudlyWithoutAnIndex(t *testing.T) {
+	pool := testPool(t)
+	ctx, hh := testutil.SeedHousehold(t, pool)
+	cleanupHousehold(t, pool, hh.HouseholdID)
+
+	// A doc the family really has, written the way a family member writes it.
+	bare := newTools(pool, nil) // nil == no index configured, as the broken pod was
+	bare.write.run(t, ctx, map[string]any{
+		"path": "how-to/pets/vet-after-hours", "title": "Vet: what to do after hours",
+		"body": "Call Northside Veterinary Emergency on 555-0142 after 8pm.",
+		"tags": []any{"pets", "vets"},
+	})
+
+	// --- 1. Words CANNOT answer this. The call must fail, not report empty --
+	// The question shares no word with the doc that is three characters or
+	// longer ("dog" is the closest, and the doc never says it), so the word
+	// fallback finds nothing — the deployed failure exactly.
+	asked := bare.search.run(t, ctx, map[string]any{
+		"query": "what do we do if the dog gets sick after the vet closes",
+	})
+	if asked.OK {
+		t.Fatalf("search with no index reported success (%q, %d items); an empty result here is the bug: agents read it as \"no such doc\"",
+			asked.Summary, len(asked.Items))
+	}
+	if asked.Error == nil {
+		t.Fatal("a failed search must carry an error envelope with a fix")
+	}
+	if !strings.Contains(strings.ToLower(asked.Error.Message), "meaning") {
+		t.Errorf("the error must say it could not search by MEANING, not just that it failed: %q", asked.Error.Message)
+	}
+	// The fix is the part that stops the dangerous next sentence.
+	if !strings.Contains(asked.Error.Fix, "kb_list") ||
+		!strings.Contains(asked.Error.Fix, "no such document") {
+		t.Errorf("the fix must route the agent to kb_list and forbid claiming the doc is absent: %q", asked.Error.Fix)
+	}
+
+	// --- 2. A word match is still useful, but it must SAY what it is --------
+	// "after hours" IS in the doc, so the fallback finds it. That must not
+	// come back looking like a real meaning search.
+	degraded := bare.search.run(t, ctx, map[string]any{"query": "after hours"})
+	if !degraded.OK {
+		t.Fatalf("a word match should still be returned: %s", degraded.Summary)
+	}
+	if len(degraded.Items) == 0 || degraded.Items[0].Path != "how-to/pets/vet-after-hours" {
+		t.Fatalf("word matches = %v, want the vet doc", degraded.paths())
+	}
+	if !strings.Contains(strings.ToUpper(degraded.Summary), "WORD MATCH") ||
+		!strings.Contains(degraded.Summary, "unavailable") {
+		t.Errorf("the summary must say the semantic search was unavailable and this is a word match: %q", degraded.Summary)
+	}
+	if degraded.Searched == nil {
+		t.Fatal("a degraded search must set searched_range; without it a client reading JSON cannot tell it from a real one")
+	}
+	if !degraded.Searched.MayHaveMore {
+		t.Errorf("searched_range.may_have_more must be true: a doc worded differently was never looked for (%+v)", degraded.Searched)
+	}
+	if !strings.Contains(degraded.Searched.Note, "does not exist") && !strings.Contains(degraded.Searched.Note, "do not exist") {
+		t.Errorf("searched_range.note must warn against concluding absence: %q", degraded.Searched.Note)
+	}
+
+	// --- 3. A HEALTHY index must not be labelled, and its empty result stands
+	// The inverse check, so the label cannot drift into "always present" (which
+	// would train callers to ignore it, the same silent failure in reverse).
+	// A Typesense that answers an empty hit list is what "nothing matched"
+	// looks like from a working index.
+	if addr := os.Getenv("TYPESENSE_TEST_ADDR"); addr != "" {
+		collection := "household_search_kbquiet_" + uuid.NewString()[:8]
+		host, port, ok := strings.Cut(addr, ":")
+		if !ok {
+			t.Fatalf("TYPESENSE_TEST_ADDR %q is not host:port", addr)
+		}
+		own := &typesense{baseURL: "http://" + host + ":" + port,
+			apiKey: os.Getenv("TYPESENSE_TEST_KEY"), client: &http.Client{Timeout: 10 * time.Second}}
+		t.Cleanup(func() { dropCollection(t, own, collection) })
+		createCollection(t, own, collection)
+		healthy := newTools(pool, own.WithCollection(collection))
+		got := healthy.search.run(t, ctx, map[string]any{"query": "a question nothing answers"})
+		if !got.OK {
+			t.Fatalf("an index that simply has no match must not fail the call: %s", got.Summary)
+		}
+		if got.Searched != nil {
+			t.Errorf("a real meaning search must not be labelled as degraded: %+v (%q)", got.Searched, got.Summary)
+		}
+	} else {
+		t.Log("no TYPESENSE_TEST_ADDR: skipped the healthy-index inverse check")
 	}
 }
 

@@ -325,3 +325,9 @@ jobs:
       # image tag the chart pins, in `--mode validate`: no cluster, ~2 seconds,
       # and it carries a negative control so it cannot silently stop working.
       - run: deploy/helm/home-os/tests/envoy-config-validate.sh
+      # Every pod that searches the index must have TYPESENSE_* env (#5621).
+      # The mcp deployment was missing it, so kb_search's semantic search
+      # errored, fell back to literal words, and a paraphrase of a real doc
+      # came back as a normal empty list. `helm template` succeeded and the pod
+      # was healthy; only a check on the RENDERED env catches this class.
+      - run: deploy/helm/home-os/tests/search-env.sh
