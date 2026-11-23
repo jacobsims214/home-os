@@ -61,7 +61,9 @@ const TILE_HINTS: Partial<Record<NavSectionId, string>> = {
   money: "Bills and loans",
   // #5408: the tile that was missing entirely — the More sheet was the only
   // phone surface that could have carried Guides and it had no tile to show.
-  guides: "How-tos, repairs, routines",
+  // #5503: the tile now leads to both halves of the section, so the hint names
+  // both. It stays SHORT: a tile hint is a one-glance line at 390 px.
+  guides: "How-tos, and things to look up",
 };
 
 interface BottomNavProps {

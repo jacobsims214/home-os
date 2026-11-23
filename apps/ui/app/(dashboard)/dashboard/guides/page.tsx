@@ -37,8 +37,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Skeleton, Text, Textarea, TextInput } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { IconAlertTriangle, IconBook, IconChevronRight, IconPlus, IconSearch } from "@tabler/icons-react";
+import { usePathname } from "next/navigation";
 import { apiFetch } from "@/lib/api";
 import { guideKeys } from "@/lib/query-keys";
+import LibrarySwitch from "@/components/kb/LibrarySwitch";
 import { ResponsiveModal, ResponsiveModalActions } from "@/components/ui";
 import { useNavRole } from "@/components/shared/use-nav-role";
 import { guideStepCount, guideSubtitle, matchesSearch, stepCountLabel, type Guide } from "@/lib/guides/model";
@@ -193,6 +195,7 @@ function NewGuideModal({
 
 export default function GuidesPage() {
   const router = useRouter();
+  const pathname = usePathname();
   const role = useNavRole();
   const canWrite = role == null || WRITER_ROLES.has(role);
   const [search, setSearch] = useState("");
@@ -234,6 +237,12 @@ export default function GuidesPage() {
           How things work around the house: the router, the water heater, the cabin in winter.
         </p>
       </div>
+
+      {/* #5503: the section's other half. A guide is a procedure you FOLLOW;
+          the reference is knowledge you LOOK UP. They share this section, the
+          page family and the markdown renderer, and differ in what a reader
+          does with them — which is what the switch says in three words. */}
+      <LibrarySwitch pathname={pathname ?? "/dashboard/guides"} />
 
       {/* Search. A real searchbox (type="search"), 16 px on phones so iOS does
           not zoom on focus, and only drawn once there is something to find. */}

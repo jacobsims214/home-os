@@ -27,6 +27,7 @@ import { Button, Card, Group, Text, Title } from "@mantine/core";
 import {
   IconArrowUpRight,
   IconBook,
+  IconBookmark,
   IconCalendarEvent,
   IconChevronRight,
   IconFileText,
@@ -68,6 +69,9 @@ export const GROUP_ICONS: Readonly<Record<string, TablerIcon>> = {
   upkeep: IconTool,
   thing: IconHome,
   guide: IconBook,
+  // #5503: the family reference, a bookmark rather than a book — a doc is
+  // looked something up in, not read through.
+  kb_doc: IconBookmark,
   credential: IconKey,
 };
 
