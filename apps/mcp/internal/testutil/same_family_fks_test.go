@@ -140,6 +140,8 @@ func TestSameFamilyFKs058_RepairAndReversible(t *testing.T) {
 	a := seedSameFamilyRows(t, pool)
 	b := seedSameFamilyRows(t, pool)
 
+	applyMigration(t, pool, "091_family_composite_fks.down.sql") // newest first: since 091 its composite FKs ride on 058/084's keys
+
 	applyMigration(t, pool, "058_same_family_fks.down.sql")
 
 	okBill := insertID(t, pool, `INSERT INTO bills (household_id, name, vendor_id) VALUES ($1, 'ok', $2) RETURNING id`, a.household, a.vendor)
