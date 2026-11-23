@@ -31,6 +31,8 @@ login.html
 discovery.json
 
 # --- round scratch ---
+# run.sh writes rounds/<label>/scorecard.md + evidence/. Append-only, never committed.
+rounds/
 logs/
 shots/
 screenshots/
