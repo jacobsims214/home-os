@@ -307,6 +307,23 @@ purpose and returns `400 unsupported_grant_type`.
 are MCP-scoped by design (see "Two kinds of token"). `up.sh` never calls REST, so that 401
 can never be misreported as a failure.
 
+### If `dex-login` reports `429 Too many sign-in attempts`
+
+That is **Dex's per-identity rate limiter**, not a bad password and not a broken
+connector. Dex answers `429` with `retry-after: 60` on `/dex/auth/local`, and the whole
+login flow has to wait. `up.sh` says so explicitly instead of guessing at the connector.
+
+Two things worth knowing:
+
+- **Repeated runs trip it.** Two back-to-back runs from a clean slate both pass; but
+  hammering the script (or the login form by hand) more than a few times in a minute
+  will get the next run limited. If a run reports `429`, wait 60s and run it again —
+  that run is not a failure of the environment.
+- **It is correct defence**, the same limiter that stops password guessing. Do not
+  disable it to make a verifier green; space the logins out instead. (README § "One
+  persistent browser profile per batch, and pace logins ≥30s" is the same fact from the
+  browser side.)
+
 ### The rule behind the table: a check that cannot tell must FAIL
 
 This project's recurring defect is a check that reports success when it cannot actually
