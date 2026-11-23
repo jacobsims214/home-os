@@ -6,6 +6,7 @@ you check what actually landed in Home OS with direct MCP calls.
 
 | File | What it does |
 |---|---|
+| `up.sh` | **Verify the environment before a round**: cluster 5/5 Ready, both personas' Dex passwords actually sign in, both agent tokens answer `tools/list`, site 200 and Dex discovery. Pass/fail table, non-zero exit on anything wrong, never prints a secret. Idempotent — see [Verifying the environment](#verifying-the-environment--upsh-and-what-it-refuses-to-guess). |
 | `chat.sh` | Sends one persona turn to a moltis agent, waits for the reply, prints the tool calls it made and its answer. `--history` dumps a whole session; `--stdin` / `--file` take the message where the shell cannot expand it — **see the quoting section immediately below**; `--selftest` runs the message-guard tests. |
 | `mcpcall.py` | Ground truth: calls one Home OS MCP tool as a household member and prints the result, over Streamable HTTP at `POST <HOMEOS_MCP_URL>/mcp` — the only MCP transport Home OS serves. `--selftest` runs its transport tests with no network. |
 | `api.py` | Same idea for the REST API (`/api/v1/...`). **Dex id_token only** — a `hos_` agent token 401s there by design; see [Two kinds of token](#two-kinds-of-token-agent-tokens-are-mcp-scoped). |
@@ -256,6 +257,97 @@ half is unchanged and is what agents actually use.
 **Several households.** A caller in more than one picks one per request with
 `X-Household-ID: <household uuid>`. It must be one of their own memberships (else 403); with
 no header the oldest membership is used, and a malformed value is a 400.
+
+## Verifying the environment — `./up.sh`, and what it refuses to guess
+
+**Run this before a round, and again after anything is redeployed:**
+
+```bash
+cd tools/wargame && ./up.sh
+```
+
+It brings the war-game environment to a *known-good* state or says loudly why not:
+a pass/fail table and exit `1` if anything is wrong. It is idempotent — it only reads and
+probes, so the second run behaves exactly like the first. Safe to paste in a ticket: it
+never prints a secret.
+
+```text
+CHECK                        RESULT DETAIL
+---------------------------- ------ ----------------------------------------
+cluster                      PASS   5/5 Ready at https://192.168.8.226:6443
+site                         PASS   HTTP 200 (https://homeos.simstech.cloud/login?redirect=%2F)
+dex-discovery                PASS   issuer https://homeos.simstech.cloud/dex
+dex-login:jacob              PASS   id_token for jacob.sims@simstech.cloud (iss https://homeos.simstech.cloud/dex)
+dex-login:amber              PASS   id_token for amber.wargame@simstech.cloud (iss https://homeos.simstech.cloud/dex)
+mcp:jacob                    PASS   95 tools over MCP as jacob
+mcp:amber                    PASS   95 tools over MCP as amber
+
+READY: all 7 checks passed.
+```
+
+### What each check actually proves
+
+| Check | Proves | Fails when |
+|---|---|---|
+| `cluster` | `kubectl get nodes` against the explicit kubeconfig returns 5 Ready, **and** the kubeconfig names `https://192.168.8.226:6443` | the kubeconfig is missing/expired, or names the dead `.176` |
+| `site` | following `/`'s redirect reaches HTTP 200 (an anonymous `/` 307s to `/login`) | the UI or its ingress is down |
+| `dex-discovery` | the discovery document's `issuer` is `https://homeos.simstech.cloud/dex` | Dex is down or serving the wrong issuer |
+| `dex-login:<persona>` | the password in that persona's Secret **signs in through the interactive local connector and yields an id_token whose `email` claim is that persona** | the Secret is stale, the account is gone, or the connector is off |
+| `mcp:<persona>` | that persona's `hos_` agent token answers `tools/list` on `POST /mcp` with a non-empty tool list | the token is revoked, or the MCP is down |
+
+**`dex-login` drives the real login flow, not the password grant.** The grant is retired
+(#4540, see "Getting a Dex id_token"), so `up.sh` goes authorize → Dex's local login form →
+POST the password → the redirect's authorization code → redeem it with PKCE. Redeeming the
+code is what makes it a real check: a redirect out of the login form only proves the form
+accepted a POST, while the id_token's `email` proves Dex authenticated *that identity*.
+**Do not "fix" a failing `dex-login` by reaching for the password grant** — it is off on
+purpose and returns `400 unsupported_grant_type`.
+
+**A `hos_` token 401ing on `/api/v1/*` is correct and is not checked here.** Agent tokens
+are MCP-scoped by design (see "Two kinds of token"). `up.sh` never calls REST, so that 401
+can never be misreported as a failure.
+
+### The rule behind the table: a check that cannot tell must FAIL
+
+This project's recurring defect is a check that reports success when it cannot actually
+tell. Two shapes of that, both closed here:
+
+- **No silent skip.** There is no third "skipped, probably fine" state. A check that could
+  not run — a Secret that will not read, a probe that produced no verdict — is a `FAIL`
+  with the reason, because otherwise a half-up environment prints green.
+- **An empty credential never reaches a probe.** A token read as `""` would be sent as an
+  empty bearer, answer `401`, and look exactly like a revoked token. `up.sh` checks the
+  value is non-empty before probing and fails on `secret:<name>` instead, so the row names
+  the real problem.
+
+Every failure names the Secret, namespace or URL to look at. The namespaces are
+load-bearing — war-game Dex passwords and agent tokens are in the **`moltis`** namespace,
+and only Jacob's Dex password is in `home-os`
+(`home-os-secrets`/`adminPassword`). **There is no `jacob.wargame@` Dex account**; Jacob's
+identity is `jacob.sims@simstech.cloud`.
+
+### Overrides (all optional)
+
+| Variable | Default |
+|---|---|
+| `WARGAME_KUBECONFIG` | `/Volumes/…/pve-1/amp-work/5319/kube/admin.kubeconfig` — **fragile, see "Cluster access" above**; copy it to `~/.kube/wargame/` and point this there |
+| `WARGAME_CONTROL_PLANE` | `https://192.168.8.226:6443` |
+| `WARGAME_EXPECT_NODES` | `5` |
+| `HOMEOS_SITE` | `https://homeos.simstech.cloud` |
+| `HOMEOS_MCP_URL` | `$HOMEOS_SITE` (a base URL; `/mcp` is appended) |
+| `WARGAME_NET_TIMEOUT` / `WARGAME_KUBECTL_TIMEOUT` | `25` / `30` seconds |
+
+### Secrets
+
+`up.sh` reads each password and agent token straight from its Secret into a `0600` file in
+a `0700` scratch dir, hands curl the **file** (`--data-urlencode password@file`, never the
+value on argv where it would land in `ps`), and overwrites-and-removes the file on every
+exit path including failure and Ctrl-C. Nothing is cached and nothing is printed. Scratch
+output belongs in this folder and is already `.gitignore`d.
+
+If #5475's `verify.py` and `verify.yaml` are present alongside it, `up.sh` also runs them
+and folds in the checks it does not do itself (the moltis instance logins), so this stays
+one command rather than "run one of two".
 
 ## Running a round
 
