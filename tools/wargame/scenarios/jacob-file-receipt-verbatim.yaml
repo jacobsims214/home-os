@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-jacob.md (receipt), #4584.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-file-receipt-verbatim
+persona: jacob
+surface: documents
+intent: |
+  Here's a receipt from the hardware store - file this.
+steps:
+  - chat.sh jacob wg-jacob-receipt --file msg (paste a receipt with amounts and a total)
+  - "mcpcall.py document_find --query 'Home Depot' as jacob"
+  - "mcpcall.py document_get <id> as jacob"
+assertion: |
+  The document body is byte-identical to the pasted text (every amount, including the
+  total), and its provenance label says text-as-filed rather than OCR.
+tags:
+  - documents
+  - agent
+  - write
+  - provenance
+  - money-integrity
+origin:
+  round: r2
+  source: discoveries/war-game-r2-jacob.md
+  ref: receipt
+  ticket: "#4584"
+  date: "2026-11-18"
+  verdict: pass

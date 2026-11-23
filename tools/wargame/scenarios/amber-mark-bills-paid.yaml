@@ -1,0 +1,29 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T10), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-mark-bills-paid
+persona: amber
+surface: money
+intent: |
+  Mark the electric and internet paid.
+steps:
+  - "mcpcall.py bill_find as amber (note electric's current status first)"
+  - "chat.sh amber r1-paid --file msg (ask: mark electric + internet paid)"
+  - mcpcall.py bill_find as amber after the turn
+  - "check status, paid_date and next_due_date on both bills"
+assertion: |
+  The already-paid bill is not paid twice (paid_date unchanged, no second payment
+  record), and the unpaid one shows status paid with paid_date today and a rolled
+  next_due_date.
+tags:
+  - money
+  - bills
+  - agent
+  - write
+  - dedup
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T10
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: pass

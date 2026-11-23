@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T8), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-what-do-we-owe
+persona: amber
+surface: money
+intent: |
+  What do we owe before the end of the month?
+steps:
+  - "chat.sh amber r1-owe --file msg (ask: what do we owe through month end)"
+  - mcpcall.py bill_find as amber
+  - "for each bill the reply lists, compare status / paid_date / amount against bill_find"
+assertion: |
+  Every status the reply states (paid vs due) is backed by bill_find's status and
+  paid_date for that bill id; no 'already paid' claim appears where paid_date is null.
+tags:
+  - money
+  - bills
+  - agent
+  - honesty
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T8
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: partial

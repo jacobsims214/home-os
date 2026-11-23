@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (cross-cutting-8), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-login-first-run
+persona: designer
+surface: auth
+intent: |
+  The login screen is the first thing a parent sees.
+steps:
+  - open /login at 390px signed out
+  - trigger a bad-password error
+  - read the copy and look for a reset path
+assertion: |
+  The login screen carries the product's identity, the error copy is grammatical and
+  does not blame the email field by default, and there is a visible reset path.
+tags:
+  - ui
+  - mobile
+  - auth
+  - copy
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: cross-cutting-8
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: fail

@@ -1,0 +1,42 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U8), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-add-event-from-today
+persona: amber
+surface: today
+intent: |
+  I want to add an event from the Today page.
+steps:
+  - open Today as amber at 390px
+  - "tap 'Add event'"
+  - "fill in a title and a time, tap Save"
+  - "mcpcall.py event_find --from <the date> --to <the date> as amber"
+assertion: |
+  Tapping Add event opens a form with title/calendar/time fields, and Save creates
+  exactly one event that event_find returns.
+tags:
+  - today
+  - calendar
+  - ui
+  - write
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U8
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: partial
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-amber.md
+      ref: G9
+      ticket: "#4596"
+      date: "2026-11-20"
+      verdict: pass
+      note: real New event bottom sheet with reminders
+    - round: r3
+      source: discoveries/war-game-r3-jacob.md
+      ref: "5302"
+      ticket: "#4595"
+      date: "2026-11-20"
+      verdict: pass
+      note: UI-created event round-trips to event_find (id 926812d6)

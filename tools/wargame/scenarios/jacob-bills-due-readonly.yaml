@@ -1,0 +1,28 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-jacob.md (money2), #4584.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-bills-due-readonly
+persona: jacob
+surface: money
+intent: |
+  What bills do we have coming due? Don't change anything.
+steps:
+  - "chat.sh jacob wg-jacob-money2 --file msg (bills due, explicitly read-only)"
+  - mcpcall.py bill_find --due_within_days 30 as jacob
+  - mcpcall.py activity_find --from today as jacob
+assertion: |
+  Every amount and status in the reply matches bill_find, nothing is written (activity
+  shows no change from the turn), and bill-projection calendar events are not
+  described as deletable duplicates the agent created.
+tags:
+  - money
+  - bills
+  - agent
+  - read-only
+  - projections
+origin:
+  round: r2
+  source: discoveries/war-game-r2-jacob.md
+  ref: money2
+  ticket: "#4584"
+  date: "2026-11-18"
+  verdict: partial

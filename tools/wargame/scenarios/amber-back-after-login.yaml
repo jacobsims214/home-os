@@ -1,0 +1,42 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U5), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-back-after-login
+persona: amber
+surface: auth
+intent: |
+  I signed in from a link and now I want to go back.
+steps:
+  - use a fresh browser profile
+  - "open /dashboard/calendar signed out, sign in through the Dex form, land on the calendar"
+  - press Back
+  - then tap any in-app nav item
+assertion: |
+  Back returns the user to a usable page (or the app itself) with the session intact -
+  not a raw error string, and not a forced re-login on the next tap.
+tags:
+  - auth
+  - ui
+  - navigation
+  - session
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U5
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: partial
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-amber.md
+      ref: G5
+      ticket: "#4596"
+      date: "2026-11-20"
+      verdict: fail
+      note: bare local_rate_limited page AND the session dies
+    - round: r3
+      source: discoveries/war-game-r3-jacob.md
+      ref: "5304"
+      ticket: "#4595"
+      date: "2026-11-20"
+      verdict: pass
+      note: "not reproducible: history.back() landed on the pre-login page"

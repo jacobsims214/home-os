@@ -1,0 +1,42 @@
+# War-game scenario - written for R4 from #5505 (household reality); not played yet.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+#
+# "Who do I call" is the question a bill page exists to answer after "do I owe
+# it". The Water bill's payee is the Warwick Water District VENDOR (phone
+# 555-0151 in the seed), so contact routing has a saved number to reach; the
+# Pediatrician copay is the free-text-payee control case, where there is none.
+id: amber-payee-contact
+persona: amber
+surface: money
+intent: |
+  The water bill is wrong - they charged us for a quarter we already paid. Who do
+  I call?
+steps:
+  - "open the Bills list as amber at 390x844 and find the Water row"
+  - "read the row's data-payee-action=call anchor and its href"
+  - "open the Water bill's page and read the Who we pay card's Call action href"
+  - "mcpcall.py bill_find with query 'Water' as amber"
+  - "mcpcall.py contact_find with query 'Warwick Water' as amber"
+assertion: |
+  The payee is reachable in one tap from both surfaces: the list row carries an
+  anchor with data-payee-action="call" whose href is tel: plus the digits of the
+  payee's phone, and the bill page's Call action has the same href. That href's
+  digits equal, character for character, the digits of the `phone` in bill_find's
+  payee object for that bill (555-0151 in the seeded household), and that number
+  is the same one contact_find returns for Warwick Water District - no number is
+  typed by hand on the page and none differs between the list, the page and the
+  tool payload. A payee card that names who is paid but offers no tel: link fails
+  this scenario, and so does a link whose digits differ from the tool payload.
+tags:
+  - money
+  - payee
+  - contact
+  - ui
+  - mobile
+origin:
+  round: r4
+  source: "#5505"
+  ref: household-reality/3
+  ticket: "#5505"
+  date: "2026-11-23"
+  verdict: untested

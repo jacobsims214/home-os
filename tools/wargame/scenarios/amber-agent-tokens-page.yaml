@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N6), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-agent-tokens-page
+persona: amber
+surface: settings
+intent: |
+  How do I connect my own AI to this?
+steps:
+  - open /dashboard/settings/agent-tokens as amber
+  - "read the active token rows, scopes, last-used, revoke, and the connect instructions"
+  - "mcpcall.py -list with the listed token's prefix matched to the member's token"
+assertion: |
+  The page lists the member's tokens masked with scope and last-used, revoke is
+  available, and the connect card names the real MCP address and bearer shape.
+tags:
+  - settings
+  - agent-tokens
+  - ui
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N6
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass

@@ -1,0 +1,29 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (A3), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-two-views-of-bills
+persona: amber
+surface: money
+intent: |
+  I see the bills twice on the calendar. What do we actually owe - and is the Dec 19
+  concert on there?
+steps:
+  - chat.sh amber r2-views --file msg (two-views question + a December lookup)
+  - mcpcall.py bill_find as amber
+  - mcpcall.py event_find --from 2026-12-01 --to 2026-12-31 as amber
+assertion: |
+  The two-views model is explained correctly (projections are not duplicates), the
+  owed table matches bill_find, and the December lookup searches the whole month - a
+  'not on the calendar' answer is only given after searching beyond the default
+  window.
+tags:
+  - money
+  - calendar
+  - agent
+  - search-window
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: A3
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: pass

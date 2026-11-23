@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-jacob.md (T9), #4541.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-cross-member-change-feed
+persona: jacob
+surface: activity
+intent: |
+  Book the Christmas tree outing, then tell me what Amber has added today.
+steps:
+  - chat.sh jacob xmas --file msg (book outing + ask what Amber added today)
+  - mcpcall.py activity_find --from today as amber
+  - mcpcall.py event_find --from 2026-11-16 --to 2026-12-31 as jacob
+assertion: |
+  The outing exists with the requested date, and every change the reply attributes to
+  Amber appears in activity_find under her name with the right action (created vs
+  updated).
+tags:
+  - activity
+  - agent
+  - cross-member
+  - read
+origin:
+  round: r1
+  source: discoveries/war-game-r1-jacob.md
+  ref: T9
+  ticket: "#4541"
+  date: "2026-11-16"
+  verdict: pass

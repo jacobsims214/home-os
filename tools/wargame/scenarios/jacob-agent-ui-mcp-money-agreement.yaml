@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (agreement-money), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-agent-ui-mcp-money-agreement
+persona: jacob
+surface: money
+intent: |
+  Do the agent, the app and the database agree about money?
+steps:
+  - "chat.sh jacob r3-bills --file msg (what's coming due, don't change anything)"
+  - mcpcall.py bill_find as jacob
+  - mcpcall.py budget_summary --sections obligations as jacob
+  - read the Money page as jacob at 390px
+assertion: |
+  The agent's figures, bill_find, budget_summary and the Money page all agree, and the
+  one-time bills excluded from the monthly figure are accounted for.
+tags:
+  - money
+  - agent
+  - ui
+  - agreement
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: agreement-money
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: pass

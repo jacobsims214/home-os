@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T3), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-book-well-visit
+persona: amber
+surface: calendar
+intent: |
+  Book the little one's well visit two weeks from Tuesday at 9:15.
+steps:
+  - "chat.sh amber r1-health --file msg (ask: well visit two weeks from Tuesday 9:15)"
+  - "mcpcall.py event_find --from <computed date> --to <computed date+1d> as amber"
+  - "mcpcall.py event_find --from <computed date> --to <computed date+1d> as jacob"
+assertion: |
+  Exactly one event exists for the resolved date at 09:15 (no duplicate of the
+  pre-existing visit), reminder_minutes is what the reply claimed, and Jacob's read
+  sees the same event.
+tags:
+  - calendar
+  - agent
+  - write
+  - dedup
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T3
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: pass

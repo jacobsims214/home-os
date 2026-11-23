@@ -1,0 +1,28 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-jacob.md (T5), #4541.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-bills-from-text
+persona: jacob
+surface: money
+intent: |
+  Add the mortgage, electric and internet as recurring bills.
+steps:
+  - "chat.sh jacob bills --stdin <<'EOF' (mortgage $2,340 due 1st, electric $180 18th, internet $75 22nd)"
+  - mcpcall.py bill_find as jacob
+  - "compare each stored amount, due day and recurrence with the message text"
+assertion: |
+  Each stored amount equals the amount in the message ($2,340 / $180 / $75), and a
+  message whose amounts arrived garbled is refused with a clarifying question rather
+  than guessed at.
+tags:
+  - money
+  - bills
+  - agent
+  - write
+  - money-integrity
+origin:
+  round: r1
+  source: discoveries/war-game-r1-jacob.md
+  ref: T5
+  ticket: "#4541"
+  date: "2026-11-16"
+  verdict: pass

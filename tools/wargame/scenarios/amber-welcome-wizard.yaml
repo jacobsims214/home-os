@@ -1,0 +1,24 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N5), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-welcome-wizard
+persona: amber
+surface: onboarding
+intent: |
+  I've been invited to a family - what do I do?
+steps:
+  - open /welcome as a signed-in user with no family
+  - read both paths (start a hub / I have an invite link)
+assertion: |
+  Both paths are offered and explained in plain language, with no duplicate primary
+  CTA competing with the invite path.
+tags:
+  - onboarding
+  - ui
+  - copy
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N5
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass

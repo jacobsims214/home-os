@@ -1,0 +1,43 @@
+# War-game scenario - written for R4 from #5505 (household reality); not played yet.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+#
+# The other half of jacob-agent-watches-notifications: silence is a property to
+# test from the person's side, not just the agent's. The seed's Homeowners
+# insurance bill (autopay on, Joint checking linked, due in 2 days) reaches its
+# due date inside the notification lead window, and Amber's list must not gain a
+# row for it.
+id: amber-notification-silence
+persona: amber
+surface: notifications
+intent: |
+  Nothing told me about the insurance bill. Did anything need me this week?
+steps:
+  - "mcpcall.py notification_find as amber (record every row's id before the due date passes)"
+  - "wait for the bill's due date to arrive with the bill-reminder job ticking (or pin with seed/household.py --today <due date> on a scratch household)"
+  - "mcpcall.py notification_find as amber again, and filter type bill_due"
+  - "mcpcall.py bill_find with query 'Homeowners insurance' as amber"
+  - "open the notifications sheet as amber at 390x844 and read the rows"
+assertion: |
+  bill_find reports that bill with attention "automatic" and days_until_due 0 on
+  its due date. notification_find after that date contains no row whose about_id
+  is the Homeowners insurance bill id, and no row whose type is bill_due and
+  whose title names it - so the set of rows in notification_find is unchanged
+  apart from rows about other records, and the notifications sheet shows no entry
+  for it either. The control case must fire in the same run or the silence proves
+  nothing: a bill that does not pay itself and is inside the lead window (Water,
+  due in 2 days, manual with an account; or Maple Family Dental, needs_setup)
+  does have a bill_due row in Amber's list. Silence with no reminder anywhere is
+  a broken job, not a passing scenario.
+tags:
+  - notifications
+  - autopay
+  - silence
+  - ui
+  - control-case
+origin:
+  round: r4
+  source: "#5505"
+  ref: household-reality/6
+  ticket: "#5505"
+  date: "2026-11-23"
+  verdict: untested

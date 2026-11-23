@@ -1,0 +1,23 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (cross-cutting-10), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-console-404s
+persona: designer
+surface: app-shell
+intent: |
+  Is the dashboard loading cleanly, with nothing missing?
+steps:
+  - load the dashboard at 390px with the network panel recording
+  - count 404 resource loads
+assertion: |
+  No 404s for first-party resources (icons/manifest) on a normal dashboard load.
+tags:
+  - ui
+  - mobile
+  - performance
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: cross-cutting-10
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: fail

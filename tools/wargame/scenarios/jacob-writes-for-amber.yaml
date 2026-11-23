@@ -1,0 +1,49 @@
+# War-game scenario - written for R4 from #5505 (household reality); not played yet.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+#
+# Knowledge crosses members: one adult's agent writes what it learned, the other
+# adult's agent finds it later by meaning. kb_write is an upsert on (household,
+# path) and REPLACES a doc at an existing path, so the write goes to a NEW path
+# and the seeded how-to/money/insurance-claim must survive untouched - that is
+# the second thing this scenario checks.
+id: jacob-writes-for-amber
+persona: jacob
+surface: guides
+intent: |
+  The water heater leaked and I finally got the claim sorted. Write up how the
+  insurance claim actually goes, step by step, so Amber can run the next one
+  without calling me.
+steps:
+  - mcpcall.py kb_get with path how-to/money/insurance-claim as jacob (read before writing)
+  - "chat.sh jacob r4-kb-write --stdin <<'EOF' (describe the claim process and ask him to write it up; no $ in the message) EOF"
+  - mcpcall.py kb_list as jacob (find the new path the turn created)
+  - mcpcall.py kb_get with that path as jacob
+  - mcpcall.py kb_get with path how-to/money/insurance-claim as jacob again
+  - "chat.sh amber r4-kb-read --file msg (ask her agent how to file an insurance claim, without naming a doc)"
+  - mcpcall.py kb_search with query 'how do we file an insurance claim' as amber
+  - mcpcall.py kb_get with the new path as amber
+assertion: |
+  The turn created a new doc at a path that was not in kb_list before it, under
+  how-to/ (a second path, not a rewrite of the seeded one): kb_list gains exactly
+  one path, kb_get of it returns a non-empty body and title, and its body contains
+  the specifics Jacob's turn supplied. The seeded how-to/money/insurance-claim is
+  unchanged - same title and body as the kb_get taken before the turn - so the
+  write did not clobber an existing doc. Amber can then find it: her agent's
+  kb_search for the claim question returns the new path among its hits, and
+  kb_get of it as amber succeeds (a member of the household reads what another
+  member's agent wrote). The reply to Amber quotes at least one instruction
+  verbatim from that body - a phrase that appears in kb_get's output and
+  nowhere else in her tool payloads - and names no step that is not in the doc.
+tags:
+  - guides
+  - kb
+  - agent
+  - write
+  - cross-member
+origin:
+  round: r4
+  source: "#5505"
+  ref: household-reality/8
+  ticket: "#5505"
+  date: "2026-11-23"
+  verdict: untested
