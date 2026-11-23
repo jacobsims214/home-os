@@ -618,15 +618,29 @@ type billPayInput struct {
 // NewBillPayTool creates the bill_pay MCP tool (catalog v2, class U),
 // replacing the S1 working name mark_bill_paid.
 //
-// It records a bill in the authenticated household as paid by setting
-// bills.paid_date and bills.paid_for_due_date (there is no payments table
-// yet, so no history is kept and amount is echoed back as amount_paid, not
-// stored). paid_date defaults to today in the household's timezone. The due
-// date the payment covers is for_due_date when given (#4655: it must be one
-// of the bill's due dates and at most a month after today), otherwise
-// inferred from paid_date (paidForDueDate), as before for_due_date existed.
+// A payment is an EVENT, so bill_pay writes two things in one transaction
+// (#5514):
+//
+//  1. a bill_payments row: what was paid, when, and which due cycle it settles.
+//     This is the history — every payment is kept, so "how much did we pay this
+//     provider last year" and "two payments on one bill" are answerable.
+//  2. bills.paid_date and bills.paid_for_due_date, the derived CACHE of the
+//     latest payment. Every existing reader still reads these
+//     (billdue.BillDueFor through bill_find, the API's bill responses, the
+//     agenda, the worker's reminders and the notification policy); switching
+//     them to the ledger is a separate ticket. Until then both are written, so
+//     the ledger and the cache cannot disagree about the payment just made.
+//
+// paid_date defaults to today in the household's timezone. The due date the
+// payment covers is for_due_date when given (#4655: it must be one of the
+// bill's due dates and at most a month after today), otherwise inferred from
+// paid_date (paidForDueDate), as before for_due_date existed.
+//
 // Paying again for a due date that is already covered (or an earlier one)
-// changes nothing and returns already_paid true.
+// changes nothing and returns already_paid true: no ledger row, no cache move.
+// That rule is WHY a second payment on one bill has to be for a later cycle —
+// see the ticket's follow-up, which reconsiders it once the ledger is
+// authoritative.
 func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Record a bill as paid. " +
@@ -711,8 +725,32 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 		}
 
 		// Already paid: r keeps its stored payment, which is the effective
-		// one. Otherwise record this payment and the due date it covers.
+		// one, and no event is recorded — a payment that does not happen is
+		// not history. Otherwise write the event and move the derived cache.
 		if !alreadyPaid {
+			// 1. The ledger row: the payment itself, kept forever (#5514).
+			// amount is what the caller said was paid, falling back to the
+			// bill's amount (the tool's documented default: "default the
+			// bill's amount"). It stays NULL when the bill has no amount at
+			// all — unknown is not zero, and 090 allows it for exactly this
+			// case. paid_for_due_date is the cycle computed above, stored as
+			// computed: re-deriving it later would be the bug 052 fixed.
+			// method stays NULL: bill_pay has no method argument, and the tool
+			// must not guess "how" from "which tool". (An unknown how is a fact
+			// the column can hold; a wrong one it cannot.) is_reconstructed is
+			// FALSE — somebody recorded this payment, which is the difference
+			// the flag exists to mark.
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO bill_payments
+				     (household_id, bill_id, amount, paid_on, paid_for_due_date, is_reconstructed)
+				 VALUES ($1, $2, COALESCE($3::numeric, $4::numeric), $5, $6, FALSE)`,
+				claims.HouseholdID, r.ID, in.amount, r.Amount, paid, target,
+			); err != nil {
+				return respond.Failed("record the payment", err), nil
+			}
+
+			// 2. The cache every existing reader uses. Both are written in
+			// this transaction, so they always agree about THIS payment.
 			if err := tx.QueryRow(ctx,
 				`UPDATE bills SET paid_date = $3, paid_for_due_date = $4, updated_at = NOW()
 				 WHERE id = $1 AND household_id = $2

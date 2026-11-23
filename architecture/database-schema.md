@@ -106,6 +106,61 @@ SELECT CASE WHEN frequency = 'monthly' THEN due_day::text
 Better still: read `frequency, due_day, due_date` together and pass all three
 to `billdue.Schedule`, which is what every Go consumer does.
 
+### Where a bill's payment history lives (090, #5514)
+
+`bill_payments` is the ledger: **one row per payment**. This is the table that
+answers "how much did we pay the dentist last year", "did we pay the October
+mortgage, and when", and "two payments on one bill" — none of which the old
+shape could express.
+
+```
+bill_payments(household_id, bill_id, amount, paid_on, paid_for_due_date,
+              payment_account_id, method, note, source_document_id,
+              is_reconstructed, created_at, created_by)
+```
+
+- `paid_on` is when the money moved; `paid_for_due_date` is the due cycle it
+  **settles**. Two columns on purpose — a late payment is one event covering an
+  earlier cycle, and collapsing them is the bug 052 fixed.
+- `amount` is what was **paid**, not `bills.amount` (what is **owed**). It is
+  NULL when nobody recorded how much: unknown is not zero, and `SUM()` skips it.
+- `is_reconstructed` is TRUE only for rows 090 rebuilt from a single
+  `bills.paid_date`. Those carry the bill's amount and its stored coverage, and
+  they are the **last** payment only, because that is all the old columns ever
+  held. An inferred history must not read as a record.
+- `bill_id`, `payment_account_id` and `source_document_id` are all **composite
+  same-family FKs** (`(col, household_id) REFERENCES parent (id, household_id)`),
+  so a payment cannot join a bill and an account from two families.
+- `UNIQUE (id, household_id)` so a later table can target a payment the same way.
+
+**`bills.paid_date` and `bills.paid_for_due_date` are still there, and still
+what every reader uses.** They are the derived **cache of the latest payment**:
+`billdue.coveredDueDate` reads them, and through it `BillDueFor`,
+`AttentionFor`, `bill_find`, the API's bill responses, the agenda, the worker's
+reminders and the notification policy. Two writers keep the cache and the ledger
+in step, each in one transaction: MCP `bill_pay` (both), and the API's bill
+update (the cache only — it resets `paid_for_due_date` to NULL when the schedule
+changes). The API records no payments at all; it has no endpoint that does.
+
+```sql
+-- WRONG: bills.paid_date holds ONE value, so this is the latest payment only
+SELECT sum(amount) FROM bills WHERE household_id = $1 AND paid_date >= $2;
+
+-- RIGHT: the ledger keeps every payment
+SELECT sum(amount) FROM bill_payments
+ WHERE household_id = $1 AND paid_on >= $2 AND paid_on < $3;
+
+-- RIGHT: one bill's history, newest first (idx_bill_payments_bill_paid)
+SELECT paid_on, amount, paid_for_due_date, is_reconstructed
+  FROM bill_payments WHERE bill_id = $1 ORDER BY paid_on DESC;
+```
+
+Making the ledger **authoritative** — pointing `billdue` at it and dropping the
+two cache columns — is a follow-up, not part of 090. When it happens it is a
+change to that one rule in `packages/billdue`, and `TestBillReadStillUsesTheCache`
+(`apps/api/internal/bill/payments_db_test.go`) is the test that has to be
+rewritten with it.
+
 ---
 
 ## The subject pattern: five tables, one rule
