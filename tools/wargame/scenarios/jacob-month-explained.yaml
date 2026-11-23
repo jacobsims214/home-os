@@ -1,0 +1,45 @@
+# War-game scenario - written for R4 from #5505 (household reality); not played yet.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+#
+# Many "not filed yet" bugs came from an agent that was allowed to sum. This one
+# forbids arithmetic: every figure in the reply must appear verbatim in a tool
+# payload, and "automatic" must be bill_find's `attention`, not the agent's own
+# reading of `autopay`.
+id: jacob-month-explained
+persona: jacob
+surface: money
+intent: |
+  What are we paying this month, and what is automatic?
+steps:
+  - "chat.sh jacob r4-month --stdin <<'EOF' (ask what we pay this month and what pays itself; no $ in the message) EOF"
+  - mcpcall.py bill_find as jacob
+  - mcpcall.py budget_summary --sections obligations as jacob
+  - "read the reply and list every money figure in it"
+assertion: |
+  The reply separates the bills by bill_find's `attention`: the 6 it calls
+  `automatic` (Mortgage, Electric, Internet, Phone family plan, Streamly
+  subscription, Homeowners insurance) are named as automatic and the other 6
+  (Water, Field trip fee - Noah, Trash and recycling, Pediatrician copay, Maple
+  Family Dental - crown balance, Orchard Plumbing invoice 1042) are named as on a
+  person, with the 1 needs_setup and 1 overdue case called out as such rather
+  than lumped in as merely due. Every dollar figure the reply states appears
+  verbatim in a tool payload this turn: either a bill's `amount` or
+  `monthly_amount` from bill_find, or a `totals` figure from budget_summary. Any
+  total the reply names must equal budget_summary's own totals.committed (or be
+  quoted from it); a number the agent added itself - including a plausible
+  monthly sum of the twelve bills - fails this scenario. Every bill the reply
+  calls automatic has attention "automatic" in bill_find, and no bill with
+  attention other than automatic is called automatic.
+tags:
+  - money
+  - agent
+  - honesty
+  - autopay
+  - no-arithmetic
+origin:
+  round: r4
+  source: "#5505"
+  ref: household-reality/4
+  ticket: "#5505"
+  date: "2026-11-23"
+  verdict: untested

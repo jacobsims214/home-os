@@ -1,0 +1,48 @@
+# War-game scenario - written for R4 from #5505 (household reality); not played yet.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+#
+# The seed (#5544) guarantees the mix this asserts on: 6 bills with autopay AND a
+# linked account, 4 manual with an account on record, 1 manual with no account, 1
+# overdue. billdue.AttentionFor decides which is which; the UI must render that
+# answer and never re-derive it from `is_autopay` (standing instructions §6).
+id: amber-autopay-vs-manual
+persona: amber
+surface: money
+intent: |
+  Which of these do I need to deal with?
+steps:
+  - "open https://homeos.simstech.cloud as amber at 390x844"
+  - "tap More -> Money -> Bills (or Today -> Bills and upkeep)"
+  - "read the header split (data-testid=bills-split) and count line (data-testid=bills-actions)"
+  - "on every bill row read data-attention and the badge's visible label"
+  - "read the context line (data-testid=bills-context), the N-dued-now line"
+  - mcpcall.py bill_find as amber
+  - api.py GET /api/v1/budget/due-soon as amber
+assertion: |
+  Tallying the list rows by their data-attention attribute gives exactly
+  {automatic: 6, due_soon: 4, needs_setup: 1, overdue: 1}, and that tally equals
+  the tally of bill_find's `attention` field over the same 12 bills. The 6 rows
+  marked automatic are the same 6 bills bill_find calls automatic (Mortgage,
+  Electric, Internet, Phone family plan, Streamly subscription, Homeowners
+  insurance) by id, not merely the first 6 rows. Each of those 6 badges reads
+  "Automatic" and every other row reads "Due soon", "Needs setup" or "Overdue" -
+  no row shows a label that disagrees with its own data-attention, and no row
+  shows "Automatic" for a bill whose bill_find `attention` is not automatic.
+  data-testid=bills-actions reads "6 need you", which equals the number of
+  bill_find rows whose attention is not `automatic` (4 + 1 + 1). The
+  bills-context "N due now" number equals the count of status "due" items in
+  GET /api/v1/budget/due-soon - a different question from "need you", and neither
+  figure may be printed in place of the other.
+tags:
+  - money
+  - ui
+  - mobile
+  - attention
+  - autopay
+origin:
+  round: r4
+  source: "#5505"
+  ref: household-reality/1
+  ticket: "#5505"
+  date: "2026-11-23"
+  verdict: untested

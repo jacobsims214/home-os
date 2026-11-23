@@ -259,7 +259,11 @@ def parse_yaml(text, name="<string>"):
 
 PERSONAS = ("amber", "jacob", "designer")
 VERDICTS = ("pass", "partial", "fail", "untested")
-ROUNDS = ("r1", "r2", "r3")
+# A round is added here when it is planned, not when it has been played: the
+# scenarios for a round are written before it, so a driver has something to run
+# (see the README's "Adding a scenario for a new round"). r4 is the
+# household-reality round (#5505); its scenarios are `untested` until it is played.
+ROUNDS = ("r1", "r2", "r3", "r4")
 ID_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 
 REQUIRED = ("id", "persona", "surface", "intent", "steps", "assertion", "tags", "origin")
@@ -332,8 +336,20 @@ def validate_scenario(doc, filename):
         if "verdict" in origin and origin["verdict"] not in VERDICTS:
             errs.append("origin.verdict %r must be one of %s"
                         % (origin["verdict"], ", ".join(VERDICTS)))
-        if "source" in origin and not str(origin["source"]).startswith("discoveries/"):
-            errs.append("origin.source %r must point into discoveries/" % (origin["source"],))
+        # A TRANSCRIBED scenario points at the write-up that recorded it. A
+        # scenario written AHEAD of the round it belongs to cannot: there is no
+        # discoveries/ row yet, so it names the ticket that designed it ("#5505")
+        # and must be `untested`. Anything else - a claimed pass, partial or fail
+        # with no write-up behind it - is a completion comment, not evidence.
+        src = str(origin.get("source", ""))
+        if not src.startswith("discoveries/"):
+            if not re.match(r"^#\d+$", src):
+                errs.append("origin.source %r must point into discoveries/ or be a ticket "
+                            "ref like #5505 (only for an untested, not-yet-played scenario)" % (src,))
+            elif origin.get("verdict") != "untested":
+                errs.append("origin.source %r is a ticket, not a discoveries/ write-up: a %r "
+                            "verdict needs the round doc that recorded it"
+                            % (src, origin.get("verdict")))
         if "date" in origin and not re.match(r"^\d{4}-\d{2}-\d{2}$", str(origin["date"])):
             errs.append("origin.date %r must be YYYY-MM-DD" % (origin["date"],))
 
@@ -598,6 +614,20 @@ def selftest(out=sys.stdout):
           "origin.round 'r9'")
     fails("bad verdict", GOOD.replace("  verdict: pass", "  verdict: great"),
           "origin.verdict 'great'")
+    # A scenario written AHEAD of its round names the ticket it was designed in, and
+    # may only be untested. A played verdict still needs the write-up behind it.
+    ahead = GOOD.split("  reruns:")[0]  # a scenario with no rerun history yet
+    _expect("ticket source, untested, is valid",
+            validate_scenario(parse_yaml(
+                ahead.replace("source: discoveries/war-game-r3-amber.md", 'source: "#5505"')
+                     .replace("verdict: pass", "verdict: untested"), "amber-sample.yaml"),
+                "amber-sample.yaml") == [], failures)
+    fails("ticket source with a played verdict",
+          ahead.replace("source: discoveries/war-game-r3-amber.md", 'source: "#5505"'),
+          "a 'pass' verdict needs the round doc")
+    fails("source that is neither",
+          ahead.replace("source: discoveries/war-game-r3-amber.md", "source: notes/scratch.md"),
+          "must point into discoveries/")
     fails("unknown field", GOOD + "colour: blue\n", "unknown field 'colour'")
     fails("surface with space", GOOD.replace("surface: money", "surface: the money page"),
           "single token")

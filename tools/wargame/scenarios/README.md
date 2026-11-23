@@ -5,9 +5,18 @@ round runs against**, which is what makes R4's findings comparable to R3's — u
 round invented its scenarios in prose inside a ticket brief, so coverage was unmeasurable and
 no two rounds could be lined up.
 
-The corpus is transcribed, not invented: every scenario here was actually exercised in R1, R2
-or R3, and `origin` records where. A passing scenario stays in the corpus as a regression
+The corpus is transcribed, not invented: every R1–R3 scenario here was actually exercised in
+that round, and `origin` records where. A passing scenario stays in the corpus as a regression
 guard — it is not deleted when it starts passing.
+
+**A round can also be written before it is played.** R4 (#5505) is the first: its eight
+household-reality scenarios were designed against the seeded household and the shipped rules,
+so `origin.source` names the ticket (`"#5505"`) instead of a `discoveries/` doc, `origin.round`
+is `r4`, and every verdict starts `untested`. The validator enforces the pairing — a ticket as
+`source` is allowed *only* with `untested`, because a `pass`/`partial`/`fail` with no round
+doc behind it is a claim, not evidence. When R4 is played, a scenario's result is a `reruns`
+entry (or, for one of these eight, its `origin.verdict` moves off `untested` and its `source`
+becomes the round's doc).
 
 ## Fields
 
@@ -20,7 +29,7 @@ guard — it is not deleted when it starts passing.
 | `steps` | yes | The concrete actions, in order, executable by a driver: a `chat.sh` turn, an `mcpcall.py` read, a UI tap sequence. Quote anything containing `$` (see the quoting section of `../README.md`). |
 | `assertion` | yes | What must be true afterwards, checked against ground truth. **This is what makes it a test rather than a demo.** If a scenario has no assertion a driver could fail, it is not a scenario. |
 | `tags` | yes | 3–6 single-token tags (`money`, `ui`, `honesty`, `write`, `search-window`, …). Used to pick a slice of the corpus for a short round. |
-| `origin` | yes | `round` (`r1`\|`r2`\|`r3`), `source` (the `discoveries/` doc), `ref` (the row/turn/finding in it), `ticket`, `date`, `verdict` (`pass`\|`partial`\|`fail`\|`untested`). |
+| `origin` | yes | `round` (`r1`\|`r2`\|`r3`\|`r4`), `source` (the `discoveries/` doc — or, for a scenario written ahead of its round, the designing ticket such as `"#5505"`, which forces `verdict: untested`), `ref` (the row/turn/finding in it, or the brief's numbered item), `ticket`, `date`, `verdict` (`pass`\|`partial`\|`fail`\|`untested`). |
 | `origin.reruns` | no | Later rounds that re-ran the same scenario: `round`, `source`, `ref`, `ticket`, `date`, `verdict`, `note`. This is the regression history — R4 adds one of these per scenario it re-runs. |
 | `notes` | no | Anything a driver needs that does not fit the fields above. |
 
@@ -58,6 +67,7 @@ parser and the validator against a good sample, each failure mode, and the real 
 
 1. If the scenario already exists, add a `reruns` entry to it — do not create a second file.
 2. If it is genuinely new, copy the shape of a neighbour, give it a stable id, and set
-   `origin` to the round and finding that produced it.
+   `origin` to the round and finding that produced it — or, when the round has not been played
+   yet, to the round and the *ticket* that designed it (`source: "#5505"`, `verdict: untested`).
 3. Run `./scenarios_load.py --check`. A round's write-up should cite scenario ids, so
    `--report` and the round doc can be compared directly.
