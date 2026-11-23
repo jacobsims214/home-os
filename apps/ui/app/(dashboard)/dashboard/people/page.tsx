@@ -27,6 +27,15 @@
  * manager. The API refuses regardless — the UI only avoids drawing a button
  * that would 403.
  *
+ * ACCOUNT OR RECORD (#5696). This list holds BOTH kinds of person and used to
+ * say nothing about which was which: a parent with a login and a role in
+ * Members, and a child, grandparent or nanny who is a record only. Each row now
+ * carries a badge from components/person/person-facts.ts (`isAccount` /
+ * `accountLabel`), whose input is the API's own `has_login`
+ * (people/handler.go:135) — the field that survives read_basic precisely so a
+ * housesitter can tell a child from an adult. The badge sits on the name line,
+ * never on a detail page: it is the first question this list is asked.
+ *
  * DATES. `birthdate` is a DATE. The age is worked out in
  * components/person/person-facts.ts from the string's own parts (never
  * `new Date("YYYY-MM-DD")`: #4550's bug class) against the household's today,
@@ -47,8 +56,10 @@ import { useCurrentHousehold, useNavRole } from "@/components/shared/use-nav-rol
 import { canManageMembers, paletteVar } from "@/lib/members/roles";
 import { ResponsiveModal, ResponsiveModalActions, TextInput } from "@/components/ui";
 import {
+  accountLabel,
   allergySummary,
   initials,
+  isAccount,
   personAge,
   personCreateBody,
   personSubtitle,
@@ -89,9 +100,14 @@ function PersonCard({ person, today }: { person: PersonLike; today: string | nul
       <div className="flex items-center gap-3 p-4">
         <Avatar person={person} />
         <div className="min-w-0 flex-1">
-          <h3 className="text-[15px] font-semibold leading-snug text-ink [overflow-wrap:anywhere]">
-            {person.display_name}
-          </h3>
+          {/* The badge rides the name line, not a detail page: which people can
+              sign in is the first thing a parent asks of this list (#5696). */}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <h3 className="text-[15px] font-semibold leading-snug text-ink [overflow-wrap:anywhere]">
+              {person.display_name}
+            </h3>
+            <AccountBadge person={person} />
+          </div>
           {subtitle && <p className="mt-0.5 text-sm text-ink-3 [overflow-wrap:anywhere]">{subtitle}</p>}
         </div>
         <IconChevronRight size={20} stroke={STROKE} className="shrink-0 text-ink-3" aria-hidden />
@@ -107,6 +123,34 @@ function PersonCard({ person, today }: { person: PersonLike; today: string | nul
         </div>
       )}
     </Link>
+  );
+}
+
+/**
+ * The account badge (#5696): "Signs in" or "No login".
+ *
+ * A household holds two kinds of person and the list must say which is which
+ * without opening a record: a parent with a login and a role in Members, and a
+ * child/grandparent/nanny who is a record only. Words carry the meaning and
+ * colour only reinforces it (KB design/accessibility-and-responsive.md), so the
+ * badge is readable in greyscale and to a screen reader.
+ *
+ * `accountLabel`/`isAccount` are the ONE implementation of the rule
+ * (components/person/person-facts.ts) — the card, the table and the person's
+ * own page all call them, so the three cannot disagree.
+ */
+function AccountBadge({ person }: { person: PersonLike }) {
+  const account = isAccount(person);
+  return (
+    <span
+      data-account-badge={account ? "account" : "record"}
+      className={
+        "inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[11px] font-semibold leading-5 " +
+        (account ? "bg-accent-soft text-accent" : "bg-surface-2 text-ink-2")
+      }
+    >
+      {accountLabel(person)}
+    </span>
   );
 }
 
@@ -249,8 +293,13 @@ export default function PeoplePage() {
             </Button>
           )}
         </div>
+        {/* #5696: the list holds both kinds of person, so the lede says so in
+            the two words the badges use. This is the sentence that answers
+            "who here is a user?" before anyone taps a row. */}
         <p className="mt-1 text-sm text-ink-3">
-          Everyone in the family, including the kids — their birthdays, schools and allergies.
+          Everyone in the household — their birthdays, schools and allergies.{" "}
+          <b className="font-semibold text-ink-2">Signs in</b> means they have a login and a role
+          (in Members); <b className="font-semibold text-ink-2">No login</b> is a record only.
         </p>
       </div>
 
@@ -320,7 +369,7 @@ export default function PeoplePage() {
             <Table highlightOnHover verticalSpacing="sm" horizontalSpacing="md" className="min-w-[36rem]">
               <Table.Thead>
                 <Table.Tr>
-                  {["Name", "Relationship", "Age", "Allergies"].map((label) => (
+                  {["Name", "Sign-in", "Relationship", "Age", "Allergies"].map((label) => (
                     <Table.Th
                       key={label}
                       scope="col"
@@ -344,6 +393,9 @@ export default function PeoplePage() {
                           {person.display_name}
                         </Link>
                       </span>
+                    </Table.Td>
+                    <Table.Td className="whitespace-nowrap">
+                      <AccountBadge person={person} />
                     </Table.Td>
                     <Table.Td className="whitespace-nowrap text-ink-2">{person.relationship || "\u2014"}</Table.Td>
                     {/* The age, from the shared helper: never a Date on a date-only string. */}
