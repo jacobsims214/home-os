@@ -191,3 +191,25 @@ export const guideKeys = {
   revisions: (id: string) => [...guideKeys.detail(id), "revisions"] as const,
   revision: (id: string, revisionId: string) => [...guideKeys.revisions(id), revisionId] as const,
 };
+
+/**
+ * The family reference — the KB (HOME-OS-5503).
+ *
+ * Under `guideKeys.all` on purpose: a guide and a reference doc share one page
+ * family (the Guides section), so a save in either must invalidate what the
+ * other side lists. Two roots would let a doc appear in the reference list
+ * while the Guides count on the switch still says the old number.
+ *
+ * `search(q)` is its own key because the API answers a SEARCH differently from
+ * a list: the hits come back ranked with a `score`, and re-using `list()` for
+ * them would hand a ranked result to a query already cached as an
+ * alphabetised list (and overwrite it).
+ */
+export const kbKeys = {
+  all: [...guideKeys.all, "kb"] as const,
+  lists: () => [...kbKeys.all, "list"] as const,
+  list: (prefix?: string) => [...kbKeys.lists(), prefix ?? ""] as const,
+  search: (q: string) => [...kbKeys.all, "search", q] as const,
+  details: () => [...kbKeys.all, "detail"] as const,
+  detail: (path: string) => [...kbKeys.details(), path] as const,
+};

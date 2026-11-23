@@ -110,6 +110,9 @@ const DETAIL_ROUTES: Readonly<Record<string, (id: string) => string>> = {
   calendar: () => "/dashboard/calendar",
   maintenance_task: () => "/dashboard/maintenance",
   maintenance_schedule: () => "/dashboard/maintenance",
+  // #5503: the family reference (the KB). Its address is its path, so the id a
+  // hit carries IS the route — a doc found here opens the doc, not a modal.
+  kb_doc: (id) => `/dashboard/guides/reference/${id}`,
 };
 
 /** The page for a record, or null when the build has none. */
@@ -217,6 +220,24 @@ export const GROUPS: readonly GroupDef[] = [
     entityTypes: ["guide"],
     open: "record",
     canSee: (role) => canSeeEntity(role, "guide"),
+  },
+  {
+    // #5503: the family reference (kb_docs). A SEPARATE group from Guides
+    // because it is a separate thing to a reader — a procedure you follow vs a
+    // thing you look up — and because merging them would put a doc's path and
+    // a guide's step count in one indistinguishable list.
+    //
+    // The KB is readable by EVERY role (ResKB read = rolesEveryone, and
+    // migration 076 added kb_doc to role_can_see_entity for exactly that
+    // reason: the sitter needs the router doc), so this group is drawn for
+    // everyone the Guides section reaches. A vendor can read a doc by API but
+    // has no nav to the surface; the API still answers their search.
+    id: "kb_doc",
+    label: "Reference",
+    kind: "doc",
+    entityTypes: ["kb_doc"],
+    open: "link",
+    canSee: (role) => canSeeEntity(role, "kb_doc"),
   },
   {
     id: "credential",

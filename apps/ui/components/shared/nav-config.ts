@@ -245,6 +245,12 @@ const ROUTE_TITLES: ReadonlyArray<[prefix: string, title: string]> = [
   // without this entry the header h1 fell through to "Home OS" — the app's
   // name instead of the page's, which is what #5409 found. It sits below
   // Documents here because a guide keeps the list's title, like a recipe.
+  //
+  // The family reference (#5503) lives under the same section and its own
+  // routes, so it needs its own title — otherwise the header read "Guides"
+  // over a page whose own heading says "Reference", which is #5409's defect
+  // again.
+  ["/dashboard/guides/reference", "Reference"],
   ["/dashboard/guides", "Guides"],
   // Settings' sub-routes (#4560). Each section page draws its body under this
   // header, so without these the h1 read "Settings" on all six and the
