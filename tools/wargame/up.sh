@@ -189,6 +189,7 @@ check_cluster() {
 check_dex_login() {
   local name="$1" email="$2" id="dex-login:$1"
   local pwfile="$SCRATCH/pw-$name"
+  local verdict="$SCRATCH/verdict-$name"
 
   if ! read_secret_to_file "$(dex_secret_ns "$name")" "$(dex_secret_name "$name")" \
         "$(dex_secret_key "$name")" "$pwfile"; then
@@ -199,9 +200,13 @@ check_dex_login() {
   # python3 does the URL/cookie/JSON work because bash cannot do PKCE or parse an
   # id_token sanely. Standard library only; the password arrives by file path and is
   # never passed on argv or through the environment.
-  local out rc
-  out="$(python3 - "$SITE" "$email" "$pwfile" "$NET_TIMEOUT" <<'PY' 2>&1
-import base64, hashlib, json, os, re, secrets, subprocess, sys, urllib.parse
+  #
+  # The verdict goes to a FILE, not through $(...): a heredoc inside command
+  # substitution is scanned by bash for a closing quote before it runs, so a single
+  # apostrophe in any comment or string here breaks the whole script. Writing to a file
+  # keeps bash out of the Python body entirely.
+  python3 - "$SITE" "$email" "$pwfile" "$NET_TIMEOUT" > "$verdict" 2>&1 <<'PY'
+import base64, hashlib, json, os, re, secrets, subprocess, sys, time, urllib.parse
 
 site, email, pwfile, timeout = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 REDIRECT = "http://127.0.0.1:19876/mcp/oauth/callback"
@@ -214,6 +219,9 @@ def curl(args):
     r = subprocess.run(cmd, capture_output=True, text=True)
     return r.returncode, r.stdout, r.stderr
 
+class Limited(Exception):
+    pass
+
 def die(msg):
     print("ERR " + msg); sys.exit(0)
 
@@ -222,90 +230,130 @@ def redirect_code(location):
         return None
     return urllib.parse.parse_qs(urllib.parse.urlparse(location).query).get("code", [None])[0]
 
-verifier = base64.urlsafe_b64encode(secrets.token_bytes(48)).decode().rstrip("=")
-challenge = base64.urlsafe_b64encode(
-    hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-q = {"client_id": "home-os-mcp", "response_type": "code", "scope": "openid email",
-     "redirect_uri": REDIRECT, "code_challenge": challenge,
-     "code_challenge_method": "S256", "state": state}
+def attempt():
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(48)).decode().rstrip("=")
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    q = {"client_id": "home-os-mcp", "response_type": "code", "scope": "openid email",
+         "redirect_uri": REDIRECT, "code_challenge": challenge,
+         "code_challenge_method": "S256", "state": state}
 
-# 1. authorize -> Dex hands back the local-connector login form
-rc, html, err = curl(["-L", site + "/dex/auth?" + urllib.parse.urlencode(q)])
-if rc != 0:
-    die("authorize request failed: " + (err.strip() or "curl rc=%d" % rc))
-m = re.search(r'<form method="post" action="([^"]+)"', html)
-if not m:
-    die("no login form at /dex/auth/local (Dex up? connector 'local' enabled?)")
-action = m.group(1).replace("&amp;", "&")
-
-# 2. POST the password. `password@file` keeps it off argv.
-rc, body, err = curl(["-o", os.path.join(workdir, "login.html"),
-                      "-w", "%{http_code}|%{redirect_url}",
-                      "--data-urlencode", "login=" + email,
-                      "--data-urlencode", "password@" + pwfile,
-                      site + action])
-if rc != 0:
-    die("login POST failed: " + (err.strip() or "curl rc=%d" % rc))
-status, _, location = body.partition("|")
-if status == "401":
-    die("Dex rejected the password (401) — Secret is stale or the account is gone")
-if status not in ("302", "303"):
-    die("login POST returned %s, expected a redirect" % status)
-
-# 3. follow the redirect chain to the authorization code. Done hop by hop rather than
-# with -L because the last hop points at 127.0.0.1:19876, which is deliberately not
-# listening: -L would fail to connect and lose the code we came for.
-hdrfile = os.path.join(workdir, "hop.hdr")
-code = redirect_code(location)
-for _ in range(4):
-    if code:
-        break
-    rc, _, err = curl(["-o", "/dev/null", "-D", hdrfile, "-w", "%{http_code}", location])
+    # 1. authorize -> the local-connector login form. The status is captured because a
+    # 429 here is the limiter, not a broken connector.
+    rc, body, err = curl(["-L", "-o", os.path.join(workdir, "auth.html"),
+                          "-w", "%{http_code}",
+                          site + "/dex/auth?" + urllib.parse.urlencode(q)])
     if rc != 0:
-        die("could not follow the login redirect: " + err.strip())
-    nxt = None
-    with open(hdrfile, "r", errors="replace") as fh:
-        for line in fh:
-            if line.lower().startswith("location:"):
-                nxt = line.split(":", 1)[1].strip()
-    if not nxt:
-        break
-    location = nxt if nxt.startswith("http") else urllib.parse.urljoin(site, nxt)
+        die("authorize request failed: " + (err.strip() or "curl rc=%d" % rc))
+    status = body.strip()[-3:]
+    html = open(os.path.join(workdir, "auth.html"), errors="replace").read()
+    m = re.search(r'<form method="post" action="([^"]+)"', html)
+    if not m:
+        if status == "429":
+            raise Limited()
+        die("no login form at /dex/auth/local (HTTP %s) — Dex up? connector local enabled?" % status)
+    action = m.group(1).replace("&amp;", "&")
+
+    # 2. POST the password. password@file keeps it off argv.
+    rc, body, err = curl(["-o", os.path.join(workdir, "login.html"),
+                          "-w", "%{http_code}|%{redirect_url}",
+                          "--data-urlencode", "login=" + email,
+                          "--data-urlencode", "password@" + pwfile,
+                          site + action])
+    if rc != 0:
+        die("login POST failed: " + (err.strip() or "curl rc=%d" % rc))
+    status, _, location = body.partition("|")
+    if status == "401":
+        die("Dex rejected the password (401) — Secret is stale or the account is gone")
+    if status == "429":
+        raise Limited()
+    if status not in ("302", "303"):
+        die("login POST returned %s, expected a redirect" % status)
+
+    # 3. follow the redirect chain to the authorization code, hop by hop rather than with
+    # -L: the last hop points at 127.0.0.1:19876, which is deliberately not listening,
+    # and -L would try to connect, fail, and lose the code.
+    hdrfile = os.path.join(workdir, "hop.hdr")
     code = redirect_code(location)
-if not code:
-    die("sign-in produced no authorization code")
+    last_status = ""
+    for _ in range(4):
+        if code:
+            break
+        rc, last_status, err = curl(["-o", "/dev/null", "-D", hdrfile,
+                                     "-w", "%{http_code}", location])
+        if rc != 0:
+            die("could not follow the login redirect: " + err.strip())
+        last_status = last_status.strip()[-3:]
+        nxt = None
+        with open(hdrfile, "r", errors="replace") as fh:
+            for line in fh:
+                if line.lower().startswith("location:"):
+                    nxt = line.split(":", 1)[1].strip()
+        if not nxt:
+            break
+        location = nxt if nxt.startswith("http") else urllib.parse.urljoin(site, nxt)
+        code = redirect_code(location)
+    if not code:
+        if last_status == "429":
+            raise Limited()
+        die("sign-in produced no authorization code (last HTTP %s)" % (last_status or "none"))
 
-# 4. redeem it — this is the proof Dex authenticated the identity
-rc, tok, err = curl(["-X", "POST", site + "/dex/token",
-                     "--data-urlencode", "grant_type=authorization_code",
-                     "--data-urlencode", "code=" + code,
-                     "--data-urlencode", "redirect_uri=" + REDIRECT,
-                     "--data-urlencode", "client_id=home-os-mcp",
-                     "--data-urlencode", "code_verifier=" + verifier])
-if rc != 0:
-    die("token exchange failed: " + err.strip())
-try:
-    doc = json.loads(tok)
-except ValueError:
-    die("token endpoint did not return JSON")
-if "id_token" not in doc:
-    die("token endpoint returned no id_token: " + str(doc.get("error", "no error field")))
+    # 4. redeem it — the proof that Dex authenticated this identity, not merely that a
+    # form accepted a POST.
+    rc, tok, err = curl(["-X", "POST", site + "/dex/token",
+                         "--data-urlencode", "grant_type=authorization_code",
+                         "--data-urlencode", "code=" + code,
+                         "--data-urlencode", "redirect_uri=" + REDIRECT,
+                         "--data-urlencode", "client_id=home-os-mcp",
+                         "--data-urlencode", "code_verifier=" + verifier])
+    if rc != 0:
+        die("token exchange failed: " + err.strip())
+    try:
+        doc = json.loads(tok)
+    except ValueError:
+        die("token endpoint did not return JSON")
+    if "id_token" not in doc:
+        die("token endpoint returned no id_token: " + str(doc.get("error", "no error field")))
 
-payload = doc["id_token"].split(".")[1]
-payload += "=" * (-len(payload) % 4)
-claims = json.loads(base64.urlsafe_b64decode(payload))
-if claims.get("email", "").lower() != email.lower():
-    die("signed in as %r, expected %r" % (claims.get("email"), email))
-print("OK id_token for %s (iss %s)" % (claims["email"], claims.get("iss")))
+    payload = doc["id_token"].split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(payload))
+    if claims.get("email", "").lower() != email.lower():
+        die("signed in as %r, expected %r" % (claims.get("email"), email))
+    print("OK id_token for %s (iss %s)" % (claims["email"], claims.get("iss")))
+
+
+# Bounded retry. Envoy rate-limits /dex/auth* per client IP (values.yaml
+# envoy.dexLogin: 10/min, burst 20) and one run spends about 10 tokens, so a second run
+# inside the same minute can be limited. Waiting is the correct answer; the alternative
+# is reporting a healthy environment as broken. The limit is reported only once this
+# wait budget is spent.
+WAIT_BUDGET_S = int(os.environ.get("WARGAME_LIMIT_WAIT_S", "130"))
+deadline = time.time() + WAIT_BUDGET_S
+while True:
+    try:
+        attempt()
+        break
+    except Limited:
+        if time.time() >= deadline:
+            die("sign-ins are rate-limited (429) and did not clear within %ds "
+                "(per-client limiter on /dex/auth*, values.yaml envoy.dexLogin). "
+                "Wait a minute and re-run; this is the limiter, not a bad password."
+                % WAIT_BUDGET_S)
+        # Never sleep past the budget: a short WARGAME_LIMIT_WAIT_S must not be
+        # stretched to a minute, or the caller's timeout kills the probe mid-wait.
+        time.sleep(max(1, min(65, deadline - time.time())))
 PY
-)"; rc=$?
+  local rc=$?
 
+  local out
+  out="$(cat "$verdict" 2>/dev/null)"
   case "$out" in
     OK*) pass "$id" "${out#OK }" ;;
     ERR*) fail "$id" "${out#ERR }" ;;
     *) fail "$id" "probe produced no verdict (rc=$rc): $(printf '%s' "$out" | head -1)" ;;
   esac
-  rm -f "$pwfile"
+  rm -f "$pwfile" "$verdict"
 }
 
 # ---------------------------------------------------------------------------
@@ -453,24 +501,32 @@ done
 # Run it and fold its verdicts in, so up.sh is the one command rather than "one of two".
 if [ -x "$HERE/verify.py" ] && [ -f "$HERE/verify.yaml" ]; then
   vout="$(cd "$HERE" && timeout 180 ./verify.py --json 2>"$SCRATCH/verr")"; vrc=$?
+  vrows=""
   if [ -n "$vout" ]; then
+    vrows="$(printf '%s' "$vout" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: raise SystemExit
+rs = d.get("checks") if isinstance(d, dict) else d
+if not isinstance(rs, list): raise SystemExit
+for r in rs:
+    print("%s\t%s\t%s" % (r.get("id",""), "1" if r.get("ok") else "0", r.get("detail","")))
+' 2>/dev/null)"
+  fi
+  # verify.py present but nothing usable back is a FAIL, not a quiet omission: a
+  # verifier that contributes no rows while reporting READY is the exact defect
+  # this script exists to catch.
+  if [ -z "$vrows" ]; then
+    fail "verify:verify.py" "ran but returned no parseable checks (rc=$vrc): $(head -1 "$SCRATCH/verr" 2>/dev/null)"
+  else
     while IFS=$'\t' read -r cid cok cdetail; do
       [ -n "$cid" ] || continue
-      # up.sh already covers cluster/site/dex/mcp more strictly; only add what it lacks.
+      # up.sh covers cluster/site/dex/mcp more strictly; only add what it lacks.
       case "$cid" in
         cluster-reachable|site-up|dex-reachable|persona-*) continue ;;
       esac
       if [ "$cok" = "1" ]; then pass "verify:$cid" "$cdetail"; else fail "verify:$cid" "$cdetail"; fi
-    done < <(printf '%s' "$vout" | python3 -c '
-import json,sys
-try: d=json.load(sys.stdin)
-except Exception: raise SystemExit
-rs = d.get("results", d if isinstance(d, list) else [])
-for r in rs:
-    print("%s\t%s\t%s" % (r.get("id",""), "1" if r.get("ok") else "0", r.get("detail","")))
-' 2>/dev/null)
-  else
-    fail "verify:verify.py" "verify.py present but produced no JSON (rc=$vrc)"
+    done <<< "$vrows"
   fi
 fi
 
