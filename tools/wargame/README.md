@@ -7,6 +7,9 @@ you check what actually landed in Home OS with direct MCP calls.
 | File | What it does |
 |---|---|
 | `up.sh` | **Verify the environment before a round**: cluster 5/5 Ready, both personas' Dex passwords actually sign in, both agent tokens answer `tools/list`, site 200 and Dex discovery. Pass/fail table, non-zero exit on anything wrong, never prints a secret. Idempotent — see [Verifying the environment](#verifying-the-environment--upsh-and-what-it-refuses-to-guess). |
+| `run.sh` | **Play a whole round in one command**: gates on `up.sh`, selects scenarios from the corpus, executes each one, and writes `scorecard.md` with the delta against the previous round. Exit `1` if any scenario FAILED, so it can gate a deploy — see [Running a round with `run.sh`](#running-a-round-with-runsh). |
+| `scenario_driver.py` | Executes ONE scenario for `run.sh`: runs the steps that have a driver (mcpcall.py, api.py, chat.sh, headless Chrome at 390px) and records PASS/FAIL/BLOCKED with evidence. Not a round entry point. |
+| `checks/<id>.py` | A scenario's own assertion check, run by the driver. Absent one the scenario is BLOCKED, never PASS. |
 | `chat.sh` | Sends one persona turn to a moltis agent, waits for the reply, prints the tool calls it made and its answer. `--history` dumps a whole session; `--stdin` / `--file` take the message where the shell cannot expand it — **see the quoting section immediately below**; `--selftest` runs the message-guard tests. |
 | `mcpcall.py` | Ground truth: calls one Home OS MCP tool as a household member and prints the result, over Streamable HTTP at `POST <HOMEOS_MCP_URL>/mcp` — the only MCP transport Home OS serves. `--selftest` runs its transport tests with no network. |
 | `api.py` | Same idea for the REST API (`/api/v1/...`). **Dex id_token only** — a `hos_` agent token 401s there by design; see [Two kinds of token](#two-kinds-of-token-agent-tokens-are-mcp-scoped). |
@@ -439,6 +442,83 @@ one command rather than "run one of two".
 
 5. **Clean up.** Delete the test events and notes, or reset the household, before the next
    round. Remove any probe pod you created, because it may hold credentials.
+
+## Running a round with `run.sh`
+
+`./up.sh` proves the environment; `./run.sh` plays the round and scores it. One command:
+
+```bash
+cd tools/wargame
+./run.sh                                  # every scenario in the corpus
+./run.sh --filter money                   # narrow by free text (id, surface, tags, intent)
+./run.sh --persona amber --surface money  # a persona's slice of a surface
+./run.sh --tag attention --round r4       # the household-reality set that touches attention
+./run.sh --ids amber-payee-contact,amber-missed-setup-bill   # exactly these
+./run.sh --limit 3                        # a quick smoke round
+```
+
+It writes `rounds/<label>/scorecard.md` plus `rounds/<label>/evidence/<scenario-id>/` (a
+`result.json`, the agent turn logs, and any screenshots). `rounds/` is git-ignored: rounds are
+append-only and nothing outside them is written, so running a round twice is safe.
+
+**Exit codes, because this is meant to gate a deploy:**
+
+| Exit | Meaning |
+|---|---|
+| `0` | The round ran and **no scenario FAILED** (PASS/BLOCKED only). |
+| `1` | At least one scenario **FAILED**. A deploy must not go out. |
+| `2` | The round **never started**: `up.sh` failed the gate, or the filters matched nothing. No scorecard is written. |
+
+### The gate: `run.sh` will not play a round against a half-up environment
+
+`run.sh` runs `./up.sh` first and refuses to start if it exits non-zero. There is deliberately no
+`--force`: a round played against a broken environment produces lies, and the fix is to repair the
+environment, not to skip the check. `--skip-up` exists only for re-running a round you just gated;
+the scorecard records that it was skipped, because those results are not comparable.
+
+### The three verdicts, and why BLOCKED is not a pass
+
+| Verdict | What it means |
+|---|---|
+| **PASS** | Every step with a driver ran, **and** the scenario's own assertion check (`checks/<id>.py`) ran and passed. Nothing reaches PASS without something that could have failed. |
+| **FAIL** | A step's driver ran and errored, or the assertion check ran and failed. This is a fact about the product. |
+| **BLOCKED** | The round could not judge it: there is no `checks/<id>.py` yet, or a step has no driver (the corpus's steps are prose taps written for a human), or a driver could not tell (a `429` from the MCP is BLOCKED, not FAIL — a rate limit is not a product defect). The scorecard names which. |
+
+A scenario graduates from BLOCKED to a real verdict by gaining a `checks/<id>.py`. The delta then
+shows that graduation as progress, which is the point of scoring the same corpus every round.
+
+### The delta is the point
+
+The top of every scorecard is the comparison with the previous round:
+
+- **`No new findings, no regressions`** — every scenario played this round has the same verdict it
+  had last round. That one line is the signal that we are done.
+- Otherwise it lists what regressed (was → now), what was fixed, what graduated, and what was
+  played for the first time. A scenario with no previous verdict **cannot** regress, so it is
+  reported as "played for the first time" and the round is explicitly **not** clean.
+
+`--compare <dir>` picks the previous round explicitly; otherwise the newest earlier round in
+`rounds/` is used. A baseline round says so instead of inventing a delta.
+
+### Writing an assertion check
+
+`checks/<scenario-id>.py` is a `python3` script (stdlib only) called as
+`checks/<id>.py --evidence-dir <dir> --persona <persona>`. Its **exit code** is the verdict:
+`0` pass, `1` fail (a fact about the product), `2` could not tell (BLOCKED — a `429`, a missing
+credential). Print one line saying what held or what did not.
+
+Read ground truth with `mcpcall.py --text <tool> '<json>'` and assert on it rather than on a
+screenshot wherever the assertion allows. Two rules from `how-to/worker-standing-instructions.md`
+that a check must follow: assert on `attention`, never on `is_autopay` (§6), and **revert-check
+it** — put the defect back, watch the check go red, restore it (§5).
+
+A worked example is `checks/amber-missed-setup-bill.py`, which asserts the seeded dental bill is
+`needs_setup` with no account and that its reminder names **both** missing halves.
+
+### An example scorecard
+
+[`examples/scorecard-narrow-round.md`](examples/scorecard-narrow-round.md) is a real 3-scenario
+round (2 PASS, 1 BLOCKED, delta "no new findings, no regressions").
 
 ## Rules
 
