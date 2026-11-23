@@ -15,19 +15,22 @@ import {
   sectionsInGroup,
 } from "./nav-config.ts";
 
-test("the eight built sections, in the approved order and groups", () => {
+test("the built sections, in the approved order and groups", () => {
   // #4569 added Documents (Household group, between Meals and People & House,
   // which is where artifact #75 v1 draws it). #5408 added Guides, last in the
   // Household group, where artifact #75 v1 also draws it — /dashboard/guides
   // shipped in #4570 and was in no nav surface at all until this.
+  // #5696 added Pets, right after People & House: it had been a `matches`
+  // entry inside People, which highlights the section but reaches nothing.
   assert.deepEqual(
     NAV_SECTIONS.map((s) => s.id),
-    ["today", "calendar", "meals", "lists", "documents", "people", "money", "guides", "settings"],
+    ["today", "calendar", "meals", "lists", "documents", "people", "pets", "money", "guides", "settings"],
   );
   assert.deepEqual(sectionsInGroup("main").map((s) => s.label), ["Today", "Calendar", "Meals", "Lists"]);
   assert.deepEqual(sectionsInGroup("household").map((s) => s.label), [
     "Documents",
     "People & House",
+    "Pets",
     "Money",
     "Guides",
   ]);
@@ -50,6 +53,29 @@ test("Guides is a Household section with a real route (#5408)", () => {
   assert.equal(isSectionActive(guides, "/dashboard/guides"), true);
   assert.equal(activeSection("/dashboard/guides/9")?.id, "guides", "a single guide stays in the section");
   assert.equal(pageTitle("/dashboard/guides"), "Guides");
+});
+
+// #5696: /dashboard/pets existed and worked, and its Add dialog worked, but no
+// nav surface linked to it — it was a `matches` entry inside People, and
+// `matches` only decides which section a route highlights. This is the #5408
+// guard repeated for the second feature it bit: a page in `matches` is not a
+// page a person can reach.
+test("Pets is a Household section with a real route, not just a People match (#5696)", () => {
+  const pets = NAV_SECTIONS.find((s) => s.id === "pets");
+  assert.ok(pets, "Pets must be in nav-config or no nav surface can reach the page");
+  assert.equal(pets.label, "Pets");
+  assert.equal(pets.href, "/dashboard/pets");
+  assert.equal(pets.group, "household", "the More sheet draws household sections as its tiles");
+  assert.equal(pets.tab, undefined, "the four phone tabs are fixed by the approved shell");
+  assert.equal(isSectionActive(pets, "/dashboard/pets"), true);
+  assert.equal(activeSection("/dashboard/pets/9")?.id, "pets", "a single pet stays in the section");
+  assert.equal(pageTitle("/dashboard/pets"), "Pets");
+  // The point of the test: no OTHER section claims the route, so the section
+  // that reaches it is the section that highlights it.
+  const owners = NAV_SECTIONS.filter((s) =>
+    [s.href, ...(s.matches ?? [])].some((p) => p === "/dashboard/pets"),
+  );
+  assert.deepEqual(owners.map((s) => s.id), ["pets"], "only Pets may own /dashboard/pets");
 });
 
 // #5199: the shell shipped "Soon" pills and "Coming soon" tile copy for Lists,
@@ -172,8 +198,20 @@ test("sectionsForRole follows the household role policy", () => {
   // A housesitter also gets Lists (#4566) and Guides (#5408): ResLists and
   // ResGuides both read rolesSitter, so a sitter works the family's lists and
   // reads its runbooks.
-  assert.deepEqual(ids("housesitter"), ["today", "calendar", "meals", "lists", "people", "guides", "settings"]);
-  // A vendor reads properties/assets/maintenance only (People & House).
+  // #5696: a housesitter also gets Pets — ResPets read is rolesSitter, and a
+  // sitter may add care notes on a pet (roles.go:217).
+  assert.deepEqual(ids("housesitter"), [
+    "today",
+    "calendar",
+    "meals",
+    "lists",
+    "people",
+    "pets",
+    "guides",
+    "settings",
+  ]);
+  // A vendor reads properties/assets/maintenance only (People & House) and has
+  // no pets grant, so no Pets section.
   assert.deepEqual(ids("vendor"), ["today", "people", "settings"]);
 });
 

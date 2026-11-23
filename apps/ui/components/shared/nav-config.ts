@@ -37,6 +37,7 @@ import {
   IconChecklist,
   IconFiles,
   IconHome,
+  IconPaw,
   IconSettings,
   IconSun,
   IconToolsKitchen,
@@ -75,6 +76,7 @@ export type NavSectionId =
   | "lists"
   | "documents"
   | "people"
+  | "pets"
   | "money"
   | "guides"
   | "settings";
@@ -179,9 +181,40 @@ export const NAV_SECTIONS: readonly NavSection[] = [
       "/dashboard/assets",
       "/dashboard/maintenance",
       "/dashboard/vehicles",
-      "/dashboard/pets",
+      // /dashboard/pets is NOT here: it is its own section below (#5696).
+      // A `matches` entry only makes a route highlight a section; it does not
+      // make the route reachable from any nav surface.
       "/dashboard/vendors",
     ],
+  },
+  {
+    // #5696: Pets is a section of its own, not a route inside People.
+    //
+    // The People page is the family roster (a person, their birthday, their
+    // allergy); a pet is the other kind of dependent, with its own record
+    // (vet, breed, care notes) and its own Add flow. Before this,
+    // /dashboard/pets sat in `people`'s `matches` and NO surface linked to it:
+    // a grep for "/dashboard/pets" outside the pets pages found nothing, so on
+    // every breakpoint the only way in was typing the URL. That is #5408's
+    // defect (Guides unreachable) one level lower and easier to miss, because
+    // `matches` made the section highlight correctly whenever someone did
+    // get there.
+    //
+    // Roles: pets read is rolesSitter and write is rolesFamily in
+    // apps/api/internal/auth/roles.go (ResPets:217), so the section is
+    // SITTERS — the same grant as Calendar, Meals and Lists. A housesitter may
+    // read a pet and add care notes; a vendor has no grant and sees no tile.
+    //
+    // Group: Household, right after People & House — where a thumb looks for
+    // "the other members of this family" — so Add pet is two taps from the
+    // phone's More tab.
+    id: "pets",
+    label: "Pets",
+    href: "/dashboard/pets",
+    icon: IconPaw,
+    group: "household",
+    roles: SITTERS,
+    matches: ["/dashboard/pets"],
   },
   {
     id: "money",
