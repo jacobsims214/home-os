@@ -140,6 +140,8 @@ func TestSameFamilyFKs058_RepairAndReversible(t *testing.T) {
 	a := seedSameFamilyRows(t, pool)
 	b := seedSameFamilyRows(t, pool)
 
+	// 093 must come off first: it rides on the properties (id, household_id) key 058 drops.
+	applyMigration(t, pool, "093_households_default_property_family_fk.down.sql")
 	applyMigration(t, pool, "058_same_family_fks.down.sql")
 
 	okBill := insertID(t, pool, `INSERT INTO bills (household_id, name, vendor_id) VALUES ($1, 'ok', $2) RETURNING id`, a.household, a.vendor)
@@ -182,6 +184,8 @@ func TestSameFamilyFKs058_RepairAndReversible(t *testing.T) {
 		}
 
 		if cycle == 0 {
+			// 093 must come off first: it rides on the properties (id, household_id) key 058 drops.
+			applyMigration(t, pool, "093_households_default_property_family_fk.down.sql")
 			applyMigration(t, pool, "058_same_family_fks.down.sql")
 		}
 	}
