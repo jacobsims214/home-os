@@ -242,7 +242,7 @@ in handler code (see `write-paths-and-side-effects.md`):
 
 | Trigger | Does |
 |---|---|
-| `derive_subject_property()` — BEFORE INSERT OR UPDATE on all five tables | sets `property_id` from `asset_id`; **refuses a contradictory subject** (087); refuses an asset, property or vehicle belonging to another family |
+| `derive_subject_property()` — BEFORE INSERT OR UPDATE on all five tables | sets `property_id` from `asset_id`; **honours an explicit clear of it** (092); **refuses a contradictory subject** (087); refuses an asset, property or vehicle belonging to another family |
 | `assets_propagate_property` — AFTER UPDATE OF property_id ON `assets` | when an asset moves to another property, realigns `property_id` on every row that names it, in all five tables |
 
 ### A contradiction is refused, not corrected (087)
@@ -268,8 +268,75 @@ supplied; only a trigger sees the row before it lands, and only a trigger sees
 - **UPDATE** — `property_id` changed (`IS DISTINCT FROM OLD.property_id`). A
   value carried over from the stored row is not a claim about this write; it is
   the previous derivation, and it is re-derived from the asset.
-- **either** — NULL is never a claim. NULL means "derive it" (and the asset FKs'
-  `ON DELETE SET NULL` produces one when an asset leaves its property).
+- **either** — NULL means "derive it" (and the asset FKs' `ON DELETE SET NULL`
+  produces one when an asset leaves its property) — **except for one shape,
+  below.**
+
+### An explicit clear of `property_id` is honoured (092)
+
+Until 092 that last line was unconditional, and it was a bug: an `UPDATE` whose
+whole purpose was to *remove* the property had it put back.
+
+```sql
+UPDATE bills SET property_id = NULL WHERE asset_id IS NOT NULL;
+UPDATE 1
+-- and property_id comes back with the asset's property
+```
+
+The caller asked to clear it and the trigger re-derived it, silently. #5519
+made this unreachable on a normal property delete but recorded it as a known
+gap; any direct `UPDATE` still hit it. Since 092 a NULL is treated as a **clear**
+— the caller's instruction, not a missing value — when all of these hold:
+
+- it is an `UPDATE` (a new row's NULL is still "no claim"),
+- `asset_id`, `vehicle_id` and `household_id` are each **unchanged** by this
+  write.
+
+The NULL is then left alone. Everything else is 087's rule, unchanged: an
+INSERT still derives, an asset **change** still derives (with a carried NULL
+too, which is what the API/MCP write path sends), a presented contradicting
+value is still refused, and repeating the clear is idempotent.
+
+**Consequence to know about.** After an explicit clear, `property_id` is NULL
+on a row whose `asset_id` is set, so `property_id = $1` no longer finds it. That
+is the caller's stated choice: the record is about the asset and deliberately
+not rolled up into the property's totals. `assets_propagate_property` skips it
+(it only touches rows whose `property_id` is distinct from the asset's), and the
+property delete cascade is unaffected (the row is already at NULL). Anything
+that re-derives it would be undoing a person's instruction.
+
+### Why deferrable constraints are not used
+
+#5519 expected the complete fix to need `DEFERRABLE INITIALLY DEFERRED` on the
+composite FKs so RI checks run at COMMIT, after every cascade action. That was
+tried against 091 on PG16 and it **does not fix this defect**, because the
+rewrite happens in a BEFORE trigger, before any RI check of any timing runs:
+
+```
+both bills FKs DEFERRABLE INITIALLY DEFERRED, then the same UPDATE
+-> property_id still comes back with the asset's property
+```
+
+What deferring *does* fix is the firing-order fragility 091 documents. The cost,
+measured on the same cluster (3000 single-row `bills` INSERTs, three alternating
+rounds, identical table, trigger disabled so only the FK work differs):
+
+| round | immediate | deferred |
+|---|---|---|
+| 1 | 21803 ms | 25161 ms |
+| 2 | 26137 ms | 29707 ms |
+| 3 | 28565 ms | 34567 ms |
+
+**+15 % to +20 % on every write to the table**, and a violation surfaces at
+COMMIT instead of at the statement that caused it. Because 092's trigger change
+removes the ordering dependence anyway (a property delete now succeeds even at
+the deliberately **inverted** constraint order 091 warns about), paying that on
+every bill write to buy an ordering guarantee that is no longer needed is a bad
+trade. Deferrable is **not** shipped; 091's creation order stays as the belt to
+092's braces, and `testdata/subject_property_explicit_null/verify_092.sql`
+asserts both. This is the surviving form of the RI-check-ordering problem: it is
+a *performance and error-timing* question now, not a correctness one, and it is
+answered no.
 
 That distinction is what keeps the ordinary update path working: changing a
 bill's asset from A to B without naming `property_id` — what
