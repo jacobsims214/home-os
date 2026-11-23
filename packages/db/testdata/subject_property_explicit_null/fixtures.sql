@@ -1,4 +1,4 @@
--- Fixtures for the explicit-property-clear harness (092). One family, two
+-- Fixtures for the explicit-property-clear harness (094). One family, two
 -- properties, one vehicle, an asset at each property and an asset at NO
 -- property (so "the asset has no property, so there is nothing to derive" has
 -- a case too). Mirrors subject_contradiction/fixtures.sql so the two harnesses

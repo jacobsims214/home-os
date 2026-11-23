@@ -1,18 +1,18 @@
--- verify_092.sql (HOME-OS-5626) -- proves an explicit property_id clear is no
+-- verify_094.sql (HOME-OS-5626) -- proves an explicit property_id clear is no
 -- longer overwritten by derive_subject_property(), on all five tables that
 -- carry the subject pattern: bills, loans, maintenance_schedules,
 -- maintenance_tasks and guides.
 --
--- Run against a database at 092, from THIS directory (fixtures first):
+-- Run against a database at 094, from THIS directory (fixtures first):
 --     psql -d <db> -f fixtures.sql
---     psql -d <db> -f verify_092.sql
+--     psql -d <db> -f verify_094.sql
 --
--- REVERT-CHECK. This script asserts 092's rule in every run; the only thing
+-- REVERT-CHECK. This script asserts 094's rule in every run; the only thing
 -- that changes between the two runs is the schema:
 --
---   at 092 (092 applied)             -> every case prints ok, no '<-- FAIL'
---   at 091 (092's down applied)      -> AC1 and AC1b print '<-- FAIL': the
---                                       clear is re-derived, the pre-092 bug.
+--   at 094 (094 applied)             -> every case prints ok, no '<-- FAIL'
+--   at 091 (094's down applied)      -> AC1 and AC1b print '<-- FAIL': the
+--                                       clear is re-derived, the pre-094 bug.
 --
 -- Every case runs inside its own savepoint (a DO block's EXCEPTION handler, or
 -- BEGIN/ROLLBACK), so an expected rejection never aborts the run.
@@ -42,9 +42,9 @@ RETURNS UUID LANGUAGE plpgsql AS $$
 DECLARE v_id UUID; v_prop UUID; v_derived UUID; v_namecol TEXT; v_name TEXT;
 BEGIN
     v_namecol := CASE p_tbl WHEN 'guides' THEN 'title' ELSE 'name' END;
-    v_name    := CASE p_tbl WHEN 'guides' THEN '092 probe guide' ELSE '092 probe ' || p_tbl END;
+    v_name    := CASE p_tbl WHEN 'guides' THEN '094 probe guide' ELSE '094 probe ' || p_tbl END;
     EXECUTE format('DELETE FROM %I WHERE household_id = %L AND %I LIKE %L',
-                   p_tbl, p_household, v_namecol, '092 probe%');
+                   p_tbl, p_household, v_namecol, '094 probe%');
 
     IF p_tbl = 'loans' THEN
         EXECUTE format('INSERT INTO %I (household_id,name,original_amount,remaining_balance,asset_id)
@@ -86,9 +86,9 @@ SELECT pg_temp.probe_clear('guides','11111111-1111-1111-1111-111111111111','3333
 DO $$
 DECLARE v_id UUID; v_prop UUID;
 BEGIN
-    EXECUTE 'DELETE FROM bills WHERE name LIKE ''092 probe%''';
+    EXECUTE 'DELETE FROM bills WHERE name LIKE ''094 probe%''';
     INSERT INTO bills (household_id,name,amount,asset_id)
-    VALUES ('11111111-1111-1111-1111-111111111111','092 probe bill',10.00,'33333333-3333-3333-3333-333333333333')
+    VALUES ('11111111-1111-1111-1111-111111111111','094 probe bill',10.00,'33333333-3333-3333-3333-333333333333')
     RETURNING id INTO v_id;
     UPDATE bills SET property_id = NULL WHERE id = v_id;
     UPDATE bills SET property_id = NULL WHERE id = v_id;   -- the retry
@@ -105,9 +105,9 @@ END $$;
 DO $$
 DECLARE v_id UUID; v_prop UUID;
 BEGIN
-    EXECUTE 'DELETE FROM bills WHERE name LIKE ''092 probe%''';
+    EXECUTE 'DELETE FROM bills WHERE name LIKE ''094 probe%''';
     INSERT INTO bills (household_id,name,amount,asset_id)
-    VALUES ('11111111-1111-1111-1111-111111111111','092 probe bill',10.00,'33333333-3333-3333-3333-333333333333')
+    VALUES ('11111111-1111-1111-1111-111111111111','094 probe bill',10.00,'33333333-3333-3333-3333-333333333333')
     RETURNING id INTO v_id;
 
     -- the API/MCP shape: switch the subject, carry property_id (NULL here)
@@ -135,10 +135,10 @@ END $$;
 DO $$
 DECLARE v_prop UUID;
 BEGIN
-    EXECUTE 'DELETE FROM bills WHERE name LIKE ''092 probe%''';
+    EXECUTE 'DELETE FROM bills WHERE name LIKE ''094 probe%''';
     INSERT INTO bills (household_id,name,amount,asset_id)
-    VALUES ('11111111-1111-1111-1111-111111111111','092 probe bill',10.00,'33333333-3333-3333-3333-333333333333');
-    SELECT property_id INTO v_prop FROM bills WHERE name LIKE '092 probe%';
+    VALUES ('11111111-1111-1111-1111-111111111111','094 probe bill',10.00,'33333333-3333-3333-3333-333333333333');
+    SELECT property_id INTO v_prop FROM bills WHERE name LIKE '094 probe%';
     IF v_prop = '22222222-2222-2222-2222-222222222222' THEN
         RAISE NOTICE 'ok  AC4 insert derived property_id from the asset';
     ELSE
@@ -151,11 +151,11 @@ END $$;
 DO $$
 DECLARE v_state TEXT;
 BEGIN
-    EXECUTE 'DELETE FROM bills WHERE name LIKE ''092 probe%''';
+    EXECUTE 'DELETE FROM bills WHERE name LIKE ''094 probe%''';
     INSERT INTO bills (household_id,name,amount,asset_id)
-    VALUES ('11111111-1111-1111-1111-111111111111','092 probe bill',10.00,'33333333-3333-3333-3333-333333333333');
+    VALUES ('11111111-1111-1111-1111-111111111111','094 probe bill',10.00,'33333333-3333-3333-3333-333333333333');
     BEGIN
-        UPDATE bills SET property_id='44444444-4444-4444-4444-444444444444' WHERE name LIKE '092 probe%';
+        UPDATE bills SET property_id='44444444-4444-4444-4444-444444444444' WHERE name LIKE '094 probe%';
         RAISE NOTICE '<-- FAIL AC5 a contradicting property was ACCEPTED';
     EXCEPTION WHEN check_violation THEN
         GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE;
@@ -168,12 +168,12 @@ END $$;
 DO $$
 DECLARE v_asset UUID; v_prop UUID;
 BEGIN
-    EXECUTE 'DELETE FROM bills WHERE name LIKE ''092 probe%''';
+    EXECUTE 'DELETE FROM bills WHERE name LIKE ''094 probe%''';
     INSERT INTO bills (household_id,name,amount,asset_id)
-    VALUES ('11111111-1111-1111-1111-111111111111','092 probe bill',10.00,'33333333-3333-3333-3333-333333333333');
+    VALUES ('11111111-1111-1111-1111-111111111111','094 probe bill',10.00,'33333333-3333-3333-3333-333333333333');
     BEGIN
         DELETE FROM properties WHERE id='22222222-2222-2222-2222-222222222222';
-        SELECT asset_id, property_id INTO v_asset, v_prop FROM bills WHERE name LIKE '092 probe%';
+        SELECT asset_id, property_id INTO v_asset, v_prop FROM bills WHERE name LIKE '094 probe%';
         IF v_asset IS NULL AND v_prop IS NULL THEN
             RAISE NOTICE 'ok  AC7 deleting the property left the bill at asset_id=NULL, property_id=NULL';
         ELSE
@@ -190,11 +190,11 @@ END $$;
 \echo '==================== AC8: a vehicle alongside a subject is still refused ===================='
 DO $$
 BEGIN
-    EXECUTE 'DELETE FROM bills WHERE name LIKE ''092 probe%''';
+    EXECUTE 'DELETE FROM bills WHERE name LIKE ''094 probe%''';
     INSERT INTO bills (household_id,name,amount,asset_id)
-    VALUES ('11111111-1111-1111-1111-111111111111','092 probe bill',10.00,'33333333-3333-3333-3333-333333333333');
+    VALUES ('11111111-1111-1111-1111-111111111111','094 probe bill',10.00,'33333333-3333-3333-3333-333333333333');
     BEGIN
-        UPDATE bills SET vehicle_id='55555555-5555-5555-5555-555555555555' WHERE name LIKE '092 probe%';
+        UPDATE bills SET vehicle_id='55555555-5555-5555-5555-555555555555' WHERE name LIKE '094 probe%';
         RAISE NOTICE '<-- FAIL AC8 a vehicle was accepted alongside an asset';
     EXCEPTION WHEN check_violation THEN
         RAISE NOTICE 'ok  AC8 a vehicle alongside an asset is still refused';
@@ -203,9 +203,9 @@ END $$;
 
 \echo ''
 \echo '==================== clearing probe rows ===================='
-DELETE FROM bills WHERE name LIKE '092 probe%';
-DELETE FROM loans WHERE name LIKE '092 probe%';
-DELETE FROM maintenance_schedules WHERE name LIKE '092 probe%';
-DELETE FROM maintenance_tasks WHERE name LIKE '092 probe%';
-DELETE FROM guides WHERE title LIKE '092 probe%';
+DELETE FROM bills WHERE name LIKE '094 probe%';
+DELETE FROM loans WHERE name LIKE '094 probe%';
+DELETE FROM maintenance_schedules WHERE name LIKE '094 probe%';
+DELETE FROM maintenance_tasks WHERE name LIKE '094 probe%';
+DELETE FROM guides WHERE title LIKE '094 probe%';
 \echo 'done: a passing run has no <-- FAIL above'

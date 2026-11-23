@@ -1,19 +1,19 @@
--- 092_subject_property_explicit_null.down.sql (HOME-OS-5626)
+-- 094_subject_property_explicit_null.down.sql (HOME-OS-5626)
 --
--- Reverses 092_subject_property_explicit_null.up.sql: derive_subject_property()
+-- Reverses 094_subject_property_explicit_null.up.sql: derive_subject_property()
 -- goes back to its 087 body, byte for byte, so the function in the catalogue is
 -- what 087 left. 087's own down migration still restores 038's body in turn, so
 -- the whole chain rolls back.
 --
 -- What cannot come back, and is not pretended to come back: a property_id that
--- a caller deliberately cleared under 092 has since been re-derived by nothing,
+-- a caller deliberately cleared under 094 has since been re-derived by nothing,
 -- so it stays NULL. Re-deriving it here would silently put back a value a
--- person asked to remove, which is the defect 092 removes rather than a repair
+-- person asked to remove, which is the defect 094 removes rather than a repair
 -- -- and it would also have to invent a value for a row whose asset has since
 -- moved. Nothing is changed; the down migration counts those rows and says so.
 --
 -- What DOES come back: an explicit UPDATE ... SET property_id = NULL on a row
--- with asset_id set is silently overwritten again. That is the pre-092
+-- with asset_id set is silently overwritten again. That is the pre-094
 -- behaviour and the down migration exists for a real rollback, not as a way to
 -- keep the new rule while dropping it.
 --
@@ -103,7 +103,7 @@ BEGIN
     FOREACH t IN ARRAY ARRAY['bills', 'loans', 'maintenance_schedules',
                              'maintenance_tasks', 'guides'] LOOP
         EXECUTE format('SELECT count(*) FROM %I WHERE asset_id IS NOT NULL AND property_id IS NULL', t) INTO n;
-        RAISE NOTICE '092 down: % row(s) in % have an asset and no property_id (left as the caller cleared them)', n, t;
+        RAISE NOTICE '094 down: % row(s) in % have an asset and no property_id (left as the caller cleared them)', n, t;
     END LOOP;
 END $$;
 

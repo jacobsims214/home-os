@@ -1,4 +1,4 @@
--- 092_subject_property_explicit_null.up.sql (HOME-OS-5626)
+-- 094_subject_property_explicit_null.up.sql (HOME-OS-5626)
 --
 -- An explicit "clear the property off this record" is no longer overwritten.
 --
@@ -13,7 +13,7 @@
 --
 -- The caller asked to clear it and the trigger put it back, silently.
 -- Measured on a database at 090 before this migration (PG16, pasted in the
--- ticket and in verify_092.sql):
+-- ticket and in verify_094.sql):
 --
 --   * trigger enabled  -> property_id is re-derived; the NULL is lost
 --   * the same statement with bills_derive_subject_property DISABLED
@@ -52,7 +52,7 @@
 -- 091 warns about), paying 15-20 % on every bill write for an ordering
 -- guarantee that is no longer needed is a bad trade. Deferrable is therefore
 -- NOT shipped. 091's stated creation order stays as the belt to this braces and
--- verify_092.sql asserts both.
+-- verify_094.sql asserts both.
 --
 -- THE RULE, precisely
 --
@@ -122,7 +122,7 @@ BEGIN
         v_cleared   := FALSE;
     ELSE
         v_presented := NEW.property_id IS DISTINCT FROM OLD.property_id;
-        -- 092: the caller asked for no property, and nothing about the subject
+        -- 094: the caller asked for no property, and nothing about the subject
         -- moved, so there is nothing to derive. A repeated clear lands here too.
         v_cleared := NEW.property_id IS NULL
                      AND NEW.asset_id     IS NOT DISTINCT FROM OLD.asset_id
@@ -141,7 +141,7 @@ BEGIN
                     USING ERRCODE = 'foreign_key_violation';
             END IF;
             IF v_cleared THEN
-                -- 092: the caller cleared it; this is not a missing value.
+                -- 094: the caller cleared it; this is not a missing value.
                 NULL;
             ELSIF v_presented AND NEW.property_id IS NOT NULL AND NEW.property_id IS DISTINCT FROM v_property THEN
                 RAISE EXCEPTION
@@ -196,7 +196,7 @@ COMMENT ON FUNCTION derive_subject_property() IS
     'asset-subject row carries both. A property_id the caller PRESENTS (on INSERT when not NULL; '
     'on UPDATE when it changed) that is not the asset''s property is refused '
     '(<table>_subject_property_conflict, 23514); a vehicle alongside a property or asset is refused '
-    '(<table>_subject_check, 23514). Since 092, an UPDATE that sets property_id to NULL while the '
+    '(<table>_subject_check, 23514). Since 094, an UPDATE that sets property_id to NULL while the '
     'subject stays put is a CLEAR and is honoured, not re-derived.';
 
 -- The triggers already exist from 038 (bills, loans, maintenance_schedules,
@@ -206,7 +206,7 @@ COMMENT ON FUNCTION derive_subject_property() IS
 -- ---------------------------------------------------------------------------
 -- 2. Report rows that already carry a deliberately-cleared property.
 --
--- Nothing to repair: 092 changes what FUTURE writes do, and a row whose
+-- Nothing to repair: 094 changes what FUTURE writes do, and a row whose
 -- property_id is NULL with an asset set is exactly the shape this migration now
 -- allows on purpose. Counted so the number is visible rather than assumed.
 -- ---------------------------------------------------------------------------
@@ -221,9 +221,9 @@ BEGIN
                              'maintenance_tasks', 'guides'] LOOP
         EXECUTE format('SELECT count(*) FROM %I WHERE asset_id IS NOT NULL AND property_id IS NULL', t) INTO n;
         total := total + n;
-        RAISE NOTICE '092 %: % row(s) have an asset and no property_id (a clear, allowed from this migration)', rpad(t, 22), n;
+        RAISE NOTICE '094 %: % row(s) have an asset and no property_id (a clear, allowed from this migration)', rpad(t, 22), n;
     END LOOP;
-    RAISE NOTICE '092 total: % row(s)', total;
+    RAISE NOTICE '094 total: % row(s)', total;
 END $$;
 
 COMMIT;
