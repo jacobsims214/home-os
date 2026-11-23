@@ -140,8 +140,6 @@ fi
 #    asks it which ids to play.
 # ---------------------------------------------------------------------------
 
-mkdir -p "$ROUND_DIR/evidence" || { echo "run.sh: cannot create $ROUND_DIR" >&2; exit 2; }
-
 if [ -n "$IDS" ]; then
   # Explicit ids are validated against the corpus: a typo must not silently
   # shrink a round to nothing.
@@ -207,6 +205,10 @@ if [ "$LIMIT" -gt 0 ] 2>/dev/null; then
   sel="$(printf '%s\n' "$sel" | head -n "$LIMIT")"
 fi
 n_sel="$(printf '%s\n' "$sel" | grep -c . || true)"
+
+# Only now that there is something to play: a round that refuses to start must
+# leave no directory behind, or the next --compare would read an empty round.
+mkdir -p "$ROUND_DIR/evidence" || { echo "run.sh: cannot create $ROUND_DIR" >&2; exit 2; }
 echo "SELECT: $n_sel of $total_sel matching scenario(s)"
 printf '%s\n' "$sel" | sed 's/^/  /'
 echo
