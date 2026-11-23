@@ -17,6 +17,7 @@
 !packages/icalx/
 !packages/billcal/
 !packages/billdue/
+!packages/notify/
 !apps/api/
 !apps/worker/
 !apps/calendar/
