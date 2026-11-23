@@ -41,8 +41,11 @@ func TestMeals047_Reversible(t *testing.T) {
 	applyMigration(t, pool, "064_membership_vendor_link.down.sql")       // newest first: 064's memberships FK needs 043's vendors key
 	applyMigration(t, pool, "061_notify_creator_role.down.sql")          // newest first: restores 054's notify_entity_creator
 	applyMigration(t, pool, "060_drop_pet_vet_columns.down.sql")         // newest first: restores pets.vet_name / vet_phone
-	applyMigration(t, pool, "091_family_composite_fks.down.sql")         // newest first: since 091 its composite FKs ride on 058/084's keys
-	applyMigration(t, pool, "058_same_family_fks.down.sql")              // newest first: 058's FKs need 043's vendors key
+	// Newest first: 093 comes off before 091 and 058 (093 > 091 > 058, and 093 and 091
+	// both ride on the properties (id, household_id) key that 058 drops).
+	applyMigration(t, pool, "093_households_default_property_family_fk.down.sql")
+	applyMigration(t, pool, "091_family_composite_fks.down.sql") // then 091: its composite FKs ride on 058/084's keys
+	applyMigration(t, pool, "058_same_family_fks.down.sql")      // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "057_secret_agent_share.down.sql")
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql") // newest first: 056 sits on top of 038-054
 	applyMigration(t, pool, "055_activity_event_titles.down.sql")
