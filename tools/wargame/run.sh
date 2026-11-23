@@ -156,35 +156,43 @@ if [ -n "$IDS" ]; then
     fi
   done
 else
-  # Build the loader's argv from the filters it already understands.
-  largs=()
-  [ -n "$PERSONA" ] && largs+=(--persona "$PERSONA")
-  [ -n "$ROUND" ]   && largs+=(--round "$ROUND")
-  if [ "${#largs[@]}" -gt 0 ]; then
-    sel="$(./scenarios_load.py "${largs[@]}" --ids)" || {
-      echo "run.sh: corpus failed to load" >&2; exit 2; }
-  else
-    sel="$(./scenarios_load.py --ids)" || { echo "run.sh: corpus failed to load" >&2; exit 2; }
-  fi
-  # --surface / --tag / --filter are not loader flags: they narrow the JSON the
-  # loader produced, so the corpus stays the single source of truth for fields.
+  # Selection goes through scenarios_load.py — the only reader of the corpus —
+  # for --persona and --round, which it owns. --surface, --tag and --filter
+  # narrow the JSON it already produced, so the corpus stays the single source
+  # of truth for every field and this script never parses YAML.
+  #
+  # NOTE (bash 3.2): an empty array cannot be expanded under `set -u`
+  # ("largs[@]: unbound variable"), so the loader argv is built as a plain
+  # string and only split when it is non-empty. Getting this wrong made
+  # --filter silently fall into a python JSONDecodeError.
+  largs=""
+  [ -n "$PERSONA" ] && largs="$largs --persona $PERSONA"
+  [ -n "$ROUND" ]   && largs="$largs --round $ROUND"
+
   if [ -n "$SURFACE" ] || [ -n "$TAG" ] || [ -n "$FILTER" ]; then
-    sel="$(./scenarios_load.py "${largs[@]}" --json | python3 -c '
+    # shellcheck disable=SC2086  # intentional word-splitting of the flag string
+    sel="$(./scenarios_load.py $largs --json | python3 -c '
 import json, sys
-surface = sys.argv[1]
-tag = sys.argv[2]
-needle = sys.argv[3].lower()
-docs = json.load(sys.stdin)["scenarios"]
+surface, tag, needle = sys.argv[1], sys.argv[2], sys.argv[3].lower()
+try:
+    docs = json.load(sys.stdin)["scenarios"]
+except Exception as exc:
+    print("run.sh: could not read the corpus JSON: %s" % exc, file=sys.stderr)
+    raise SystemExit(2)
 for d in docs:
     if surface and d["surface"] != surface:
         continue
     if tag and tag not in d["tags"]:
         continue
-    if needle and needle not in (d["id"] + " " + d["surface"] + " " + " ".join(d["tags"])
-                                 + " " + d["intent"]).lower():
+    hay = " ".join([d["id"], d["surface"], " ".join(d["tags"]), d["intent"]]).lower()
+    if needle and needle not in hay:
         continue
     print(d["id"])
 ' "$SURFACE" "$TAG" "$FILTER")" || { echo "run.sh: filter failed" >&2; exit 2; }
+  else
+    # shellcheck disable=SC2086
+    sel="$(./scenarios_load.py $largs --ids)" || {
+      echo "run.sh: corpus failed to load" >&2; exit 2; }
   fi
 fi
 
@@ -334,7 +342,13 @@ for sid, d in cur.items():
     elif p == "BLOCKED" and v == "PASS":
         graduated.append(sid)
 
-clean = not new_fail and not regressed and not fixed and not graduated
+# A scenario played for the FIRST time is not "unchanged": it was never compared.
+# Calling that clean is a plausible wrong answer (§7), so `clean` requires that
+# every scenario this round also appears in the previous round.
+compared = [sid for sid in cur if sid in prev]
+uncompared = [sid for sid in cur if sid not in prev]
+clean = (not new_fail and not regressed and not fixed and not graduated
+         and not uncompared)
 
 lines = []
 A = lines.append
@@ -367,9 +381,17 @@ else:
     A("Against `%s`." % os.path.basename(prev_dir.rstrip("/")))
     A("")
     if clean:
-        A("**No new findings, no regressions.** The %d scenario(s) this round played"
+        A("**No new findings, no regressions.** All %d scenario(s) this round played"
           % len(cur))
         A("verdict-for-verdict the same as last round. If that holds again, we are done.")
+    elif not regressed and not new_fail and not fixed and not graduated and uncompared:
+        A("**%d scenario(s) played for the first time; the other %d are unchanged.**"
+          % (len(uncompared), len(compared)))
+        A("")
+        A("This is not a clean round: a scenario with no previous verdict cannot")
+        A("regress, so it cannot contribute to \"we are done\" yet. Played first time:")
+        for sid in sorted(uncompared):
+            A("- `%s` — %s" % (sid, cur[sid].get("verdict")))
     else:
         bits = []
         if regressed:
@@ -471,6 +493,9 @@ if prev_dir:
     print("delta vs:  %s" % prev_dir)
     if clean:
         print("DELTA:     no new findings, no regressions (%d scenarios unchanged)" % len(cur))
+    elif not regressed and not new_fail and not fixed and not graduated and uncompared:
+        print("DELTA:     %d new scenario(s) played for the first time, %d unchanged"
+              % (len(uncompared), len(compared)))
     else:
         print("DELTA:     %d regressed, %d new failure(s), %d fixed, %d graduated, %d new"
               % (len(regressed), len(new_fail), len(fixed), len(graduated), len(appeared)))
