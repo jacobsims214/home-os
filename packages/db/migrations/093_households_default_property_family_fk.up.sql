@@ -1,0 +1,2 @@
+-- 093_households_default_property_family_fk.up.sql (#5521, schema review F6)
+-- STUB: claimed by #5521. Real body lands in the same branch shortly.

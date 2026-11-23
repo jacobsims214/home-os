@@ -1,0 +1,2 @@
+-- 093_households_default_property_family_fk.down.sql (#5521)
+-- STUB
