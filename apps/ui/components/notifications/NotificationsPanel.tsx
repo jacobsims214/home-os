@@ -253,7 +253,7 @@ function KindIcon({ item }: { item: NotificationItem }) {
 
 function LoadingRows() {
   return (
-    <div aria-busy="true" aria-label="Loading notifications" data-testid="notifications-loading">
+    <div role="status" aria-busy="true" aria-label="Loading notifications" data-testid="notifications-loading">
       {[0, 1, 2].map((i) => (
         <div key={i} className={classes.item}>
           <span className={classes.skeleton} style={{ width: 36, height: 36, flex: "none" }} />

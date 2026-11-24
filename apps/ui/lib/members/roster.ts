@@ -108,7 +108,10 @@ export function inviteExpiry(expiresAt: string, now: number = Date.now()): { tex
   if (Number.isNaN(at)) return { text: "", soon: false };
   const days = Math.ceil((at - now) / 86_400_000);
   if (days < 0) {
-    return { text: `expired ${new Date(at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`, soon: false };
+    // UTC: the invite's instant, shown as a fixed-zone date so it does not
+    // change shape with the reader's device (#5316).
+    const when = new Date(at).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+    return { text: `expired ${when}`, soon: false };
   }
   if (days === 0) return { text: "expires today", soon: true };
   if (days === 1) return { text: "expires tomorrow", soon: true };

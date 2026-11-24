@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-jacob.md (T8), #4541.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-append-note-readback
+persona: jacob
+surface: notes
+intent: |
+  Add the nut allergy and the EpiPen location, then read the note back to me.
+steps:
+  - "chat.sh jacob notes --file msg (append allergy + EpiPen location, read back)"
+  - "mcpcall.py note_get <id> as jacob"
+assertion: |
+  The appended text is present in note_get exactly as written, the earlier content
+  survives the append, and the read-back matches the stored body.
+tags:
+  - notes
+  - agent
+  - write
+  - append
+origin:
+  round: r1
+  source: discoveries/war-game-r1-jacob.md
+  ref: T8
+  ticket: "#4541"
+  date: "2026-11-16"
+  verdict: pass

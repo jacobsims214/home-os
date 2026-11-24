@@ -7,6 +7,7 @@ import {
   onlyOn,
   pressOpener,
   seedHouseholds,
+  SEED_HOUSEHOLD_NAME,
 } from "./fixtures";
 
 /**
@@ -78,13 +79,37 @@ async function gotoBills(page: Page) {
 }
 
 /**
- * The bill names on screen once the list has rendered. Polled: the page paints
- * its skeleton first, and an empty read would pass a "no old rows" assertion
- * that actually ran too early.
+ * The bill rows on screen once the list has rendered, by the id each row
+ * carries (`data-bill-row`, #4551's rebuilt bills list).
+ *
+ * This used to read `[data-entity-card] h3`, which the rebuilt page never
+ * renders — `data-entity-card` is EntityList's, and EntityList is orphaned — so
+ * the selector matched nothing and every wait below timed out.
+ *
+ * Polled: the page paints its skeleton first, and an empty read would pass a
+ * "no old rows" assertion that actually ran too early.
  */
-async function billNames(page: Page): Promise<string[]> {
-  await expect.poll(() => page.locator("main [data-entity-card] h3").allInnerTexts()).not.toEqual([]);
-  return page.locator("main [data-entity-card] h3").allInnerTexts();
+async function billRowIds(page: Page): Promise<string[]> {
+  await expect.poll(() => page.locator("main [data-bill-row]").count()).toBeGreaterThan(0);
+  return page
+    .locator("main [data-bill-row]")
+    .evaluateAll((rows) => rows.map((r) => r.getAttribute("data-bill-row")!));
+}
+
+/**
+ * A role with no money read gets the no-access card and no rows at all.
+ *
+ * This is the CORRECT product behaviour for a housesitter, not a gap: the API
+ * answers 403 on every money route for that role
+ * (decisions/2026-11-15-role-policy.md, auth.CanSeeMoney #4806), so the page
+ * must not even ask. The money isolation is deliberate and this spec asserts it
+ * rather than working around it.
+ */
+async function expectMoneyNoAccess(page: Page) {
+  const card = page.locator('main [data-testid="money-no-access"]');
+  await expect(card).toBeVisible();
+  await expect(card.getByRole("heading", { name: "Money isn't shared with housesitters" })).toBeVisible();
+  await expect(page.locator("main [data-bill-row]")).toHaveCount(0);
 }
 
 test.describe("family switcher, phone 390", () => {
@@ -127,11 +152,18 @@ test.describe("family switcher, phone 390", () => {
   });
 
   test("switching changes the visible data, and no previous-household row survives", async ({ loggedInPage: page, request, stubSid }, testInfo) => {
-    await seedTwoFamilies(request, stubSid!);
+    // Viewer in Oak Street, not housesitter: this test is about the DATA
+    // changing with the household, so both sides need a money read. A viewer is
+    // the role that reads money and cannot write it
+    // (decisions/2026-11-15-role-policy.md), so the page renders and the rows
+    // are the other family's. The housesitter case — no money at all — is
+    // asserted in the role test below, and it is the product's deliberate
+    // behaviour, not a gap this test may paper over.
+    await seedTwoFamilies(request, stubSid!, { sims: "owner", oak: "viewer" });
     await gotoBills(page);
 
     // The Sims family's bills, on screen.
-    expect((await billNames(page)).sort()).toEqual(["Duke Energy electric", "Internet"]);
+    expect((await billRowIds(page)).sort()).toEqual(["b1", "b2"]);
     await expect(page.locator("main")).toContainText("Duke Energy electric");
 
     const sheet = await openPicker(page);
@@ -145,9 +177,11 @@ test.describe("family switcher, phone 390", () => {
     await expect(page.locator("main")).toContainText("Oak Street water");
     await expect(page.locator("main")).not.toContainText("Duke Energy electric");
     await expect(page.locator("main")).not.toContainText("Internet");
-    expect((await billNames(page)).sort()).toEqual(["Oak Street water"]);
-    // And nothing from the old family is still cached behind the page.
-    await expect(page.locator("main [data-entity-card]")).toHaveCount(1);
+    expect((await billRowIds(page)).sort()).toEqual(["b3"]);
+    // And nothing from the old family is still cached behind the page: exactly
+    // one row, the one bill Oak Street has.
+    await expect(page.locator("main [data-bill-row]")).toHaveCount(1);
+    await expect(page.locator('main [data-bill-row="b1"], main [data-bill-row="b2"]')).toHaveCount(0);
 
     // The API's own view: the request that fetched what is now on screen carried
     // the Oak Street id — this is the half a screenshot cannot show.
@@ -179,7 +213,7 @@ test.describe("family switcher, phone 390", () => {
     loggedInPage: page,
     request,
     stubSid,
-  }) => {
+  }, testInfo) => {
     // Owner in one family, housesitter in the other (the ticket's own example).
     await seedTwoFamilies(request, stubSid!, { sims: "owner", oak: "housesitter" });
     await gotoBills(page);
@@ -205,9 +239,23 @@ test.describe("family switcher, phone 390", () => {
     // Owner: money, documents, people and calendar are all reachable.
     expect(await navInDrawer()).toEqual({ money: 1, documents: 1, people: 1, calendar: 1 });
 
-    await (await openPicker(page)).getByRole("radio", { name: /Oak Street/ }).click();
+    const oakSheet = await openPicker(page);
+    await oakSheet.getByRole("radio", { name: /Oak Street/ }).click();
+    await expect(oakSheet).toBeHidden();
     await expect(chip(page)).toContainText("Oak Street");
-    await expect(page.locator("main")).toContainText("Oak Street water");
+
+    // And the page itself: a housesitter gets no money AT ALL, so the bills page
+    // says so instead of listing the family's bills. This is the correct
+    // behaviour since the role policy (#4806): the API answers 403 on every
+    // money route for a sitter, so the page must not even ask. Asserting the
+    // family's bills here would be asserting money isolation away.
+    await expectMoneyNoAccess(page);
+    await expect(page.locator("main")).not.toContainText("Oak Street water");
+    await page.screenshot({ path: testInfo.outputPath("switcher-390-housesitter-no-money.png") });
+    await testInfo.attach("switcher-390-housesitter-no-money", {
+      path: testInfo.outputPath("switcher-390-housesitter-no-money.png"),
+      contentType: "image/png",
+    });
 
     // Housesitter: no money and no documents (#4569 put Documents in the nav
     // for readers; files read is family + viewer, so a sitter loses both).
@@ -227,7 +275,10 @@ test.describe("family switcher, phone 390", () => {
     request,
     stubSid,
   }) => {
-    await seedTwoFamilies(request, stubSid!);
+    // A viewer, so the landing page has rows to look at: the point of this test
+    // is that the URL becomes the SECTION's list for the new household (its own
+    // rows), never a 404 for the old household's record id.
+    await seedTwoFamilies(request, stubSid!, { sims: "owner", oak: "viewer" });
     await page.goto("/dashboard/bills/b1");
     await expect(page.locator("main")).toContainText("Duke Energy electric");
 
@@ -235,6 +286,9 @@ test.describe("family switcher, phone 390", () => {
     await expect(page).toHaveURL(/\/dashboard\/bills$/);
     await expect(page.locator("main")).toContainText("Oak Street water");
     await expect(page.locator("main")).not.toContainText("Duke Energy electric");
+    // The old family's record is not on screen and its id is not in the URL.
+    await expect(page.locator("main [data-bill-row]")).toHaveCount(1);
+    await expect(page.locator('main [data-bill-row="b1"]')).toHaveCount(0);
   });
 
   test("the shell is reachable from the More sheet as well, and the picker is accessible", async ({ loggedInPage: page, request, stubSid }, testInfo) => {
@@ -265,8 +319,10 @@ test.describe("family switcher, phone 390", () => {
     await page.goto("/dashboard/bills");
     await expect(page.locator("main").getByRole("heading", { level: 2, name: "Bills" })).toBeVisible();
 
-    // The name is still there (where am I), but there is nothing to open.
-    const c = header(page).getByText("Your family", { exact: true });
+    // The name is still there (where am I), but there is nothing to open. It is
+    // the SEED household's name — not "Your family", which is the placeholder for
+    // a household that is not known (#5322).
+    const c = header(page).getByText(SEED_HOUSEHOLD_NAME, { exact: true });
     await expect(c).toBeVisible();
     await expect(header(page).getByRole("button", { name: /^Family:/ })).toHaveCount(0);
 

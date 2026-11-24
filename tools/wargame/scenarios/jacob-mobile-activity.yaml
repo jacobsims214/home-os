@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (activity), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-mobile-activity
+persona: jacob
+surface: activity
+intent: |
+  Who did what?
+steps:
+  - open Activity as jacob at 390px
+  - "read rows for people and for agents, including a deleted record"
+assertion: |
+  Rows carry per-person and per-agent attribution, and a deleted record says there is
+  nothing left to open.
+tags:
+  - activity
+  - ui
+  - mobile
+  - attribution
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: activity
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: pass

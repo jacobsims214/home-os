@@ -64,8 +64,9 @@ func decodeOverview(t *testing.T, env envelope) overview {
 func mentionsOnlyRegisteredTools(t *testing.T, s string) {
 	t.Helper()
 	registered := []string{
-		"agenda_get", "bill_find", "bill_pay", "event_create", "event_find", "event_update", "event_delete",
-		"family_update", "maintenance_complete", "maintenance_find", "notification_find", "person_find", "search_all",
+		"agenda_get", "bill_find", "bill_pay", "bill_update", "document_upload", "event_create", "event_find",
+		"event_update", "event_delete", "family_update", "maintenance_complete", "maintenance_find",
+		"maintenance_update", "notification_find", "person_find", "search_all",
 	}
 	toolLike := []string{"_find", "_get", "_create", "_update", "_delete", "_pay", "_complete", "_all"}
 	for _, w := range strings.FieldsFunc(s, func(r rune) bool { return !(r == '_' || r >= 'a' && r <= 'z') }) {
@@ -135,10 +136,10 @@ func TestFamilyOverviewNextDays(t *testing.T) {
 	// Notifications: two family-wide unread, one read, one another family's.
 	for _, read := range []bool{false, false, true} {
 		mustExec(t, pool,
-			`INSERT INTO notifications (household_id, type, title, body, read_at) VALUES ($1, 'info', 'Hi', 'body', CASE WHEN $2 THEN NOW() END)`,
+			`INSERT INTO notifications (household_id, type, title, body, read_at) VALUES ($1, 'bill_due', 'Hi', 'body', CASE WHEN $2 THEN NOW() END)`,
 			hh.HouseholdID, read)
 	}
-	mustExec(t, pool, `INSERT INTO notifications (household_id, type, title, body) VALUES ($1, 'info', 'Theirs', 'body')`, other.HouseholdID)
+	mustExec(t, pool, `INSERT INTO notifications (household_id, type, title, body) VALUES ($1, 'bill_due', 'Theirs', 'body')`, other.HouseholdID)
 
 	// Counts, and the newest change (activity_log is written by triggers).
 	mustExec(t, pool, `INSERT INTO pets (household_id, name, species) VALUES ($1, 'Rex', 'dog')`, hh.HouseholdID)
@@ -311,7 +312,7 @@ func TestFamilyOverviewLatency(t *testing.T) {
 	mustExec(t, pool, `INSERT INTO notes (household_id, entity_type, entity_id, title, body)
 		SELECT $1, 'household', $1, 'Note ' || g, 'body' FROM generate_series(1, 300) g`, hh.HouseholdID)
 	mustExec(t, pool, `INSERT INTO notifications (household_id, type, title, body)
-		SELECT $1, 'info', 'N ' || g, 'body' FROM generate_series(1, 200) g`, hh.HouseholdID)
+		SELECT $1, 'bill_due', 'N ' || g, 'body' FROM generate_series(1, 200) g`, hh.HouseholdID)
 	mustExec(t, pool, `ANALYZE`)
 
 	callEnvelope(t, ctx, h, rs, nil) // warm-up: connections, plans

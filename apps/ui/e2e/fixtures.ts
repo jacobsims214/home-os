@@ -16,6 +16,21 @@ import { test as base, expect, type APIRequestContext, type Locator, type Page }
 export const SESSION_COOKIE = "home-os-token";
 export const REFRESH_COOKIE = "home-os-refresh";
 
+/**
+ * The name of the stub's single seed household (#5322).
+ *
+ * A session that never POSTs /e2e/households keeps that one family — the stub's
+ * documented contract — so the shell's family chip names it. Mirrors
+ * `SEED_HOUSEHOLD.name` in e2e/stub-server.mjs, which is `${SEED_USER.name}'s
+ * Home`, the same convention the API's bootstrap uses
+ * (apps/api/internal/seed/bootstrap.go).
+ *
+ * Do NOT assert the chip says "Your family": that string is the UI's
+ * "household not known yet" placeholder (HouseholdSwitcher.tsx), so asserting it
+ * passes exactly when GET /me/households came back empty — the bug in #5322.
+ */
+export const SEED_HOUSEHOLD_NAME = "E2E Tester's Home";
+
 const external = !!process.env.E2E_BASE_URL;
 const stubUrl = `http://127.0.0.1:${process.env.E2E_STUB_PORT || 3901}`;
 export const testUser = {

@@ -1,7 +1,7 @@
 // Run: npm test (node --test; Node >= 23.6 strips TypeScript types natively).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { apiFetch, ApiError, redirectToLogin, resetLoginRedirect, isBffPath } from "./api.ts";
+import { apiFetch, ApiError, redirectToLogin, resetLoginRedirect, isBffPath, bffPath } from "./api.ts";
 
 // Minimal browser stand-ins: window.location with a recorded assign(), and a
 // fetch that answers with a fixed status.
@@ -94,6 +94,20 @@ test("isBffPath matches /bff and its subpaths only", () => {
   assert.ok(isBffPath("/bff/files/upload"));
   assert.ok(!isBffPath("/bffx"));
   assert.ok(!isBffPath("/api/v1/auth/forgot-password"));
+});
+
+// ── invite signup is public (#4579) ───────────────────────────────────────
+// A person with no account has no session, so POST /api/v1/invites/accept must
+// reach the API's own public route: through the BFF it would be a 401 before
+// the API ever saw the token (invite/handler.go mounts the route outside
+// RequireAuth for exactly this case).
+test("invite signup goes to /api/v1, not /bff: there is no session yet", async () => {
+  const calls = answer(201, { data: { role: "family_member", user_created: true } });
+  await apiFetch("/api/v1/invites/accept", { method: "POST", body: { token: "t", name: "n", password: "p" } });
+  assert.deepEqual(calls, ["/api/v1/invites/accept"]);
+  // Accepting while signed in still goes through the BFF, which adds the Bearer.
+  assert.equal(bffPath("/bff/invites/accept"), "/bff/invites/accept");
+  assert.equal(bffPath("/api/v1/invites"), "/bff/invites", "the authenticated invite routes stay on the BFF");
 });
 
 // ── offline (#4538) ────────────────────────────────────────────────────────

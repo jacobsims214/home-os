@@ -43,11 +43,22 @@ export interface Asset {
 }
 
 /** POST /api/v1/assets request body */
+/**
+ * What a vendor row is for (#5529, migration 080). `service_provider` does
+ * work for the family (the contacts list); `payee` is paid by the family (the
+ * bill payee picker); `both` is both.
+ *
+ * GET /api/v1/vendors already excludes payee-only rows, so anything this type
+ * describes came from the contacts list. Use `?kind=payee` for the payee side.
+ */
+export type VendorKind = "service_provider" | "payee" | "both";
+
 /** GET /api/v1/vendors response item (a family contact). `trades` is always an array. */
 export interface Vendor {
   id: string;
   household_id: string;
   name: string;
+  kind: VendorKind;
   trades: string[];
   specialty?: string;
   phone?: string;
@@ -186,6 +197,15 @@ export interface SecretRecord {
   secret_type: SecretType;
   created_at: string;
   updated_at: string;
+  /**
+   * "Shared with agents" (#4446): the server holds a second, server-readable
+   * copy so an MCP agent can read this credential. False is the default and
+   * the only value the UI can create by itself; turning it on is an explicit
+   * owner/family_manager action. agent_ciphertext is never serialized.
+   */
+  shared_with_agents?: boolean;
+  /** When sharing was turned on; absent when not shared. */
+  agent_shared_at?: string;
 }
 
 /** Alias used by UI components */
@@ -217,4 +237,16 @@ export interface UpdateSecretRequest {
   key_version: number;
   name: string;
   secret_type: SecretType;
+  /**
+   * The NEW plaintext payload, sent only when this save must keep a
+   * credential shared with agents (#4446). A PATCH without it drops the
+   * server copy, because a new blob may mean a new password. The API accepts
+   * it from an owner or family_manager only; anyone else gets 403.
+   */
+  agent_value?: Record<string, string>;
+}
+
+/** Body of PUT /api/v1/secrets/:id/agent-share — the plaintext payload. */
+export interface ShareSecretRequest {
+  value: Record<string, string>;
 }

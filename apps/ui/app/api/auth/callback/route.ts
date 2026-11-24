@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { DEX_UI_CLIENT_ID, dexConfig } from "@/lib/auth/dex-config";
 import { PKCE_COOKIE, PKCE_COOKIE_PATH, decodePkceCookie } from "@/lib/auth/pkce-cookie";
-import { returnUrl } from "@/lib/auth/return-path";
+import { completionUrl } from "@/lib/auth/return-path";
 import { HOUSEHOLD_COOKIE } from "@/lib/household-cookie";
 
 export const runtime = "nodejs";
@@ -123,8 +123,9 @@ export async function GET(request: NextRequest) {
     }
 
     // Back to the page the user started from (sanitised again: the cookie
-    // only ever held what /api/auth/login accepted, but trust nothing).
-    const response = redirectClearingPkce(returnUrl(publicOrigin, pkce.returnPath));
+    // only ever held what /api/auth/login accepted, but trust nothing), through
+    // the app's own completion page so Back never lands on Dex (#5304).
+    const response = redirectClearingPkce(completionUrl(publicOrigin, pkce.returnPath));
     // Session token for the BFF; expires with the id token.
     response.cookies.set(COOKIE_NAME, idToken, { ...baseCookie(), maxAge });
     if (typeof refreshToken === "string" && refreshToken) {

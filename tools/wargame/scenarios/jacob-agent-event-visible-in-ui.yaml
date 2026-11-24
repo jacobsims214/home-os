@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (agreement-agent-event-visible), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-agent-event-visible-in-ui
+persona: jacob
+surface: calendar
+intent: |
+  My agent added an event - can I see it in the app?
+steps:
+  - "chat.sh jacob r3-write --file msg (add a phone UI check event Sat 9:30-10:00)"
+  - "mcpcall.py event_find --from <sat> --to <sat+1d> as jacob"
+  - open Today and Calendar as jacob; read the Activity row
+assertion: |
+  The agent-created event appears on Today and Calendar and its Activity row carries
+  the agent attribution.
+tags:
+  - calendar
+  - agent
+  - ui
+  - agreement
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: agreement-agent-event-visible
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: pass

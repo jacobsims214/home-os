@@ -124,10 +124,10 @@ func TestDomainV2Cleanup056_AlarmDedupeAndEventLink(t *testing.T) {
 	}
 	// Family-wide rows (user_id NULL) and rows without a key are not limited.
 	for i := 0; i < 2; i++ {
-		mustExec(t, pool, `INSERT INTO notifications (household_id, type, title, dedupe_key) VALUES ($1, 'info', 'x', 'k1')`, f.household)
-		mustExec(t, pool, `INSERT INTO notifications (household_id, user_id, type, title) VALUES ($1, $2, 'info', 'x')`, f.household, user)
+		mustExec(t, pool, `INSERT INTO notifications (household_id, type, title, dedupe_key) VALUES ($1, 'bill_due', 'x', 'k1')`, f.household)
+		mustExec(t, pool, `INSERT INTO notifications (household_id, user_id, type, title) VALUES ($1, $2, 'bill_due', 'x')`, f.household, user)
 	}
-	_, err = pool.Exec(ctx, `INSERT INTO notifications (household_id, type, title, dedupe_key) VALUES ($1, 'info', 'x', ' ')`, f.household)
+	_, err = pool.Exec(ctx, `INSERT INTO notifications (household_id, type, title, dedupe_key) VALUES ($1, 'bill_due', 'x', ' ')`, f.household)
 	wantSQLState(t, err, sqlstateCheckViolation)
 
 	// Deleting the event clears the link and keeps the reminder.
@@ -169,6 +169,7 @@ func TestDomainV2Cleanup056_BackfillAndReversible(t *testing.T) {
 	applyMigration(t, pool, "064_membership_vendor_link.down.sql")     // newest first: 064's memberships FK needs 043's vendors key
 	applyMigration(t, pool, "061_notify_creator_role.down.sql")        // newest first: restores 054's notify_entity_creator
 	applyMigration(t, pool, "060_drop_pet_vet_columns.down.sql")       // newest first: restores pets.vet_name / vet_phone
+	applyMigration(t, pool, "091_family_composite_fks.down.sql")       // newest first: since 091 its composite FKs ride on 058/084's keys
 	applyMigration(t, pool, "058_same_family_fks.down.sql")            // newest first: 058's FKs need 043's vendors key
 	applyMigration(t, pool, "057_secret_agent_share.down.sql")
 	applyMigration(t, pool, "056_domain_v2_cleanup.down.sql")

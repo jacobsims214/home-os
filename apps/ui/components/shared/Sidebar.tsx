@@ -29,14 +29,13 @@
  * about which family you are in.
  */
 
-import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { Avatar, Box, Menu, Text, TextInput, UnstyledButton, VisuallyHidden } from "@mantine/core";
-import { IconChevronRight, IconLogout, IconSearch, IconSettings } from "@tabler/icons-react";
-import ColorSchemeControl from "@/components/ui/ColorSchemeControl";
-import { teardownSession } from "@/lib/session-teardown";
-import { useAuthStore } from "@/stores/auth";
+import { usePathname } from "next/navigation";
+import { Avatar, UnstyledButton, VisuallyHidden } from "@mantine/core";
+import { IconChevronRight, IconLogout } from "@tabler/icons-react";
+import AccountMenu, { useAccountMenuState } from "@/components/account/AccountMenu";
+import LogoutForm from "@/components/shared/LogoutForm";
+import { useAccountIdentity } from "@/components/shared/use-account";
 import {
   NAV_GROUP_LABELS,
   NAV_ICON_STROKE,
@@ -46,6 +45,7 @@ import {
 } from "@/components/shared/nav-config";
 import { useNavSections } from "@/components/shared/use-nav-role";
 import HomeMark from "@/components/shared/HomeMark";
+import SidebarSearch from "@/components/search/SidebarSearch";
 import classes from "./Sidebar.module.css";
 
 export type SidebarVariant = "sidebar" | "drawer";
@@ -114,59 +114,11 @@ export function Brand({ as: Tag = "div" }: { as?: "div" | "span" }) {
 
 // ─── Search ───────────────────────────────────────────────────
 
-function SidebarSearch({ variant }: { variant: SidebarVariant }) {
-  const router = useRouter();
-  const [query, setQuery] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-  const drawer = variant === "drawer";
-
-  // "/" focuses the sidebar search, unless the user is already typing.
-  useEffect(() => {
-    if (drawer) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-      const input = inputRef.current;
-      // Only when the sidebar is on screen (it's display:none below 62em).
-      if (!input || input.offsetParent === null) return;
-      e.preventDefault();
-      input.focus();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [drawer]);
-
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const q = query.trim();
-    if (!q) return;
-    router.push("/dashboard/search?q=" + encodeURIComponent(q));
-  };
-
-  return (
-    <form role="search" onSubmit={submit} className={classes.search}>
-      <TextInput
-        ref={inputRef}
-        type="search"
-        value={query}
-        onChange={(e) => setQuery(e.currentTarget.value)}
-        placeholder="Search"
-        aria-label="Search"
-        leftSection={<IconSearch size={drawer ? 18 : 16} stroke={NAV_ICON_STROKE} aria-hidden />}
-        rightSection={
-          drawer ? undefined : (
-            <kbd className={classes.kbd} aria-hidden>
-              /
-            </kbd>
-          )
-        }
-        rightSectionPointerEvents="none"
-        classNames={{ input: classes.searchInput }}
-      />
-    </form>
-  );
-}
+// The box lives in components/search/SidebarSearch.tsx (#5303): it was here as
+// a submit-only form, which on a phone was a box that did nothing while you
+// typed. It is a component of its own because it now runs the real search
+// (debounce, drop-down, empty/error states) through the same hook and the same
+// rows as the Search page, and because that is more than a nav file should own.
 
 // ─── Nav rows ─────────────────────────────────────────────────
 
@@ -222,135 +174,32 @@ function NavRow({ section, active }: { section: NavSection; active: boolean }) {
 
 // ─── Account ──────────────────────────────────────────────────
 
-function useAccount() {
-  const user = useAuthStore((s) => s.user);
-  const name = user?.name || "Account";
-  const initials =
-    (user?.name || user?.email || "U")
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((p) => p[0]!.toUpperCase())
-      .join("") || "U";
-  return { user, name, initials };
-}
-
 /**
- * Native POST to /api/auth/logout (#4424): the route expires the session
- * cookies and 303s to /login, and the full page load drops the React Query
- * cache.
+ * Desktop foot: the user button opens the account menu upward (#5198).
  *
- * Before that (#4648) the page purges what the session left in the browser —
- * Cache Storage (the pre-#4648 worker cached authenticated `/bff/*` responses
- * there), localStorage (`home-os-auth` profile, `home-os-recent` titles,
- * `home-os-property`), sessionStorage, IndexedDB — and clears the in-memory
- * user. A shared family device must not serve one person's household data to
- * the next one after this button is pressed.
+ * The menu itself is components/account/AccountMenu — the same identity header,
+ * Profile / Theme / Notification settings rows and ghost-danger Log out that the
+ * phone's bottom sheet shows — placed as a popover here because the artifact
+ * (#75 v1) draws it opening upward from the sidebar's user button at 1440 px.
  *
- * The submit is held back for that purge, but never for long: teardownSession()
- * bounds each step (2 s) and the form is submitted from `finally`, so a wedged
- * browser cannot trap the person on the page still holding a session. The
- * route's own `Clear-Site-Data` header then clears the rest anyway.
+ * Named by its content, not aria-label, so the visible name and email are part of
+ * the accessible name (WCAG 2.5.3, axe label-content-name-mismatch, #4752).
  */
-function LogoutForm({ children, className }: { children: React.ReactNode; className?: string }) {
-  const submitting = useRef(false);
-  return (
-    <form
-      method="post"
-      action="/api/auth/logout"
-      className={className}
-      onSubmit={(event) => {
-        // A double submit while the purge is running must not queue a second one.
-        if (submitting.current) {
-          event.preventDefault();
-          return;
-        }
-        const form = event.currentTarget;
-        // No JS? The form posts and the route's Clear-Site-Data does the work.
-        if (typeof window === "undefined") return;
-        event.preventDefault();
-        submitting.current = true;
-        void purgeThenSubmit(form);
-      }}
-    >
-      {children}
-    </form>
-  );
-}
-
-/**
- * Runs the teardown, then submits the native form (so the cookies still go).
- *
- * Order matters: dropping the in-memory user FIRST makes zustand's persist
- * middleware write `home-os-auth` one last time (with `user: null`), and the
- * purge that follows removes the key outright. The other way round leaves an
- * empty-looking key behind.
- */
-async function purgeThenSubmit(form: HTMLFormElement): Promise<void> {
-  try {
-    useAuthStore.getState().setUser(null);
-    await teardownSession({ unregister: true });
-  } finally {
-    form.submit();
-  }
-}
-
-/**
- * The account menu's rows: name and email, Settings, the Theme picker and
- * Log out. Shared by the header avatar menu (phone/tablet) and the sidebar
- * user button (desktop).
- */
-export function AccountMenuItems() {
-  const { user, name } = useAccount();
-  return (
-    <>
-      <Box px="sm" py="xs">
-        <Text size="sm" fw={600} truncate="end">
-          {name}
-        </Text>
-        {user?.email && (
-          <Text size="xs" c="var(--ink-3)" truncate="end">
-            {user.email}
-          </Text>
-        )}
-      </Box>
-      <Menu.Divider />
-      <Menu.Item component={Link} href="/dashboard/settings" leftSection={<IconSettings size={18} stroke={NAV_ICON_STROKE} />}>
-        Settings
-      </Menu.Item>
-      <Menu.Divider />
-      <Box px="sm" py="xs">
-        <Text size="xs" fw={500} c="var(--ink-2)" mb={6}>
-          Theme
-        </Text>
-        <ColorSchemeControl />
-      </Box>
-      <Menu.Divider />
-      <LogoutForm>
-        <Menu.Item
-          component="button"
-          type="submit"
-          color="red.9"
-          closeMenuOnClick={false}
-          leftSection={<IconLogout size={18} stroke={NAV_ICON_STROKE} />}
-          style={{ color: "var(--danger)" }}
-        >
-          Log out
-        </Menu.Item>
-      </LogoutForm>
-    </>
-  );
-}
-
-/** Desktop foot: the user button opens the account menu upward. */
 function SidebarAccount() {
-  const { user, name, initials } = useAccount();
+  const { user, name, initials } = useAccountIdentity();
+  const menu = useAccountMenuState();
   return (
-    <Menu position="top-start" width={236} shadow="lg" radius="md" withinPortal offset={6}>
-      <Menu.Target>
-        {/* Named by its content, not aria-label, so the visible name and email are part of
-            the accessible name (WCAG 2.5.3, axe label-content-name-mismatch, #4752). */}
-        <UnstyledButton className={classes.userButton} aria-haspopup="menu">
+    <AccountMenu
+      placement="sidebar"
+      opened={menu.opened}
+      onChange={(next) => (next ? menu.open() : menu.close())}
+      trigger={
+        <UnstyledButton
+          className={classes.userButton}
+          onClick={menu.open}
+          aria-haspopup="dialog"
+          aria-expanded={menu.opened}
+        >
           <Avatar size={32} radius="xl" color="cyan.9" variant="filled" src={user?.avatar_url ?? undefined} aria-hidden>
             {initials}
           </Avatar>
@@ -361,17 +210,14 @@ function SidebarAccount() {
           </span>
           <IconChevronRight size={16} stroke={NAV_ICON_STROKE} className={classes.userChevron} aria-hidden />
         </UnstyledButton>
-      </Menu.Target>
-      <Menu.Dropdown>
-        <AccountMenuItems />
-      </Menu.Dropdown>
-    </Menu>
+      }
+    />
   );
 }
 
 /** Drawer foot: avatar, name, email and a Log out button. */
 function DrawerAccount() {
-  const { user, name, initials } = useAccount();
+  const { user, name, initials } = useAccountIdentity();
   return (
     <div className={classes.drawerAccount}>
       <Avatar size={36} radius="xl" color="cyan.9" variant="filled" src={user?.avatar_url ?? undefined}>

@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N17), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-agent-find-filed-documents
+persona: amber
+surface: documents
+intent: |
+  Find the copay statement and the vet bill - I want to see they're really filed.
+steps:
+  - chat.sh amber r3-docs --file msg (find both filed bills)
+  - mcpcall.py document_find as amber
+  - mcpcall.py bill_find as amber
+assertion: |
+  Both records are found and their amounts, due dates and status are quoted from tool
+  fields, including paid_date: null where nothing has been paid.
+tags:
+  - documents
+  - money
+  - agent
+  - read
+  - honesty
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N17
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass

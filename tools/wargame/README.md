@@ -6,10 +6,17 @@ you check what actually landed in Home OS with direct MCP calls.
 
 | File | What it does |
 |---|---|
+| `up.sh` | **Verify the environment before a round**: cluster 5/5 Ready, both personas' Dex passwords actually sign in, both agent tokens answer `tools/list`, site 200 and Dex discovery. Pass/fail table, non-zero exit on anything wrong, never prints a secret. Idempotent — see [Verifying the environment](#verifying-the-environment--upsh-and-what-it-refuses-to-guess). |
+| `run.sh` | **Play a whole round in one command**: gates on `up.sh`, selects scenarios from the corpus, executes each one, and writes `scorecard.md` with the delta against the previous round. Exit `1` if any scenario FAILED, so it can gate a deploy — see [Running a round with `run.sh`](#running-a-round-with-runsh). |
+| `scenario_driver.py` | Executes ONE scenario for `run.sh`: runs the steps that have a driver (mcpcall.py, api.py, chat.sh, headless Chrome at 390px) and records PASS/FAIL/BLOCKED with evidence. Not a round entry point. |
+| `checks/<id>.py` | A scenario's own assertion check, run by the driver. Absent one the scenario is BLOCKED, never PASS. |
 | `chat.sh` | Sends one persona turn to a moltis agent, waits for the reply, prints the tool calls it made and its answer. `--history` dumps a whole session; `--stdin` / `--file` take the message where the shell cannot expand it — **see the quoting section immediately below**; `--selftest` runs the message-guard tests. |
 | `mcpcall.py` | Ground truth: calls one Home OS MCP tool as a household member and prints the result, over Streamable HTTP at `POST <HOMEOS_MCP_URL>/mcp` — the only MCP transport Home OS serves. `--selftest` runs its transport tests with no network. |
 | `api.py` | Same idea for the REST API (`/api/v1/...`). **Dex id_token only** — a `hos_` agent token 401s there by design; see [Two kinds of token](#two-kinds-of-token-agent-tokens-are-mcp-scoped). |
 | `personas.md` | The household, the two personas (Jacob, Amber), their scenarios and sample turns, and the agent system-prompt snippet. |
+| `seed/household.py` | The household itself: 12 bills whose mix puts all four `billdue.AttentionFor` states on the board at once (6 autopay-with-account incl. one due in 2 days, 4 manual-with-account, 1 manual with no account due soon, 1 overdue), 3 last-4 payment accounts, 13 contacts with phone/email/website, 4 **`kb_docs`** KB docs, people, pets, vehicles, property. Dates are computed from today in the household's timezone. Idempotent, refuses anything that is not the war-game household. **[`seed/README.md`](seed/README.md)** |
+| `scenarios/` | The scenario corpus: one YAML file per scenario, with the persona, surface, intent, steps, assertion and the round that found it. See [`scenarios/README.md`](scenarios/README.md). |
+| `scenarios_load.py` | Loads and validates `scenarios/`: schema, duplicate ids, missing ids, and the count report per persona, surface and round. `--selftest` needs no corpus. |
 
 ## Never put a `$` through your shell — always single-quote, or better use `--stdin`
 
@@ -254,6 +261,114 @@ half is unchanged and is what agents actually use.
 `X-Household-ID: <household uuid>`. It must be one of their own memberships (else 403); with
 no header the oldest membership is used, and a malformed value is a 400.
 
+## Verifying the environment — `./up.sh`, and what it refuses to guess
+
+**Run this before a round, and again after anything is redeployed:**
+
+```bash
+cd tools/wargame && ./up.sh
+```
+
+It brings the war-game environment to a *known-good* state or says loudly why not:
+a pass/fail table and exit `1` if anything is wrong. It is idempotent — it only reads and
+probes, so the second run behaves exactly like the first. Safe to paste in a ticket: it
+never prints a secret.
+
+```text
+CHECK                        RESULT DETAIL
+---------------------------- ------ ----------------------------------------
+cluster                      PASS   5/5 Ready at https://192.168.8.226:6443
+site                         PASS   HTTP 200 (https://homeos.simstech.cloud/login?redirect=%2F)
+dex-discovery                PASS   issuer https://homeos.simstech.cloud/dex
+dex-login:jacob              PASS   id_token for jacob.sims@simstech.cloud (iss https://homeos.simstech.cloud/dex)
+dex-login:amber              PASS   id_token for amber.wargame@simstech.cloud (iss https://homeos.simstech.cloud/dex)
+mcp:jacob                    PASS   95 tools over MCP as jacob
+mcp:amber                    PASS   95 tools over MCP as amber
+
+READY: all 7 checks passed.
+```
+
+### What each check actually proves
+
+| Check | Proves | Fails when |
+|---|---|---|
+| `cluster` | `kubectl get nodes` against the explicit kubeconfig returns 5 Ready, **and** the kubeconfig names `https://192.168.8.226:6443` | the kubeconfig is missing/expired, or names the dead `.176` |
+| `site` | following `/`'s redirect reaches HTTP 200 (an anonymous `/` 307s to `/login`) | the UI or its ingress is down |
+| `dex-discovery` | the discovery document's `issuer` is `https://homeos.simstech.cloud/dex` | Dex is down or serving the wrong issuer |
+| `dex-login:<persona>` | the password in that persona's Secret **signs in through the interactive local connector and yields an id_token whose `email` claim is that persona** | the Secret is stale, the account is gone, or the connector is off |
+| `mcp:<persona>` | that persona's `hos_` agent token answers `tools/list` on `POST /mcp` with a non-empty tool list | the token is revoked, or the MCP is down |
+
+**`dex-login` drives the real login flow, not the password grant.** The grant is retired
+(#4540, see "Getting a Dex id_token"), so `up.sh` goes authorize → Dex's local login form →
+POST the password → the redirect's authorization code → redeem it with PKCE. Redeeming the
+code is what makes it a real check: a redirect out of the login form only proves the form
+accepted a POST, while the id_token's `email` proves Dex authenticated *that identity*.
+**Do not "fix" a failing `dex-login` by reaching for the password grant** — it is off on
+purpose and returns `400 unsupported_grant_type`.
+
+**A `hos_` token 401ing on `/api/v1/*` is correct and is not checked here.** Agent tokens
+are MCP-scoped by design (see "Two kinds of token"). `up.sh` never calls REST, so that 401
+can never be misreported as a failure.
+
+### If `dex-login` reports `429 Too many sign-in attempts`
+
+That is **Dex's per-identity rate limiter**, not a bad password and not a broken
+connector. Dex answers `429` with `retry-after: 60` on `/dex/auth/local`, and the whole
+login flow has to wait. `up.sh` says so explicitly instead of guessing at the connector.
+
+Two things worth knowing:
+
+- **Repeated runs trip it.** Two back-to-back runs from a clean slate both pass; but
+  hammering the script (or the login form by hand) more than a few times in a minute
+  will get the next run limited. If a run reports `429`, wait 60s and run it again —
+  that run is not a failure of the environment.
+- **It is correct defence**, the same limiter that stops password guessing. Do not
+  disable it to make a verifier green; space the logins out instead. (README § "One
+  persistent browser profile per batch, and pace logins ≥30s" is the same fact from the
+  browser side.)
+
+### The rule behind the table: a check that cannot tell must FAIL
+
+This project's recurring defect is a check that reports success when it cannot actually
+tell. Two shapes of that, both closed here:
+
+- **No silent skip.** There is no third "skipped, probably fine" state. A check that could
+  not run — a Secret that will not read, a probe that produced no verdict — is a `FAIL`
+  with the reason, because otherwise a half-up environment prints green.
+- **An empty credential never reaches a probe.** A token read as `""` would be sent as an
+  empty bearer, answer `401`, and look exactly like a revoked token. `up.sh` checks the
+  value is non-empty before probing and fails on `secret:<name>` instead, so the row names
+  the real problem.
+
+Every failure names the Secret, namespace or URL to look at. The namespaces are
+load-bearing — war-game Dex passwords and agent tokens are in the **`moltis`** namespace,
+and only Jacob's Dex password is in `home-os`
+(`home-os-secrets`/`adminPassword`). **There is no `jacob.wargame@` Dex account**; Jacob's
+identity is `jacob.sims@simstech.cloud`.
+
+### Overrides (all optional)
+
+| Variable | Default |
+|---|---|
+| `WARGAME_KUBECONFIG` | `/Volumes/…/pve-1/amp-work/5319/kube/admin.kubeconfig` — **fragile, see "Cluster access" above**; copy it to `~/.kube/wargame/` and point this there |
+| `WARGAME_CONTROL_PLANE` | `https://192.168.8.226:6443` |
+| `WARGAME_EXPECT_NODES` | `5` |
+| `HOMEOS_SITE` | `https://homeos.simstech.cloud` |
+| `HOMEOS_MCP_URL` | `$HOMEOS_SITE` (a base URL; `/mcp` is appended) |
+| `WARGAME_NET_TIMEOUT` / `WARGAME_KUBECTL_TIMEOUT` | `25` / `30` seconds |
+
+### Secrets
+
+`up.sh` reads each password and agent token straight from its Secret into a `0600` file in
+a `0700` scratch dir, hands curl the **file** (`--data-urlencode password@file`, never the
+value on argv where it would land in `ps`), and overwrites-and-removes the file on every
+exit path including failure and Ctrl-C. Nothing is cached and nothing is printed. Scratch
+output belongs in this folder and is already `.gitignore`d.
+
+If #5475's `verify.py` and `verify.yaml` are present alongside it, `up.sh` also runs them
+and folds in the checks it does not do itself (the moltis instance logins), so this stays
+one command rather than "run one of two".
+
 ## Running a round
 
 1. **Baseline.** Record what's in the household before play, so you can tell the agents'
@@ -268,7 +383,10 @@ no header the oldest membership is used, and a malformed value is a 400.
    ./mcpcall.py note_find
    ```
 
-2. **Play a persona turn.** Pick a scenario from `personas.md`. The session name is the
+2. **Play a persona turn.** Pick a scenario from the corpus (`./scenarios_load.py --ids`, or
+   `--persona amber --round r3 --ids` for a slice; assertions come from `--json`), and read
+   `personas.md` for the household and the voice. Cite the scenario's `id` in the round write-up,
+   so coverage and results are comparable between rounds. The session name is the
    topic; reuse it for follow-ups, use a new one when the topic changes:
 
    ```bash
@@ -324,6 +442,83 @@ no header the oldest membership is used, and a malformed value is a 400.
 
 5. **Clean up.** Delete the test events and notes, or reset the household, before the next
    round. Remove any probe pod you created, because it may hold credentials.
+
+## Running a round with `run.sh`
+
+`./up.sh` proves the environment; `./run.sh` plays the round and scores it. One command:
+
+```bash
+cd tools/wargame
+./run.sh                                  # every scenario in the corpus
+./run.sh --filter money                   # narrow by free text (id, surface, tags, intent)
+./run.sh --persona amber --surface money  # a persona's slice of a surface
+./run.sh --tag attention --round r4       # the household-reality set that touches attention
+./run.sh --ids amber-payee-contact,amber-missed-setup-bill   # exactly these
+./run.sh --limit 3                        # a quick smoke round
+```
+
+It writes `rounds/<label>/scorecard.md` plus `rounds/<label>/evidence/<scenario-id>/` (a
+`result.json`, the agent turn logs, and any screenshots). `rounds/` is git-ignored: rounds are
+append-only and nothing outside them is written, so running a round twice is safe.
+
+**Exit codes, because this is meant to gate a deploy:**
+
+| Exit | Meaning |
+|---|---|
+| `0` | The round ran and **no scenario FAILED** (PASS/BLOCKED only). |
+| `1` | At least one scenario **FAILED**. A deploy must not go out. |
+| `2` | The round **never started**: `up.sh` failed the gate, or the filters matched nothing. No scorecard is written. |
+
+### The gate: `run.sh` will not play a round against a half-up environment
+
+`run.sh` runs `./up.sh` first and refuses to start if it exits non-zero. There is deliberately no
+`--force`: a round played against a broken environment produces lies, and the fix is to repair the
+environment, not to skip the check. `--skip-up` exists only for re-running a round you just gated;
+the scorecard records that it was skipped, because those results are not comparable.
+
+### The three verdicts, and why BLOCKED is not a pass
+
+| Verdict | What it means |
+|---|---|
+| **PASS** | Every step with a driver ran, **and** the scenario's own assertion check (`checks/<id>.py`) ran and passed. Nothing reaches PASS without something that could have failed. |
+| **FAIL** | A step's driver ran and errored, or the assertion check ran and failed. This is a fact about the product. |
+| **BLOCKED** | The round could not judge it: there is no `checks/<id>.py` yet, or a step has no driver (the corpus's steps are prose taps written for a human), or a driver could not tell (a `429` from the MCP is BLOCKED, not FAIL — a rate limit is not a product defect). The scorecard names which. |
+
+A scenario graduates from BLOCKED to a real verdict by gaining a `checks/<id>.py`. The delta then
+shows that graduation as progress, which is the point of scoring the same corpus every round.
+
+### The delta is the point
+
+The top of every scorecard is the comparison with the previous round:
+
+- **`No new findings, no regressions`** — every scenario played this round has the same verdict it
+  had last round. That one line is the signal that we are done.
+- Otherwise it lists what regressed (was → now), what was fixed, what graduated, and what was
+  played for the first time. A scenario with no previous verdict **cannot** regress, so it is
+  reported as "played for the first time" and the round is explicitly **not** clean.
+
+`--compare <dir>` picks the previous round explicitly; otherwise the newest earlier round in
+`rounds/` is used. A baseline round says so instead of inventing a delta.
+
+### Writing an assertion check
+
+`checks/<scenario-id>.py` is a `python3` script (stdlib only) called as
+`checks/<id>.py --evidence-dir <dir> --persona <persona>`. Its **exit code** is the verdict:
+`0` pass, `1` fail (a fact about the product), `2` could not tell (BLOCKED — a `429`, a missing
+credential). Print one line saying what held or what did not.
+
+Read ground truth with `mcpcall.py --text <tool> '<json>'` and assert on it rather than on a
+screenshot wherever the assertion allows. Two rules from `how-to/worker-standing-instructions.md`
+that a check must follow: assert on `attention`, never on `is_autopay` (§6), and **revert-check
+it** — put the defect back, watch the check go red, restore it (§5).
+
+A worked example is `checks/amber-missed-setup-bill.py`, which asserts the seeded dental bill is
+`needs_setup` with no account and that its reminder names **both** missing halves.
+
+### An example scorecard
+
+[`examples/scorecard-narrow-round.md`](examples/scorecard-narrow-round.md) is a real 3-scenario
+round (2 PASS, 1 BLOCKED, delta "no new findings, no regressions").
 
 ## Rules
 

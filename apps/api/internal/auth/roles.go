@@ -96,6 +96,7 @@ type Resource string
 const (
 	ResHousehold     Resource = "household"     // the household record and the caller's households
 	ResMembers       Resource = "members"       // memberships (people who log in) and their roles
+	ResMemberAudit   Resource = "member_audit"  // the audit of membership changes (#5518)
 	ResInvites       Resource = "invites"       // invitations
 	ResAgentTokens   Resource = "agent_tokens"  // the caller's own agent tokens
 	ResAssets        Resource = "assets"        // assets
@@ -121,6 +122,7 @@ const (
 	ResMeals         Resource = "meals"         // recipes, meal plans, meal feedback
 	ResActivity      Resource = "activity"      // the family activity feed
 	ResGuides        Resource = "guides"        // guides
+	ResKB            Resource = "kb"            // the family knowledge base (kb_docs, #5502)
 	// ResPassword is the caller's own sign-in password. The resource is
 	// self-scoped: no route and no handler ever names another account, so a
 	// grant here only ever changes the caller's own credential (#4822).
@@ -196,7 +198,12 @@ var policy = map[Resource]map[Action][]string{
 	// ordinary write (#4820).
 	ResHousehold: {ActRead: rolesEveryone, ActWrite: rolesManagers},
 	ResMembers:   {ActRead: rolesSitter, ActWrite: rolesManagers},
-	ResInvites:   {ActRead: rolesManagers, ActWrite: rolesManagers},
+	// The audit trail of membership changes (#5518, finding F24): who granted,
+	// demoted or removed whom. Managers only -- a demotion must not be readable
+	// in the shared feed by the member being demoted. activity_log has no
+	// per-row visibility, so the decision lives here, where every reader asks.
+	ResMemberAudit: {ActRead: rolesManagers},
+	ResInvites:     {ActRead: rolesManagers, ActWrite: rolesManagers},
 	ResAgentTokens: {
 		ActRead:       rolesEveryone, // list one's own tokens
 		ActRevoke:     rolesEveryone, // revoke one's own tokens (e.g. after a demotion)
@@ -262,6 +269,11 @@ var policy = map[Resource]map[Action][]string{
 	ResActivity: {ActRead: rolesReaders},
 	ResGuides:   {ActRead: rolesSitter, ActWrite: rolesFamily},
 
+	// The family knowledge base (#5502) is the one area EVERY role reads, a
+	// housesitter and a vendor included: its whole point is that the
+	// babysitter can find the router doc. Writes are ordinary family writes.
+	ResKB: {ActRead: rolesEveryone, ActWrite: rolesFamily},
+
 	// Changing your own password is every role's own business, including a
 	// viewer, a housesitter and a vendor: it grants nothing beyond the
 	// credential the caller already signs in with. The handler verifies the
@@ -314,6 +326,10 @@ var entityResources = map[string]Resource{
 	"meal_plan":            ResMeals,
 	"meal_feedback":        ResMeals,
 	"guide":                ResGuides,
+	"kb_doc":               ResKB,
+	// 086 (#5518): the membership audit. NOT ResMembers -- members.read is
+	// rolesSitter, so reusing it would let a housesitter read who demoted whom.
+	"membership": ResMemberAudit,
 }
 
 // EntityResource returns the resource guarding entity kind kind, and false

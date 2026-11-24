@@ -219,10 +219,18 @@ func TestEntityHelpers(t *testing.T) {
 			t.Errorf("CanAnnotateEntity(%s, %s) = %v, want %v", tc.role, tc.kind, got, tc.annotate)
 		}
 	}
-	if hidden := HiddenEntityKinds(RoleViewer); len(hidden) != 1 || hidden[0] != "secret" {
-		t.Errorf("viewer hidden kinds = %v, want [secret]", hidden)
+	// A viewer is kept from credentials AND from the membership audit (#5518):
+	// who granted, demoted or removed whom is management data.
+	if hidden := HiddenEntityKinds(RoleViewer); len(hidden) != 2 ||
+		!slices.Contains(hidden, "secret") || !slices.Contains(hidden, "membership") {
+		t.Errorf("viewer hidden kinds = %v, want [secret membership]", hidden)
 	}
 	if hidden := HiddenEntityKinds(RoleOwner); len(hidden) != 0 {
 		t.Errorf("owner hidden kinds = %v, want none", hidden)
+	}
+	for _, role := range []string{RoleFamilyMember, RoleViewer, RoleHousesitter, RoleVendor} {
+		if CanSeeEntity(role, "membership") {
+			t.Errorf("%s can read the membership audit; it is owner/family_manager only", role)
+		}
 	}
 }

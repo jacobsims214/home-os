@@ -16,6 +16,43 @@
   --shell-ink: var(--ink);
   --shell-ink-2: var(--ink-2);
   --shell-ink-3: var(--ink-3);
+
+  /*
+   * How much room a page with a floating action button must keep clear at the
+   * bottom (#5408).
+   *
+   * Two things float over the end of a page and neither takes up layout space:
+   * the phone tab bar (56 px + safe-area, in the footer) and the page's FAB, a
+   * 56 px square sitting 72 px above the safe area — so the FAB's TOP edge is
+   * 128 px above the bottom of the viewport. Mantine pads <main> for the footer
+   * (57 px, the bar's height) and nothing padded for the FAB, so on Calendar the
+   * "+" sat on the last event card and on Lists it covered the lower-right of
+   * the list: 128 − 73 = 55 px of the last card could never be scrolled out from
+   * under it, and a tap there hit the button instead of the card.
+   *
+   * Everything here is the FAB's own geometry, in one place, so no page guesses:
+   *   offset + size = the FAB's top edge (128 px)
+   *   + the breathing gap, minus what <main> already reserves for the footer
+   * so the extra space equals the shortfall, not the whole 128 px. Expressed as
+   * max(0, …) so the rule stays correct if either the footer or the FAB changes.
+   */
+  --shell-footer-height: 3.5625rem; /* BottomNav's 56px bar + 1px border (DashboardShell.Footer) */
+  --shell-fab-offset: 72px;
+  --shell-fab-size: 56px;
+  --shell-fab-top: calc(var(--shell-fab-offset) + var(--shell-fab-size));
+  /* Extra room below the last card so it scrolls fully clear, not just level. */
+  --shell-bottom-gap: 16px;
+  --shell-bottom-clearance: max(
+    0px,
+    calc(var(--shell-fab-top) + var(--shell-bottom-gap) - var(--shell-footer-height) + env(safe-area-inset-bottom, 0px))
+  );
+}
+
+@media (min-width: 48em) {
+  .shellVars {
+    /* No tab bar and no FAB from 48em up. */
+    --shell-bottom-clearance: 0px;
+  }
 }
 
 /* The tab bar's More sheet (BottomNav.module.css) renders in a portal,
@@ -224,6 +261,43 @@
   margin: 0 auto;
   padding: 16px;
   min-width: 0;
+}
+
+/*
+ * Keep the end of a page with a floating action button clear of it (#5408).
+ *
+ * ONE place for the whole app: this is the shared shell, so any page that has a
+ * FAB gets the clearance by marking the button `data-floating-action`, never by
+ * padding itself. Before this, the tab bar was allowed for (Mantine pads <main>
+ * by the footer height) but the FAB was not, because a floating button by
+ * definition takes up no layout space — the last card could not be scrolled out
+ * from under it, and a tap there hit the button instead of the card.
+ *
+ * The two FABs are positioned differently, and that changes what "make room"
+ * has to mean, so there are two declarations against the one variable:
+ *
+ *  - `fixed` (Lists): out of flow entirely. The page needs more scroll length
+ *    below its content so the last card can be scrolled up past the button, and
+ *    padding-bottom on the scroll container's content box is exactly that. It
+ *    scrolls with the content rather than pushing the button down the page.
+ *
+ *  - `sticky` (Calendar): still a flow item, drawn upward from its own position
+ *    by -translate-y-full. At full scroll its static position IS the bottom of
+ *    the last card, which is why padding on the container could never help — the
+ *    button travels with the content and stays glued on top of the last card.
+ *    What it needs is a gap above itself to live in: margin-top on the marked
+ *    row pushes the row down by the button's height plus the breathing gap, so
+ *    the button lands in that gap instead of over the card.
+ *
+ * :has() keeps both rules off pages without a FAB — this asks for clearance, not
+ * for 87 px of dead space at the end of Settings.
+ */
+.content:has([data-floating-action]) {
+  padding-bottom: calc(16px + var(--shell-bottom-clearance, 0px));
+}
+
+.content [data-floating-action] {
+  margin-top: calc(var(--shell-fab-size, 56px) + var(--shell-bottom-gap, 16px));
 }
 
 /* ---------- drawer ---------- */

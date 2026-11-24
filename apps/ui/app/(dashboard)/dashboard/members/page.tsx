@@ -62,13 +62,19 @@ import {
   IconLink,
   IconPalette,
   IconRefresh,
+  IconShare,
   IconTrash,
   IconUserPlus,
   IconUsers,
 } from "@tabler/icons-react";
 import ResponsiveModal, { ResponsiveModalActions } from "@/components/ui/ResponsiveModal";
-import { useMyHouseholds, useNavRole } from "@/components/shared/use-nav-role";
+import { useCurrentHousehold, useMyHouseholds, useNavRole } from "@/components/shared/use-nav-role";
 import { householdRoleLabel } from "@/lib/household-roles";
+import {
+  householdCardInitial,
+  householdCardMeta,
+  householdCardName,
+} from "@/lib/members/household-card";
 import {
   canManageMembers,
   canSeeMembers,
@@ -90,7 +96,6 @@ import {
   ownerCount,
   useChangeRole,
   useCreateInvite,
-  useHousehold,
   useInvites,
   useRemoveMember,
   useRoster,
@@ -131,7 +136,13 @@ function dotStyle(color: string | null): React.CSSProperties | undefined {
 function joinedLabel(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  // UTC: a joined date is a civil date, so UTC cannot move it (#5316).
+  return d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────
@@ -153,7 +164,15 @@ export default function MembersPage() {
   const allowed = roleSettled && canSeeMembers(role);
   const manager = allowed && canManageMembers(role);
 
-  const { data: hh } = useHousehold(allowed);
+  // The household this page is in, from the SAME source the rest of the app
+  // reads (#5300): GET /me/households via useCurrentHousehold. The card used to
+  // fetch GET /households/me, whose payload is the Go Household struct with no
+  // json tags — `data.Timezone`, not `data.timezone` — so the zone was always
+  // `undefined` and a family with a zone was told "Time zone not set". Reading
+  // the family list here instead is not a second source of truth: it is the one
+  // source, already used by Today, Calendar, Pets, People, Bills and search, and
+  // it also saves a request that only this page ever made.
+  const household = useCurrentHousehold();
   const { data: me } = useViewerId(allowed);
   const viewer = me?.id ?? null;
   // The roster shows skeleton rows only AFTER the role says yes: before that
@@ -233,20 +252,25 @@ export default function MembersPage() {
   return (
     <div className={classes.page} data-testid="members-page">
       <p className={classes.lede}>
-        Who can sign in to {hh?.data?.name ?? "this family"} and what each person can do. Kids and
-        anyone without a login live in People &amp; House.
+        Who can sign in to {household?.name?.trim() || "this family"} and what each person can do.
+        Kids and anyone without a login live in People &amp; House.
       </p>
 
       {/* ── The household itself ─────────────────────────────── */}
       <section className={classes.houseCard} aria-label="Household">
         <span className={classes.houseMark} aria-hidden>
-          {(hh?.data?.name ?? "H").charAt(0).toUpperCase()}
+          {householdCardInitial(household)}
         </span>
         <div className={classes.houseBody}>
-          <h2 className={classes.houseName}>{hh?.data?.name ?? "This family"}</h2>
-          <p className={classes.houseMeta}>
-            {hh?.data?.timezone ?? "Time zone not set"}
-            {role ? ` · you're a ${householdRoleLabel(role).toLowerCase()}` : ""}
+          <h2 className={classes.houseName} data-testid="household-name">
+            {householdCardName(household)}
+          </h2>
+          {/* The zone comes from the household record (#5300) — see
+              lib/members/household-card.ts for the read this replaced. While
+              the household is unknown the line carries the role only, rather
+              than claiming the family has no zone. */}
+          <p className={classes.houseMeta} data-testid="household-meta">
+            {householdCardMeta(household, role)}
           </p>
           <p className={classes.houseNote}>
             The time zone sets when reminders, bills and &ldquo;today&rdquo; roll over for everyone.
@@ -886,7 +910,22 @@ function InviteDialog({
           <p className={classes.hint} style={{ marginTop: 0 }}>
             Send them this link: text, email or in person. It works once and expires in 7 days.
           </p>
-          <CopyLinkButton url={result} email={email} block />
+          {/* Copy link is the one that always works; Share joins it where the
+              browser has the OS sheet (a phone). Side by side, so neither takes
+              the row the other needs at 390 px. */}
+          <div className={classes.inviteShareRow}>
+            <CopyLinkButton url={result} email={email} block />
+            <ShareLinkButton url={result} email={email} />
+          </div>
+          <div className={classes.inviteSecret} role="note" data-testid="invite-secret-note">
+            <IconAlertTriangle size={18} stroke={ICON_STROKE} />
+            <span>
+              Anyone who has this link can join as{" "}
+              <b>{picked ? householdRoleLabel(picked) : "a family member"}</b>, so send it only to{" "}
+              {email.trim() || "the person you're inviting"}. The link is the invite: don&apos;t post
+              it in a group chat. No email was sent.
+            </span>
+          </div>
         </>
       ) : (
         <>
@@ -988,6 +1027,47 @@ function InviteDialog({
         )}
       </ResponsiveModalActions>
     </ResponsiveModal>
+  );
+}
+
+// ─── Share link ───────────────────────────────────────────────────────
+
+/**
+ * The phone's own share sheet (SMS, WhatsApp, AirDrop), which is how an invite
+ * actually reaches someone (#4579, artifact #103's "Share…"). The Web Share API
+ * needs a user gesture, a secure context and a browser that has it, so its
+ * absence is not an error: the button simply is not drawn, and Copy link stays.
+ * The URL only ever leaves through the OS sheet: it is never rendered, logged or
+ * put in the page's text.
+ */
+function ShareLinkButton({ url, email }: { url: string; email: string }) {
+  // Read after mount: `navigator.share` is undefined while server-rendering, and
+  // drawing a button that then vanishes would shift the layout.
+  const [canShare, setCanShare] = useState(false);
+  useEffect(() => {
+    setCanShare(typeof navigator !== "undefined" && typeof navigator.share === "function");
+  }, []);
+  if (!canShare) return null;
+  return (
+    <Button
+      variant="default"
+      leftSection={<IconShare size={16} stroke={ICON_STROKE} />}
+      onClick={() => {
+        void navigator
+          .share({
+            title: "Join the family on Home OS",
+            text: email ? `You're invited to Home OS as ${email}.` : "You're invited to Home OS.",
+            url,
+          })
+          .catch(() => {
+            // Cancelled, or the browser refused: nothing to undo, and the link
+            // was not shared. Copy link is still there.
+          });
+      }}
+      data-testid="invite-share"
+    >
+      Share
+    </Button>
   );
 }
 

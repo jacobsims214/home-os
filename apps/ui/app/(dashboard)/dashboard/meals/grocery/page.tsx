@@ -22,7 +22,7 @@
 
 import { useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import dayjs from "dayjs";
+import { useHouseholdToday } from "@/lib/today/api";
 import Link from "next/link";
 import { Button, Card, Group, Text, Title } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
@@ -41,15 +41,20 @@ export default function GroceryPage() {
   const canWrite = role == null ? true : WRITER_ROLES.has(role);
   const params = useSearchParams();
 
-  // The range comes from the week plan. Defaults: this week's dinners, worked
-  // out in the browser so it matches the week the person just looked at.
+  // The range comes from the week plan. Defaults: this week's dinners, in the
+  // FAMILY's day (#5316), so the default week is the one the person just looked
+  // at rather than the one a UTC browser happens to be on.
+  const today = useHouseholdToday();
   const range = useMemo(() => {
     const from = params?.get("from") ?? "";
     const to = params?.get("to") ?? "";
     if (/^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to)) return { from, to };
-    const start = weekStart(dayjs().format("YYYY-MM-DD"));
+    // Unknown household: an empty range, which useGroceryPreview leaves
+    // disabled (`!!range.from`). Nothing is guessed while it loads.
+    if (!today) return { from: "", to: "" };
+    const start = weekStart(today);
     return { from: start, to: addDays(start, 6) };
-  }, [params]);
+  }, [params, today]);
   const slots = useMemo(() => ["dinner"], []);
 
   const previewQuery = useGroceryPreview({ ...range, slots });

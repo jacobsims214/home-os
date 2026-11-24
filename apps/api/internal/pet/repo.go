@@ -123,6 +123,16 @@ UPDATE vendors
  WHERE id = $1 AND household_id = $2
    AND (NOT ('vet' = ANY (trades)) OR NULLIF(btrim(phone), '') IS NULL)`
 
+// vetKindSQL promotes a PAYEE that is being used as a vet to 'both' (#5529,
+// 080). The trigger in 080 does this whenever trades change, but this path
+// can match a vendor that ALREADY has the 'vet' trade and only fills a blank
+// phone -- no trade write, so no trigger -- and a payee that the family's pet
+// sees must not stay invisible in the contacts list. Idempotent: a
+// service_provider or both row is left alone.
+const vetKindSQL = `
+UPDATE vendors SET kind = 'both', updated_at = NOW()
+ WHERE id = $1 AND household_id = $2 AND kind = 'payee'`
+
 func resolveVet(ctx context.Context, q querier, householdID uuid.UUID, ref VetRef) (uuid.UUID, error) {
 	name := trimmed(ref.Name)
 	phone := trimmed(ref.Phone)
@@ -169,6 +179,9 @@ SELECT pg_advisory_xact_lock(hashtextextended('pet_vet:' || $1::text, 0)),
 	if err == nil {
 		if _, err := q.Exec(ctx, tagVetSQL, id, householdID, phoneArg); err != nil {
 			return uuid.Nil, fmt.Errorf("tag vet vendor: %w", err)
+		}
+		if _, err := q.Exec(ctx, vetKindSQL, id, householdID); err != nil {
+			return uuid.Nil, fmt.Errorf("promote vet vendor kind: %w", err)
 		}
 		return id, nil
 	}

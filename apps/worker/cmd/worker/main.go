@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/api/pkg/smtp"
+	"home-os/notify"
 	"home-os/worker/internal/alarms"
 	"home-os/worker/internal/billmirror"
 	"home-os/worker/internal/config"
@@ -157,98 +158,18 @@ type notif struct {
 	Body        string
 }
 
-// billDueWindowDays and maintenanceDueWindowDays are how far ahead (in whole
-// days, inclusive of today) a bill or maintenance task triggers a notification.
+// billLeadDays and maintenanceDueWindowDays are how far ahead (in whole days,
+// inclusive of today) a bill or maintenance task triggers a notification.
+//
+// billLeadDays is only the lead time for an ORDINARY manual bill (due_soon).
+// Which bills earn a reminder at all is decided by billdue.AdviceFor, keyed on
+// the shared attention rule (#5498/#5500, see billreminders.go), and
+// needs_setup bills are reminded earlier than this on purpose: the family has to
+// set something up before the money can move.
 const (
-	billDueWindowDays        = 3
+	billLeadDays             = 3
 	maintenanceDueWindowDays = 7
 )
-
-// billCandidatesSQL lists every bill with a usable schedule (a monthly bill
-// with due_day 1-31, or a quarterly/semiannual/annual/once bill with a
-// due_date, migration 044, #4468) and no bill_due notification in the last
-// 24 hours, with what the due-date rule needs: the household's timezone (for
-// "today"), frequency, due_day, due_date, paid_date and paid_for_due_date
-// (migration 052, #4655). $1 is now's UTC date: a once bill due more than a
-// day before it can never be in any household's window (every local date is
-// within a day of UTC), so it is not fetched. Which of them
-// are due within the window is decided in Go by nextUnpaidDue (billdue.go),
-// the same rule as the MCP bill tools (apps/mcp/internal/bill.BillDue and
-// coveredDueDate), so a bill marked paid with bill_pay is not notified for
-// the due date it paid. Doing it in SQL would mean a second copy of
-// paidForDueDate in another language, and AT TIME ZONE fails the whole
-// query on a bad households.timezone where the MCP tools fall back to UTC.
-const billCandidatesSQL = `
-	SELECT b.id::text, h.timezone, b.frequency, b.due_day, b.due_date, b.paid_date, b.paid_for_due_date
-	FROM bills b
-	JOIN households h ON h.id = b.household_id
-	WHERE ((b.frequency = 'monthly' AND b.due_day BETWEEN 1 AND 31)
-	    OR (b.frequency <> 'monthly' AND b.due_date IS NOT NULL))
-	AND NOT (b.frequency = 'once' AND b.due_date < $1::date - 1)
-	AND NOT EXISTS (
-		SELECT 1 FROM notifications n
-		WHERE n.entity_id = b.id AND n.type = 'bill_due'
-		AND n.created_at > NOW() - INTERVAL '24 hours'
-	)
-`
-
-// billDueSQL inserts a bill_due notification for each ($1[i], $2[i]) pair of
-// bill id and due date chosen by dueBills. notifications.entity_id is UUID,
-// so bill ids are passed and compared as UUIDs (casting them to text fails
-// with "operator does not exist: uuid = text"). The NOT EXISTS is repeated
-// so two overlapping runs still keep one bill_due per bill per 24 hours.
-const billDueSQL = `
-	INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
-	SELECT b.household_id, 'bill_due', b.name || ' due soon',
-	       CASE WHEN b.amount IS NULL THEN 'Payment due on ' ELSE 'Payment of $' || b.amount || ' due on ' END
-	           || to_char(d.due_date, 'Mon FMDD'),
-	       'bill', b.id
-	FROM unnest($1::uuid[], $2::date[]) AS d(bill_id, due_date)
-	JOIN bills b ON b.id = d.bill_id
-	WHERE NOT EXISTS (
-		SELECT 1 FROM notifications n
-		WHERE n.entity_id = b.id AND n.type = 'bill_due'
-		AND n.created_at > NOW() - INTERVAL '24 hours'
-	)
-	RETURNING id, household_id, type, title, body
-`
-
-// billCandidate is one row of billCandidatesSQL.
-type billCandidate struct {
-	ID        string
-	Timezone  string
-	Frequency string
-	DueDay    *int
-	DueDate   *time.Time
-	PaidDate  *time.Time
-	PaidFor   *time.Time
-}
-
-// dueBills returns the ids and next unpaid due dates of the candidates whose
-// due date falls within [today, today + windowDays], where today is now's
-// date in each bill's household timezone.
-//
-// A monthly bill's due_day is a day of the month (1-31), so the next due
-// date can be in this month or the next one: on Nov 29 a bill due on the 1st
-// is due Dec 1. The day is clamped to the month's length, so due_day 31 is
-// due Feb 28 (or 29), and Apr 30. A quarterly, semiannual or annual bill is
-// due every 3/6/12 months on its due_date's day; a once bill on due_date
-// only. A payment that covers that due date moves the bill on to the
-// following one, which is at least 28 days away and so never notifies (a
-// paid once bill has none). An unpaid once bill whose date has passed is
-// overdue, not due soon, so it is not notified again.
-func dueBills(now time.Time, candidates []billCandidate, windowDays int) (ids []string, dueDates []time.Time) {
-	for _, c := range candidates {
-		today := householdToday(now, c.Timezone)
-		s := schedule{frequency: c.Frequency, dueDay: c.DueDay, dueDate: c.DueDate}
-		next, ok := nextUnpaidDue(today, s, c.PaidDate, c.PaidFor)
-		if ok && !next.Before(today) && !next.After(today.AddDate(0, 0, windowDays)) {
-			ids = append(ids, c.ID)
-			dueDates = append(dueDates, next)
-		}
-	}
-	return ids, dueDates
-}
 
 // maintenanceCandidatesSQL lists pending maintenance tasks with no
 // maintenance_due notification in the last 24 hours, with their household's
@@ -267,7 +188,7 @@ const maintenanceCandidatesSQL = `
 	AND mt.due_date BETWEEN $1::date - 1 AND $1::date + $2::int + 1
 	AND NOT EXISTS (
 		SELECT 1 FROM notifications n
-		WHERE n.entity_id = mt.id AND n.type = 'maintenance_due'
+		WHERE n.entity_id = mt.id AND n.type = $3::notification_type
 		AND n.created_at > NOW() - INTERVAL '24 hours'
 	)
 `
@@ -278,7 +199,7 @@ const maintenanceCandidatesSQL = `
 // one maintenance_due per task per 24 hours.
 const maintenanceDueSQL = `
 	INSERT INTO notifications (household_id, type, title, body, entity_type, entity_id)
-	SELECT mt.household_id, 'maintenance_due', mt.name || ' due soon',
+	SELECT mt.household_id, $2::notification_type, mt.name || ' due soon',
 	       COALESCE(mt.description, ''),
 	       'maintenance_task', mt.id
 	FROM unnest($1::uuid[]) AS d(task_id)
@@ -286,7 +207,7 @@ const maintenanceDueSQL = `
 	WHERE mt.status = 'pending'
 	AND NOT EXISTS (
 		SELECT 1 FROM notifications n
-		WHERE n.entity_id = mt.id AND n.type = 'maintenance_due'
+		WHERE n.entity_id = mt.id AND n.type = $2::notification_type
 		AND n.created_at > NOW() - INTERVAL '24 hours'
 	)
 	RETURNING id, household_id, type, title, body
@@ -332,34 +253,19 @@ func generateNotifications(ctx context.Context, pool *pgxpool.Pool, smtpClient *
 	return nil
 }
 
-// insertDueNotifications inserts bill_due notifications (see dueBills) and
-// maintenance_due notifications (see dueTasks), both with today taken from
-// now in each household's timezone (households.timezone, UTC when unknown),
-// and returns the inserted rows.
+// insertDueNotifications inserts bill reminders (see billreminders.go: the
+// policy keyed on billdue.AttentionFor, with its digest cap and dedupe key) and
+// maintenance_due notifications (see dueTasks), both with today taken from now
+// in each household's timezone (households.timezone, UTC when unknown), and
+// returns the inserted rows.
 func insertDueNotifications(ctx context.Context, pool *pgxpool.Pool, now time.Time) ([]notif, error) {
-	rows, err := pool.Query(ctx, billCandidatesSQL, now.UTC().Format(time.DateOnly))
+	allNotifs, err := insertBillReminders(ctx, pool, now)
 	if err != nil {
-		return nil, fmt.Errorf("bill notifications: %w", err)
-	}
-	candidates, err := pgx.CollectRows(rows, pgx.RowToStructByPos[billCandidate])
-	if err != nil {
-		return nil, fmt.Errorf("bill notifications: %w", err)
+		return nil, err
 	}
 
-	var allNotifs []notif
-	if ids, dueDates := dueBills(now, candidates, billDueWindowDays); len(ids) > 0 {
-		rows, err = pool.Query(ctx, billDueSQL, ids, dueDates)
-		if err != nil {
-			return nil, fmt.Errorf("bill notifications: %w", err)
-		}
-		allNotifs, err = pgx.CollectRows(rows, pgx.RowToStructByPos[notif])
-		if err != nil {
-			return nil, fmt.Errorf("bill notifications: %w", err)
-		}
-	}
-
-	rows, err = pool.Query(ctx, maintenanceCandidatesSQL,
-		now.UTC().Format(time.DateOnly), maintenanceDueWindowDays)
+	rows, err := pool.Query(ctx, maintenanceCandidatesSQL,
+		now.UTC().Format(time.DateOnly), maintenanceDueWindowDays, notify.TypeMaintenanceDue)
 	if err != nil {
 		return nil, fmt.Errorf("maintenance notifications: %w", err)
 	}
@@ -371,7 +277,7 @@ func insertDueNotifications(ctx context.Context, pool *pgxpool.Pool, now time.Ti
 	if len(ids) == 0 {
 		return allNotifs, nil
 	}
-	rows, err = pool.Query(ctx, maintenanceDueSQL, ids)
+	rows, err = pool.Query(ctx, maintenanceDueSQL, ids, notify.TypeMaintenanceDue)
 	if err != nil {
 		return nil, fmt.Errorf("maintenance notifications: %w", err)
 	}

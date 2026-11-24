@@ -65,6 +65,14 @@ type Config struct {
 	//   API_CHANGE_PASSWORD_RATE_BURST       default 3
 	ChangePasswordRatePerMinute int
 	ChangePasswordRateBurst     int
+
+	// SearchReconcileSeconds is how often the API re-derives the
+	// household_search index from Postgres (#5298). Records are written by the
+	// REST API, the MCP, CalDAV and the worker, and only the REST handlers
+	// index on write, so without this sweep a record an agent created is never
+	// searchable. 0 disables the sweep.
+	//   API_SEARCH_RECONCILE_SECONDS  default 300
+	SearchReconcileSeconds int
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -106,6 +114,13 @@ func Load() (*Config, error) {
 
 		ChangePasswordRatePerMinute: getEnvInt("API_CHANGE_PASSWORD_RATE_PER_MINUTE", "5"),
 		ChangePasswordRateBurst:     getEnvInt("API_CHANGE_PASSWORD_RATE_BURST", "3"),
+
+		// Search index reconciliation (#5298). Records are written by the
+		// REST API, the MCP, CalDAV and the worker, and only the REST
+		// handlers index on write, so the index drifts from Postgres by
+		// default. This sweep re-derives it from Postgres, the source of
+		// truth. 0 disables it (a deployment running --keep reindex by hand).
+		SearchReconcileSeconds: getEnvInt("API_SEARCH_RECONCILE_SECONDS", "300"),
 	}
 
 	var missing []string

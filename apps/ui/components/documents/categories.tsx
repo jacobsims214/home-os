@@ -28,7 +28,7 @@ import {
   type IconProps,
 } from "@tabler/icons-react";
 import { NAV_ICON_STROKE } from "@/components/shared/nav-config";
-import { CATEGORY_SINGULAR, categoryOf, type Category } from "@/lib/documents/model";
+import { CATEGORY_SINGULAR, categoryOf, isFiled, type Category } from "@/lib/documents/model";
 import type { FileRecord } from "@/lib/types/api";
 
 const ICONS: Record<Category, ComponentType<IconProps>> = {
@@ -56,7 +56,22 @@ export function documentIcon(file: Pick<FileRecord, "category">, size = 20) {
   return <CategoryIcon category={categoryOf(file)} size={size} />;
 }
 
-/** The singular label for a category, for a chip on one document. */
+/** The singular label for a category, for a picker button or a heading. */
 export function categoryLabel(category: Category | string): string {
   return CATEGORY_SINGULAR[category as Category] ?? CATEGORY_SINGULAR.other;
+}
+
+/**
+ * The tint of a category glyph: grey ONLY for a document with no category.
+ *
+ * Decided by the one filing rule (`isFiled`, #5299), never by comparing
+ * `category === "other"`: a document filed as Other is filed, so it gets the
+ * same accent treatment as any other category, and a card is never painted as
+ * "missing" while its group says it has a category. The hub's category tiles
+ * pass their category, which is always a filed one by construction.
+ */
+export function categoryTint(file: Pick<FileRecord, "category">): { background: string; color: string } {
+  return isFiled(file)
+    ? { background: "var(--accent-soft)", color: "var(--accent)" }
+    : { background: "var(--surface-2)", color: "var(--ink-2)" };
 }

@@ -65,6 +65,8 @@ import CookMode from "@/components/recipes/CookMode";
 import RecipeForm from "@/components/recipes/RecipeForm";
 import { useNavRole } from "@/components/shared/use-nav-role";
 import dayjs from "dayjs";
+import { useHouseholdToday } from "@/lib/today/api";
+import { addDays } from "@/lib/recipes/week";
 
 const ICON_STROKE = 1.75;
 const WRITER_ROLES = new Set(["owner", "family_manager", "family_member"]);
@@ -85,11 +87,18 @@ export default function RecipeDetailPage() {
 
   // "Next planned" and ratings need a range. Today..+60d is enough to answer
   // "when is this on the plan" without pulling a year of history.
-  const range = useMemo(() => {
-    const from = dayjs().format("YYYY-MM-DD");
-    return { from, to: dayjs().add(60, "day").format("YYYY-MM-DD") };
-  }, []);
-  const mealsQuery = useMealPlans(range, !!recipe);
+  //
+  // `from` is the FAMILY's today (#5316): a page opened at 22:30 in New York
+  // on a browser reading UTC would otherwise ask from tomorrow, and "next
+  // planned" would silently skip tonight.
+  const today = useHouseholdToday();
+  // A stable placeholder while the household loads: `enabled` is what keeps
+  // the request from going out, not a null range (useMealPlans' key needs one).
+  const range = useMemo(
+    () => (today ? { from: today, to: addDays(today, 60) } : { from: "", to: "" }),
+    [today],
+  );
+  const mealsQuery = useMealPlans(range, !!recipe && !!today);
   const plannedMeals = (mealsQuery.data?.data ?? []).filter((m) => m.recipe_id === recipe?.id);
   const nextPlanned = plannedMeals.sort((a, b) => a.date.localeCompare(b.date))[0] ?? null;
   const lastPlanned = [...plannedMeals].sort((a, b) => b.date.localeCompare(a.date))[0] ?? null;

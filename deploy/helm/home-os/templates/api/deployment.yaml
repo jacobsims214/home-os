@@ -27,15 +27,7 @@ spec:
         - name: PORT
           value: "{{ .Values.api.port }}"
         {{- include "home-os.databaseEnv" . | nindent 8 }}
-        - name: TYPESENSE_HOST
-          value: home-os-typesense
-        - name: TYPESENSE_PORT
-          value: "{{ .Values.typesense.port }}"
-        - name: TYPESENSE_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "home-os.secretsName" . }}
-              key: typesenseApiKey
+        {{- include "home-os.typesenseEnv" . | nindent 8 }}
         - name: ENCRYPTION_KEY
           valueFrom:
             secretKeyRef:

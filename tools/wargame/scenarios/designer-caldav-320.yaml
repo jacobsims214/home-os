@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (feature-4), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-caldav-320
+persona: designer
+surface: settings
+intent: |
+  I'm setting up my phone calendar on an old iPhone.
+steps:
+  - open /dashboard/settings/phone-calendar at 320x568 and 390x844 as amber
+  - read the steps and the Server field; check overflow
+assertion: |
+  Steps stay readable and reachable at 320px, the Server field is not the only way to
+  get the URL (Copy exists), and no horizontal overflow appears.
+tags:
+  - ui
+  - mobile
+  - settings
+  - caldav
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: feature-4
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: pass

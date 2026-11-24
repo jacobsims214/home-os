@@ -38,7 +38,10 @@ jobs:
             parallel: ""
           - module: apps/mcp
             parallel: "-p 4"
-            typesense_tests: "TestDocumentSemanticSearch|TestGuideFindByMeaning"
+            # TestAgentAWritesAgentBFindsByMeaning is #5502's headline test: an
+            # agent writes a KB doc over MCP and another agent (a housesitter)
+            # finds it by meaning through kb_search.
+            typesense_tests: "TestDocumentSemanticSearch|TestGuideFindByMeaning|TestAgentAWritesAgentBFindsByMeaning"
           - module: apps/worker
             parallel: ""
           - module: packages/billcal
@@ -128,7 +131,7 @@ jobs:
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/homeos_test?sslmode=disable
       TYPESENSE_TEST_ADDR: 127.0.0.1:8108
       TYPESENSE_TEST_KEY: homeos-ci-test-key
-      TYPESENSE_TESTS: TestDocumentHybridSearch|TestGuideHybridSearchIntegration|TestTypesenseHybridIntegration|TestNoteHitsFollowParentIntegration
+      TYPESENSE_TESTS: TestDocumentHybridSearch|TestGuideHybridSearchIntegration|TestTypesenseHybridIntegration|TestNoteHitsFollowParentIntegration|TestSearchFindsEventsAndBillsIntegration|TestSweepBackfillsImmediatelyIntegration|TestAgentAWritesAgentBFindsByMeaningIntegration
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -187,7 +190,7 @@ jobs:
         working-directory: apps/api
         run: |
           set -o pipefail
-          go test -count=1 -v -run "^($TYPESENSE_TESTS)$" ./internal/file ./internal/guides ./internal/search | tee "$RUNNER_TEMP/typesense-tests.log"
+          go test -count=1 -v -run "^($TYPESENSE_TESTS)$" ./internal/file ./internal/guides ./internal/kb ./internal/search ./internal/searchrecon ./internal/searchsweep | tee "$RUNNER_TEMP/typesense-tests.log"
           for t in ${TYPESENSE_TESTS//|/ }; do
             grep -q -- "--- PASS: $t " "$RUNNER_TEMP/typesense-tests.log" || { echo "::error::$t did not PASS (skipped or missing)"; exit 1; }
           done
@@ -202,6 +205,13 @@ jobs:
           cache: npm
           cache-dependency-path: apps/ui/package-lock.json
       - run: npm ci
+        working-directory: apps/ui
+      # The unit suite was green locally but never gated a PR. It now carries
+      # lib/today/one-clock.test.mjs, which fails when a page reads the
+      # current date from the browser's clock instead of the household's
+      # (#5316). A guard CI does not run prevents nothing, so it runs here.
+      - name: Unit tests (includes the one-clock guard)
+        run: npm test
         working-directory: apps/ui
       - run: npm run build
         working-directory: apps/ui
@@ -302,3 +312,22 @@ jobs:
       # reaches the ConfigMap is exactly the bug that cost the family agents
       # their headless auth (#4357, #4886).
       - run: deploy/helm/home-os/tests/dex-config.sh
+      # A throttled sign-in must be a page, not Envoy's bare local-reply body
+      # (#5407). Also asserted on the rendered output: the 429 is produced by
+      # Envoy itself, so nothing in apps/ui can restyle it.
+      - run: deploy/helm/home-os/tests/envoy-local-reply.sh
+      # ...and Envoy must be able to LOAD that render (#5421). The check above
+      # only greps the text, so on dc01ab9 it passed while Envoy refused the
+      # config outright: `text_format_source.inline_string` is a substitution-
+      # format string, and the 429 page's `width: 100%;` read as a bogus `%`
+      # command. Envoy is the ingress, so that took the site down (503) and the
+      # deploy was rolled back (#5420). This step runs the real binary, at the
+      # image tag the chart pins, in `--mode validate`: no cluster, ~2 seconds,
+      # and it carries a negative control so it cannot silently stop working.
+      - run: deploy/helm/home-os/tests/envoy-config-validate.sh
+      # Every pod that searches the index must have TYPESENSE_* env (#5621).
+      # The mcp deployment was missing it, so kb_search's semantic search
+      # errored, fell back to literal words, and a paraphrase of a real doc
+      # came back as a normal empty list. `helm template` succeeded and the pod
+      # was healthy; only a check on the RENDERED env catches this class.
+      - run: deploy/helm/home-os/tests/search-env.sh

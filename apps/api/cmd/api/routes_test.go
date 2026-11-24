@@ -161,6 +161,14 @@ var expectedAccess = map[string][]string{
 
 	"GET /api/v1/search": everyone, // #4717: every role, filtered per hit by the handler
 
+	// The knowledge base (#5502): every role reads it, a housesitter included
+	// (the babysitter needs the router doc, or everything the family wrote is
+	// wasted); the family roles write.
+	"GET /api/v1/kb":      everyone,
+	"GET /api/v1/kb/*":    everyone,
+	"PUT /api/v1/kb/*":    family,
+	"DELETE /api/v1/kb/*": family,
+
 	"GET /api/v1/notes":         sitters, // housesitter: notes on visible records only (handler)
 	"POST /api/v1/notes":        sitterEdit,
 	"GET /api/v1/notes/{id}":    sitters,

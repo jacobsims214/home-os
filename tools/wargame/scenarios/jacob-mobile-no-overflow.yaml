@@ -1,0 +1,24 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (layout), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-mobile-no-overflow
+persona: jacob
+surface: app-shell
+intent: |
+  Does anything spill off the side of my phone?
+steps:
+  - sign in as jacob at 390x844
+  - "for each dashboard route, compare document.scrollWidth with 390"
+assertion: |
+  No route overflows horizontally (scrollWidth == viewport width).
+tags:
+  - app-shell
+  - ui
+  - mobile
+  - layout
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: layout
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: pass

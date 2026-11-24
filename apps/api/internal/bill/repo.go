@@ -2,7 +2,6 @@ package bill
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -25,14 +24,32 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 }
 
 // billColumns is the select list scanBill reads, in its order.
+//
+// The payment account and payee are scalar subqueries on their primary keys,
+// not joins, so the SAME list works in a RETURNING clause (#5498). A LEFT JOIN
+// would need a second column list for insert/update, and two lists that must
+// agree are a second place for them to disagree.
 const billColumns = `id, household_id, property_id, name, amount, due_day,
 	category, vendor_id, rrule, notes, created_at, updated_at,
 	vehicle_id, asset_id, paid_date, is_autopay, account_number, payment_url,
-	frequency, due_date, budget_category_id, paid_for_due_date, source_document_id`
+	frequency, due_date, budget_category_id, paid_for_due_date, source_document_id,
+	autopay_account_id, payee_name,
+	(SELECT pa.name FROM payment_accounts pa WHERE pa.id = bills.autopay_account_id),
+	(SELECT pa.institution FROM payment_accounts pa WHERE pa.id = bills.autopay_account_id),
+	(SELECT pa.last_four FROM payment_accounts pa WHERE pa.id = bills.autopay_account_id),
+	(SELECT pa.account_type::text FROM payment_accounts pa WHERE pa.id = bills.autopay_account_id),
+	(SELECT v.name FROM vendors v WHERE v.id = bills.vendor_id),
+	(SELECT v.phone FROM vendors v WHERE v.id = bills.vendor_id),
+	(SELECT v.email FROM vendors v WHERE v.id = bills.vendor_id),
+	(SELECT v.website FROM vendors v WHERE v.id = bills.vendor_id)`
 
 // scanBill scans a single Bill from a pgx.Row.
 func scanBill(row pgx.Row) (*Bill, error) {
 	b := &Bill{}
+	// The account and payee columns are nullable subqueries; scanBill folds
+	// them into b.PaymentAccount and b.Payee.
+	var accountName, accountInstitution, accountLastFour, accountType *string
+	var payeeName, payeePhone, payeeEmail, payeeWebsite *string
 	err := row.Scan(
 		&b.ID,
 		&b.HouseholdID,
@@ -57,11 +74,55 @@ func scanBill(row pgx.Row) (*Bill, error) {
 		&b.BudgetCategoryID,
 		&b.PaidForDueDate,
 		&b.SourceDocumentID,
+		&b.AutopayAccountID,
+		&b.PayeeName,
+		&accountName, &accountInstitution, &accountLastFour, &accountType,
+		&payeeName, &payeePhone, &payeeEmail, &payeeWebsite,
 	)
 	if err != nil {
 		return nil, err
 	}
+	// A linked account is one row: if the id resolved, the name resolved too
+	// (it is NOT NULL on payment_accounts). A dangling id cannot happen (the
+	// composite FK's ON DELETE SET NULL), so a nil name means "no account".
+	if b.AutopayAccountID != nil && accountName != nil {
+		b.PaymentAccount = &PaymentAccount{
+			ID: *b.AutopayAccountID, Name: *accountName, Institution: accountInstitution,
+			LastFour: accountLastFour, AccountType: orDefault(accountType, "checking"),
+		}
+	}
+	// The payee: the vendors row when vendor_id is set (one fact, one place,
+	// 075), otherwise the free-text name of a payee that is not a vendor.
+	switch {
+	case b.VendorID != nil && payeeName != nil && *payeeName != "":
+		id := *b.VendorID
+		b.Payee = &Payee{VendorID: &id, Name: *payeeName, Phone: payeePhone, Email: payeeEmail, Website: payeeWebsite}
+	case b.PayeeName != nil && *b.PayeeName != "":
+		b.Payee = &Payee{Name: *b.PayeeName}
+	}
 	return b, nil
+}
+
+// orDefault is s, or def when s is nil (the test files have their own deref).
+func orDefault(s *string, def string) string {
+	if s == nil {
+		return def
+	}
+	return *s
+}
+
+// HouseholdTimezone returns the household's IANA timezone ("UTC" when unset),
+// for the attention state and every due date: they are judged against the
+// family's date, not the server's.
+func (r *Repo) HouseholdTimezone(ctx context.Context, householdID uuid.UUID) (string, error) {
+	var tz *string
+	if err := r.pool.QueryRow(ctx, `SELECT timezone FROM households WHERE id = $1`, householdID).Scan(&tz); err != nil {
+		return "", fmt.Errorf("household timezone: %w", err)
+	}
+	if tz == nil || *tz == "" {
+		return "UTC", nil
+	}
+	return *tz, nil
 }
 
 // List returns all bills for a household, ordered by name.
@@ -70,7 +131,8 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID) ([]*Bill, error)
 		`SELECT `+billColumns+`
 		 FROM bills
 		 WHERE household_id = $1
-		 ORDER BY name`,
+		 -- b-qualified: the payee subquery also selects a vendors.name (#5498)
+		 ORDER BY bills.name`,
 		householdID,
 	)
 	if err != nil {
@@ -110,8 +172,10 @@ func (r *Repo) Get(ctx context.Context, id, householdID uuid.UUID) (*Bill, error
 	return b, nil
 }
 
-// Create inserts a new bill and writes a bill.created outbox event in a single
-// transaction. Returns the created bill.
+// Create inserts a new bill and returns it. The bill.created outbox event is
+// written by the bills_outbox trigger (migration 088), not here, so every
+// write path -- this one, the MCP tools and assets_propagate_property() --
+// enqueues exactly one event.
 func (r *Repo) Create(ctx context.Context, b *Bill) (*Bill, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -123,14 +187,20 @@ func (r *Repo) Create(ctx context.Context, b *Bill) (*Bill, error) {
 		`INSERT INTO bills (household_id, property_id, name, amount, due_day,
 		                    category, vendor_id, rrule, notes,
 		                    vehicle_id, asset_id, is_autopay, account_number, payment_url,
-		                    frequency, due_date, budget_category_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-		         COALESCE(NULLIF($15, ''), 'monthly'), $16, $17)
+		                    frequency, due_date, budget_category_id,
+		                    autopay_account_id, payee_name)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+		         -- A caller that says nothing about autopay gets false, not NULL
+		         -- (075: bills.is_autopay is NOT NULL, and false is the value
+		         -- that asks a person to pay instead of staying silent).
+		         COALESCE($12, false), $13, $14,
+		         COALESCE(NULLIF($15, ''), 'monthly'), $16, $17, $18, $19)
 		 RETURNING `+billColumns,
 		b.HouseholdID, b.PropertyID, b.Name, b.Amount, b.DueDay,
 		b.Category, b.VendorID, b.Rrule, b.Notes,
 		b.VehicleID, b.AssetID, b.IsAutopay, b.AccountNumber, b.PaymentURL,
 		b.Frequency, b.DueDate, b.BudgetCategoryID,
+		b.AutopayAccountID, b.PayeeName,
 	)
 	created, err := scanBill(row)
 	if err != nil {
@@ -143,28 +213,14 @@ func (r *Repo) Create(ctx context.Context, b *Bill) (*Bill, error) {
 		return nil, fmt.Errorf("create bill: %w", err)
 	}
 
-	payload, err := json.Marshal(billEventPayload{ID: created.ID.String(), Name: created.Name})
-	if err != nil {
-		return nil, fmt.Errorf("create bill: marshal payload: %w", err)
-	}
-
-	_, err = tx.Exec(ctx,
-		`INSERT INTO outbox_events (type, payload, household_id)
-		 VALUES ($1, $2, $3)`,
-		"bill.created", payload, created.HouseholdID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create bill: outbox event: %w", err)
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("create bill: commit: %w", err)
 	}
 	return created, nil
 }
 
-// Update updates an existing bill and writes a bill.updated outbox event in a
-// single transaction. Returns the updated bill.
+// Update updates an existing bill and returns it. The bill.updated outbox
+// event is written by the bills_outbox trigger (migration 088), not here.
 func (r *Repo) Update(ctx context.Context, b *Bill) (*Bill, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -183,9 +239,13 @@ func (r *Repo) Update(ctx context.Context, b *Bill) (*Bill, error) {
 		                                OR due_date IS DISTINCT FROM $17::date
 		                              THEN NULL ELSE paid_for_due_date END,
 		     category = $6, vendor_id = $7, rrule = $8, notes = $9,
-		     vehicle_id = $10, asset_id = $11, is_autopay = $12,
+		     -- absent keeps the current value; the column is NOT NULL (075).
+		     vehicle_id = $10, asset_id = $11, is_autopay = COALESCE($12, is_autopay),
 		     account_number = $13, payment_url = $14,
 		     frequency = $16, due_date = $17, budget_category_id = $18,
+		     -- $19/$20 are the whole new value each time (the handler merged the
+		     -- stored row with the request), so null clears the link.
+		     autopay_account_id = $19, payee_name = $20,
 		     updated_at = NOW()
 		 WHERE id = $1 AND household_id = $15
 		 RETURNING `+billColumns,
@@ -194,6 +254,7 @@ func (r *Repo) Update(ctx context.Context, b *Bill) (*Bill, error) {
 		b.VehicleID, b.AssetID, b.IsAutopay, b.AccountNumber, b.PaymentURL,
 		b.HouseholdID,
 		b.Frequency, b.DueDate, b.BudgetCategoryID,
+		b.AutopayAccountID, b.PayeeName,
 	)
 	updated, err := scanBill(row)
 	if err != nil {
@@ -209,28 +270,15 @@ func (r *Repo) Update(ctx context.Context, b *Bill) (*Bill, error) {
 		return nil, fmt.Errorf("update bill: %w", err)
 	}
 
-	payload, err := json.Marshal(billEventPayload{ID: updated.ID.String(), Name: updated.Name})
-	if err != nil {
-		return nil, fmt.Errorf("update bill: marshal payload: %w", err)
-	}
-
-	_, err = tx.Exec(ctx,
-		`INSERT INTO outbox_events (type, payload, household_id)
-		 VALUES ($1, $2, $3)`,
-		"bill.updated", payload, updated.HouseholdID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("update bill: outbox event: %w", err)
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("update bill: commit: %w", err)
 	}
 	return updated, nil
 }
 
-// Delete removes a bill by ID, scoped to the household. Writes a bill.deleted
-// outbox event in a single transaction.
+// Delete removes a bill by ID, scoped to the household. The bill.deleted
+// outbox event is written by the bills_outbox trigger (migration 088) from
+// the row the DELETE removed, not here.
 func (r *Repo) Delete(ctx context.Context, id, householdID uuid.UUID) error {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -256,30 +304,10 @@ func (r *Repo) Delete(ctx context.Context, id, householdID uuid.UUID) error {
 		return pgx.ErrNoRows
 	}
 
-	payload, err := json.Marshal(billEventPayload{ID: id.String()})
-	if err != nil {
-		return fmt.Errorf("delete bill: marshal payload: %w", err)
-	}
-
-	_, err = tx.Exec(ctx,
-		`INSERT INTO outbox_events (type, payload, household_id)
-		 VALUES ($1, $2, $3)`,
-		"bill.deleted", payload, householdID,
-	)
-	if err != nil {
-		return fmt.Errorf("delete bill: outbox event: %w", err)
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("delete bill: commit: %w", err)
 	}
 	return nil
-}
-
-// billEventPayload is the JSON payload written to outbox_events for bill events.
-type billEventPayload struct {
-	ID   string `json:"id"`
-	Name string `json:"name,omitempty"`
 }
 
 // isUniqueViolation returns true if the error is a PostgreSQL unique constraint

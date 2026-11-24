@@ -72,7 +72,8 @@ var wantToolRoles = map[string][]string{
 	"family_overview":   roleEveryone, // trim: people/ages, bills_due, counts, recent_changes, own jobs
 	"asset_find":        roleEveryone, // trim: purchase_price/current_value are #4808's
 	"property_find":     roleEveryone, // trim: mortgage/tax/insurance are #4808's
-	"notification_find": roleEveryone, // trim: maintenance_due limited to a linked vendor's own jobs
+	"notification_find": roleEveryone, // trim: maintenance_due limited to a linked vendor's own jobs; bills hidden by the money policy
+	"notification_get":  roleEveryone, // trim: same row, same visibility and money policy as notification_find
 	"search_all":        roleEveryone, // trim: only the areas the role may read
 
 	// ---- reads gated on a resource ----
@@ -91,6 +92,9 @@ var wantToolRoles = map[string][]string{
 	"contact_find":            roleSitters,
 	"guide_find":              roleSitters,
 	"guide_get":               roleSitters,
+	"kb_get":                  roleEveryone,
+	"kb_list":                 roleEveryone,
+	"kb_search":               roleEveryone,
 	"list_find":               roleSitters,
 	"list_get":                roleSitters,
 	"meal_suggest":            roleSitters,
@@ -126,6 +130,7 @@ var wantToolRoles = map[string][]string{
 	"guide_create":        roleFamily,
 	"guide_delete":        roleFamily,
 	"guide_update":        roleFamily,
+	"kb_write":            roleFamily,
 	"list_create":         roleFamily,
 	"list_remove_items":   roleFamily,
 	"list_update":         roleFamily,

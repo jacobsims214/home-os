@@ -29,7 +29,7 @@ func TestEntityKind070_ColumnsAndOwnerChecks(t *testing.T) {
 	}
 
 	notify := func(kind *string, id *uuid.UUID) error {
-		_, err := pool.Exec(ctx, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'x', 'n', $2, $3)`, f.household, kind, id)
+		_, err := pool.Exec(ctx, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'bill_due', 'n', $2, $3)`, f.household, kind, id)
 		return err
 	}
 	kind := func(s string) *string { return &s }
@@ -55,7 +55,7 @@ func TestEntityKind070_ColumnsAndOwnerChecks(t *testing.T) {
 			t.Errorf("own calendar: %v", err)
 		}
 		// Moving a notification to another family is refused too.
-		n := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'x', 'n', 'vehicle', $2) RETURNING id`, f.household, f.vehicle)
+		n := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'bill_due', 'n', 'vehicle', $2) RETURNING id`, f.household, f.vehicle)
 		_, err := pool.Exec(ctx, `UPDATE notifications SET household_id = $1 WHERE id = $2`, other.household, n)
 		wantSQLState(t, err, sqlstateFKViolation)
 		// Marking read does not re-check (the trigger is on the entity columns).
@@ -174,9 +174,9 @@ func TestEntityKind070_Rehome(t *testing.T) {
 	cal := insertID(t, pool, `INSERT INTO calendars (household_id, name, type, caldav_uid) VALUES ($1, 'Family', 'family', gen_random_uuid()::text) RETURNING id`, f.household)
 	ev := insertID(t, pool, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag) VALUES ($1, 'ev1', '{}', 'e') RETURNING id`, cal)
 	link := insertID(t, pool, `INSERT INTO document_links (household_id, entity_type, entity_id, link_type, url) VALUES ($1, 'vehicle', $2, 'url', 'https://example.com') RETURNING id`, f.household, f.vehicle)
-	nEv := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'x', 'ev', 'calendar_event', $2) RETURNING id`, f.household, ev)
-	nCal := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'x', 'cal', 'calendar', $2) RETURNING id`, f.household, cal)
-	nLink := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'x', 'link', 'document_link', $2) RETURNING id`, f.household, link)
+	nEv := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'bill_due', 'ev', 'calendar_event', $2) RETURNING id`, f.household, ev)
+	nCal := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'bill_due', 'cal', 'calendar', $2) RETURNING id`, f.household, cal)
+	nLink := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'bill_due', 'link', 'document_link', $2) RETURNING id`, f.household, link)
 	evNote := insertID(t, pool, `INSERT INTO notes (household_id, entity_type, entity_id, title, body) VALUES ($1, 'calendar_event', $2, 'Bring wine', 'x') RETURNING id`, f.household, ev)
 
 	cleared := func(id uuid.UUID) bool {
@@ -201,7 +201,7 @@ func TestEntityKind070_Rehome(t *testing.T) {
 	// A whole family, with events and notifications about them.
 	cal2 := insertID(t, pool, `INSERT INTO calendars (household_id, name, type, caldav_uid) VALUES ($1, 'Family', 'family', gen_random_uuid()::text) RETURNING id`, f.household)
 	ev2 := insertID(t, pool, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, entity_type, entity_id) VALUES ($1, 'ev2', '{}', 'e', 'vehicle', $2) RETURNING id`, cal2, f.vehicle)
-	mustExec(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'x', 'ev2', 'calendar_event', $2)`, f.household, ev2)
+	mustExec(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'bill_due', 'ev2', 'calendar_event', $2)`, f.household, ev2)
 	if _, err := pool.Exec(ctx, `DELETE FROM households WHERE id = $1`, f.household); err != nil {
 		t.Fatalf("household delete: %v", err)
 	}
@@ -244,10 +244,10 @@ func TestEntityKind070_Reversible(t *testing.T) {
 	item := insertID(t, pool, `INSERT INTO list_items (list_id, text) VALUES ($1, 'Milk') RETURNING id`, list)
 	maintEv := insertID(t, pool, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, entity_type, entity_id) VALUES ($1, 'm', '{}', 'e', 'maintenance', $2) RETURNING id`, cal, task)
 	crossEv := insertID(t, pool, `INSERT INTO calendar_objects (calendar_id, uid, ical_data, etag, entity_type, entity_id) VALUES ($1, 'x', '{}', 'e', 'property', $2) RETURNING id`, cal, other.property)
-	nItem := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'x', 'i', 'list_item', $2) RETURNING id`, f.household, item)
-	nCross := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'x', 'c', 'property', $2) RETURNING id`, f.household, other.property)
-	nMaint := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'x', 'm', 'maintenance', $2) RETURNING id`, f.household, task)
-	nHalf := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type) VALUES ($1, 'x', 'h', 'bill') RETURNING id`, f.household)
+	nItem := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'bill_due', 'i', 'list_item', $2) RETURNING id`, f.household, item)
+	nCross := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'bill_due', 'c', 'property', $2) RETURNING id`, f.household, other.property)
+	nMaint := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type, entity_id) VALUES ($1, 'bill_due', 'm', 'maintenance', $2) RETURNING id`, f.household, task)
+	nHalf := insertID(t, pool, `INSERT INTO notifications (household_id, type, title, entity_type) VALUES ($1, 'bill_due', 'h', 'bill') RETURNING id`, f.household)
 
 	applyMigration(t, pool, "070_entity_kind_notifications.up.sql")
 	applyMigration(t, pool, "071_person_color.up.sql")

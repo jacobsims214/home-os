@@ -1,0 +1,35 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U13), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-offline
+persona: amber
+surface: app-shell
+intent: |
+  The signal dropped in the store - does it still work?
+steps:
+  - open a list as amber at 390px
+  - enable CDP offline emulation
+  - try to navigate and try to save a change
+  - restore the network
+assertion: |
+  An honest offline banner is shown over cached content, no write is silently
+  accepted, and the app recovers cleanly when the network returns.
+tags:
+  - app-shell
+  - ui
+  - offline
+  - honesty
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U13
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: pass
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-amber.md
+      ref: N11
+      ticket: "#4596"
+      date: "2026-11-20"
+      verdict: pass
+      note: "banner over current cache (32 left), clean recovery"

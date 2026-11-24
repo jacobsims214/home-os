@@ -24,10 +24,9 @@
 import { useMemo } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
-import { MY_HOUSEHOLDS_QUERY_KEY } from "@/components/shared/use-nav-role";
-import { currentHousehold, type MyHousehold } from "@/lib/today/api";
-import { householdToday } from "@/lib/today/agenda";
-import type { RecordFacts } from "./results";
+import { useHouseholdToday } from "@/lib/today/api";
+import { canSeeEntity } from "@/lib/resource-access";
+import type { FactContext, Group, RecordFacts, SearchRole } from "./results";
 
 /** Rows fetched at once, per group, before "Show all". */
 export const COLLAPSED_ROWS = 5;
@@ -150,16 +149,42 @@ export function useRecordFacts(targets: readonly Target[]): ReadonlyMap<string, 
   }, [itemTargets, itemQueries, listTypes, listQueries]);
 }
 
-/** The role's `today` in the household's timezone (bills are dated there). */
-export function useHouseholdToday(): string | null {
-  const q = useQuery({
-    queryKey: MY_HOUSEHOLDS_QUERY_KEY,
-    queryFn: () => apiFetch<{ data: MyHousehold[] }>("/api/v1/me/households"),
-    staleTime: 5 * 60_000,
-    retry: false,
-  });
-  const hh = currentHousehold(q.data?.data);
-  return hh ? householdToday(hh.timezone) : null;
+/**
+ * Every fact a list of drawn groups needs: the records behind the rows shown,
+ * plus the two shared lookups those facts are computed against (today, in the
+ * household's timezone, and the property names that make "For: main house"
+ * readable).
+ *
+ * Split out of the Search page for #5303 so the drawer's drop-down completes its
+ * rows exactly the way the page does — one implementation of "a row carries
+ * context", reached by both surfaces, and the same TanStack cache keys, so
+ * opening the page after searching in the drawer costs no extra reads.
+ *
+ * `expanded` may be omitted by a surface that never expands groups (the
+ * drawer's compact panel): then only the collapsed page of each group is read.
+ */
+export function useGroupFacts(
+  groups: readonly Group[],
+  role: SearchRole,
+  expanded: ReadonlySet<string> = new Set(),
+): { records: ReadonlyMap<string, RecordFacts>; ctx: FactContext } {
+  const targets = useMemo<Target[]>(() => {
+    const out: Target[] = [];
+    for (const g of groups) {
+      const rows = expanded.has(g.def.id) ? g.hits : g.hits.slice(0, COLLAPSED_ROWS);
+      for (const { hit } of rows) {
+        out.push({ entityType: hit.entity_type, id: recordId(hit.entity_type, hit.entity_id, hit.file_id) });
+      }
+    }
+    return out;
+  }, [groups, expanded]);
+
+  const records = useRecordFacts(targets);
+  const today = useHouseholdToday();
+  const wantsProperties = useMemo(() => groups.some((g) => ["bill", "thing", "upkeep"].includes(g.def.id)), [groups]);
+  const propertyNames = usePropertyNames(wantsProperties && canSeeEntity(role, "property"));
+  const ctx = useMemo<FactContext>(() => ({ today, propertyNames }), [today, propertyNames]);
+  return { records, ctx };
 }
 
 /**

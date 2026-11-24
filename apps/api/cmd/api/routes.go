@@ -19,6 +19,7 @@ import (
 	"home-os/api/internal/guides"
 	"home-os/api/internal/household"
 	"home-os/api/internal/invite"
+	"home-os/api/internal/kb"
 	"home-os/api/internal/link"
 	"home-os/api/internal/lists"
 	"home-os/api/internal/loan"
@@ -27,6 +28,7 @@ import (
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/note"
 	"home-os/api/internal/notification"
+	"home-os/api/internal/paymentaccount"
 	"home-os/api/internal/people"
 	"home-os/api/internal/pet"
 	"home-os/api/internal/property"
@@ -131,6 +133,21 @@ func registerProtectedRoutes(r chi.Router, d protectedDeps) {
 	r.Put("/api/v1/pets/{id}", petHandler.Update)
 	r.Delete("/api/v1/pets/{id}", petHandler.Delete)
 
+	// Payment accounts (075, #5497): the accounts a household pays bills from.
+	// Holds a name, an institution, a type and the LAST FOUR DIGITS only; the
+	// bank login is a link to a secrets row, so no credential is ever stored
+	// here. Routes are role-gated on ResBills: money read is the least a role
+	// needs to be told which account pays a bill, and a viewer who passes it
+	// still loses login_stored, which follows ResSecrets (see the handler).
+	paymentAccountRepo := paymentaccount.NewRepo(d.pool)
+	paymentAccountHandler := paymentaccount.NewHandler(paymentAccountRepo)
+	r.Get("/api/v1/payment-accounts", paymentAccountHandler.List)
+	r.Post("/api/v1/payment-accounts", paymentAccountHandler.Create)
+	r.Get("/api/v1/payment-accounts/{id}", paymentAccountHandler.Get)
+	r.Put("/api/v1/payment-accounts/{id}", paymentAccountHandler.Update)
+	r.Delete("/api/v1/payment-accounts/{id}", paymentAccountHandler.Delete)
+	r.Put("/api/v1/payment-accounts/{id}/secret", paymentAccountHandler.LinkSecret)
+
 	// Vendor CRUD
 	vendorRepo := vendors.NewRepo(d.pool)
 	vendorHandler := vendors.NewHandler(vendorRepo).WithSearchClient(d.search)
@@ -139,6 +156,9 @@ func registerProtectedRoutes(r chi.Router, d protectedDeps) {
 	r.Get("/api/v1/vendors/{id}", vendorHandler.Get)
 	r.Put("/api/v1/vendors/{id}", vendorHandler.Update)
 	r.Delete("/api/v1/vendors/{id}", vendorHandler.Delete)
+	// The payee's portal login (075, #5497): a LINK to a secrets row. The body is
+	// a uuid, so saving this never carries a credential.
+	r.Put("/api/v1/vendors/{id}/portal-secret", vendorHandler.LinkPortalSecret)
 
 	// Calendar CRUD (must be before maintenance — maintenance handler needs calendarRepo)
 	calendarRepo := calendar.NewRepo(d.pool)
@@ -262,6 +282,17 @@ func registerProtectedRoutes(r chi.Router, d protectedDeps) {
 
 	// Stage 2 family routes: people, budget, lists, meals, activity, guides.
 	registerStage2Routes(r, d.pool, d.search)
+
+	// The family knowledge base (#5502): durable, path-addressed docs an agent
+	// or a person writes for another agent or person to find later. Every role
+	// reads; the family roles write (auth.ResKB). The index is derived from
+	// Postgres by searchrecon, so a doc written through the MCP is findable
+	// without the API having been the writer (#5298).
+	kbHandler := kb.NewHandler(kb.NewRepo(d.pool), d.search)
+	r.Get("/api/v1/kb", kbHandler.ListOrSearch)
+	r.Get("/api/v1/kb/*", kbHandler.Get)
+	r.Put("/api/v1/kb/*", kbHandler.Upsert)
+	r.Delete("/api/v1/kb/*", kbHandler.Delete)
 }
 
 // registerStage2Routes mounts the Stage 2 family routes (#4489): people and

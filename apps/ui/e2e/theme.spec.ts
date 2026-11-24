@@ -188,7 +188,9 @@ test.describe("legacy-colour bridge, drop zone", () => {
   test("dark 1440: the Files drop zone passes axe colour-contrast", async ({ loggedInPage: page }, testInfo) => {
     onlyOn("desktop");
     await gotoBillFiles(page);
-    const zone = page.getByRole("button", { name: "Drop files here or click to upload" });
+    // Named by its visible text since #4588 (the old aria-label said
+    // "click to upload", words the zone does not show).
+    const zone = page.getByRole("button", { name: /^Drop files here, or browse/ });
     await expect(zone).toBeVisible();
     await page.mouse.move(0, 0);
     await page.waitForTimeout(200); // transition-colors

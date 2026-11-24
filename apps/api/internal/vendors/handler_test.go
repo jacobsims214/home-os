@@ -131,6 +131,7 @@ func (f *vendorFixture) do(t *testing.T, method, path string, body any) (int, js
 type vendorJSON struct {
 	ID     string   `json:"id"`
 	Name   string   `json:"name"`
+	Kind   string   `json:"kind"`
 	Trades []string `json:"trades"`
 	Phone  *string  `json:"phone"`
 }
@@ -328,4 +329,127 @@ func TestNormalizeAddress(t *testing.T) {
 		}
 		assert.Equal(t, tc.want, g)
 	}
+}
+
+// --- kind: the two lists stay separate (#5529, migration 080) ---
+
+// TestNormalizeKind covers the write path's validation: blank means "not
+// given" (create -> the database default, update -> keep the stored kind),
+// and every enum value passes through lower-cased.
+func TestNormalizeKind(t *testing.T) {
+	tests := []struct {
+		in, want, wantErr string
+	}{
+		{"", "", ""},
+		{"  ", "", ""},
+		{"service_provider", "service_provider", ""},
+		{"PAYEE", "payee", ""},
+		{" Both ", "both", ""},
+		{"utility", "", "kind must be service_provider, payee or both"},
+		{"both ", "both", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, msg := normalizeKind(tt.in)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantErr, msg)
+		})
+	}
+}
+
+// TestNormalizeKindFilter covers ?kind=: blank is the contacts list (the
+// pre-080 behaviour), and an unknown value is an error rather than a silent
+// fallback, so a mistyped client never gets contacts while asking for payees.
+func TestNormalizeKindFilter(t *testing.T) {
+	tests := []struct{ in, want, wantErr string }{
+		{"", "", ""},
+		{"service_provider", "service_provider", ""},
+		{"payee", "payee", ""},
+		{"Payee", "payee", ""},
+		{"both", "both", ""},
+		{"payees", "", "kind must be service_provider, payee or both"},
+		{"service provider", "", "kind must be service_provider, payee or both"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, msg := normalizeKindFilter(tt.in)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantErr, msg)
+		})
+	}
+}
+
+// TestVendorKindKeepsListsSeparate is the point of 080: a payee-only row
+// (the electric utility) never shows up in the contacts list, a
+// service-provider-only row (the gardener) never shows up in the payee
+// picker, and a row that is both shows up in each.
+func TestVendorKindKeepsListsSeparate(t *testing.T) {
+	f := setup(t)
+
+	gardener := f.create(t, map[string]any{"name": "Green Thumb Gardening", "trades": []string{"Gardening"}})
+	assert.Equal(t, "service_provider", gardener.Kind, "an omitted kind is a contact")
+
+	utility := f.create(t, map[string]any{"name": "Metro Electric", "kind": "payee"})
+	assert.Equal(t, "payee", utility.Kind)
+
+	both := f.create(t, map[string]any{"name": "Comfort HVAC", "kind": "both", "trades": []string{"hvac"}})
+	assert.Equal(t, "both", both.Kind)
+
+	t.Run("the contacts list excludes payee-only rows", func(t *testing.T) {
+		got := f.list(t, "")
+		assert.ElementsMatch(t, []string{"Green Thumb Gardening", "Comfort HVAC"}, got,
+			"the plumber list must not fill with utilities")
+		assert.NotContains(t, got, "Metro Electric")
+		assert.ElementsMatch(t, []string{"Green Thumb Gardening", "Comfort HVAC"}, f.list(t, "?kind=service_provider"),
+			"naming the kind explicitly gives the same set")
+	})
+
+	t.Run("the payee picker excludes service-provider-only rows", func(t *testing.T) {
+		got := f.list(t, "?kind=payee")
+		assert.ElementsMatch(t, []string{"Metro Electric", "Comfort HVAC"}, got,
+			"the payee picker must not offer the gardener who is not also paid")
+		assert.NotContains(t, got, "Green Thumb Gardening")
+	})
+
+	t.Run("kind=both is exactly the rows that are both", func(t *testing.T) {
+		assert.Equal(t, []string{"Comfort HVAC"}, f.list(t, "?kind=both"))
+	})
+
+	t.Run("trade and kind compose", func(t *testing.T) {
+		assert.Equal(t, []string{"Comfort HVAC"}, f.list(t, "?trade=hvac&kind=payee"))
+		assert.Equal(t, []string{"Comfort HVAC"}, f.list(t, "?trade=hvac"))
+		assert.Empty(t, f.list(t, "?trade=electrician&kind=payee"),
+			"a trade filter does not resurrect a row the kind excludes")
+	})
+
+	t.Run("an unknown kind is a 400", func(t *testing.T) {
+		code, _ := f.do(t, http.MethodGet, "/api/v1/vendors?kind=payees", nil)
+		assert.Equal(t, http.StatusBadRequest, code)
+	})
+
+	t.Run("an unknown kind on a write is a 400", func(t *testing.T) {
+		code, _ := f.do(t, http.MethodPost, "/api/v1/vendors", map[string]any{"name": "X", "kind": "utility"})
+		assert.Equal(t, http.StatusBadRequest, code)
+	})
+
+	t.Run("update omitting kind keeps the stored kind", func(t *testing.T) {
+		code, data := f.do(t, http.MethodPut, "/api/v1/vendors/"+utility.ID, map[string]any{"name": "Metro Electric Co"})
+		require.Equal(t, http.StatusOK, code, string(data))
+		var v vendorJSON
+		require.NoError(t, json.Unmarshal(data, &v))
+		assert.Equal(t, "payee", v.Kind, "a client that predates 080 must not reset a payee to service_provider")
+	})
+
+	t.Run("update can reclassify a row", func(t *testing.T) {
+		code, data := f.do(t, http.MethodPut, "/api/v1/vendors/"+gardener.ID,
+			map[string]any{"name": "Green Thumb Gardening", "kind": "both"})
+		require.Equal(t, http.StatusOK, code, string(data))
+		var v vendorJSON
+		require.NoError(t, json.Unmarshal(data, &v))
+		assert.Equal(t, "both", v.Kind)
+		assert.Contains(t, f.list(t, "?kind=payee"), "Green Thumb Gardening",
+			"once it is also paid, the payee picker offers it")
+		assert.Contains(t, f.list(t, ""), "Green Thumb Gardening",
+			"and it stays in the contacts list")
+	})
 }

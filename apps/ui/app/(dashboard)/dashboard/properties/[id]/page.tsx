@@ -1,689 +1,425 @@
 "use client";
 
+/**
+ * Property detail (#4578), rebuilt per the People & House mockup (artifact #89,
+ * House > property) and domain model v2: property → rooms → things, with the
+ * upkeep that needs attention and the details sheet.
+ *
+ * Mobile-first:
+ * - Phone (< 768 px): DetailPageLayout's sticky title bar (back 44 px, h2
+ *   title, actions menu), then Details / Resources as collapsible sections.
+ *   Rooms are a two-column grid of 44 px+ cards; a card opens the room's
+ *   things in a bottom sheet. Adding a room or a thing is one bottom sheet
+ *   with 44 px fields (no iOS zoom, no sideways scroll at 375 px).
+ * - ≥ 1024 px: the layout's two columns — the sheet on the left, Resources on
+ *   the right — and the room grid grows to three columns.
+ *
+ * Money: every figure comes from components/property/property-finance.ts
+ * (#4553), the ONE implementation of the mortgage math. The page used to carry
+ * its own copy of it (a plain /12 here, of a percent), which is the #4509 bug
+ * class; there is no second copy now.
+ *
+ * The edit form is the one the #4706/#4728 work landed: only the property's
+ * own fields are edited here — the mortgage, tax, insurance and HOA are its
+ * loans and bills (LinkedFinances), never the property's own inputs.
+ */
+
 import { useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import Link from "next/link";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, ApiError } from "@/lib/api";
-import { propertyKeys, assetKeys, maintenanceKeys, calendarKeys } from "@/lib/query-keys";
-import ConfirmDialog from "@/components/ui/ConfirmDialog";
-import AddMaintenanceTaskModal from "@/components/maintenance/AddMaintenanceTaskModal";
-import AssetCard from "@/components/asset/AssetCard";
-import { Card } from "@/components/ui/Card";
-import DetailPageLayout from "@/components/layout/DetailPageLayout";
-import { TextInput } from "@/components/ui/TextInput";
-import { MantineSelect as Select } from "@/components/ui/Select";
-import { Button } from "@/components/ui/Button";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Button, Table } from "@mantine/core";
+import {
+  IconAlertTriangle,
+  IconChevronRight,
+  IconHome,
+  IconPlus,
+  IconRefresh,
+} from "@tabler/icons-react";
+import { apiFetch } from "@/lib/api";
+import { assetKeys, maintenanceKeys, propertyKeys } from "@/lib/query-keys";
 import type { PropertyDetailResponse, RoomListResponse } from "@/types/property";
 import type { Asset } from "@/lib/types/api";
 import type { MaintenanceTask } from "@/components/maintenance/types";
+import { Skeleton } from "@mantine/core";
+import { Select, TextInput } from "@/components/ui";
+import DetailPageLayout from "@/components/layout/DetailPageLayout";
 import LinkedFinances, { useLinkedFinances } from "@/components/finance/LinkedFinances";
-import { monthlyBillAmount, pickMortgage, propertyEditBody, PROPERTY_EDIT_FIELDS } from "@/components/finance/linked-finance-utils";
+import { pickMortgage } from "@/components/finance/linked-finance-utils";
+import { PROPERTY_EDIT_FIELDS, propertyEditBody } from "@/components/finance/linked-finance-utils";
+import { typeLabel } from "@/components/property/property-tree";
+import { formatUsd, toNumber } from "@/components/property/property-finance";
+import PropertyRooms from "@/components/property/PropertyRooms";
+import PropertyAttention from "@/components/property/PropertyAttention";
+import PropertyDetailsSheet from "@/components/property/PropertyDetailsSheet";
+import AddRoomModal, { roomsKey } from "@/components/property/AddRoomModal";
+import AddThingModal from "@/components/property/AddThingModal";
+import { useNavRole } from "@/components/shared/use-nav-role";
+import { useHouseholdToday } from "@/lib/today/api";
+import { canWriteProperty } from "@/components/property/property-access";
 
-// ── Local type definitions (replacing deleted @/components/dashboard/dashboard-types) ──
+const STROKE = 1.75;
 
-interface CalendarEvent {
-  id: string;
-  title: string;
-  date?: string;
-  start?: string;
-  property_id?: string;
-  event_type?: string;
-}
-
-// ── Helpers ──────────────────────────────────────────────────
-
-function fmtCurrency(value: string | null | undefined): string {
-  if (!value) return "—";
-  const n = Number(value);
-  if (Number.isNaN(n)) return "—";
-  return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
-}
-
-function fmtCurrencyPrecise(value: string | null | undefined): string {
-  if (!value) return "—";
-  const n = Number(value);
-  if (Number.isNaN(n)) return "—";
-  return n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function fmtDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
-  } catch { return iso; }
-}
-
-function num(v: string | null | undefined): number {
-  if (!v) return 0;
-  const n = Number(v);
-  return Number.isNaN(n) ? 0 : n;
-}
-
-/** Calculate monthly mortgage payment using standard amortization formula. */
-function monthlyMortgagePayment(principal: number, annualRate: number, termMonths: number): number {
-  if (principal <= 0 || termMonths <= 0) return 0;
-  if (annualRate === 0) return principal / termMonths;
-  const r = annualRate / 100 / 12;
-  return (principal * r) / (1 - Math.pow(1 + r, -termMonths));
-}
-
-/** Calculate remaining mortgage balance after N months. */
-function remainingBalance(principal: number, annualRate: number, termMonths: number, monthsElapsed: number): number {
-  if (principal <= 0) return 0;
-  if (monthsElapsed >= termMonths) return 0;
-  if (annualRate === 0) return principal * (1 - monthsElapsed / termMonths);
-  const r = annualRate / 100 / 12;
-  const pmt = monthlyMortgagePayment(principal, annualRate, termMonths);
-  return principal * Math.pow(1 + r, monthsElapsed) - pmt * (Math.pow(1 + r, monthsElapsed) - 1) / r;
-}
-
-/** Calculate months elapsed since a date string. */
-function monthsSince(dateStr: string | null | undefined): number {
-  if (!dateStr) return 0;
-  const start = new Date(dateStr);
-  if (isNaN(start.getTime())) return 0;
-  const now = new Date();
-  return Math.max(0, (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth()));
-}
-
-function statusBadge(status: string): { label: string; cls: string } {
-  switch (status) {
-    case "pending": return { label: "Pending", cls: "bg-amber-50 text-amber-700" };
-    case "in_progress": return { label: "In Progress", cls: "bg-blue-50 text-blue-700" };
-    case "done": return { label: "Done", cls: "bg-green-50 text-green-700" };
-    case "skipped": return { label: "Skipped", cls: "bg-gray-100 text-gray-600" };
-    default: return { label: status, cls: "bg-gray-100 text-gray-600" };
-  }
-}
-
-// ── Edit form fields ─────────────────────────────────────────
-
-const PROPERTY_TYPES = ["Single Family", "Condo", "Townhouse", "Multi-Family", "Land", "Commercial", "Other"];
-
-function EditField({ label, value, onChange, type = "text", placeholder, required = false }: {
-  label: string; value: string; onChange: (v: string) => void; type?: string; placeholder?: string; required?: boolean;
-}) {
-  return (
-    <div>
-      <label className="mb-1 block text-xs font-medium text-gray-600">
-        {label} {required && <span className="text-red-500">*</span>}
-      </label>
-      <TextInput
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        size="sm"
-      />
-    </div>
-  );
-}
-
-// ── Page ─────────────────────────────────────────────────────
+/** The property types the API stores, for the edit select. */
+const PROPERTY_TYPES = [
+  { value: "single_family", label: "Single family" },
+  { value: "condo", label: "Condo" },
+  { value: "townhouse", label: "Townhouse" },
+  { value: "apartment", label: "Apartment" },
+  { value: "land", label: "Land" },
+  { value: "multi_family", label: "Multi-family" },
+  { value: "commercial", label: "Commercial" },
+];
 
 export default function PropertyDetailPage() {
+  // The FAMILY's day (#5316) for every "overdue" badge on the page. Null until
+  // the household is known: nothing is claimed overdue on a guess.
+  const today = useHouseholdToday();
   const params = useParams<{ id: string }>();
-  const router = useRouter();
-  const queryClient = useQueryClient();
   const propertyId = params.id;
+  const queryClient = useQueryClient();
+  const role = useNavRole();
+  // The family roles add rooms and things; a housesitter or vendor reads the
+  // house only (roles.go ResProperties/ResAssets ActWrite — property-access.ts).
+  const canWrite = canWriteProperty(role);
 
   const [isEditing, setIsEditing] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [showAddMaintenance, setShowAddMaintenance] = useState(false);
-  const [showFinancials, setShowFinancials] = useState(false);
   const [editValues, setEditValues] = useState<Record<string, string>>({});
+  const [addRoomOpen, setAddRoomOpen] = useState(false);
+  const [addThingRoomId, setAddThingRoomId] = useState<string | undefined>(undefined);
+  const [addThingOpen, setAddThingOpen] = useState(false);
 
-  // ── Data fetching ──────────────────────────────────────────
-
-  const { data: propData, isLoading, isError, error } = useQuery({
+  const propertyQuery = useQuery({
     queryKey: propertyKeys.detail(propertyId),
     queryFn: () => apiFetch<PropertyDetailResponse>(`/api/v1/properties/${propertyId}`),
     enabled: !!propertyId,
   });
 
-  const { data: roomsData } = useQuery({
-    queryKey: [...propertyKeys.detail(propertyId), "rooms"],
+  const roomsQuery = useQuery({
+    queryKey: roomsKey(propertyId),
     queryFn: () => apiFetch<RoomListResponse>(`/api/v1/properties/${propertyId}/rooms`),
     enabled: !!propertyId,
   });
 
-  const { data: assets = [] } = useQuery({
+  const thingsQuery = useQuery({
     queryKey: assetKeys.byProperty(propertyId),
-    queryFn: () => apiFetch<{ data: Asset[] }>("/api/v1/assets", { params: { property_id: propertyId } }).then((r) => r.data),
+    queryFn: () =>
+      apiFetch<{ data: Asset[] }>("/api/v1/assets", { params: { property_id: propertyId } }).then(
+        (r) => r.data ?? [],
+      ),
     enabled: !!propertyId,
   });
 
-  const { data: maintenanceTasks = [] } = useQuery({
+  const tasksQuery = useQuery({
     queryKey: maintenanceKeys.byProperty(propertyId),
-    queryFn: () => apiFetch<{ data: MaintenanceTask[] }>("/api/v1/maintenance/tasks", { params: { property_id: propertyId } }).then((r) => r.data),
+    queryFn: () =>
+      apiFetch<{ data: MaintenanceTask[] }>("/api/v1/maintenance/tasks", {
+        params: { property_id: propertyId },
+      }).then((r) => r.data ?? []),
     enabled: !!propertyId,
   });
 
-  // The property's loans and bills (property_id, #4704): its mortgage, tax,
-  // insurance and HOA. Same queries as the Loans & bills card below.
+  // Same query keys as LinkedFinances, so the mortgage row costs no request.
   const linked = useLinkedFinances({ kind: "property", id: propertyId });
+  const mortgage = pickMortgage(linked.loans.data ?? []);
 
-  const { data: calendarEvents = [] } = useQuery({
-    queryKey: calendarKeys.eventsByProperty(propertyId),
-    queryFn: () => apiFetch<{ data: CalendarEvent[] }>("/api/v1/calendars/events", { params: { property_id: propertyId } }).then((r) => r.data),
-    enabled: !!propertyId,
-  });
+  const property = propertyQuery.data?.data;
+  const rooms = roomsQuery.data?.data ?? [];
+  const things = thingsQuery.data ?? [];
+  const tasks = tasksQuery.data ?? [];
 
-  const property = propData?.data;
-  const rooms = roomsData?.data ?? [];
-  const bills = linked.bills.data ?? [];
-  const loans = linked.loans.data ?? [];
-  const mortgageLoan = pickMortgage(loans);
-
-  // Calendar events (all, not filtered by month)
-  const monthEvents = calendarEvents;
-
-  // ── Delete mutation ────────────────────────────────────────
-
-  const deleteMutation = useMutation({
-    mutationFn: () => apiFetch<void>(`/api/v1/properties/${propertyId}`, { method: "DELETE" }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: propertyKeys.lists() });
-      router.push("/dashboard/properties");
-    },
-  });
-
-  // ── Update mutation ────────────────────────────────────────
-
-  const updateMutation = useMutation({
-    mutationFn: (body: Record<string, unknown>) =>
-      apiFetch(`/api/v1/properties/${propertyId}`, { method: "PUT", body }),
+  const update = useMutation({
+    mutationFn: (values: Record<string, string>) =>
+      apiFetch<PropertyDetailResponse>(`/api/v1/properties/${propertyId}`, {
+        method: "PUT",
+        body: propertyEditBody(values),
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: propertyKeys.detail(propertyId) });
+      queryClient.invalidateQueries({ queryKey: propertyKeys.lists() });
       setIsEditing(false);
     },
   });
 
-  // ── Edit mutation ──────────────────────────────────────────
-
-  const editMutation = useMutation({
-    // Only the form's own fields: the mortgage/tax/insurance/HOA fields are
-    // derived from the linked loan and bills and are never sent (#4706).
-    mutationFn: (data: Record<string, string>) => apiFetch(`/api/v1/properties/${propertyId}`, {
-      method: 'PUT',
-      body: propertyEditBody(data),
-    }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: propertyKeys.detail(propertyId) });
-    },
-  });
-
-  // ── Edit handlers ──────────────────────────────────────────
-
-  function startEditing() {
+  const startEditing = () => {
     if (!property) return;
-    const f: Record<string, string> = {};
+    const values: Record<string, string> = {};
     for (const k of PROPERTY_EDIT_FIELDS) {
-      f[k] = ((property as unknown as Record<string, string | null>)[k]) ?? "";
+      values[k] = (property as unknown as Record<string, string | null>)[k] ?? "";
     }
-    setEditValues(f);
+    setEditValues(values);
     setIsEditing(true);
-  }
+  };
 
-  function cancelEditing() {
-    setIsEditing(false);
-  }
+  const openAddThing = (roomId?: string) => {
+    setAddThingRoomId(roomId);
+    setAddThingOpen(true);
+  };
 
-  // ── Financial calculations ─────────────────────────────────
+  // ── Loading / error ────────────────────────────────────────
 
-  const mortgagePrincipal = num(property?.mortgage_amount);
-  const mortgageRate = num(property?.mortgage_rate);
-  const mortgageTerm = num(property?.mortgage_term_months);
-  const mortgageStart = property?.mortgage_start_date;
-  const monthsElapsed = monthsSince(mortgageStart);
-  const monthlyPayment = monthlyMortgagePayment(mortgagePrincipal, mortgageRate, mortgageTerm);
-  const remaining = remainingBalance(mortgagePrincipal, mortgageRate, mortgageTerm, monthsElapsed);
-  const totalPaid = monthlyPayment * monthsElapsed;
-  const interestPaid = totalPaid - (mortgagePrincipal - remaining);
-  const principalPaid = mortgagePrincipal - remaining;
-  const payoffProgress = mortgagePrincipal > 0 ? Math.min(100, (principalPaid / mortgagePrincipal) * 100) : 0;
-
-  const currentValue = num(property?.current_value);
-  const equity = currentValue - remaining;
-  const equityPct = currentValue > 0 ? (equity / currentValue) * 100 : 0;
-
-  // Monthly cost: the loans' payments (the mortgage's own payment, else the
-  // amortized one) plus every linked bill per month. Tax, insurance and HOA
-  // are bills now, so they are counted once, in the bills.
-  const mortgageMonthly = num(String(mortgageLoan?.monthly_payment ?? "")) || monthlyPayment;
-  const otherLoansMonthly = loans.filter((l) => l !== mortgageLoan).reduce((sum, l) => sum + num(String(l.monthly_payment ?? "")), 0);
-  const monthlyBills = bills.reduce((sum, b) => sum + monthlyBillAmount(b), 0);
-  const totalMonthlyCost = mortgageMonthly + otherLoansMonthly + monthlyBills;
-  const totalAssetValue = Array.isArray(assets) ? assets.reduce((sum, a) => sum + num(a.purchase_price), 0) : 0;
-
-  const hasFinancialData = mortgagePrincipal > 0 || currentValue > 0 || num(property?.purchase_price) > 0;
-
-  // ── Loading / Error states ─────────────────────────────────
-
-  if (isLoading) {
+  if (propertyQuery.isLoading) {
     return (
-      <div className="flex items-center justify-center py-20">
-        <svg className="h-6 w-6 animate-spin text-indigo-600" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-        </svg>
-        <span className="ml-3 text-sm text-gray-500">Loading property...</span>
+      <div role="status" aria-busy="true" aria-label="Loading property" className="mx-auto w-full max-w-2xl space-y-3">
+        <Skeleton height={20} width="55%" radius="sm" />
+        <Skeleton height={14} width="35%" radius="sm" />
+        <Skeleton height={96} radius="md" />
+        <Skeleton height={96} radius="md" />
       </div>
     );
   }
 
-  if (isError || !property) {
+  if (propertyQuery.isError || !property) {
     return (
-      <div className="mx-auto max-w-2xl px-4 py-12 text-center">
-        <p className="text-sm text-red-600">Failed to load property. {(error as Error)?.message}</p>
-        <Link href="/dashboard/properties" className="mt-4 inline-block text-sm font-medium text-indigo-600 hover:text-indigo-500">
-          &larr; Back to properties
+      <div className="mx-auto w-full max-w-2xl">
+        <div
+          role="alert"
+          className="flex flex-col items-start gap-3 rounded-token-md border border-warn-line bg-warn-bg p-4 text-warn-ink sm:flex-row sm:items-center"
+        >
+          <IconAlertTriangle size={20} stroke={STROKE} className="shrink-0" aria-hidden />
+          <p className="flex-1 text-sm">
+            Couldn&apos;t load this property. Check your connection and try again.
+          </p>
+          <Button
+            variant="default"
+            onClick={() => propertyQuery.refetch()}
+            loading={propertyQuery.isFetching}
+            className="max-md:min-h-11"
+          >
+            Try again
+          </Button>
+        </div>
+        <Link
+          href="/dashboard/properties"
+          className="mt-4 inline-flex min-h-11 items-center gap-1 text-sm font-medium text-accent hover:underline"
+        >
+          Back to properties
         </Link>
       </div>
     );
   }
 
-  // ── EDIT MODE ──────────────────────────────────────────────
+  const type = typeLabel(property.property_type);
+  const summary = [property.address, type, `${rooms.length} ${rooms.length === 1 ? "room" : "rooms"}`]
+    .filter(Boolean)
+    .join(" · ");
+
+  // ── Edit mode ──────────────────────────────────────────────
 
   if (isEditing) {
+    // Read the value BEFORE entering the updater: by the time a state updater
+    // runs, React has cleared the event and `currentTarget` is null (and the
+    // page crashed on the first keystroke for it).
+    const field = (name: string, label: string, props: Record<string, unknown> = {}) => (
+      <TextInput
+        label={label}
+        value={editValues[name] ?? ""}
+        onChange={(e) => {
+          const value = e.currentTarget.value;
+          setEditValues((v) => ({ ...v, [name]: value }));
+        }}
+        {...props}
+      />
+    );
     return (
       <DetailPageLayout
         entityType="property"
         entityId={propertyId}
-        title="Edit Property"
-        isEditing={isEditing}
-        onEdit={startEditing}
-        onDelete={() => setShowDeleteConfirm(true)}
-        onCancel={cancelEditing}
-        onSave={() => editMutation.mutate(editValues)}
-        isSaving={editMutation.isPending}
+        title={`Edit ${property.name}`}
+        isEditing
+        onCancel={() => setIsEditing(false)}
+        onSave={() => update.mutate(editValues)}
+        isSaving={update.isPending}
       >
-        <div className="mb-6">
-          <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-gray-500">Basic Info</h2>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <EditField label="Property Name *" value={editValues.name ?? ""} onChange={(v) => setEditValues({ ...editValues, name: v })} placeholder="Main Residence" required />
-            <EditField label="Address" value={editValues.address ?? ""} onChange={(v) => setEditValues({ ...editValues, address: v })} placeholder="123 Main St" />
-            <div>
-              <label className="mb-1 block text-xs font-medium text-gray-600">
-                Property Type <span className="text-red-500">*</span>
-              </label>
-              <Select
-                value={editValues.property_type ?? ""}
-                onChange={(value) => setEditValues({ ...editValues, property_type: value ?? "" })}
-                placeholder="Select type..."
-                size="sm"
-                data={[{ value: "", label: "Select type..." }, ...PROPERTY_TYPES.map(t => ({ value: t, label: t }))]}
-                clearable
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-gray-600">Notes</label>
-              <TextInput
-                value={editValues.notes ?? ""}
-                onChange={(e) => setEditValues({ ...editValues, notes: e.target.value })}
-                placeholder="Add notes..."
-                size="sm"
-              />
-            </div>
-          </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 max-md:[&_.mantine-Input-input]:min-h-11 max-md:[&_.mantine-Input-input]:text-base">
+          {field("name", "Name", { required: true, "data-autofocus": true })}
+          {field("address", "Address")}
+          <Select
+            label="Type"
+            data={PROPERTY_TYPES}
+            value={editValues.property_type || null}
+            onChange={(value) => setEditValues((v) => ({ ...v, property_type: value ?? "" }))}
+            placeholder="Not set"
+            clearable
+          />
+          {field("current_value", "Current value", { inputMode: "decimal", placeholder: "$" })}
+          {field("purchase_price", "Purchase price", { inputMode: "decimal", placeholder: "$" })}
+          {field("purchase_date", "Purchase date", { type: "date" })}
+          {field("down_payment", "Down payment", { inputMode: "decimal", placeholder: "$" })}
         </div>
-
-        {/* Financial Details (collapsible using details element) */}
-        <details className="mb-6 rounded-lg border border-gray-200">
-          <summary className="cursor-pointer list-none px-4 py-3">
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowFinancials(!showFinancials);
-              }}
-              className="flex w-full items-center justify-between text-sm font-semibold text-gray-700 hover:text-gray-900"
-            >
-              <span className="flex items-center gap-2">
-                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d={showFinancials ? "M19.5 8.25l-7.5 7.5-7.5-7.5" : "M8.25 4.5l7.5 7.5-7.5 7.5"} />
-                </svg>
-                Financial Details
-              </span>
-              <svg className="h-4 w-4 transition-transform" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" d={showFinancials ? "M19.5 8.25l-7.5 7.5-7.5-7.5" : "M8.25 4.5l7.5 7.5-7.5 7.5"} />
-              </svg>
-            </button>
-          </summary>
-          <div className="border-t border-gray-200 p-4">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              <EditField label="Purchase Price" value={editValues.purchase_price ?? ""} onChange={(v) => setEditValues({ ...editValues, purchase_price: v })} placeholder="$350,000" />
-              <EditField label="Purchase Date" value={editValues.purchase_date ?? ""} onChange={(v) => setEditValues({ ...editValues, purchase_date: v })} type="date" />
-              <EditField label="Current Value" value={editValues.current_value ?? ""} onChange={(v) => setEditValues({ ...editValues, current_value: v })} placeholder="$420,000" />
-              <EditField label="Down Payment" value={editValues.down_payment ?? ""} onChange={(v) => setEditValues({ ...editValues, down_payment: v })} placeholder="$50,000" />
-            </div>
-            <p className="mt-3 text-xs text-ink-3">
-              The mortgage, property tax, insurance and HOA are the loans and bills linked to this property. Change them under Loans &amp; bills.
-            </p>
-          </div>
-        </details>
-
-        {/* Actions */}
-        <div className="mt-8 flex items-center justify-between border-t border-gray-200 pt-4">
-          <button
-            onClick={() => setShowDeleteConfirm(true)}
-            className="text-sm font-medium text-red-600 hover:text-red-700"
-          >
-            Delete Property
-          </button>
-          <div className="flex gap-3">
-            <Button variant="outline" onClick={cancelEditing}>
-              Cancel
-            </Button>
-            <Button onClick={() => editMutation.mutate(editValues)} loading={editMutation.isPending}>
-              {editMutation.isPending ? "Saving..." : "Save Changes"}
-            </Button>
-          </div>
+        <div className="mt-4">
+          <TextInput
+            label="Notes"
+            value={editValues.notes ?? ""}
+            onChange={(e) => {
+              const value = e.currentTarget.value;
+              setEditValues((v) => ({ ...v, notes: value }));
+            }}
+          />
         </div>
-
-        <ConfirmDialog
-          open={showDeleteConfirm}
-          onClose={() => setShowDeleteConfirm(false)}
-          onConfirm={() => deleteMutation.mutate()}
-          title="Delete Property"
-          message={`Are you sure you want to delete "${property.name}"? This cannot be undone.`}
-          confirmLabel="Delete"
-          loading={deleteMutation.isPending}
-        />
+        <p className="mt-3 text-xs text-ink-3">
+          The mortgage, property tax, insurance and HOA are the loans and bills linked to this
+          property. Change them under Loans &amp; bills.
+        </p>
+        {update.isError && (
+          <p role="alert" className="mt-3 text-sm text-danger">
+            Couldn&apos;t save: {update.error instanceof Error ? update.error.message : "try again"}
+          </p>
+        )}
       </DetailPageLayout>
     );
   }
 
-  // ── VIEW MODE ──────────────────────────────────────────────
+  // ── Read mode ──────────────────────────────────────────────
 
   return (
     <DetailPageLayout
       entityType="property"
       entityId={propertyId}
       title={property.name}
-      isEditing={isEditing}
       onEdit={startEditing}
-      onDelete={() => setShowDeleteConfirm(true)}
-      onCancel={cancelEditing}
-      onSave={() => editMutation.mutate(editValues)}
-      isSaving={editMutation.isPending}
     >
-      {/* ── Header Card ─────────────────────────────────────── */}
-      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-        <div className="flex items-start justify-between gap-4">
+      <div data-property-detail className="min-w-0">
+        {/* The property head: icon, name, the one line that says where it is. */}
+        <div className="mb-4 flex items-center gap-3.5">
+          <span
+            aria-hidden
+            className="grid size-14 shrink-0 place-items-center rounded-token-md bg-accent-soft text-accent"
+          >
+            <IconHome size={28} stroke={STROKE} />
+          </span>
           <div className="min-w-0 flex-1">
-            <h1 className="text-2xl font-bold tracking-tight text-gray-900">{property.name}</h1>
-            {property.address && <p className="mt-1 text-sm text-gray-500">{property.address}</p>}
-            <div className="mt-3 flex flex-wrap gap-2">
-              {property.property_type && (
-                <span className="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700">
-                  {property.property_type}
-                </span>
-              )}
-            </div>
+            <h1 className="text-xl font-semibold leading-tight text-ink [overflow-wrap:anywhere] md:text-2xl">
+              {property.name}
+            </h1>
+            {summary && <p className="mt-0.5 text-sm text-ink-3 [overflow-wrap:anywhere]">{summary}</p>}
           </div>
+          <span className="shrink-0 text-right">
+            <span className="block text-xs text-ink-3">Value</span>
+            <span className="block text-[15px] font-semibold tabular-nums text-ink">
+              {formatUsd(toNumber(property.current_value)) ?? "—"}
+            </span>
+          </span>
         </div>
-        {property.notes && (
-          <div className="mt-4 rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">{property.notes}</div>
-        )}
-      </div>
 
-      {/* ── Financial Hub ───────────────────────────────────── */}
-      {hasFinancialData && (
-        <div className="mt-8 grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {/* Equity & Value Card */}
-          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-gray-900">Value & Equity</h2>
+        <div className="flex flex-col gap-6">
+          {/* Add-room / Add-thing live at the top of the sheet on a phone: the
+              title bar's menu is Edit only, and the room grid follows. */}
+          {canWrite && (
+            <div className="flex flex-wrap gap-2 md:hidden">
+              <Button
+                variant="default"
+                onClick={() => setAddRoomOpen(true)}
+                leftSection={<IconPlus size={16} stroke={STROKE} />}
+                aria-haspopup="dialog"
+                className="min-h-11 flex-1"
+              >
+                Add room
+              </Button>
+              <Button
+                variant="default"
+                onClick={() => openAddThing()}
+                leftSection={<IconPlus size={16} stroke={STROKE} />}
+                aria-haspopup="dialog"
+                className="min-h-11 flex-1"
+              >
+                Add thing
+              </Button>
             </div>
-            <div className="mt-3">
-              <p className="text-3xl font-bold text-gray-900">{fmtCurrency(property.current_value)}</p>
-              <p className="text-xs text-gray-400">Current value (user estimate)</p>
-            </div>
+          )}
 
-            {currentValue > 0 && remaining > 0 && (
-              <div className="mt-4">
-                {/* Equity bar */}
-                <div className="flex h-6 overflow-hidden rounded-full bg-gray-100">
-                  <div className="flex items-center justify-center bg-green-500 text-xs font-medium text-white" style={{ width: `${equityPct}%` }}>
-                    {equityPct > 15 && `${Math.round(equityPct)}%`}
-                  </div>
-                  <div className="flex items-center justify-center bg-orange-400 text-xs font-medium text-white" style={{ width: `${100 - equityPct}%` }}>
-                    {(100 - equityPct) > 15 && `${Math.round(100 - equityPct)}%`}
-                  </div>
-                </div>
-                <div className="mt-2 flex justify-between text-xs">
-                  <span className="text-green-600">Equity: {fmtCurrency(equity.toFixed(2))}</span>
-                  <span className="text-orange-600">Owed: {fmtCurrency(remaining.toFixed(2))}</span>
-                </div>
+          <PropertyRooms
+            propertyId={propertyId}
+            rooms={rooms}
+            things={things}
+            tasks={tasks}
+            canWrite={canWrite}
+            onAddRoom={() => setAddRoomOpen(true)}
+            onAddThing={openAddThing}
+            today={today}
+          />
+
+          <PropertyAttention tasks={tasks} things={things} propertyName={property.name} today={today} />
+
+          <PropertyDetailsSheet
+            property={property}
+            roomCount={rooms.length}
+            thingCount={things.length}
+            mortgage={mortgage ?? null}
+          />
+
+          <LinkedFinances subject={{ kind: "property", id: propertyId, name: property.name }} framed />
+
+          {/* The things list, for the tablet/desktop reader who wants the flat
+              view (the rooms grid above is the phone's way in). */}
+          {things.length > 0 && (
+            <section aria-labelledby="property-things" className="hidden min-w-0 md:block">
+              <h2 id="property-things" className="mb-1 text-sm font-semibold text-ink-2">
+                Things <span className="font-medium text-ink-3">{things.length}</span>
+              </h2>
+              <div className="overflow-x-auto rounded-token-md border border-line bg-surface shadow-token-sm">
+                <Table highlightOnHover verticalSpacing="sm" horizontalSpacing="md">
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th scope="col" className="text-xs font-semibold uppercase tracking-wide text-ink-3">
+                        Thing
+                      </Table.Th>
+                      <Table.Th scope="col" className="text-xs font-semibold uppercase tracking-wide text-ink-3">
+                        Room
+                      </Table.Th>
+                      <Table.Th scope="col" className="text-xs font-semibold uppercase tracking-wide text-ink-3">
+                        Category
+                      </Table.Th>
+                      <Table.Th className="w-10">
+                        <span className="sr-only">Open</span>
+                      </Table.Th>
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {things.map((thing) => (
+                      <Table.Tr key={thing.id}>
+                        <Table.Td className="font-medium text-ink">
+                          <Link href={`/dashboard/assets/${thing.id}`} className="hover:underline">
+                            {thing.name}
+                          </Link>
+                        </Table.Td>
+                        <Table.Td className="text-ink-2">
+                          {rooms.find((r) => r.id === thing.room_id)?.name ?? "Not in a room"}
+                        </Table.Td>
+                        <Table.Td className="text-ink-2">{thing.category ?? "—"}</Table.Td>
+                        <Table.Td className="text-ink-3">
+                          <IconChevronRight size={18} stroke={STROKE} aria-hidden />
+                        </Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
               </div>
-            )}
+            </section>
+          )}
 
-            <dl className="mt-4 space-y-1.5 border-t border-gray-100 pt-3">
-              <div className="flex justify-between text-sm"><dt className="text-gray-500">Purchase Price</dt><dd className="font-medium text-gray-900">{fmtCurrency(property.purchase_price)}</dd></div>
-              <div className="flex justify-between text-sm"><dt className="text-gray-500">Purchase Date</dt><dd className="font-medium text-gray-900">{fmtDate(property.purchase_date)}</dd></div>
-              <div className="flex justify-between text-sm"><dt className="text-gray-500">Down Payment</dt><dd className="font-medium text-gray-900">{fmtCurrency(property.down_payment)}</dd></div>
-            </dl>
-          </div>
-
-          {/* Monthly Cost of Ownership Card */}
-          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-gray-900">Monthly Cost</h2>
-            </div>
-            <div className="mt-3">
-              <p className="text-3xl font-bold text-gray-900">{fmtCurrencyPrecise(totalMonthlyCost.toFixed(2))}<span className="text-base font-normal text-gray-400">/mo</span></p>
-            </div>
-
-            <dl className="mt-4 space-y-1.5">
-              {mortgageMonthly > 0 && (
-                <div className="flex justify-between text-sm"><dt className="text-gray-500">Mortgage Payment</dt><dd className="font-medium text-gray-900">{fmtCurrencyPrecise(mortgageMonthly.toFixed(2))}</dd></div>
-              )}
-              {otherLoansMonthly > 0 && (
-                <div className="flex justify-between text-sm"><dt className="text-gray-500">Other Loans</dt><dd className="font-medium text-gray-900">{fmtCurrencyPrecise(otherLoansMonthly.toFixed(2))}</dd></div>
-              )}
-              {monthlyBills > 0 && (
-                <div className="flex justify-between text-sm"><dt className="text-gray-500">Bills (tax, insurance, HOA, utilities)</dt><dd className="font-medium text-gray-900">{fmtCurrencyPrecise(monthlyBills.toFixed(2))}</dd></div>
-              )}
-            </dl>
-
-            {totalMonthlyCost === 0 && (
-              <p className="mt-3 text-xs text-gray-400">No costs yet. Add the mortgage and bills under Loans &amp; bills.</p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── Mortgage Amortization ──────────────────────────── */}
-      {mortgagePrincipal > 0 && mortgageTerm > 0 && (
-        <div className="mt-8 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-semibold text-gray-900">Mortgage Amortization</h2>
-            {mortgageLoan && (
-              <Link href={`/dashboard/loans/${mortgageLoan.id}`} className="inline-flex min-h-11 items-center text-sm font-medium text-accent hover:underline md:min-h-0">
-                View loan
-              </Link>
-            )}
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-1 text-sm text-gray-600">
-            {property.mortgage_lender && <span><span className="text-gray-400">Lender:</span> {property.mortgage_lender}</span>}
-            <span><span className="text-gray-400">Rate:</span> {property.mortgage_rate}%</span>
-            <span><span className="text-gray-400">Term:</span> {mortgageTerm} months</span>
-            {mortgageStart && <span><span className="text-gray-400">Started:</span> {fmtDate(mortgageStart)}</span>}
-            <span><span className="text-gray-400">Months in:</span> {monthsElapsed} / {mortgageTerm}</span>
-          </div>
-
-          {/* Progress bar */}
-          <div className="mt-4">
-            <div className="flex justify-between text-xs text-gray-500 mb-1">
-              <span>Principal paid: {fmtCurrency(principalPaid.toFixed(2))}</span>
-              <span>{Math.round(payoffProgress)}% paid off</span>
-            </div>
-            <div className="h-3 overflow-hidden rounded-full bg-gray-100">
-              <div className="h-full rounded-full bg-indigo-500 transition-all" style={{ width: `${payoffProgress}%` }} />
-            </div>
-          </div>
-
-          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <div>
-              <p className="text-xs text-gray-400">Monthly Payment</p>
-              <p className="text-lg font-semibold text-gray-900">{fmtCurrencyPrecise(monthlyPayment.toFixed(2))}</p>
-            </div>
-            <div>
-              <p className="text-xs text-gray-400">Principal Paid</p>
-              <p className="text-lg font-semibold text-green-600">{fmtCurrency(principalPaid.toFixed(2))}</p>
-            </div>
-            <div>
-              <p className="text-xs text-gray-400">Interest Paid</p>
-              <p className="text-lg font-semibold text-orange-500">{fmtCurrency(interestPaid.toFixed(2))}</p>
-            </div>
-            <div>
-              <p className="text-xs text-gray-400">Remaining Balance</p>
-              <p className="text-lg font-semibold text-gray-900">{fmtCurrency(remaining.toFixed(2))}</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Loans & bills: the mortgage, tax, insurance and HOA live here (#4706) ── */}
-      <div className="mt-8">
-        <LinkedFinances framed subject={{ kind: "property", id: propertyId, name: property.name }} />
-      </div>
-
-      {/* ── Maintenance ─────────────────────────────────────── */}
-      <div className="mt-8 grid grid-cols-1 gap-4">
-        {/* Maintenance */}
-        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-semibold text-gray-900">Maintenance</h2>
-            <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-700">{maintenanceTasks.length}</span>
-          </div>
-          <div className="mt-3">
-            {maintenanceTasks.length === 0 ? (
-              <p className="text-sm text-gray-400 py-4 text-center">No maintenance tasks</p>
-            ) : (
-              <ul className="divide-y divide-gray-50">
-                {maintenanceTasks.slice(0, 5).map((task) => {
-                  const s = statusBadge(task.status);
-                  return (
-                    <li key={task.id} className="flex items-center justify-between py-2">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">{task.name}</p>
-                        <p className="text-xs text-gray-400">{task.due_date ? `Due ${fmtDate(task.due_date)}` : "No due date"}</p>
-                      </div>
-                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${s.cls}`}>{s.label}</span>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* ── Assets ──────────────────────────────────────────── */}
-      <div className="mt-8 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-semibold text-gray-900">Assets</h2>
-          <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-700">{assets.length}</span>
-        </div>
-        {totalAssetValue > 0 && (
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-xs text-gray-400">Total asset value:</span>
-            <span className="text-sm font-bold text-gray-900">{fmtCurrency(totalAssetValue.toFixed(2))}</span>
-          </div>
-        )}
-        <div className="mt-3">
-          {assets.length === 0 ? (
-            <p className="text-sm text-gray-400 py-4 text-center">No assets tracked</p>
-          ) : (
-            <ul className="divide-y divide-gray-50">
-              {assets.slice(0, 5).map((asset) => (
-                <li key={asset.id}>
-                  <Link href={`/dashboard/assets/${asset.id}`} className="flex items-center justify-between py-2 hover:bg-gray-50 -mx-2 px-2 rounded cursor-pointer">
-                    <div>
-                      <p className="text-sm font-medium text-gray-900">{asset.name}</p>
-                      <p className="text-xs text-gray-400">{[asset.category, asset.manufacturer, asset.model].filter(Boolean).join(" · ") || "—"}</p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {asset.purchase_price && <span className="text-xs text-gray-400">{fmtCurrency(asset.purchase_price)}</span>}
-                      {asset.warranty_expiry && (
-                        <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-xs ${new Date(asset.warranty_expiry) < new Date() ? "bg-red-50 text-red-600" : "bg-green-50 text-green-600"}`}>
-                          {new Date(asset.warranty_expiry) < new Date() ? "Exp" : "Warr"}
-                        </span>
-                      )}
-                    </div>
-                  </Link>
-                </li>
-              ))}
-            </ul>
+          {tasksQuery.isError && (
+            <p role="alert" className="flex items-center gap-2 text-sm text-warn-ink">
+              <IconRefresh size={16} stroke={STROKE} aria-hidden />
+              Couldn&apos;t load upkeep for this property.
+            </p>
           )}
         </div>
       </div>
 
-      {/* ── Calendar Events (this month) ───────────────────── */}
-      <div className="mt-8 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-semibold text-gray-900">Events</h2>
-          <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-700">{monthEvents.length}</span>
-        </div>
-        <div className="mt-3">
-          {monthEvents.length === 0 ? (
-            <p className="text-sm text-gray-400 py-4 text-center">No events this month</p>
-          ) : (
-            <ul className="divide-y divide-gray-50">
-              {monthEvents.slice(0, 6).map((event) => (
-                <li key={event.id} className="flex items-center justify-between py-2">
-                  <div>
-                    <p className="text-sm font-medium text-gray-900">{event.title}</p>
-                    <p className="text-xs text-gray-400">{fmtDate(event.start)}{event.event_type ? ` · ${event.event_type}` : ""}</p>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </div>
-
-      {/* ── Rooms ───────────────────────────────────────────── */}
-      <div className="mt-8 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-semibold text-gray-900">Rooms</h2>
-          <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-700">{rooms.length}</span>
-        </div>
-        <div className="mt-3">
-          {rooms.length === 0 ? (
-            <p className="text-sm text-gray-400 py-4 text-center">No rooms added</p>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {rooms.map((room) => (
-                <span key={room.id} className="inline-flex items-center rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-sm text-gray-700">
-                  {room.name}{room.floor !== null && <span className="ml-1.5 text-xs text-gray-400">· Floor {room.floor}</span>}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ── Add Maintenance Task Modal ──────────────────────── */}
-      <AddMaintenanceTaskModal
-        open={showAddMaintenance}
-        onClose={() => setShowAddMaintenance(false)}
+      <AddRoomModal
+        opened={addRoomOpen}
+        onClose={() => setAddRoomOpen(false)}
         propertyId={propertyId}
-        entityName={property.name}
+        propertyName={property.name}
       />
-
-      {/* ── Delete confirmation ─────────────────────────────── */}
-      <ConfirmDialog
-        open={showDeleteConfirm}
-        onClose={() => setShowDeleteConfirm(false)}
-        onConfirm={() => deleteMutation.mutate()}
-        title="Delete Property"
-        message={`Are you sure you want to delete "${property.name}"? This will also remove associated data. This cannot be undone.`}
-        confirmLabel="Delete Property"
-        loading={deleteMutation.isPending}
+      <AddThingModal
+        opened={addThingOpen}
+        onClose={() => setAddThingOpen(false)}
+        propertyId={propertyId}
+        propertyName={property.name}
+        rooms={rooms}
+        defaultRoomId={addThingRoomId}
       />
     </DetailPageLayout>
   );

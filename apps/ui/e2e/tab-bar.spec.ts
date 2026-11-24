@@ -132,12 +132,108 @@ for (const width of [375, 390]) {
       await expect(page).toHaveURL(/\/dashboard\/bills$/);
       await expect(sheet).toBeHidden();
 
-      // The account row opens the account menu (with the logout form).
+      // The account row opens the account menu — the phone's bottom sheet — with
+      // the identity header and the logout form (#5198).
       await more.click();
       await sheet.getByRole("button", { name: /Account & log out/ }).click();
       await expect(sheet).toBeHidden();
-      await expect(page.getByRole("menu")).toBeVisible();
-      await expect(page.getByRole("menuitem", { name: "Log out" })).toBeVisible();
+      const account = page.getByRole("dialog", { name: /Account menu for/ });
+      await expect(account).toBeVisible();
+      await expect(account.getByRole("button", { name: "Log out" })).toBeVisible();
+      await expect(account.getByRole("link", { name: "Profile" })).toBeVisible();
+    });
+  });
+}
+
+/**
+ * #5408 defect 2: a page with a floating action button must leave room for it at
+ * the bottom. The tab bar was allowed for (Mantine pads <main> by the footer
+ * height) and the FAB was not, so its 56 px square sat on the last card and a
+ * tap there hit the button instead of the card.
+ *
+ * Asserted as measured geometry, not as a class name: scroll to the end, then
+ * require that nothing in <main> is left under the FAB and that a hit test at
+ * the lowest content corner does not land on the button. Runs at 320 px too,
+ * where the ticket says it was worst.
+ */
+for (const width of [390, 320]) {
+  test.describe(`FAB clearance ${width}px`, () => {
+    test.use({ viewport: { width, height: 844 } });
+    test.beforeEach(() => onlyOn("phone"));
+
+    test("the last card clears the FAB and the tab bar", async ({ loggedInPage: page }) => {
+      // Lists is the clearer case: eight list cards in three kind sections, so
+      // the page scrolls well past one screen and the FAB sits over the last one.
+      await page.route(/\/bff\/lists(\?.*)?$/, (route) =>
+        route.fulfill({
+          json: {
+            data: Array.from({ length: 8 }, (_, i) => ({
+              id: `lst-${i}`,
+              household_id: "h1",
+              name: `List number ${i + 1}`,
+              kind: ["grocery", "chores", "todo"][i % 3],
+              entity_type: null,
+              entity_id: null,
+              is_template: false,
+              archived: false,
+              item_count: 4,
+              open_count: (i % 4) + 1,
+              created_at: "2026-11-10T00:00:00Z",
+              updated_at: "2026-11-18T16:00:00Z",
+            })),
+          },
+        }),
+      );
+      await page.goto("/dashboard/lists");
+      const fab = page.getByTestId("lists-fab");
+      await expect(fab).toBeVisible();
+
+      const report = await page.evaluate(async () => {
+        for (let i = 0; i < 4; i++) {
+          window.scrollTo(0, document.documentElement.scrollHeight);
+          await new Promise((r) => setTimeout(r, 60));
+        }
+        const main = document.querySelector("main")!;
+        const fabEl = main.querySelector("[data-floating-action]")!;
+        const fabBtn = (fabEl.querySelector("button") ?? fabEl) as HTMLElement;
+        const f = fabBtn.getBoundingClientRect();
+        const bar = document.querySelector('[data-testid="tab-bar"]')!.getBoundingClientRect();
+
+        // Every content box still overlapping either overlay.
+        const covered: string[] = [];
+        let lowest: DOMRect | null = null;
+        for (const el of Array.from(main.querySelectorAll("a, li, article, div, section"))) {
+          const r = el.getBoundingClientRect();
+          if (r.width < 120 || r.height < 40) continue;
+          if (fabEl === el || fabEl.contains(el) || el.contains(fabEl)) continue;
+          if (!(el.textContent || "").trim()) continue;
+          if (!lowest || r.bottom > lowest.bottom) lowest = r;
+          if (r.bottom > f.top + 0.5 && r.right > f.left && r.top < f.bottom) {
+            covered.push(`under the FAB: ${(el.textContent || "").trim().slice(0, 30)}`);
+          }
+          if (r.bottom > bar.top + 0.5) {
+            covered.push(`under the bar: ${(el.textContent || "").trim().slice(0, 30)}`);
+          }
+        }
+        // And what a tap at the lowest content corner would actually hit.
+        let tapHits = "nothing";
+        if (lowest) {
+          const px = Math.min(lowest.right - 10, f.x + f.width / 2);
+          const py = Math.min(lowest.bottom - 6, f.y + f.height / 2);
+          const top = document.elementFromPoint(px, py) as HTMLElement | null;
+          tapHits = top === fabBtn || fabBtn.contains(top) ? "the FAB" : (top?.tagName ?? "nothing");
+        }
+        return {
+          covered,
+          tapHits,
+          gapBelowLowest: lowest ? Math.round(f.top - lowest.bottom) : null,
+        };
+      });
+
+      expect(report.covered, report.covered.join("; ")).toEqual([]);
+      expect(report.tapHits, "a tap at the last card's corner must not hit the FAB").not.toBe("the FAB");
+      // There is real room, not a 1 px graze.
+      expect(report.gapBelowLowest!).toBeGreaterThan(0);
     });
   });
 }

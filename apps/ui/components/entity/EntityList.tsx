@@ -314,7 +314,7 @@ export default function EntityList({
 
       {isLoading && (
         <div
-          aria-busy="true"
+          role="status" aria-busy="true"
           aria-label={`Loading ${title.toLowerCase()}`}
           className={cardView ? "grid gap-3 sm:grid-cols-2 lg:grid-cols-3" : "space-y-2"}
         >

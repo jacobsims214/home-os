@@ -3,6 +3,7 @@ package household
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +137,17 @@ func TestFamilyOverview(t *testing.T) {
 		}
 		if len(ov.HowTo) < 5 || len(ov.HowTo) > 8 {
 			t.Errorf("how_to has %d lines, want 5-8", len(ov.HowTo))
+		}
+		// #5301: the one line that closes the F-AGENT-2 false-authorship class
+		// must stay. An agent that reads family_overview before answering is
+		// told that managed_by means a record keeps the entry, not that an
+		// assistant (this one or an earlier session) created it — which is the
+		// belief that produced "duplicates I added", and the offer to delete the
+		// family's bill view, in the war game round.
+		if !slices.ContainsFunc(ov.HowTo, func(s string) bool {
+			return strings.Contains(s, "managed_by") && strings.Contains(s, "never offer to delete")
+		}) {
+			t.Errorf("how_to no longer teaches that managed_by is a record's, not the assistant's: %v", ov.HowTo)
 		}
 		if !strings.Contains(env.Summary, f.Today) || !strings.Contains(env.Summary, "2 people") || len(env.Next) == 0 {
 			t.Errorf("summary %q next %v", env.Summary, env.Next)

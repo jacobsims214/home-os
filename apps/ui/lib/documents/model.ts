@@ -41,9 +41,13 @@ import type { FileRecord } from "@/lib/types/api";
  * (`file.Categories`): receipt, tax, insurance, medical, manual, warranty,
  * school, legal, vehicle, home, other.
  *
- * `other` means "not filed yet" rather than a category of its own: the mockup
- * never shows it as a chip unless it actually holds documents, because
- * surfacing it nags people to file things.
+ * `other` is a CATEGORY, not a synonym for "unfiled" (#5299). The column is
+ * NOT NULL DEFAULT 'other' (migration 048), the API rejects clearing it
+ * ("category cannot be null; use \"other\"") and the pickers offer it by that
+ * name — so a document whose card says "Other" has been filed as Other. Whether
+ * a document is filed at all is ONE rule, `isFiled()` below; the count, the row
+ * chip and the tints all ask it instead of comparing `category === "other"`
+ * for themselves.
  */
 export const CATEGORIES = [
   "receipt",
@@ -73,7 +77,7 @@ export const CATEGORY_LABELS: Record<Category, string> = {
   legal: "Legal",
   vehicle: "Vehicles",
   home: "Home",
-  other: "Not filed yet",
+  other: "Other",
 };
 
 /** Singular label, for one document's chip ("Receipt"). */
@@ -98,9 +102,60 @@ export function isCategory(value: string | null | undefined): value is Category 
 /**
  * A file's category, defaulting to `other` — the column's own default, and what
  * a row written before 048 (or by a client that sent nothing) really is.
+ *
+ * This is the ICON and BUCKET normaliser, not the filing rule: it can't tell
+ * "filed as Other" from "sent no category", because both draw the same glyph.
+ * Ask `isFiled()` whether a document is filed.
  */
 export function categoryOf(file: Pick<FileRecord, "category">): Category {
   return isCategory(file.category) ? file.category : "other";
+}
+
+// ─── Filed or not: THE one rule (#5299) ──────────────────────
+
+/**
+ * The chip a document with no category at all shows on its card.
+ */
+export const UNFILED_CHIP_LABEL = "No category";
+
+/**
+ * Is this document filed? THE ONE RULE (#5299).
+ *
+ * Filed means it carries one of the API's categories — and `other` IS one of
+ * them: migration 048 makes `files.category` `NOT NULL DEFAULT 'other'`, the
+ * API rejects clearing it ("category cannot be null; use \"other\"") and both
+ * pickers offer it by the name "Other". A document is unfiled only when the
+ * payload carries no category at all (a row read before 048, or a client that
+ * sent nothing, which the API stores as Other anyway).
+ *
+ * Before #5299 this question had two answers in two places: the hub counted
+ * `category === "other"` as unfiled (its tile read "Not filed yet") while
+ * `DocumentRow` printed "Other" from an independent label map — so one
+ * document was both unfiled and filed. Everything that asks the question now
+ * asks it HERE: the tile counts (`categoryCounts`), the list of unfiled ones
+ * (`unfiledDocuments`), each card's chip (`documentCategoryLabel`) and the
+ * glyph tints (`categoryTint`). "Not filed yet" is not a category name and is
+ * never printed as one: the tile for `other` says Other, like the card does.
+ */
+export function isFiled(file: Pick<FileRecord, "category">): boolean {
+  return isCategory(file.category);
+}
+
+/** The documents carrying no category at all, in list order. */
+export function unfiledDocuments<T extends Pick<FileRecord, "category">>(files: readonly T[]): T[] {
+  return files.filter((f) => !isFiled(f));
+}
+
+/**
+ * The words a CARD uses for a document's category.
+ *
+ * Decided here, once, so it cannot contradict the count a tile shows (#5299):
+ * a filed document shows its category's own name ("Other" included — that is
+ * what its picker button says too), and an unfiled one says it has no category
+ * instead of borrowing Other's name.
+ */
+export function documentCategoryLabel(file: Pick<FileRecord, "category">): string {
+  return isFiled(file) ? CATEGORY_SINGULAR[categoryOf(file)] : UNFILED_CHIP_LABEL;
 }
 
 // ─── Titles and identity ──────────────────────────────────────
@@ -138,8 +193,26 @@ export function daysBetween(from: string, to: string): number | null {
   return Math.round(ms / 86_400_000);
 }
 
-/** Today as "YYYY-MM-DD" in the browser's own calendar (what a person sees). */
-export function todayString(now: Date = new Date()): string {
+/**
+ * "YYYY-MM-DD" for one instant, in a ZONE. Kept for callers that already have
+ * the instant they mean (and for the tests that pin the local-day behaviour).
+ *
+ * NOT a source of "today" (#5316): a page's today is the FAMILY's, from
+ * `householdToday(household?.timezone)` via `useHouseholdToday()`. The
+ * `today` arguments below therefore have no default — passing the browser's
+ * day must be a deliberate act, not something a missing argument does.
+ */
+export function todayString(now: Date, timeZone?: string): string {
+  if (timeZone) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(now);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+    return `${get("year")}-${get("month")}-${get("day")}`;
+  }
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const d = String(now.getDate()).padStart(2, "0");
@@ -173,7 +246,7 @@ export interface Expiry {
   label: string;
 }
 
-export function expiryOf(file: Pick<FileRecord, "expires_on">, today: string = todayString()): Expiry {
+export function expiryOf(file: Pick<FileRecord, "expires_on">, today: string): Expiry {
   const raw = file.expires_on ?? null;
   if (!raw) return { state: "none", days: null, label: "" };
   const days = daysBetween(today, raw);
@@ -190,7 +263,7 @@ export function expiryOf(file: Pick<FileRecord, "expires_on">, today: string = t
 }
 
 /** Documents whose expiry is within the window, or already past. */
-export function isExpiring(file: Pick<FileRecord, "expires_on">, today: string = todayString()): boolean {
+export function isExpiring(file: Pick<FileRecord, "expires_on">, today: string): boolean {
   const days = file.expires_on ? daysBetween(today, file.expires_on) : null;
   return days !== null && days <= EXPIRING_WINDOW_DAYS;
 }
@@ -202,7 +275,7 @@ export function isExpiring(file: Pick<FileRecord, "expires_on">, today: string =
  */
 export function expiringSoon<T extends Pick<FileRecord, "expires_on">>(
   files: readonly T[],
-  today: string = todayString(),
+  today: string,
 ): T[] {
   return files
     .filter((f) => isExpiring(f, today))
@@ -370,16 +443,22 @@ export interface CategoryCount {
 /**
  * Per-category counts over a file list.
  *
- * `other` is included in the map so those documents are never invisible, but
- * the hub only draws a tile for it when its count is above zero (the mockup's
- * rule: other means "not filed yet", so a zero tile would only nag).
+ * Only FILED documents are counted here (`isFiled`, #5299): a document with no
+ * category at all is not an "Other" document, it is what `unfiledDocuments()`
+ * returns, and the hub notes how many of those there are. Before #5299 they
+ * were folded into `other`, which is how a card showing "Other" ended up
+ * counted as unfiled.
+ *
+ * `other` is in the map like every other category, so the hub draws its tile
+ * only when documents were really filed as Other.
  */
-export function categoryCounts(files: readonly FileRecord[], today: string = todayString()): Map<Category, CategoryCount> {
+export function categoryCounts(files: readonly FileRecord[], today: string): Map<Category, CategoryCount> {
   const out = new Map<Category, CategoryCount>();
   for (const c of CATEGORIES) out.set(c, { category: c, count: 0, expiring: 0, latest: null });
   // Newest first, so the first row seen per category is its latest.
   const sorted = [...files].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
   for (const f of sorted) {
+    if (!isFiled(f)) continue; // no category: `unfiledDocuments()` counts it, never "Other"
     const entry = out.get(categoryOf(f))!;
     entry.count += 1;
     if (isExpiring(f, today)) entry.expiring += 1;
@@ -389,7 +468,7 @@ export function categoryCounts(files: readonly FileRecord[], today: string = tod
 }
 
 /** The categories worth a tile: everything with documents, in display order. */
-export function populatedCategories(files: readonly FileRecord[], today: string = todayString()): CategoryCount[] {
+export function populatedCategories(files: readonly FileRecord[], today: string): CategoryCount[] {
   const counts = categoryCounts(files, today);
   return CATEGORIES.map((c) => counts.get(c)!).filter((c) => c.count > 0);
 }
@@ -414,7 +493,9 @@ export interface DocumentFilters {
 export function filterDocuments(files: readonly FileRecord[], filters: DocumentFilters): FileRecord[] {
   const q = (filters.q ?? "").trim().toLowerCase();
   return files.filter((f) => {
-    if (filters.category && categoryOf(f) !== filters.category) return false;
+    // Same rule as everywhere else: a document with no category is not a copy
+    // of the "other" category, so `?category=other` does not pick it up (#5299).
+    if (filters.category && (!isFiled(f) || categoryOf(f) !== filters.category)) return false;
     if (filters.personId && (f.person_id ?? "") !== filters.personId) return false;
     if (!q) return true;
     const hay = [displayTitle(f), f.name, f.description ?? "", ...(f.tags ?? [])].join(" ").toLowerCase();

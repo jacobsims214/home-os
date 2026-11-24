@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (overflow-320), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-320-overflow
+persona: designer
+surface: app-shell
+intent: |
+  Does it still hold together on a small old iPhone?
+steps:
+  - "Playwright iPhone SE emulation (320x568), signed in as amber"
+  - visit the same 9 sections
+  - "assert no horizontal overflow and check tap targets >=44px"
+assertion: |
+  No horizontal overflow at 320px and primary tap targets are at least 44px.
+tags:
+  - ui
+  - mobile
+  - layout
+  - overflow
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: overflow-320
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: pass

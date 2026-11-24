@@ -21,7 +21,9 @@
  * the page says that rather than showing an error it cannot fix.
  */
 
+import { Suspense } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { Button, Card } from "@mantine/core";
 import { IconAlertTriangle, IconArrowLeft, IconHistory, IconRefresh } from "@tabler/icons-react";
@@ -40,8 +42,44 @@ interface ActivityPage {
   next_cursor: string | null;
 }
 
+/**
+ * `useSearchParams` needs a Suspense boundary in the App Router, or the route
+ * opts into client-side rendering for the whole page (same note as
+ * dashboard/people/page.tsx and dashboard/activity's siblings).
+ */
 export default function ActivityPage() {
+  return (
+    <Suspense fallback={<ActivityLoading />}>
+      <ActivityPageBody />
+    </Suspense>
+  );
+}
+
+/** The pre-filter loading card, also used while the route's params settle. */
+function ActivityLoading() {
+  return (
+    <div className="mx-auto w-full max-w-[760px] px-4 pt-4 md:px-6 md:pt-6">
+      <Card withBorder radius="md" padding="md" aria-busy="true">
+        <div className="flex flex-col gap-3">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="h-4 animate-pulse rounded-sm bg-line" />
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function ActivityPageBody() {
   const role = useNavRole();
+  // A credential's page links here with ?entity_type=secret&entity_id=<id>
+  // (#4575): that is that credential's slice of the trail — every agent read
+  // of it. The API has filtered on entity_type/entity_id all along
+  // (activity/handler.go parseFilter); the page just never passed them on.
+  const params = useSearchParams();
+  const entityType = params.get("entity_type") ?? undefined;
+  const entityId = params.get("entity_id") ?? undefined;
+  const filtered = !!(entityType || entityId);
   // Three states, not two: the role is unknown (GET /me/households in flight),
   // known and allowed, or known and refused. Only the last one is the
   // "not your access" message — telling a viewer they may not read the feed
@@ -55,10 +93,17 @@ export default function ActivityPage() {
   const people = usePeople(canRead);
 
   const feed = useInfiniteQuery({
-    queryKey: ["activity", "all"],
+    // The filter is part of the key: a credential's trail and the whole feed
+    // are different lists and must not share a cache entry.
+    queryKey: ["activity", "all", entityType ?? "", entityId ?? ""],
     queryFn: ({ pageParam }) =>
       apiFetch<ActivityPage>("/api/v1/activity", {
-        params: { limit: PAGE_SIZE, cursor: pageParam ?? undefined },
+        params: {
+          limit: PAGE_SIZE,
+          cursor: pageParam ?? undefined,
+          entity_type: entityType,
+          entity_id: entityId,
+        },
       }),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
@@ -79,13 +124,23 @@ export default function ActivityPage() {
           className="inline-flex min-h-11 items-center gap-1.5 text-[13px] font-semibold text-accent md:min-h-0"
         >
           <IconArrowLeft size={16} stroke={NAV_ICON_STROKE} aria-hidden />
-          Today
+          {filtered ? "Back" : "Today"}
         </Link>
         {/* The shell's header already prints "Family activity" (nav-config's
             ROUTE_TITLES), so this page does not repeat it: one h1 per screen. */}
         <p className="mt-1 text-sm text-ink-2">
-          Every change in this family, newest first, with the person who made it and the assistant it came through.
+          {filtered
+            ? "Every time an agent was given this credential, newest first, with who asked and which assistant read it."
+            : "Every change in this family, newest first, with the person who made it and the assistant it came through."}
         </p>
+        {filtered && (
+          <Link
+            href="/dashboard/activity"
+            className="mt-1 inline-flex min-h-11 items-center text-[13px] font-semibold text-accent"
+          >
+            See all family activity
+          </Link>
+        )}
       </div>
 
       {known && (!canRead || forbidden) ? (
@@ -146,10 +201,13 @@ export default function ActivityPage() {
               <IconHistory size={20} stroke={NAV_ICON_STROKE} />
             </span>
             <div className="min-w-0">
-              <p className="text-[15px] font-semibold text-ink">No changes yet</p>
+              <p className="text-[15px] font-semibold text-ink">
+                {filtered ? "No agent has used this credential yet" : "No changes yet"}
+              </p>
               <p className="mt-0.5 text-[13px] leading-snug text-ink-3">
-                Every create, update and delete in this family lands here with who did it. It starts filling as soon as
-                anyone — or their assistant — changes something.
+                {filtered
+                  ? "Each time an agent reads this credential, a row appears here: who asked, which assistant, and when. Nothing here means nothing has been read."
+                  : "Every create, update and delete in this family lands here with who did it. It starts filling as soon as anyone — or their assistant — changes something."}
               </p>
             </div>
           </div>

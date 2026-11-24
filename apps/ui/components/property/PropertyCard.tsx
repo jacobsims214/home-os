@@ -2,6 +2,9 @@
 
 import Link from "next/link";
 import type { PropertyResponse } from "@/types/property";
+// One implementation of the money math (#4553): the rate is a percent, so
+// dividing by 12 alone (the old code here) inflated it ~100x (#4509).
+import { hasFinancialData, monthlyCarryingCost, toNumber } from "./property-finance";
 
 interface PropertyCardProps {
   property: PropertyResponse;
@@ -39,72 +42,8 @@ const currencyFormatter = new Intl.NumberFormat("en-US", {
 });
 
 function formatCurrency(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? currencyFormatter.format(n) : null;
-}
-
-/** Parses a nullable numeric string to a finite number, or null. */
-function toNumber(value: string | null | undefined): number | null {
-  if (!value) return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-/**
- * Monthly carrying cost = amortized mortgage payment + property tax / 12 +
- * insurance / 12 + HOA. Mortgage payment uses the standard fixed-rate
- * amortization formula: M = P * (r/12) / (1 - (1+r/12)^-n). Returns null if no
- * monthly component can be computed.
- */
-function monthlyCost(p: PropertyResponse): number | null {
-  let total = 0;
-  let hasAny = false;
-
-  const amount = toNumber(p.mortgage_amount);
-  const rate = toNumber(p.mortgage_rate);
-  const termMonths = toNumber(p.mortgage_term_months);
-  if (amount !== null && rate !== null && termMonths !== null && termMonths > 0) {
-    const r = rate / 12;
-    if (r === 0) {
-      total += amount / termMonths;
-    } else {
-      total += (amount * r) / (1 - Math.pow(1 + r, -termMonths));
-    }
-    hasAny = true;
-  }
-
-  const taxAnnual = toNumber(p.property_tax_annual);
-  if (taxAnnual !== null) {
-    total += taxAnnual / 12;
-    hasAny = true;
-  }
-
-  const insuranceAnnual = toNumber(p.insurance_annual);
-  if (insuranceAnnual !== null) {
-    total += insuranceAnnual / 12;
-    hasAny = true;
-  }
-
-  const hoaMonthly = toNumber(p.hoa_fee_monthly);
-  if (hoaMonthly !== null) {
-    total += hoaMonthly;
-    hasAny = true;
-  }
-
-  return hasAny ? total : null;
-}
-
-function hasFinancialData(p: PropertyResponse): boolean {
-  return Boolean(
-    p.current_value ||
-      p.mortgage_amount ||
-      p.property_tax_annual ||
-      p.insurance_annual ||
-      p.hoa_fee_monthly ||
-      p.purchase_price ||
-      p.down_payment,
-  );
+  const n = toNumber(value);
+  return n === null ? null : currencyFormatter.format(n);
 }
 
 function CountBadge({ label, count }: { label: string; count: number }) {
@@ -122,7 +61,7 @@ export default function PropertyCard({
   maintenanceCount,
 }: PropertyCardProps) {
   const currentValue = formatCurrency(property.current_value);
-  const monthly = monthlyCost(property);
+  const monthly = monthlyCarryingCost(property);
   const showFinancials = hasFinancialData(property);
   const showCounts =
     roomCount !== undefined || assetCount !== undefined || maintenanceCount !== undefined;

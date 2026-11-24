@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-jacob.md (xmas), #4584.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-unbounded-event-search
+persona: jacob
+surface: calendar
+intent: |
+  Is the Christmas tree outing on the calendar?
+steps:
+  - chat.sh jacob wg-jacob-xmas --file msg (is the Christmas tree thing on the calendar?)
+  - mcpcall.py event_find --query Christmas as jacob (no from/to)
+assertion: |
+  A bare-query event search covers all dates, so an event weeks away is found; a 'not
+  on the calendar' answer is only given when the search actually covered the date
+  range.
+tags:
+  - calendar
+  - agent
+  - search-window
+origin:
+  round: r2
+  source: discoveries/war-game-r2-jacob.md
+  ref: xmas
+  ticket: "#4584"
+  date: "2026-11-18"
+  verdict: pass

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"home-os/api/internal/invite"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchsweep"
 	"home-os/api/internal/seed"
 	"home-os/api/pkg/apierr"
 	"home-os/api/pkg/smtp"
@@ -116,6 +118,22 @@ func main() {
 	if err := searchClient.InitCollection(ctx); err != nil {
 		slog.Warn("search: failed to initialize collection", "error", err)
 	}
+
+	// Reconcile the index with Postgres on a timer (#5298). Records reach the
+	// database through four writers — these REST handlers, the MCP, CalDAV and
+	// the worker — and only the REST handlers index on write, so the index
+	// drifts by design. The sweep re-derives it from the source of truth, which
+	// is also what backfills a deployment that predates this change. It runs in
+	// the background and never fails startup: the index keeps its previous
+	// contents and the next tick retries.
+	sweepCtx, stopSweep := context.WithCancel(ctx)
+	defer stopSweep()
+	go func() {
+		job := searchsweep.New(pool, searchClient, time.Duration(cfg.SearchReconcileSeconds)*time.Second)
+		if err := job.Run(sweepCtx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("search sweep exited", "error", err)
+		}
+	}()
 
 	// Create the chi router and apply middleware.
 	r := chi.NewRouter()
@@ -245,6 +263,9 @@ func main() {
 		slog.Info("shutting down gracefully...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		// Stop the search sweep before the pool closes, so an in-flight
+		// reconcile cannot use a closed connection.
+		stopSweep()
 		pool.Close()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("shutdown error", "error", err)

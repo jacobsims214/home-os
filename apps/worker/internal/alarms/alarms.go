@@ -69,6 +69,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/icalx"
+	"home-os/notify"
 )
 
 const (
@@ -84,7 +85,9 @@ const (
 	// NotificationType is written on every alarm notification; EntityType
 	// names what it is about (the calendar object), the same reference the
 	// item_changed notifications of migration 054 use for events.
-	NotificationType = "calendar_alarm"
+	// NotificationType is the vocabulary's value (home-os/notify, 079): the
+	// database refuses anything outside it, so it is not a literal here.
+	NotificationType = string(notify.TypeCalendarAlarm)
 	EntityType       = "calendar_event"
 
 	// advisoryLockKey serialises runs across worker replicas.

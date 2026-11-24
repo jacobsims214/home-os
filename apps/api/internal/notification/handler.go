@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -11,6 +12,7 @@ import (
 	"home-os/api/internal/middleware"
 	"home-os/api/pkg/apierr"
 	"home-os/api/pkg/smtp"
+	"home-os/notify"
 )
 
 // Handler holds the dependencies needed by notification HTTP handlers.
@@ -110,6 +112,15 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	if req.Type == "" || req.Title == "" {
 		apierr.BadRequest(w, "type and title are required")
+		return
+	}
+	// notifications.type is the notification_type domain (migration 079): the
+	// database refuses a value outside it, and this handler is the one path
+	// where a CALLER chooses the type, so it answers with the allowed list
+	// instead of a constraint violation. Every other writer is code that uses
+	// home-os/notify's constants and cannot get here with a bad value.
+	if !notify.Type(req.Type).Valid() {
+		apierr.BadRequest(w, "type must be one of: "+strings.Join(notify.Names(), ", "))
 		return
 	}
 

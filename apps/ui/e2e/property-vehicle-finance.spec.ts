@@ -140,13 +140,14 @@ test("property: linked loans and bills are listed; editing sends no legacy finan
   await snap(page, testInfo, "property-1280");
 
   await main.getByRole("button", { name: "Edit" }).click();
-  await main.getByText("Financial Details").first().click();
+  // #4578 rebuilt the form: the legacy finance inputs are gone, not hidden in a
+  // collapsed "Financial Details" block, and Save is the layout's own button.
   for (const label of ["Mortgage Amount", "Mortgage Rate (%)", "Property Tax (annual)", "Insurance (annual)", "Insurance Provider", "HOA Fee (monthly)"]) {
     await expect(main.getByText(label, { exact: true })).toHaveCount(0);
   }
-  const nameInput = main.getByPlaceholder("Main Residence");
+  const nameInput = main.getByRole("textbox", { name: "Name" });
   await nameInput.fill("Lake Cabin North");
-  await main.getByRole("button", { name: "Save Changes" }).click();
+  await main.getByRole("button", { name: "Save", exact: true }).click();
 
   await expect.poll(() => writes.propertyPuts.length).toBe(1);
   const body = writes.propertyPuts[0];

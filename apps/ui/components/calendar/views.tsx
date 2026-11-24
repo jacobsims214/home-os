@@ -622,7 +622,7 @@ export function CalendarError({ what, onRetry }: { what: string; onRetry: () => 
 /** Skeleton rows, only in the content area (the shell and controls stay up). */
 export function CalendarSkeleton({ rows = 4 }: { rows?: number }) {
   return (
-    <div className="overflow-hidden rounded-token-md border border-line bg-surface" aria-busy="true" data-testid="calendar-skeleton">
+    <div className="overflow-hidden rounded-token-md border border-line bg-surface" role="status" aria-busy="true" data-testid="calendar-skeleton">
       {Array.from({ length: rows }).map((_, i) => (
         <div key={i} className="flex items-center gap-3 border-b border-line px-3.5 py-3.5 last:border-b-0">
           <span className="h-3.5 w-12 rounded bg-line" />

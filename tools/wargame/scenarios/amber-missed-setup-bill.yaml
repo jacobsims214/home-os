@@ -1,0 +1,43 @@
+# War-game scenario - written for R4 from #5505 (household reality); not played yet.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+#
+# The trap the autopay epic exists for, and the bill the seed plants on purpose:
+# "Maple Family Dental - crown balance", $412.00, due in 3 days, autopay OFF and
+# no account on record. AttentionFor says needs_setup; AdviceFor's message must
+# name BOTH missing halves, not merely that the bill is due.
+id: amber-missed-setup-bill
+persona: amber
+surface: money
+intent: |
+  The dental bill is due in a few days and nothing was ever set up to pay it. How
+  is it supposed to get paid?
+steps:
+  - "open the Bills list as amber at 390x844 and find the Maple Family Dental row"
+  - "read that row's data-attention and badge label, then open the bill's own page"
+  - "read data-testid=bill-autopay-account and the line under the autopay switch"
+  - "mcpcall.py bill_find with query 'Maple Family Dental' as amber"
+  - "mcpcall.py notification_find as amber once the bill-reminder tick has run"
+assertion: |
+  bill_find returns exactly one row: attention "needs_setup", autopay false, no
+  payment_account key at all, amount 412.00, days_until_due 3. The list row's
+  data-attention is "needs_setup" and its badge reads "Needs setup" - not "Due
+  soon", not "Automatic". On the bill's page, data-testid=bill-autopay-account
+  says no account is on record rather than only printing the due date.
+  notification_find holds at most one row whose about_id is that bill, its
+  needs_you is true, and its body names what is MISSING: the body contains the
+  substring "autopay is off" and the substring "no account is set", alongside the
+  amount and due date. A notification that says only that the bill is due, or
+  gives only an amount and a date, fails this scenario.
+tags:
+  - money
+  - attention
+  - needs-setup
+  - notifications
+  - honesty
+origin:
+  round: r4
+  source: "#5505"
+  ref: household-reality/2
+  ticket: "#5505"
+  date: "2026-11-23"
+  verdict: untested

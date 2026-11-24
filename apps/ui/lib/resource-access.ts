@@ -79,6 +79,10 @@ const ENTITY_RESOURCES: Readonly<Record<string, string>> = {
   meal_plan: "meals",
   meal_feedback: "meals",
   guide: "guides",
+  // #5503: the family reference. Unknown kinds fail closed to the family roles,
+  // so without this row a housesitter's own search would drop the router doc
+  // they are allowed to read.
+  kb_doc: "kb",
 };
 
 /** Read grants per resource (roles.go policy[x].read). Missing: nobody. */
@@ -103,6 +107,9 @@ const READ_GRANTS: Readonly<Record<string, readonly Role[]>> = {
   meals: SITTERS,
   calendar: SITTERS,
   guides: SITTERS,
+  // ResKB read: rolesEveryone (roles.go:275). Every role reads the KB, a
+  // housesitter included — the babysitter needs the router doc.
+  kb: ROLES as readonly Role[],
 };
 
 function isRole(role: string | null | undefined): role is Role {

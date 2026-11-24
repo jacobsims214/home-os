@@ -65,9 +65,6 @@ type toolHandler = func(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 var (
 	fullRoles   = map[string]bool{"owner": true, "family_manager": true, "family_member": true}
 	viewerRoles = map[string]bool{"viewer": true}
-	// viewerHidden are the entity types a viewer never sees, as a row or as
-	// the parent of a row.
-	viewerHidden = []string{"secret"}
 )
 
 // kind is how one activity_log.entity_type reads in output.
@@ -240,9 +237,14 @@ func NewActivityFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 		}
 		var hidden []string
 		switch {
-		case fullRoles[role]:
-		case viewerRoles[role]:
-			hidden = viewerHidden
+		case fullRoles[role], viewerRoles[role]:
+			// What this role may not see, from the ONE policy table, not a
+			// hand-written list. The list was ["secret"] and stayed that way
+			// when 086 (#5518) added the membership audit -- which a viewer and
+			// a family_member must not read, because a demotion is not family
+			// news. Deriving it means a kind added to the policy is hidden
+			// here without anyone remembering this line.
+			hidden = auth.HiddenEntityKinds(role)
 		default:
 			return respond.Fail(respond.Error{
 				Message: fmt.Sprintf("The %s role can't see the family's change history.", roleLabel(role)),

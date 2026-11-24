@@ -3,6 +3,7 @@ package vendors
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"home-os/api/internal/auth"
 	"home-os/api/internal/middleware"
 	"home-os/api/internal/search"
 	"home-os/api/pkg/apierr"
@@ -82,7 +84,11 @@ func (h *Handler) deleteVendorIndex(ctx context.Context, id string) {
 // --- request / response types ---
 
 type createVendorRequest struct {
-	Name      string   `json:"name"`
+	Name string `json:"name"`
+	// Kind is what the row is for (080, #5529): service_provider (default),
+	// payee or both. A contacts-path client omits it and gets
+	// service_provider, which is where a contact belongs.
+	Kind      string   `json:"kind"`
 	Trades    []string `json:"trades"`
 	Specialty *string  `json:"specialty"`
 	Phone     *string  `json:"phone"`
@@ -96,7 +102,11 @@ type createVendorRequest struct {
 // (or null) trades keep the stored trades, [] clears them; an omitted
 // address keeps the stored one, null or "" clears it.
 type updateVendorRequest struct {
-	Name      string    `json:"name"`
+	Name string `json:"name"`
+	// Kind reclassifies the row (080, #5529). A pointer so an omitted kind
+	// keeps the stored one -- a client that predates 080 must never silently
+	// reset a payee back to service_provider.
+	Kind      *string   `json:"kind"`
 	Trades    *[]string `json:"trades"`
 	Specialty *string   `json:"specialty"`
 	Phone     *string   `json:"phone"`
@@ -107,25 +117,38 @@ type updateVendorRequest struct {
 }
 
 type vendorResponse struct {
-	ID          string   `json:"id"`
-	HouseholdID string   `json:"household_id"`
-	Name        string   `json:"name"`
-	Trades      []string `json:"trades"`
-	Specialty   *string  `json:"specialty,omitempty"`
-	Phone       *string  `json:"phone,omitempty"`
-	Email       *string  `json:"email,omitempty"`
-	Website     *string  `json:"website,omitempty"`
-	Address     *string  `json:"address,omitempty"`
-	Notes       *string  `json:"notes,omitempty"`
-	CreatedAt   string   `json:"created_at"`
-	UpdatedAt   string   `json:"updated_at"`
+	ID          string `json:"id"`
+	HouseholdID string `json:"household_id"`
+	Name        string `json:"name"`
+	// Kind is "service_provider", "payee" or "both" (080, #5529).
+	Kind      string   `json:"kind"`
+	Trades    []string `json:"trades"`
+	Specialty *string  `json:"specialty,omitempty"`
+	Phone     *string  `json:"phone,omitempty"`
+	Email     *string  `json:"email,omitempty"`
+	Website   *string  `json:"website,omitempty"`
+	Address   *string  `json:"address,omitempty"`
+	Notes     *string  `json:"notes,omitempty"`
+	// PortalLoginStored says a payee portal login is on file for this vendor
+	// (075, #5497). It is the credential fact only -- never the uuid, never the
+	// username, never the password -- and it is ABSENT for a role the credential
+	// policy excludes (a viewer, a housesitter, a vendor), so the response
+	// cannot be used to tell "no login" from "not allowed to know".
+	PortalLoginStored *bool `json:"portal_login_stored,omitempty"`
+	// PortalSecretID is the linked credential's ID (never a credential): the
+	// handle the vault needs to open it. Same credential gate as
+	// PortalLoginStored, so it is absent for a viewer.
+	PortalSecretID *string `json:"portal_secret_id,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
 }
 
-func toVendorResponse(v *Vendor) vendorResponse {
-	return vendorResponse{
+func toVendorResponse(v *Vendor, role string) vendorResponse {
+	r := vendorResponse{
 		ID:          v.ID.String(),
 		HouseholdID: v.HouseholdID.String(),
 		Name:        v.Name,
+		Kind:        v.Kind,
 		Trades:      nonNil(v.Trades),
 		Specialty:   v.Specialty,
 		Phone:       v.Phone,
@@ -136,12 +159,25 @@ func toVendorResponse(v *Vendor) vendorResponse {
 		CreatedAt:   v.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   v.UpdatedAt.Format(time.RFC3339),
 	}
+	// The credential fact follows the EXISTING credential policy --
+	// auth.ResSecrets, which is family only -- asked through auth.Can rather
+	// than by naming roles here. A viewer reads vendors (ResVendors) and must
+	// still not learn that a portal login exists.
+	if auth.Can(role, auth.ResSecrets, auth.ActRead) {
+		stored := v.PortalSecretID != nil
+		r.PortalLoginStored = &stored
+		if v.PortalSecretID != nil {
+			id := v.PortalSecretID.String()
+			r.PortalSecretID = &id
+		}
+	}
+	return r
 }
 
-func toVendorResponses(vendors []*Vendor) []vendorResponse {
+func toVendorResponses(vendors []*Vendor, role string) []vendorResponse {
 	out := make([]vendorResponse, 0, len(vendors))
 	for _, v := range vendors {
-		out = append(out, toVendorResponse(v))
+		out = append(out, toVendorResponse(v, role))
 	}
 	return out
 }
@@ -156,9 +192,24 @@ func householdID(r *http.Request) (uuid.UUID, error) {
 }
 
 // List returns the vendors for the authenticated household.
-// GET /api/v1/vendors[?trade=plumber]
+// GET /api/v1/vendors[?trade=plumber][&kind=payee]
+//
 // trade is normalized like stored trades ("Plumbing" finds plumber) and
 // matched exactly; blank means no filter.
+//
+// kind (080, #5529) chooses WHICH list, and the two lists do not mix:
+//
+//	(none)             the contacts list -- everyone who does work. This is
+//	                   the default and it excludes payee-only rows, so the
+//	                   list of plumbers and gardeners never fills with
+//	                   utilities and mortgage servicers.
+//	service_provider   the same contacts list, named explicitly.
+//	payee              the bill payee picker -- payee and both, never a
+//	                   gardener who is not also paid.
+//	both               only rows that are both.
+//
+// An unrecognised kind is a 400, not a silent fallback: a client that
+// mistypes must not be handed the contacts list and think it has payees.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	hid, err := householdID(r)
 	if err != nil {
@@ -172,14 +223,20 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vendors, err := h.repo.List(r.Context(), hid, trade)
+	kind, msg := normalizeKindFilter(r.URL.Query().Get("kind"))
+	if msg != "" {
+		apierr.BadRequest(w, msg)
+		return
+	}
+
+	vendors, err := h.repo.List(r.Context(), hid, trade, kind)
 	if err != nil {
 		apierr.InternalError(w, err)
 		return
 	}
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
-		"data": toVendorResponses(vendors),
+		"data": toVendorResponses(vendors, middleware.Role(r)),
 	})
 }
 
@@ -209,7 +266,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
-		"data": toVendorResponse(vendor),
+		"data": toVendorResponse(vendor, middleware.Role(r)),
 	})
 }
 
@@ -233,6 +290,11 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	kind, msg := normalizeKind(req.Kind)
+	if msg != "" {
+		apierr.BadRequest(w, msg)
+		return
+	}
 	trades, msg := normalizeTrades(req.Trades)
 	if msg != "" {
 		apierr.BadRequest(w, msg)
@@ -246,6 +308,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	v := &Vendor{
 		Name:      req.Name,
+		Kind:      kind,
 		Trades:    trades,
 		Specialty: req.Specialty,
 		Phone:     req.Phone,
@@ -264,7 +327,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	h.indexVendor(r.Context(), created)
 
 	apierr.JSON(w, http.StatusCreated, map[string]any{
-		"data": toVendorResponse(created),
+		"data": toVendorResponse(created, middleware.Role(r)),
 	})
 }
 
@@ -299,9 +362,17 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		apierr.BadRequest(w, msg)
 		return
 	}
+	var kind string
+	if req.Kind != nil {
+		if kind, msg = normalizeKind(*req.Kind); msg != "" {
+			apierr.BadRequest(w, msg)
+			return
+		}
+	}
 
 	v := &Vendor{
 		Name:      req.Name,
+		Kind:      kind, // "" keeps the stored kind (see updateVendorRequest)
 		Specialty: req.Specialty,
 		Phone:     req.Phone,
 		Email:     req.Email,
@@ -331,7 +402,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	h.indexVendor(r.Context(), updated)
 
 	apierr.JSON(w, http.StatusOK, map[string]any{
-		"data": toVendorResponse(updated),
+		"data": toVendorResponse(updated, middleware.Role(r)),
 	})
 }
 
@@ -404,6 +475,30 @@ func normalizeAddress(in *string) (*string, string) {
 	return &a, ""
 }
 
+// --- kind (080, #5529) ---
+
+// normalizeKind validates a kind on a write. Blank means "not given": on
+// create the database default (service_provider) applies, on update the
+// stored kind is kept. Anything else must be an enum value.
+func normalizeKind(k string) (string, string) {
+	k = strings.ToLower(strings.TrimSpace(k))
+	if k == "" || ValidKind(k) {
+		return k, ""
+	}
+	return "", "kind must be service_provider, payee or both"
+}
+
+// normalizeKindFilter validates the ?kind= list filter. Blank is the
+// contacts list, which is the pre-080 behaviour.
+func normalizeKindFilter(k string) (string, string) {
+	k = strings.ToLower(strings.TrimSpace(k))
+	switch k {
+	case "", KindServiceProvider, KindPayee, KindBoth:
+		return k, ""
+	}
+	return "", "kind must be service_provider, payee or both"
+}
+
 // --- trades ---
 
 const (
@@ -466,4 +561,56 @@ func normalizeTrades(in []string) ([]string, string) {
 		return nil, "at most 20 trades per vendor"
 	}
 	return out, ""
+}
+
+// LinkPortalSecret attaches or detaches the payee portal login for a vendor.
+// PUT /api/v1/vendors/{id}/portal-secret
+//
+// The body carries a SECRET UUID AND NOTHING ELSE. The credential itself was
+// encrypted in the browser and posted to /api/v1/secrets; this route never sees
+// a plaintext, a ciphertext or a password, which is what lets the UI show
+// "portal login stored" without the server ever knowing the login.
+func (h *Handler) LinkPortalSecret(w http.ResponseWriter, r *http.Request) {
+	hid, err := householdID(r)
+	if err != nil {
+		apierr.Forbidden(w, "missing household context")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		apierr.BadRequest(w, "invalid vendor id")
+		return
+	}
+	var req struct {
+		SecretID *string `json:"secret_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierr.BadRequest(w, "invalid request body")
+		return
+	}
+	var secretID *uuid.UUID
+	if req.SecretID != nil && *req.SecretID != "" {
+		parsed, perr := uuid.Parse(*req.SecretID)
+		if perr != nil {
+			apierr.BadRequest(w, "invalid secret_id")
+			return
+		}
+		secretID = &parsed
+	}
+	vendor, err := h.repo.SetPortalSecret(r.Context(), hid, id, secretID)
+	if errors.Is(err, ErrSecretNotFound) {
+		apierr.BadRequest(w, "that credential is not one of this family's — save it in the vault first")
+		return
+	}
+	if err != nil {
+		apierr.InternalError(w, err)
+		return
+	}
+	if vendor == nil {
+		apierr.NotFound(w, "vendor not found")
+		return
+	}
+	apierr.JSON(w, http.StatusOK, map[string]any{
+		"data": toVendorResponse(vendor, middleware.Role(r)),
+	})
 }

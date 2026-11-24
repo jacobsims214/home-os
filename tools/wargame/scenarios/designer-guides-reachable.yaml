@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (feature-1), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-guides-reachable
+persona: designer
+surface: guides
+intent: |
+  A parent standing at the router should be able to find the guide.
+steps:
+  - open the app at 390px as amber
+  - open the More sheet and the hamburger drawer
+  - "search the dashboard DOM for any href containing 'guides'"
+assertion: |
+  There is a navigation path (tab bar, More sheet or drawer) to /dashboard/guides.
+tags:
+  - ui
+  - mobile
+  - navigation
+  - discoverability
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: feature-1
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: fail

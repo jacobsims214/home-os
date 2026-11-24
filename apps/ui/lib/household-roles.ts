@@ -32,6 +32,43 @@ export function householdRoleLabel(role: string | null | undefined): string {
 }
 
 /**
+ * A word's indefinite article, chosen by the SOUND of its first syllable, not
+ * its spelling: "an owner", "a family manager", "a user", "a one-off".
+ *
+ * Two closed lists cover every English spelling that breaks the "vowel letter ⇒
+ * an" rule, because they are a handful and guessing at them per call site is how
+ * "a owner" shipped (#5300):
+ *  - silent H (the h is not pronounced, so the word starts on its vowel):
+ *    hour, honest, honor/honour, heir;
+ *  - a vowel LETTER said as a consonant (yoo-/w-/wun-): uni-, use-, usu-, uti-,
+ *    ure-, uro-, ubiq-, eu-, ewe-, one-, once-.
+ * Acronyms and numbers are outside this helper's job.
+ */
+export function indefiniteArticle(word: string): "a" | "an" {
+  const w = word.trim().toLowerCase();
+  if (w === "") return "a";
+  if (/^(hour|honest|honor|honour|heir)/.test(w)) return "an";
+  if (/^(uni|use|usu|uti|ure|uro|ubiq|eu|ewe|one\b|once\b)/.test(w)) return "a";
+  return /^[aeiou]/.test(w) ? "an" : "a";
+}
+
+/**
+ * A role with its indefinite article, for prose: "an owner", "a family
+ * manager". The label is lowercased, because the phrase is used mid-sentence
+ * ("you're an owner here"); `capitalised` gives the sentence-start form
+ * ("An owner can change it").
+ */
+export function householdRoleWithArticle(
+  role: string | null | undefined,
+  { capitalised = false }: { capitalised?: boolean } = {},
+): string {
+  const label = householdRoleLabel(role).toLowerCase();
+  const article = indefiniteArticle(label);
+  if (capitalised) return `${article.charAt(0).toUpperCase()}${article.slice(1)} ${label}`;
+  return `${article} ${label}`;
+}
+
+/**
  * The switching row's second line: the role this person holds here, and whether
  * this is the one they are in. Text, not colour alone, so the selected family is
  * readable without the accent tint. Kept short so it never wraps a 64 px row.

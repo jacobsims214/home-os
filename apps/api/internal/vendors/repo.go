@@ -25,13 +25,35 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 // non-empty trade (already normalized, see NormalizeTrade) keeps only the
 // vendors that have that trade; the containment test is served by the GIN
 // index on vendors.trades (043).
-func (r *Repo) List(ctx context.Context, householdID uuid.UUID, trade string) ([]*Vendor, error) {
+//
+// kind (080, #5529) picks WHICH list is being asked for, and the two lists
+// never mix:
+//
+//	""                 the contacts list: everyone who does work, i.e.
+//	                   kind <> 'payee' (service_provider and both).
+//	                   This is the default because the only creation path
+//	                   before 080 was the contacts list, so an existing
+//	                   caller keeps the set it had, minus payee-only rows.
+//	"service_provider" the same contacts list, explicitly.
+//	"payee"            the bill payee picker: kind <> 'service_provider'
+//	                   (payee and both).
+//	"both"             exactly the rows that are both.
+//
+// The household_id + kind predicate is served by idx_vendors_household_kind
+// (080).
+func (r *Repo) List(ctx context.Context, householdID uuid.UUID, trade, kind string) ([]*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, name, trades, specialty, phone, email, website, address, notes, created_at, updated_at
+		`SELECT id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, portal_secret_id, created_at, updated_at
 		 FROM vendors
-		 WHERE household_id = $1 AND ($2::text = '' OR trades @> ARRAY[$2::text])
+		 WHERE household_id = $1
+		   AND ($2::text = '' OR trades @> ARRAY[$2::text])
+		   AND CASE $3::text
+		         WHEN 'payee' THEN kind <> 'service_provider'
+		         WHEN 'both'  THEN kind = 'both'
+		         ELSE              kind <> 'payee'
+		       END
 		 ORDER BY created_at DESC`,
-		householdID, trade,
+		householdID, trade, kind,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list vendors: %w", err)
@@ -49,7 +71,7 @@ func (r *Repo) List(ctx context.Context, householdID uuid.UUID, trade string) ([
 // Returns nil if not found.
 func (r *Repo) Get(ctx context.Context, householdID, id uuid.UUID) (*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, household_id, name, trades, specialty, phone, email, website, address, notes, created_at, updated_at
+		`SELECT id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, portal_secret_id, created_at, updated_at
 		 FROM vendors WHERE id = $1 AND household_id = $2`,
 		id, householdID,
 	)
@@ -71,10 +93,10 @@ func (r *Repo) Get(ctx context.Context, householdID, id uuid.UUID) (*Vendor, err
 // Create inserts a new vendor for the given household.
 func (r *Repo) Create(ctx context.Context, householdID uuid.UUID, v *Vendor) (*Vendor, error) {
 	rows, err := r.pool.Query(ctx,
-		`INSERT INTO vendors (household_id, name, trades, specialty, phone, email, website, address, notes)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 RETURNING id, household_id, name, trades, specialty, phone, email, website, address, notes, created_at, updated_at`,
-		householdID, v.Name, nonNil(v.Trades), v.Specialty, v.Phone, v.Email, v.Website, v.Address, v.Notes,
+		`INSERT INTO vendors (household_id, name, kind, trades, specialty, phone, email, website, address, notes)
+		 VALUES ($1, $2, COALESCE(NULLIF($3::text, '')::vendor_kind, 'service_provider'), $4, $5, $6, $7, $8, $9, $10)
+		 RETURNING id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, portal_secret_id, created_at, updated_at`,
+		householdID, v.Name, v.Kind, nonNil(v.Trades), v.Specialty, v.Phone, v.Email, v.Website, v.Address, v.Notes,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create vendor: %w", err)
@@ -100,11 +122,12 @@ func (r *Repo) Update(ctx context.Context, householdID, id uuid.UUID, v *Vendor,
 		 SET name = $1, specialty = $2, phone = $3, email = $4, website = $5, notes = $6,
 		     trades = COALESCE($9::text[], trades),
 		     address = CASE WHEN $10::bool THEN address ELSE $11 END,
+		     kind = COALESCE(NULLIF($12::text, '')::vendor_kind, kind),
 		     updated_at = NOW()
 		 WHERE id = $7 AND household_id = $8
-		 RETURNING id, household_id, name, trades, specialty, phone, email, website, address, notes, created_at, updated_at`,
+		 RETURNING id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, portal_secret_id, created_at, updated_at`,
 		v.Name, v.Specialty, v.Phone, v.Email, v.Website, v.Notes,
-		id, householdID, v.Trades, keepAddress, v.Address,
+		id, householdID, v.Trades, keepAddress, v.Address, v.Kind,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update vendor: %w", err)
@@ -143,4 +166,45 @@ func nonNil(trades []string) []string {
 		return []string{}
 	}
 	return trades
+}
+
+
+// ErrSecretNotFound is returned when a portal_secret_id is not a secret of this
+// household. The composite FK (vendors_portal_secret_fkey, 075) refuses the
+// write; this error turns that refusal into a 400 a person can act on.
+var ErrSecretNotFound = errors.New("secret not found in this household")
+
+// SetPortalSecret links (or, with nil, unlinks) the payee portal login for a
+// vendor. As with payment accounts, the write is a uuid against the composite
+// FK, so a secret from another family cannot be attached even if a caller skips
+// the existence check below.
+func (r *Repo) SetPortalSecret(ctx context.Context, householdID, id uuid.UUID, secretID *uuid.UUID) (*Vendor, error) {
+	if secretID != nil {
+		var exists bool
+		if err := r.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM secrets WHERE id = $1 AND household_id = $2)`,
+			*secretID, householdID).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("check secret: %w", err)
+		}
+		if !exists {
+			return nil, ErrSecretNotFound
+		}
+	}
+	rows, err := r.pool.Query(ctx,
+		`UPDATE vendors SET portal_secret_id = $3, updated_at = NOW()
+		  WHERE id = $1 AND household_id = $2
+		 RETURNING id, household_id, name, kind, trades, specialty, phone, email, website, address, notes, portal_secret_id, created_at, updated_at`,
+		id, householdID, secretID)
+	if err != nil {
+		return nil, fmt.Errorf("link vendor portal secret: %w", err)
+	}
+	defer rows.Close()
+	v, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByPos[Vendor])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("collect vendor: %w", err)
+	}
+	return v, nil
 }

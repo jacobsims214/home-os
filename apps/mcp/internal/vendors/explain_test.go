@@ -34,7 +34,7 @@ func TestContactFindUsesVendorIDIndexes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, err := tx.Query(ctx, "EXPLAIN "+contactSelect, h.HouseholdID.String(), nil, "", "", "", "", defaultLimit, 0)
+	rows, err := tx.Query(ctx, "EXPLAIN "+contactSelect, h.HouseholdID.String(), nil, "", "", "", "", defaultLimit, 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}

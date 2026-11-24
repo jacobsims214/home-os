@@ -37,7 +37,13 @@ export default function VetPicker({ value, onChange, current, label = "Vet" }: V
 
   const vets = useQuery({
     queryKey: vetContactsKey,
-    queryFn: () => apiFetch<{ data: VetContact[] }>("/api/v1/vendors", { params: { trade: VET_TRADE } }),
+    // kind=service_provider is explicit (#5529): a vet does work for the
+    // family, so the list must never offer a payee-only row. It is also the
+    // endpoint's default, stated here so the intent survives an edit.
+    queryFn: () =>
+      apiFetch<{ data: VetContact[] }>("/api/v1/vendors", {
+        params: { trade: VET_TRADE, kind: "service_provider" },
+      }),
     enabled: open || !!value,
   });
   const list = vets.data?.data ?? [];
@@ -149,7 +155,7 @@ function VetSheet({
       <form onSubmit={submit} noValidate>
         <Stack gap="sm">
           {loading && (
-            <div aria-busy="true" aria-label="Loading vet contacts" className="space-y-2">
+            <div role="status" aria-busy="true" aria-label="Loading vet contacts" className="space-y-2">
               {[1, 2].map((i) => (
                 <Skeleton key={i} height={52} radius="md" />
               ))}

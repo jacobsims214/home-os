@@ -3,12 +3,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   CATEGORIES,
+  CATEGORY_LABELS,
+  CATEGORY_SINGULAR,
   EXPIRING_WINDOW_DAYS,
+  UNFILED_CHIP_LABEL,
   categoryCounts,
   categoryOf,
   cleanTags,
   daysBetween,
   displayTitle,
+  documentCategoryLabel,
   expiryOf,
   expiringSoon,
   fileKind,
@@ -16,6 +20,7 @@ import {
   formatDay,
   formatSize,
   isExpiring,
+  isFiled,
   parseDay,
   populatedCategories,
   rowMeta,
@@ -23,6 +28,7 @@ import {
   tagCloud,
   textState,
   todayString,
+  unfiledDocuments,
   uploaderName,
 } from "./model.ts";
 
@@ -72,9 +78,14 @@ test("formatDay and shortDay never go through a Date for a day string", () => {
   assert.equal(shortDay(null), "");
 });
 
-test("todayString is a local calendar day", () => {
+test("todayString reads the day in the zone it is given (#5316)", () => {
   assert.equal(todayString(new Date(2026, 10, 18, 0, 5)), "2026-11-18");
   assert.equal(todayString(new Date(2026, 0, 3, 23, 55)), "2026-01-03");
+  // 03:30Z is Thursday in UTC but still Wednesday 22:30 in New York. The
+  // argument-less form is the browser's day; a page must pass the household's.
+  const instant = new Date("2026-11-19T03:30:00Z");
+  assert.equal(todayString(instant, "UTC"), "2026-11-19");
+  assert.equal(todayString(instant, "America/New_York"), "2026-11-18");
 });
 
 // ─── Expiry ──────────────────────────────────────────────────
@@ -220,7 +231,11 @@ test("categoryCounts counts, flags expiring and remembers the newest", () => {
   assert.equal(counts.get("receipt").count, 2);
   assert.equal(counts.get("receipt").latest.title, "Costco", "newest first, so the newest is latest");
   assert.equal(counts.get("insurance").expiring, 1);
-  assert.equal(counts.get("other").count, 1, "an uncategorised row counts as other");
+  assert.equal(
+    counts.get("other").count,
+    0,
+    "a row with NO category is not an Other document — Other is a category, and nothing was filed as it (#5299)",
+  );
   assert.equal(counts.get("tax").count, 0);
 });
 
@@ -230,6 +245,82 @@ test("populatedCategories is the display order, only what has documents", () => 
   assert.deepEqual(cats.map((c) => c.category), ["receipt", "home"]);
   assert.deepEqual(cats.map((c) => c.count), [2, 1]);
   assert.deepEqual(populatedCategories([], TODAY), [], "an empty family gets no tiles");
+});
+
+// ─── Filed or not: the ONE rule (#5299) ─────────────────────
+//
+// The bug: the hub's "Not filed yet" count treated category "other" as
+// uncategorised, while the card printed "Other" from a separate label map. One
+// document was counted as unfiled AND displayed with a category. These tests
+// pin the rule in one place and pin the counter and the card to it, so no future
+// change can give them different answers.
+
+test("a document filed as Other is FILED — Other is a category, not a lack of one", () => {
+  // The ticket's own case: a card showing "Other".
+  assert.equal(isFiled(file({ category: "other" })), true);
+  assert.equal(documentCategoryLabel(file({ category: "other" })), "Other");
+  // Every real category is filed, by the same rule.
+  for (const category of CATEGORIES) {
+    assert.equal(isFiled(file({ category })), true, `${category} is a category, so its document is filed`);
+  }
+  // Only a payload with no category at all is unfiled, and the old bug counted
+  // that row as "other".
+  for (const category of [undefined, null, "", "not-a-category"]) {
+    assert.equal(isFiled(file({ category })), false, JSON.stringify(category));
+    assert.equal(
+      documentCategoryLabel(file({ category })),
+      UNFILED_CHIP_LABEL,
+      "an unfiled card must not borrow Other's name — that was the contradiction",
+    );
+  }
+  assert.equal(UNFILED_CHIP_LABEL, "No category");
+});
+
+test("the 'Not filed yet' count and the card's category can never disagree (#5299)", () => {
+  // The reproduction, one document per shape a real household has: an insurance
+  // policy, a document filed as Other, and one with no category at all.
+  const other = file({ id: "o", category: "other", created_at: "2026-11-14T00:00:00Z" });
+  const insurance = file({ id: "i", category: "insurance", created_at: "2026-11-13T00:00:00Z" });
+  const bare = file({ id: "b", category: "", created_at: "2026-11-12T00:00:00Z" });
+  const files = [other, insurance, bare];
+
+  const unfiled = unfiledDocuments(files);
+  const counts = categoryCounts(files, TODAY);
+
+  // THE TICKET'S SYMPTOM, asserted first: no document may be counted as "not
+  // filed yet" while its own card shows a category (Amber saw "Not filed yet
+  // 1" over a card reading "Other").
+  for (const f of files) {
+    const countedAsUnfiled = unfiled.includes(f);
+    const showsCategory = documentCategoryLabel(f) !== UNFILED_CHIP_LABEL;
+    assert.equal(
+      countedAsUnfiled,
+      !showsCategory,
+      `${f.id}: counted as not-filed=${countedAsUnfiled} but its card shows "${documentCategoryLabel(f)}" — the count and the card must agree`,
+    );
+  }
+
+  // And the counted set is exactly the documents with no category at all.
+  assert.deepEqual(unfiled.map((f) => f.id), ["b"], "only the document with no category is not filed yet");
+
+  // The Other tile is what a household sees when a document was filed as Other,
+  // and it holds exactly that document — not the uncategorised one.
+  assert.equal(counts.get("other").count, 1, "the document filed as Other has an Other tile");
+  assert.deepEqual(
+    populatedCategories(files, TODAY).map((c) => c.category),
+    ["insurance", "other"],
+    "the uncategorised document contributes no tile; Other does",
+  );
+  // The pre-#5299 shape: `other: 2` (the real Other PLUS the uncategorised one),
+  // which is how the card showing "Other" got counted as unfiled.
+  const wouldHaveBeenCountedAsOther = files.filter((f) => categoryOf(f) === "other");
+  assert.equal(wouldHaveBeenCountedAsOther.length, 2, "the old rule would have merged these two — the bug");
+});
+
+test("the Other tile is named Other, so a tile and a card never use two names for it", () => {
+  // The tile heading and the card chip are the same word for the same value.
+  assert.equal(CATEGORY_LABELS.other, CATEGORY_SINGULAR.other);
+  assert.notEqual(CATEGORY_LABELS.other, UNFILED_CHIP_LABEL, "the tile for Other is not the unfiled group's name");
 });
 
 // ─── Filtering and tags ─────────────────────────────────────

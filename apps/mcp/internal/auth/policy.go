@@ -27,10 +27,11 @@ package auth
 //     credential tools refuse, and credential records (and notes and
 //     documents attached to them) are dropped from search.
 //   - housesitter: reads pets, properties/rooms/assets, guides, vendors
-//     (contacts), calendar, lists, meals and notes; may add and check off
-//     list items and add notes on pets. People: names, relationship and
-//     allergies only. No money, vehicles, files/documents, credentials or
-//     activity feed. Search is allowed but returns only those areas.
+//     (contacts), calendar, lists, meals, notes and the knowledge base; may add
+//     and check off list items and add notes on pets. People: names,
+//     relationship and allergies only. No money, vehicles, files/documents,
+//     credentials or activity feed. Search is allowed but returns only those
+//     areas.
 //   - vendor: reads properties/rooms/assets and maintenance tasks and
 //     schedules (their own jobs when the membership is linked to a vendors
 //     row); may update a maintenance task's status, completion and notes.
@@ -52,6 +53,7 @@ type Resource string
 const (
 	ResHousehold     Resource = "household"     // the household record and the caller's households
 	ResMembers       Resource = "members"       // memberships (people who log in) and their roles
+	ResMemberAudit   Resource = "member_audit"  // the audit of membership changes (#5518)
 	ResInvites       Resource = "invites"       // invitations
 	ResAgentTokens   Resource = "agent_tokens"  // the caller's own agent tokens
 	ResAssets        Resource = "assets"        // assets
@@ -77,6 +79,7 @@ const (
 	ResMeals         Resource = "meals"         // recipes, meal plans, meal feedback
 	ResActivity      Resource = "activity"      // the family activity feed
 	ResGuides        Resource = "guides"        // guides
+	ResKB            Resource = "kb"            // the family knowledge base (kb_docs, #5502)
 	// ResPassword is the caller's own sign-in password (#4822). No MCP tool
 	// uses it; it is here so this mirror matches roles.go, which the shared
 	// fixture enforces.
@@ -159,7 +162,9 @@ var Policy = map[Resource]map[Action][]string{
 	// family_manager may change its name or timezone (#4820).
 	ResHousehold: {ActRead: rolesEveryone, ActWrite: rolesManagers},
 	ResMembers:   {ActRead: rolesSitter, ActWrite: rolesManagers},
-	ResInvites:   {ActRead: rolesManagers, ActWrite: rolesManagers},
+	// Managers only: a demotion must not be readable by the member demoted.
+	ResMemberAudit: {ActRead: rolesManagers},
+	ResInvites:     {ActRead: rolesManagers, ActWrite: rolesManagers},
 	ResAgentTokens: {
 		ActRead:       rolesEveryone, // list one's own tokens
 		ActRevoke:     rolesEveryone, // revoke one's own tokens (e.g. after a demotion)
@@ -213,6 +218,11 @@ var Policy = map[Resource]map[Action][]string{
 	ResMeals:    {ActRead: rolesSitter, ActWrite: rolesFamily, ActRateOthers: rolesManagers},
 	ResActivity: {ActRead: rolesReaders},
 	ResGuides:   {ActRead: rolesSitter, ActWrite: rolesFamily},
+
+	// The family knowledge base (#5502) is the one area EVERY role reads, a
+	// housesitter and a vendor included: its whole point is that the
+	// babysitter can find the router doc. Writes are ordinary family writes.
+	ResKB: {ActRead: rolesEveryone, ActWrite: rolesFamily},
 
 	// Changing your own sign-in password is every role's own business,
 	// including a viewer, a housesitter and a vendor (#4822). Nothing in the
@@ -277,6 +287,10 @@ var EntityResources = map[string]Resource{
 	"meal_plan":            ResMeals,
 	"meal_feedback":        ResMeals,
 	"guide":                ResGuides,
+	"kb_doc":               ResKB,
+	// 086 (#5518): the membership audit, managers only. See policy.go's
+	// ResMemberAudit and apps/api/internal/auth/roles.go.
+	"membership": ResMemberAudit,
 }
 
 // EntityResource returns the resource guarding entity kind kind, and false

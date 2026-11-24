@@ -357,6 +357,33 @@ func (r *Repo) AllForIndex(ctx context.Context, fn func(f *File, personName stri
 	return rows.Err()
 }
 
+// ForIndexInHousehold calls fn for every file of one household with its
+// person's display name. It is what searchrecon uses to rebuild that
+// household's search documents (#5298); unlike AllForIndex it never reads
+// another family's rows, so a reconcile pass cannot see them.
+func (r *Repo) ForIndexInHousehold(ctx context.Context, householdID string, fn func(f *File, personName string) error) error {
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+fileColumns+`, COALESCE(p.display_name, '')
+		 FROM files f
+		 LEFT JOIN people p ON p.id = f.person_id AND p.household_id = f.household_id
+		 WHERE f.household_id = $1::uuid`, householdID)
+	if err != nil {
+		return fmt.Errorf("files in household: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var f File
+		var person string
+		if err := rows.Scan(append(f.scanTargets(), &person)...); err != nil {
+			return fmt.Errorf("files in household: scan: %w", err)
+		}
+		if err := fn(&f, person); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 // DeleteFile removes a file, scoped to household_id. Its blob goes in the
 // same statement: the files_delete_blob AFTER DELETE trigger (migration 038)
 // deletes the file_blobs row unless another file still references it, so no

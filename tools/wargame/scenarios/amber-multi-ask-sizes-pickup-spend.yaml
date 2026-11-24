@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T13), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-multi-ask-sizes-pickup-spend
+persona: amber
+surface: notes
+intent: |
+  Three things at once: the little one's clothing size, the school pickup rules, and
+  what we spent at Home Depot.
+steps:
+  - chat.sh amber r1-mixed --file msg (three asks in one message)
+  - "mcpcall.py note_find --query 'pickup' as amber"
+  - "mcpcall.py search_all --query 'Home Depot' as amber"
+assertion: |
+  All three answers are present and sourced; where two notes disagree about pickup the
+  reply presents them side by side instead of merging them into one procedure.
+tags:
+  - notes
+  - agent
+  - multi-ask
+  - conflict
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T13
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: partial

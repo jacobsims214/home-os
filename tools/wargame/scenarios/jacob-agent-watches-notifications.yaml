@@ -1,0 +1,43 @@
+# War-game scenario - written for R4 from #5505 (household reality); not played yet.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+#
+# "Autopay means silence" is the notification policy (#5500/#5525): automatic
+# bills earn no reminder, so an agent that polls unread_only=true reports only
+# bills a person has to handle. The Homeowners insurance bill is the silence case
+# - autopay on, account linked, due in 2 days, inside the lead window a manual
+# bill would be reminded in.
+id: jacob-agent-watches-notifications
+persona: jacob
+surface: notifications
+intent: |
+  Anything I need to deal with? Check for me, I'm not opening the app.
+steps:
+  - "mcpcall.py notification_find with unread_only true as jacob (note the baseline rows)"
+  - "chat.sh jacob r4-watch --file msg (ask whether anything needs him, without naming a tool)"
+  - "mcpcall.py notification_find with unread_only true as jacob again after the turn"
+  - mcpcall.py bill_find as jacob
+assertion: |
+  Every bill the reply says needs Jacob has attention needs_setup, due_soon or
+  overdue in bill_find, and needs_you true on its notification row. No bill with
+  attention "automatic" is named as needing him - Homeowners insurance in
+  particular (autopay on, account linked, due in 2 days) is either not mentioned
+  or explicitly described as paying itself, and it has no notification row at
+  all. Every notification the reply mentions exists in notification_find before
+  or after the turn, matched by id; the count of "things needing you" equals
+  notification_find's needs_you figure, and the reply invents no notification,
+  bill or amount that is not in a tool payload. A reply that reports an empty
+  list while notification_find's needs_you is above zero fails, and so does one
+  that reports a reminder for a bill that pays itself.
+tags:
+  - notifications
+  - agent
+  - honesty
+  - autopay
+  - read-only
+origin:
+  round: r4
+  source: "#5505"
+  ref: household-reality/5
+  ticket: "#5505"
+  date: "2026-11-23"
+  verdict: untested

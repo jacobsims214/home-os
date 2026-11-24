@@ -1,0 +1,34 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U6), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-members-timezone
+persona: amber
+surface: settings
+intent: |
+  Does this thing know what time zone we're in?
+steps:
+  - open /dashboard/members as amber
+  - "read the 'This family' card"
+  - mcpcall.py family_overview as amber
+assertion: |
+  The Members page shows the household timezone that family_overview returns, and the
+  role sentence reads grammatically ('you're an owner').
+tags:
+  - settings
+  - members
+  - ui
+  - timezone
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U6
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: partial
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-amber.md
+      ref: G7
+      ticket: "#4596"
+      date: "2026-11-20"
+      verdict: pass
+      note: "'America/New_York - you're an owner'"

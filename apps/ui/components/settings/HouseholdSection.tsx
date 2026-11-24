@@ -30,9 +30,10 @@ import { IconAlertTriangle, IconCheck } from "@tabler/icons-react";
 import { apiFetch, ApiError } from "@/lib/api";
 import ColorSchemeControl from "@/components/ui/ColorSchemeControl";
 import { useCurrentHousehold, useNavRole } from "@/components/shared/use-nav-role";
+import { householdRoleWithArticle } from "@/lib/household-roles";
 import { SectionHeader, SettingsCard } from "./SettingsFrame";
 import TimezoneField from "./TimezoneField";
-import { canManageHousehold, roleLabel } from "./settings-sections";
+import { canManageHousehold } from "./settings-sections";
 import { validateTimezone } from "./timezone";
 import classes from "./settings.module.css";
 
@@ -185,7 +186,7 @@ export default function HouseholdSection() {
       ) : (
         <SettingsCard
           title="Family details"
-          description={`You're a ${roleLabel(role).toLowerCase()} here, so these are read-only. An owner or family manager can change them.`}
+          description={`You're ${householdRoleWithArticle(role)} here, so these are read-only. An owner or family manager can change them.`}
         >
           <div className={classes.readOnlyGrid}>
             <div>

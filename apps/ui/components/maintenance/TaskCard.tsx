@@ -19,23 +19,30 @@ const statusCycle: Record<
   skipped: "pending",
 };
 
-function isOverdue(task: MaintenanceTask): boolean {
+function isOverdue(task: MaintenanceTask, today: string): boolean {
   if (!task.due_date) return false;
   if (task.status === "done" || task.status === "skipped") return false;
-  return new Date(task.due_date) < new Date();
+  // Civil dates compare as strings (#5316): no browser zone can move the day.
+  return task.due_date.slice(0, 10) < today.slice(0, 10);
 }
 
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return "";
   const d = new Date(dateStr);
+  // UTC: a civil due date has no zone, so UTC cannot move it (#5316).
   return d.toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
+    timeZone: "UTC",
   });
 }
 
-export default function TaskCard({ task, onStatusChange }: TaskCardProps) {
+export default function TaskCard({
+  task,
+  today,
+  onStatusChange,
+}: TaskCardProps & { today: string }) {
   const [pending, setPending] = useState(false);
 
   const handleStatusClick = () => {
@@ -47,7 +54,7 @@ export default function TaskCard({ task, onStatusChange }: TaskCardProps) {
     setTimeout(() => setPending(false), 500);
   };
 
-  const overdue = isOverdue(task);
+  const overdue = isOverdue(task, today);
 
   return (
     <div

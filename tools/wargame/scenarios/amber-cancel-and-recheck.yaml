@@ -1,0 +1,27 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T16), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-cancel-and-recheck
+persona: amber
+surface: calendar
+intent: |
+  Cancel the well visit on the 1st and show me that week.
+steps:
+  - mcpcall.py event_find --from 2026-11-30 --to 2026-12-06 as amber (baseline the week)
+  - "chat.sh amber r1-cancel --file msg (ask: cancel the Dec 1 well visit, show that week)"
+  - mcpcall.py event_find --from 2026-11-30 --to 2026-12-06 as amber after the turn
+assertion: |
+  The event is gone from a fresh event_find, the reply's week summary lists every
+  event the baseline held (minus the cancelled one), and nothing is called overdue
+  that is not yet due.
+tags:
+  - calendar
+  - agent
+  - write
+  - verification
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T16
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: partial

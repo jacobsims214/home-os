@@ -17,6 +17,9 @@
  *
  * No JSX and no imports beyond the sibling modules, so `node --test` loads it.
  */
+// A VALUE import needs the extension for `node --test` (see the file header):
+// "is this day still open" is answered by ONE shared rule, never re-compared here.
+import { dayPosition, isTodayOrFutureDay } from "../today/days.ts";
 import type { RecipeAllergyData } from "./allergy";
 import type { Meal, Recipe } from "./types";
 
@@ -67,6 +70,12 @@ export interface WeekDay {
   /** "November 16" for the accessible label. */
   long: string;
   isToday: boolean;
+  /**
+   * The day is already gone (before the family's today). A past row is
+   * history, not an invitation: the page never asks anyone to plan dinner
+   * for it (#5305). Derived from the shared dayPosition rule, not a compare.
+   */
+  isPast: boolean;
   /** The dinner planned for this day, if any. */
   dinner: Meal | null;
   /** Meals in the other slots, for the "2 more" chip. */
@@ -103,7 +112,12 @@ export function buildWeek(start: string, meals: readonly Meal[], today: string):
       dow: d ? DOW[d.getDay()] : "",
       dayNum: d ? String(d.getDate()) : "",
       long: d ? `${MONTHS[d.getMonth()]} ${d.getDate()}` : date,
-      isToday: date === today,
+      // Both flags come from the ONE day-position rule (lib/today/days.ts), so
+      // "today" and "gone" can never disagree with each other or with another
+      // page. A plain `date === today` here would be a second comparison to keep
+      // in step, and #5305 is what happens when they drift.
+      isToday: dayPosition(date, today) === "today",
+      isPast: dayPosition(date, today) === "past",
       dinner,
       otherSlots,
     });
@@ -142,9 +156,32 @@ export function plannedDinners(days: readonly WeekDay[]): number {
   return days.filter((d) => d.dinner !== null).length;
 }
 
-/** The first empty dinner slot, or null when the week is full. */
-export function firstEmptyDay(days: readonly WeekDay[]): WeekDay | null {
-  return days.find((d) => d.dinner === null) ?? null;
+/**
+ * The first dinner still worth planning: the earliest empty slot that is TODAY
+ * or later, or null when every remaining day is planned (or the week is over).
+ *
+ * This is where #5305 was: the function returned the first empty row of the
+ * whole Mon-Sun week, so on Wednesday it answered "Monday the 16th" — two days
+ * gone — and the page asked the family to plan last Monday's dinner. "Still
+ * open" is a question about the family's today, so it is answered by the shared
+ * `isTodayOrFutureDay` rule (lib/today/days.ts) against `today`, which the
+ * caller must have taken from `householdToday(timezone)`.
+ *
+ * A week entirely in the past therefore has no next empty day, which is the
+ * truth: nothing in it can still be planned.
+ */
+export function firstEmptyDay(days: readonly WeekDay[], today: string): WeekDay | null {
+  return days.find((d) => d.dinner === null && isTodayOrFutureDay(d.date, today)) ?? null;
+}
+
+/**
+ * The first row that is today or later, for a control that needs *some* day of
+ * the week when no dinner is open (the "What's for dinner?" sheet). Null only
+ * when the whole week is past. Kept here so the page never reaches for `days[0]`
+ * and lands on a gone Monday again.
+ */
+export function firstUpcomingDay(days: readonly WeekDay[], today: string): WeekDay | null {
+  return days.find((d) => isTodayOrFutureDay(d.date, today)) ?? null;
 }
 
 /**
