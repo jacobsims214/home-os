@@ -445,6 +445,11 @@ one command rather than "run one of two".
 
 ## Running a round with `run.sh`
 
+**When** a round runs is not a judgement call: `how-to/war-game-cadence.md` sets the trigger — a
+**smoke slice** after every production deploy, a **full family year** before any release to `main`
+— and a deploy is not complete until its slice is green. Read that before deciding whether to run
+one.
+
 `./up.sh` proves the environment; `./run.sh` plays the round and scores it. One command:
 
 ```bash
