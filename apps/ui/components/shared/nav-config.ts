@@ -32,14 +32,19 @@
  */
 import type { Icon } from "@tabler/icons-react";
 import {
+  IconAddressBook,
   IconBook,
+  IconBox,
+  IconBuildingEstate,
   IconCalendar,
+  IconCar,
   IconChecklist,
   IconFiles,
   IconHome,
   IconPaw,
   IconSettings,
   IconSun,
+  IconTool,
   IconToolsKitchen,
   IconWallet,
 } from "@tabler/icons-react";
@@ -68,6 +73,12 @@ const FAMILY: readonly NavRole[] = ["owner", "family_manager", "family_member"];
 const READERS: readonly NavRole[] = [...FAMILY, "viewer"];
 /** Readers plus housesitter (calendar and meals). */
 const SITTERS: readonly NavRole[] = [...READERS, "housesitter"];
+/**
+ * Readers plus vendor: the fabric of the house. Mirrors `rolesFabric` in
+ * apps/api/internal/auth/roles.go, which is ResMaintenance's read grant — the
+ * one household resource a vendor reads and a housesitter does not.
+ */
+const FABRIC: readonly NavRole[] = [...READERS, "vendor"];
 
 export type NavSectionId =
   | "today"
@@ -76,7 +87,12 @@ export type NavSectionId =
   | "lists"
   | "documents"
   | "people"
+  | "properties"
+  | "assets"
+  | "vehicles"
   | "pets"
+  | "vendors"
+  | "maintenance"
   | "money"
   | "guides"
   | "settings";
@@ -165,27 +181,59 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     roles: READERS,
   },
   {
+    // The People page (#4565) is the family ROSTER: a person, their birthday,
+    // their allergy, whether they can sign in. The house is not inside it and
+    // never was.
+    //
+    // #5704 is the SECOND time `matches` was mistaken for reachability:
+    // /dashboard/properties, /assets, /vehicles, /vendors and /maintenance sat
+    // in this array and NOWHERE ELSE. A `matches` entry only decides which
+    // section HIGHLIGHTS a route — it draws no link — so the whole "House"
+    // half of People & House was typed-URL-only on every breakpoint while
+    // looking perfectly configured. #5696 hit the same trap with Pets; #5408
+    // with Guides (absent from this file entirely). nav-config.test.mjs now
+    // fails if any route is only a `matches` entry, so it cannot ship again.
     id: "people",
     label: "People & House",
-    // The People page (#4565) is the way in: the family comes first, the house
-    // follows from the same section (properties, vehicles, pets, vendors).
     href: "/dashboard/people",
     icon: IconHome,
     group: "household",
-    matches: [
-      "/dashboard/people",
-      // Properties led this section before the People page existed; it is
-      // still part of it now that the href is People.
-      "/dashboard/properties",
-      "/dashboard/members",
-      "/dashboard/assets",
-      "/dashboard/maintenance",
-      "/dashboard/vehicles",
-      // /dashboard/pets is NOT here: it is its own section below (#5696).
-      // A `matches` entry only makes a route highlight a section; it does not
-      // make the route reachable from any nav surface.
-      "/dashboard/vendors",
-    ],
+    // Members stays here: it is the roster's account side (invites, roles), and
+    // it is linked from Today, the family switcher and Settings > Members.
+    matches: ["/dashboard/people", "/dashboard/members"],
+  },
+  {
+    // #5704: Properties was URL-only. ResProperties read is rolesEveryone in
+    // apps/api/internal/auth/roles.go, so this section carries no `roles` — the
+    // same grant People & House has, which is also why a vendor keeps it.
+    id: "properties",
+    label: "Properties",
+    href: "/dashboard/properties",
+    icon: IconBuildingEstate,
+    group: "household",
+    matches: ["/dashboard/properties"],
+  },
+  {
+    // #5704: Assets — the flat, cross-house list of everything in a room. Read
+    // is rolesEveryone (ResAssets), so every role sees the section.
+    id: "assets",
+    label: "Assets",
+    href: "/dashboard/assets",
+    icon: IconBox,
+    group: "household",
+    matches: ["/dashboard/assets"],
+  },
+  {
+    // #5704: Vehicles. ResVehicles read is rolesReaders — a housesitter may
+    // drive the family's car and must find it; a vendor has no grant and gets
+    // no tile.
+    id: "vehicles",
+    label: "Vehicles",
+    href: "/dashboard/vehicles",
+    icon: IconCar,
+    group: "household",
+    roles: READERS,
+    matches: ["/dashboard/vehicles"],
   },
   {
     // #5696: Pets is a section of its own, not a route inside People.
@@ -217,13 +265,42 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     matches: ["/dashboard/pets"],
   },
   {
+    // #5704: Vendors — the trades list ("who's the plumber, and call them").
+    // ResVendors read is rolesSitter, the same grant as Pets.
+    id: "vendors",
+    label: "Vendors",
+    href: "/dashboard/vendors",
+    icon: IconAddressBook,
+    group: "household",
+    roles: SITTERS,
+    matches: ["/dashboard/vendors"],
+  },
+  {
+    // #5704: Maintenance ("Upkeep" in the People & House mockup, artifact #89
+    // v1). ResMaintenance read is rolesFabric — family, viewer AND vendor, but
+    // NOT a housesitter — so this is the one Household section on FABRIC. A
+    // vendor is the role that closes jobs, which is why it reads the board.
+    id: "maintenance",
+    label: "Maintenance",
+    href: "/dashboard/maintenance",
+    icon: IconTool,
+    group: "household",
+    roles: FABRIC,
+    matches: ["/dashboard/maintenance"],
+  },
+  {
+    // #5704: the href is the Money OVERVIEW now, not Bills. /dashboard/money
+    // has existed since #4571 with no inbound link of its own (Bills was the
+    // section's href and nothing linked to the overview), so the section
+    // pointed past a page nobody could reach. Bills and loans are the
+    // overview's two ways on, so they stay in `matches` and keep Money
+    // highlighted.
     id: "money",
     label: "Money",
-    // The Money overview (#4571) doesn't exist yet; bills is today's way in.
-    href: "/dashboard/bills",
+    href: "/dashboard/money",
     icon: IconWallet,
     group: "household",
-    matches: ["/dashboard/money", "/dashboard/loans"],
+    matches: ["/dashboard/bills", "/dashboard/loans"],
     roles: READERS,
   },
   {
