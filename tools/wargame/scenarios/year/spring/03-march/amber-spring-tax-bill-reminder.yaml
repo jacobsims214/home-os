@@ -17,8 +17,8 @@ steps:
   - "control case: mcpcall.py bill_find with query 'Mortgage' as amber (autopay, has an account)"
   - "mcpcall.py notification_find as amber again and look for a Mortgage reminder"
 assertion: |
-  The tax bill produces a notification whose body names the bill and whose `attention`
-  is `needs_setup`; the notification count for it is exactly 1, not 0 and not one per
+  notification_find returns exactly one notification whose body names the tax bill and
+  whose `attention` is `needs_setup`; the count is exactly 1, not 0 and not one per
   day. The control case is what makes the silence meaningful: the Mortgage bill,
   `automatic` with a paying account, produces no notification at all in the same
   window, so "the house was quiet" and "the worker was dead" cannot be confused. A run
