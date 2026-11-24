@@ -965,6 +965,17 @@ def selftest(out=sys.stdout):
         if any(d.get("season") for d in corpus.scenarios):
             _expect("year corpus covers every surface", coverage(corpus, out=io.StringIO()) == 0,
                     failures)
+            # COVERAGE.md is generated; a hand-edited or stale matrix is a doc claiming a
+            # coverage the corpus does not have, so the matrix in it must be the one the
+            # loader would emit today.
+            doc = os.path.join(real, "year", "COVERAGE.md")
+            if os.path.isfile(doc):
+                with open(doc, encoding="utf-8") as fh:
+                    body = fh.read()
+                want = io.StringIO()
+                coverage_markdown(corpus, out=want)
+                _expect("COVERAGE.md's matrix matches the corpus (regenerate with "
+                        "--coverage --markdown)", want.getvalue().strip() in body, failures)
         _expect("corpus covers three personas",
                 {d["persona"] for d in corpus.scenarios} == set(PERSONAS), failures)
         _expect("corpus ids unique",

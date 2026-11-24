@@ -36,5 +36,5 @@ origin:
   source: "#5713"
   ref: summer/jacob-summer-plumbing-invoice-paid
   ticket: "#5713"
-  date: 2026-11-24
+  date: "2026-11-24"
   verdict: untested

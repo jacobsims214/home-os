@@ -15,12 +15,12 @@ intent: |
 steps:
   - "chat.sh amber school --stdin with the message above"
   - "mcpcall.py person_find as amber"
-  - "mcpcall.py person_update for Ava, Liam and Nora with school and grade"
+  - "mcpcall.py person_update for Maya, Noah and Lily with school and grade"
   - "open https://homeos.simstech.cloud/dashboard/people at 390x844 as amber"
 assertion: |
   person_find returns exactly five people (two parents, three children), and each
-  child's record carries the school and grade the reply names - Ava 9 and in grade 4,
-  Liam 6 and in grade 1, Nora 3 and in preschool. The number of children on the people
+  child's record carries the school and grade the reply names - Maya 9 and in grade 4,
+  Noah 6 and in grade 1, Lily 3 and in preschool. The number of children on the people
   page equals the number of relationship=child records in the payload; a form signed
   against a child who does not exist in the house is the failure mode.
 parity: |
@@ -36,5 +36,5 @@ origin:
   source: "#5713"
   ref: fall/amber-fall-school-forms-people
   ticket: "#5713"
-  date: 2026-11-24
+  date: "2026-11-24"
   verdict: untested

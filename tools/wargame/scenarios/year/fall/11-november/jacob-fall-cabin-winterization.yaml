@@ -11,16 +11,16 @@ intent: |
   The cabin has to be closed for the winter: water off, lines blown, heat at 45. Do it
   as a checklist tied to the cabin, and tell me what still needs doing.
 steps:
-  - "chat.sh jacob cabin --stdin with the message above"
+  - "mcpcall.py property_find with query 'Cabin' as jacob (create it with property_create if the seed has only the house)"
   - "mcpcall.py property_find with query 'Cabin' as jacob"
   - "mcpcall.py list_create or maintenance_create for the winterization steps, attached to the cabin"
   - "open https://homeos.simstech.cloud/dashboard/properties/ (Cabin) at 390x844 as jacob"
 assertion: |
-  The cabin is its own property record, distinct from Maple Street, and the
-  winterization steps are attached to it - each step's subject is the cabin's property
-  id, not the house's. The steps count matches what the reply names, and the cabin's
-  page lists them. A checklist attached to the wrong property fails, because next
-  spring nobody looks at the house's list for the cabin's water lines.
+  The cabin is its own property record, distinct from the house, and the winterization
+  steps are attached to it - each step's subject is the cabin's property id, not the
+  house's. The steps count matches what the reply names, and the cabin's page lists
+  them. A checklist attached to the wrong property fails, because next spring nobody
+  looks at the house's list for the cabin's water lines.
 parity: |
   the cabin's winterization step count: the number of steps attached to the cabin and
   the number rendered on the cabin page are the same integer
@@ -34,5 +34,5 @@ origin:
   source: "#5713"
   ref: fall/jacob-fall-cabin-winterization
   ticket: "#5713"
-  date: 2026-11-24
+  date: "2026-11-24"
   verdict: untested

@@ -1,14 +1,14 @@
 # Family year - fall, 09-september. Written for R4 from #5713; not played yet.
 # Do not edit `intent` to match new behavior: change the assertion.
 #
-# The bus comes at 7:42 for Ava and 8:05 for Liam, and it is a different route this
+# The bus comes at 7:42 for Maya and 8:05 for Noah, and it is a different route this
 # year. Put it on the calendar as a repeating thing, not one heroic entry.
 id: amber-fall-bus-schedule-calendar
 persona: amber
 surface: calendar
 channel: both
 intent: |
-  The bus comes at 7:42 for Ava and 8:05 for Liam, and it is a different route this
+  The bus comes at 7:42 for Maya and 8:05 for Noah, and it is a different route this
   year. Put it on the calendar as a repeating thing, not one heroic entry.
 steps:
   - "chat.sh amber bus --stdin with the message above"
@@ -34,5 +34,5 @@ origin:
   source: "#5713"
   ref: fall/amber-fall-bus-schedule-calendar
   ticket: "#5713"
-  date: 2026-11-24
+  date: "2026-11-24"
   verdict: untested

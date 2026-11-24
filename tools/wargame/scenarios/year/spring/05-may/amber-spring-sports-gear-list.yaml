@@ -19,7 +19,7 @@ assertion: |
   One list exists, named for soccer gear, and list_get returns every item the reply
   named - no item is described in the reply that is not in the list, and the count in
   the list page's header equals the number of items list_get returns. Each item has a
-  quantity or a size where the family gave one (shin guards: a size for Ava), because
+  quantity or a size where the family gave one (shin guards: a size for Maya), because
   a list that loses the size is the reason the shopping trip fails.
 parity: |
   the item count: list_get's item count and the number rendered in the list header are
@@ -34,5 +34,5 @@ origin:
   source: "#5713"
   ref: spring/amber-spring-sports-gear-list
   ticket: "#5713"
-  date: 2026-11-24
+  date: "2026-11-24"
   verdict: untested
