@@ -1,0 +1,39 @@
+# Family year - spring, 04-april. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# Maya's spring soccer registration closes on March 20 and the fee is $185. I keep
+# missing it because it is a deadline, not an event. Put it somewhere that shouts.
+id: amber-spring-sports-registration-deadline
+persona: amber
+surface: calendar
+channel: both
+intent: |
+  Maya's spring soccer registration closes on March 20 and the fee is $185. I keep
+  missing it because it is a deadline, not an event. Put it somewhere that shouts.
+steps:
+  - "chat.sh amber soccer --stdin <<'EOF' (heredoc quoted: the message contains a $)"
+  - "mcpcall.py event_find with from 2027-03-01 to 2027-03-31 as amber"
+  - "mcpcall.py agenda_get with from 2027-03-13 as amber (a week before)"
+  - "open https://homeos.simstech.cloud/dashboard/calendar at 390x844 as amber"
+assertion: |
+  The deadline exists exactly once on the family calendar, on 2027-03-20, attached to
+  Maya (the person id person_find returns for her) and not to Jacob or Amber. The
+  reply gives the fee as 185.00 and does not invent a second date. agenda_get for the
+  week before returns it, which is what makes it a deadline rather than a note: a
+  calendar entry nobody is shown before the day is the same as no entry.
+parity: |
+  the deadline date: event_find's start date, the calendar cell it renders in, and the
+  date the reply names are all 2027-03-20
+tags:
+  - calendar
+  - people
+  - deadline
+  - write
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: spring/amber-spring-sports-registration-deadline
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

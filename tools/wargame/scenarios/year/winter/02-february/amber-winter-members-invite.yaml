@@ -1,0 +1,39 @@
+# Family year - winter, 02-february. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# My mother watches the kids two days a week and needs to see the calendar and the
+# school forms - not the money. Invite her with the least access that does that.
+id: amber-winter-members-invite
+persona: amber
+surface: invites
+channel: both
+intent: |
+  My mother watches the kids two days a week and needs to see the calendar and the
+  school forms - not the money. Invite her with the least access that does that.
+steps:
+  - "chat.sh amber grandma --stdin with the message above"
+  - "open https://homeos.simstech.cloud/dashboard/members at 390x844 as amber"
+  - "mcpcall.py family_overview as amber for the member list"
+  - "api.py GET /api/v1/invites as amber"
+assertion: |
+  An invite exists for that address, and its role is a member role - not an owner and
+  not an admin - which the invite list and the members page both show. The invitation
+  has not been silently converted into a membership before it is accepted. The number
+  of pending invites on the page equals the number the payload returns; an invite sent
+  with a role that can see the money fails this scenario even though the email went
+  out.
+parity: |
+  the pending invite: its address and role in the invites payload are the address and
+  role rendered on the members page, and the pending count matches
+tags:
+  - invites
+  - people
+  - settings
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: winter/amber-winter-members-invite
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

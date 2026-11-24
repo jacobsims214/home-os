@@ -1,0 +1,41 @@
+# Family year - winter, 12-december. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# A pipe burst over the kitchen on the 12th. The insurer opened claim 44-2210 and
+# the restoration company wants $6,400. Record the claim and the cost so we are not
+# reconstructing this from memory in March.
+id: jacob-winter-burst-pipe-claim
+persona: jacob
+surface: bills
+channel: both
+intent: |
+  A pipe burst over the kitchen on the 12th. The insurer opened claim 44-2210 and the
+  restoration company wants $6,400. Record the claim and the cost so we are not
+  reconstructing this from memory in March.
+steps:
+  - "chat.sh jacob claim --stdin <<'EOF' (heredoc quoted: the message contains a $ amount)"
+  - "mcpcall.py bill_find with query 'claim' as jacob"
+  - "mcpcall.py note_create or bill_create for the claim with its number"
+  - "open https://homeos.simstech.cloud/dashboard/bills at 390x844 as jacob"
+assertion: |
+  The claim exists once, retrievable by its number 44-2210, with the restoration cost
+  6400.00 attached - and the number is the insurer's, not a generated id the reply
+  then calls the claim number. bill_find's row renders that same amount and number on
+  the bills page. A claim recorded as a note with no amount fails: the amount is what
+  the insurance decision turns on.
+parity: |
+  the claim number and amount: bill_find's 44-2210 and 6400.00 appear identically on
+  the bills row and in the reply
+tags:
+  - bills
+  - money
+  - emergency
+  - write
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: winter/jacob-winter-burst-pipe-claim
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

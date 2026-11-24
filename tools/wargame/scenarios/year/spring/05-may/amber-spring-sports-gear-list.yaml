@@ -1,0 +1,38 @@
+# Family year - spring, 05-may. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# Soccer starts Saturday and nobody has shin guards that fit. Make me a list I can
+# hand Jacob at the store.
+id: amber-spring-sports-gear-list
+persona: amber
+surface: lists
+channel: both
+intent: |
+  Soccer starts Saturday and nobody has shin guards that fit. Make me a list I can
+  hand Jacob at the store.
+steps:
+  - "chat.sh amber gear --stdin with the message above"
+  - "mcpcall.py list_find as amber"
+  - "mcpcall.py list_get for that list"
+  - "open https://homeos.simstech.cloud/dashboard/lists at 390x844 as amber"
+assertion: |
+  One list exists, named for soccer gear, and list_get returns every item the reply
+  named - no item is described in the reply that is not in the list, and the count in
+  the list page's header equals the number of items list_get returns. Each item has a
+  quantity or a size where the family gave one (shin guards: a size for Maya), because
+  a list that loses the size is the reason the shopping trip fails.
+parity: |
+  the item count: list_get's item count and the number rendered in the list header are
+  the same integer
+tags:
+  - lists
+  - write
+  - count
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: spring/amber-spring-sports-gear-list
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

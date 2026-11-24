@@ -1,0 +1,38 @@
+# Family year - summer, 07-july. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The Odyssey's registration expires July 31. Renew it, put the new date on the van,
+# and do not let me find out from a cop.
+id: jacob-summer-vehicle-registration-renewal
+persona: jacob
+surface: vehicles
+channel: both
+intent: |
+  The Odyssey's registration expires July 31. Renew it, put the new date on the van,
+  and do not let me find out from a cop.
+steps:
+  - "chat.sh jacob van --stdin with the message above"
+  - "mcpcall.py vehicle_find with query 'Odyssey' as jacob"
+  - "mcpcall.py vehicle_update with registration_expires 2027-07-31 as jacob"
+  - "open https://homeos.simstech.cloud/dashboard/vehicles at 390x844 as jacob"
+assertion: |
+  vehicle_find returns exactly one vehicle for Odyssey, and its registration expiry is
+  2027-07-31 - a year out, not 30 Jul and not the old date. The vehicles page renders
+  that same date on the Odyssey card, and the reply names it. A renewal that updates a
+  note field but leaves the expiry unchanged fails, because the expiry is the field
+  that is read.
+parity: |
+  the van's registration expiry: vehicle_find's registration_expires and the date on
+  the Odyssey card are the same day
+tags:
+  - vehicles
+  - write
+  - date
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: summer/jacob-summer-vehicle-registration-renewal
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

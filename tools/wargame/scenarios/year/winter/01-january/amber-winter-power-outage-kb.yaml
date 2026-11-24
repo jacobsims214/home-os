@@ -1,0 +1,38 @@
+# Family year - winter, 01-january. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# While the power is out I want the one page that says what to do about the freezer
+# and the sump pump - not a search results list I have to read on a dying phone.
+id: amber-winter-power-outage-kb
+persona: amber
+surface: kb
+channel: both
+intent: |
+  While the power is out I want the one page that says what to do about the freezer
+  and the sump pump - not a search results list I have to read on a dying phone.
+steps:
+  - "mcpcall.py kb_search with query 'freezer power outage' as amber"
+  - "mcpcall.py kb_get with the top result's path as amber"
+  - "open https://homeos.simstech.cloud/dashboard/guides/reference at 390x844 as amber and open the same page"
+assertion: |
+  kb_search returns the household's own outage doc, and kb_get for its path returns a
+  body that names the freezer window and the sump pump - the two things the family
+  asked about. The reference page renders that same doc at the same path. A kb_search
+  that returns an empty list while the doc exists fails this scenario and must not be
+  reported as "no such document": that is the degradation the standing instructions
+  call out by name.
+parity: |
+  the outage doc's path and its freezer window: kb_get's path and hours match the page
+  the reference viewer opens and the hours it renders
+tags:
+  - kb
+  - guides
+  - honesty
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: winter/amber-winter-power-outage-kb
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

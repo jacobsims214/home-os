@@ -1,0 +1,38 @@
+# Family year - fall, 09-september. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# Maya's teacher wants to talk about the reading group. Write down what to ask her
+# and how we reach her, as a how-to I can open the night before the conference.
+id: jacob-fall-teacher-contact-guide
+persona: jacob
+surface: guides
+channel: both
+intent: |
+  Maya's teacher wants to talk about the reading group. Write down what to ask her and
+  how we reach her, as a how-to I can open the night before the conference.
+steps:
+  - "chat.sh jacob teacher --stdin with the message above"
+  - "mcpcall.py contact_find with query 'Riverside Elementary' as jacob"
+  - "mcpcall.py guide_create attached to Maya (or to the household) as jacob"
+  - "mcpcall.py guide_find as jacob"
+assertion: |
+  A guide exists whose body names the teacher conference and whose contact details are
+  the school vendor's own phone and email from contact_find - no figure or address
+  that is not in a payload. guide_find returns it in one call, and it is attached to
+  Maya rather than floating unattached, because a guide nobody can find from the
+  child's page is a document nobody reads.
+parity: |
+  the teacher's phone number: contact_find's phone for Riverside Elementary, the
+  number in the guide's body and the number the guide page renders are the same digits
+tags:
+  - guides
+  - people
+  - write
+  - vendors
+origin:
+  round: r4
+  source: "#5713"
+  ref: fall/jacob-fall-teacher-contact-guide
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

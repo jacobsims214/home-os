@@ -1,0 +1,38 @@
+# Family year - summer, 08-august. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# Plan the cabin week's dinners and turn them into one grocery run, because the
+# nearest store up there is 20 minutes each way.
+id: amber-summer-trip-meals
+persona: amber
+surface: meals
+channel: both
+intent: |
+  Plan the cabin week's dinners and turn them into one grocery run, because the
+  nearest store up there is 20 minutes each way.
+steps:
+  - "chat.sh amber suppers --stdin with the message above"
+  - "mcpcall.py meal_set across the trip's dinner slots"
+  - "mcpcall.py meal_build_grocery_list for that week"
+  - "open https://homeos.simstech.cloud/dashboard/meals at 390x844 as amber"
+assertion: |
+  Every dinner slot in the trip week holds a set meal - seven, checked by counting the
+  filled slots the payload returns - and the grocery list meal_build_grocery_list
+  produces is reachable from the meals page. The number of ingredients on the grocery
+  list equals the list payload's item count; a meal plan whose grocery list is empty
+  fails, because the plan then does nothing for the family.
+parity: |
+  the filled dinner slots: the count of set meals meal_set reports for the week and
+  the number of filled dinner cells on the meals page are the same integer
+tags:
+  - meals
+  - lists
+  - write
+  - count
+origin:
+  round: r4
+  source: "#5713"
+  ref: summer/amber-summer-trip-meals
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

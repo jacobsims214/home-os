@@ -1,0 +1,40 @@
+# Family year - summer, 06-june. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# Orchard Plumbing fixed the toilet flange for $640 and they want a check. Record it
+# as paid and tell me what it did to this month's money, not what it did to the year.
+id: jacob-summer-plumbing-invoice-paid
+persona: jacob
+surface: money
+channel: both
+intent: |
+  Orchard Plumbing fixed the toilet flange for $640 and they want a check. Record it
+  as paid and tell me what it did to this month's money, not what it did to the year.
+steps:
+  - "chat.sh jacob invoice --stdin <<'EOF' (heredoc quoted: the message contains a $)"
+  - "mcpcall.py bill_find with query 'Orchard Plumbing' as jacob"
+  - "mcpcall.py bill_pay for that bill"
+  - "mcpcall.py budget_summary with sections ['obligations'] as jacob"
+  - "open https://homeos.simstech.cloud/dashboard/money at 390x844 as jacob"
+assertion: |
+  The bill exists at exactly 640.00, marked paid, and the amount the Money page shows
+  for this month's obligations is budget_summary's own total for that month, digit for
+  digit. The reply's figure is a number that appears in budget_summary.totals - never
+  a total the agent computed itself, since a total computed in prose is the defect
+  this assertion exists for. A paid bill that stays in the outstanding total fails.
+parity: |
+  this month's obligations total: budget_summary.totals and the total rendered on the
+  Money page are the same amount, in cents
+tags:
+  - money
+  - bills
+  - budget
+  - write
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: summer/jacob-summer-plumbing-invoice-paid
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

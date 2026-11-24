@@ -1,0 +1,36 @@
+# Family year - spring, 05-may. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The water bill is paid. I am standing at the counter with my phone and I want to
+# tick it off without talking to anybody.
+id: amber-spring-bill-mark-paid-ui
+persona: amber
+surface: bills
+channel: ui
+intent: |
+  The water bill is paid. I am standing at the counter with my phone and I want to
+  tick it off without talking to anybody.
+steps:
+  - "open https://homeos.simstech.cloud/dashboard/bills at 390x844 as amber"
+  - "find the Water row and tap its paid control"
+  - "reload the page and read the Water row's state"
+  - "mcpcall.py bill_find with query 'Water' as amber (ground truth after the tap)"
+assertion: |
+  The row's state after the tap is paid, in the page and in bill_find's payload - the
+  tap wrote, it did not only change the render. The bill's amount on the row is
+  unchanged (96.40 for the seeded Water bill), so a paid-marking control that also
+  rewrites the amount is caught. A double-tap does not create a second payment record:
+  bill_find returns one Water bill, not two.
+tags:
+  - bills
+  - money
+  - ui-only
+  - double-tap
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: spring/amber-spring-bill-mark-paid-ui
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

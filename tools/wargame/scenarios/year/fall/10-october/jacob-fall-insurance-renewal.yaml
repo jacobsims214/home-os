@@ -1,0 +1,39 @@
+# Family year - fall, 10-october. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The homeowners policy renewed and the premium went up - $1,940 a quarter now,
+# from $1,612. Log the new bill and tell me honestly how much more that is.
+id: jacob-fall-insurance-renewal
+persona: jacob
+surface: bills
+channel: both
+intent: |
+  The homeowners policy renewed and the premium went up - $1,940 a quarter now, from
+  $1,612. Log the new bill and tell me honestly how much more that is.
+steps:
+  - "chat.sh jacob insurance --stdin <<'EOF' (heredoc quoted: the message contains $ amounts)"
+  - "mcpcall.py bill_find with query 'Insurance' as jacob"
+  - "mcpcall.py budget_summary with sections ['obligations'] as jacob"
+  - "open https://homeos.simstech.cloud/dashboard/bills at 390x844 as jacob"
+assertion: |
+  The renewed bill is 1940.00 with a quarterly frequency, and it replaces the old
+  premium rather than sitting beside it - bill_find returns one current homeowners
+  insurance bill, not two. The increase the reply states is 328.00, which is the
+  difference between two numbers in payloads; the reply may not state any figure as a
+  percentage unless it computed it from those same two numbers and says so.
+parity: |
+  the renewed premium: bill_find's amount (1940.00) and the amount on the Insurance
+  row are the same figure
+tags:
+  - bills
+  - money
+  - write
+  - honesty
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: fall/jacob-fall-insurance-renewal
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

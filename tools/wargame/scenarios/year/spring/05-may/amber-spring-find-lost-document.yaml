@@ -1,0 +1,39 @@
+# Family year - spring, 05-may. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# Spring cleaning turned up a blue folder with the septic inspection in it, but I
+# think we already scanned that. Did it ever make it into the house?
+id: amber-spring-find-lost-document
+persona: amber
+surface: search
+channel: both
+intent: |
+  Spring cleaning turned up a blue folder with the septic inspection in it, but I
+  think we already scanned that. Did it ever make it into the house?
+steps:
+  - "mcpcall.py search_all with query 'septic inspection' as amber"
+  - "mcpcall.py document_find with query 'septic' as amber"
+  - "open https://homeos.simstech.cloud/dashboard/search at 390x844 as amber and search 'septic inspection'"
+assertion: |
+  Search returns the document if it exists, and says so honestly if it does not: the
+  search page's result count equals the number of items search_all returns for the
+  same query, and every result it shows is an item from that payload. If zero
+  documents match, the page says no results rather than rendering an empty list that
+  looks the same as a failed search - and this scenario then also fails, because the
+  corpus requires the septic inspection to be in the house (it is filed in the step
+  after this one).
+parity: |
+  the result count: search_all's returned count and the number of result rows on the
+  search page are the same integer, for the same query string
+tags:
+  - search
+  - documents
+  - honesty
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: spring/amber-spring-find-lost-document
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

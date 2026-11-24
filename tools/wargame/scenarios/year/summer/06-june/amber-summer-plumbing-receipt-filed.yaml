@@ -1,0 +1,37 @@
+# Family year - summer, 06-june. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The plumber's receipt is a photo in my camera roll. File it with the invoice so
+# that if the ceiling stains next winter we have the proof it was fixed.
+id: amber-summer-plumbing-receipt-filed
+persona: amber
+surface: documents
+channel: both
+intent: |
+  The plumber's receipt is a photo in my camera roll. File it with the invoice so that
+  if the ceiling stains next winter we have the proof it was fixed.
+steps:
+  - "mcpcall.py document_upload with the receipt photo as amber, amount 640.00"
+  - "mcpcall.py document_find with query 'Orchard Plumbing' as amber"
+  - "open https://homeos.simstech.cloud/dashboard/documents at 390x844 as amber"
+assertion: |
+  The receipt is a filed document whose amount is 640.00 - the same amount as the paid
+  bill, not a re-typed figure - and which links to the property or the bill it pays
+  for. document_find returns it under the vendor's name, and the reply's amount
+  matches the payload. A receipt filed with no amount, or with an amount that differs
+  from the bill it settles, fails: the pair is the evidence.
+parity: |
+  the receipt amount: document_find's amount for the receipt and the paid bill's
+  amount are the same 640.00
+tags:
+  - documents
+  - money
+  - write
+  - filing
+origin:
+  round: r4
+  source: "#5713"
+  ref: summer/amber-summer-plumbing-receipt-filed
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

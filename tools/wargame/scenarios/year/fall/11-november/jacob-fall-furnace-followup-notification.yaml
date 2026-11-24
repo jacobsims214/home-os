@@ -1,0 +1,38 @@
+# Family year - fall, 11-november. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The furnace replacement is the thing that must not drift. Did the house actually
+# put it in front of us, or is it sitting in a list we never open?
+id: jacob-fall-furnace-followup-notification
+persona: jacob
+surface: notifications
+channel: both
+intent: |
+  The furnace replacement is the thing that must not drift. Did the house actually put
+  it in front of us, or is it sitting in a list we never open?
+steps:
+  - "mcpcall.py maintenance_find as jacob for the open furnace task"
+  - "wait one tick, then mcpcall.py notification_find as jacob"
+  - "open https://homeos.simstech.cloud/dashboard/notifications at 390x844 as jacob"
+  - "control case: a maintenance task whose due date is six months out, which must not notify"
+assertion: |
+  The furnace task produces at least one notification naming it, inside the same
+  window in which two ordinary bills also notifying proves the notifier alive. The
+  task six months out produces none. Counting matters: the reply may say "you were
+  reminded" only if notification_find returns a notification for that task id, and the
+  notifications page shows the same number of rows for it.
+parity: |
+  the furnace reminder count: notification_find's notifications for the furnace task
+  and the rows rendered for it on the notifications page are the same number
+tags:
+  - notifications
+  - maintenance
+  - control-case
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: fall/jacob-fall-furnace-followup-notification
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

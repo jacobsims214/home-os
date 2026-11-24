@@ -1,0 +1,38 @@
+# Family year - summer, 08-august. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# Biscuit is due for his annual and his rabies expires in August. Book it with our
+# vet and tell me when he is next due, not when he was last seen.
+id: amber-summer-dog-vet-visit
+persona: amber
+surface: pets
+channel: both
+intent: |
+  Biscuit is due for his annual and his rabies expires in August. Book it with our vet
+  and tell me when he is next due, not when he was last seen.
+steps:
+  - "chat.sh amber vet --stdin with the message above"
+  - "mcpcall.py pet_find with query 'Biscuit' as amber"
+  - "mcpcall.py contact_find with query 'Warwick Animal Hospital' as amber"
+  - "open https://homeos.simstech.cloud/dashboard/pets at 390x844 as amber"
+assertion: |
+  pet_find returns Biscuit with a vet link to the household's own vet vendor, and the
+  rabies expiry it carries is the date the reply names. The vet the agent points at is
+  the same vendor contact_find returns - not a clinic from the model's memory. The pet
+  page shows Biscuit's next-due date identical to the payload's; a pet whose
+  vaccinations are a free-text note with no date fails this scenario.
+parity: |
+  the rabies expiry date: pet_find's vaccination date and the date rendered on
+  Biscuit's card are the same day
+tags:
+  - pets
+  - vendors
+  - date
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: summer/amber-summer-dog-vet-visit
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

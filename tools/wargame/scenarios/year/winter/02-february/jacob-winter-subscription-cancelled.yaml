@@ -1,0 +1,40 @@
+# Family year - winter, 02-february. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# Cancel the $19.99 subscription. It should stop appearing as a bill we owe, and I
+# want to be able to prove next month that we cancelled it.
+id: jacob-winter-subscription-cancelled
+persona: jacob
+surface: bills
+channel: both
+intent: |
+  Cancel the $19.99 subscription. It should stop appearing as a bill we owe, and I
+  want to be able to prove next month that we cancelled it.
+steps:
+  - "mcpcall.py bill_find with query 'subscription' as jacob"
+  - "mcpcall.py bill_delete or bill_update to end the subscription as jacob"
+  - "mcpcall.py bill_find with query 'subscription' as jacob again"
+  - "open https://homeos.simstech.cloud/dashboard/bills at 390x844 as jacob"
+assertion: |
+  After the cancellation bill_find returns no current subscription bill - the read
+  back is the evidence, not the reply's claim - and this month's obligations total in
+  budget_summary drops by exactly 19.99 from the figure recorded before the change.
+  The bills page shows no subscription row. A cancellation that leaves the bill
+  `active` but says it is cancelled is the exact failure mode: the next charge lands
+  and the family believes they cancelled.
+parity: |
+  the change to this month's obligations: budget_summary's total drops by exactly
+  19.99, and the bills page shows one fewer row
+tags:
+  - bills
+  - money
+  - write
+  - honesty
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: winter/jacob-winter-subscription-cancelled
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

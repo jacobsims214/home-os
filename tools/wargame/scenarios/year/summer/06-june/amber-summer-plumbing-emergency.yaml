@@ -1,0 +1,38 @@
+# Family year - summer, 06-june. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The upstairs toilet is running into the ceiling below it. I need a plumber now,
+# not a phone tree. Who do we use, and can I call them from the phone?
+id: amber-summer-plumbing-emergency
+persona: amber
+surface: vendors
+channel: both
+intent: |
+  The upstairs toilet is running into the ceiling below it. I need a plumber now, not
+  a phone tree. Who do we use, and can I call them from the phone?
+steps:
+  - "chat.sh amber flood --stdin with the message above"
+  - "mcpcall.py contact_find with query 'Plumber' as amber"
+  - "open https://homeos.simstech.cloud/dashboard/vendors at 390x844 as amber"
+  - "read the plumber row's Call action href"
+assertion: |
+  The plumber the agent names is a vendor in the household with a phone number, and
+  the reply's number is that number - never a number invented from memory. The vendor
+  page's Call action href is `tel:` plus the digits of contact_find's `phone`. A reply
+  that says "call a plumber" without naming ours is a FAIL: the household already has
+  one on file and the agent's job was to reach it.
+parity: |
+  the plumber's phone number: the digits in the reply, contact_find's phone and the
+  tel: href all agree
+tags:
+  - vendors
+  - emergency
+  - contact
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: summer/amber-summer-plumbing-emergency
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

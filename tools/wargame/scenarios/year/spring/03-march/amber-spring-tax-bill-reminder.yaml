@@ -1,0 +1,42 @@
+# Family year - spring, 03-march. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# I am not going to remember a tax bill in April. Did the house actually warn me
+# about it, or does it just sit there looking important?
+id: amber-spring-tax-bill-reminder
+persona: amber
+surface: notifications
+channel: both
+intent: |
+  I am not going to remember a tax bill in April. Did the house actually warn me about
+  it, or does it just sit there looking important?
+steps:
+  - "mcpcall.py bill_find with query 'School Tax' as amber"
+  - "wait for one bill-reminder tick, then mcpcall.py notification_find as amber"
+  - "open https://homeos.simstech.cloud/dashboard/notifications at 390x844 as amber"
+  - "control case: mcpcall.py bill_find with query 'Mortgage' as amber (autopay, has an account)"
+  - "mcpcall.py notification_find as amber again and look for a Mortgage reminder"
+assertion: |
+  notification_find returns exactly one notification whose body names the tax bill and
+  whose `attention` is `needs_setup`; the count is exactly 1, not 0 and not one per
+  day. The control case is what makes the silence meaningful: the Mortgage bill,
+  `automatic` with a paying account, produces no notification at all in the same
+  window, so "the house was quiet" and "the worker was dead" cannot be confused. A run
+  where neither bill notifies is a FAIL for this scenario, not a pass on the tax bill.
+parity: |
+  the reminder count: notification_find returns exactly 1 notification naming the
+  School Tax bill, and the notifications page renders exactly 1 row for it with the
+  same bill title and amount
+tags:
+  - notifications
+  - money
+  - attention
+  - silence
+  - control-case
+origin:
+  round: r4
+  source: "#5713"
+  ref: spring/amber-spring-tax-bill-reminder
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested

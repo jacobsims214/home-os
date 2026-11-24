@@ -1,0 +1,39 @@
+# Family year - spring, 04-april. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The Orchard Fence quote is a PDF on my phone. File it where I will find it next
+# spring when we actually do the fence, not in a downloads folder.
+id: amber-spring-fence-quote-document
+persona: amber
+surface: documents
+channel: both
+intent: |
+  The Orchard Fence quote is a PDF on my phone. File it where I will find it next
+  spring when we actually do the fence, not in a downloads folder.
+steps:
+  - "mcpcall.py document_upload with the quote PDF as amber, linked to the house's property"
+  - "mcpcall.py document_find with query 'fence' as amber"
+  - "open https://homeos.simstech.cloud/dashboard/documents at 390x844 as amber"
+assertion: |
+  The document is filed, not sitting unfiled: document_find returns one row whose
+  `document_type` is a real value (never empty and never the literal "Other" used as a
+  catch-all), whose `property_id` is the house's property id (18 Orchard Lane in the
+  seed), and whose amount field, if present, is 4850.00. The documents page shows it
+  with the same filed-to label the payload carries; a document that lists with no
+  filed-to target fails this scenario even though the upload succeeded.
+parity: |
+  the quote amount and its filed-to target: document_find's amount (4850.00) and the
+  property name render identically on the document row
+tags:
+  - documents
+  - vendors
+  - property
+  - write
+  - filing
+origin:
+  round: r4
+  source: "#5713"
+  ref: spring/amber-spring-fence-quote-document
+  ticket: "#5713"
+  date: "2026-11-24"
+  verdict: untested
