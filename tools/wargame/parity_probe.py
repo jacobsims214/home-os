@@ -93,14 +93,26 @@ def ui_side(evidence_dir, sid):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--id", required=True)
-    ap.add_argument("--evidence-dir", required=True)
+    ap.add_argument("--evidence-dir", default="")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--ui-path", action="store_true",
+                    help="print the page this scenario's parity fact renders on (the probe's "
+                         "UI_PATH), if the probe names one; else nothing. run.sh uses it so "
+                         "the round renders the page the fact is on, not only the starting "
+                         "page the corpus's `open` step names.")
     ap.add_argument("--agent", help="replay: a saved agent snapshot (json)")
     ap.add_argument("--ui", help="replay: a saved ui-channel.json")
     args = ap.parse_args(argv)
 
     sid = args.id
     mod, probe_path = load_probe(sid)
+
+    if args.ui_path:
+        # Loaded without needing any evidence: the round asks this before it renders.
+        if mod is not None and getattr(mod, "UI_PATH", None):
+            print(mod.UI_PATH)
+            return 0
+        return 1
     agent = load_json(args.agent) if args.agent else agent_side(args.evidence_dir, sid)
     ui = load_json(args.ui) if args.ui else ui_side(args.evidence_dir, sid)
 

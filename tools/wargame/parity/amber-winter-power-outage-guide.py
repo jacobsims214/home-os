@@ -31,6 +31,12 @@ import re
 
 HOURS_RE = re.compile(r"(\d{1,3})\s*hours?", re.IGNORECASE)
 
+# The corpus's `open` step names /dashboard/guides (the list). The fact — the guide's
+# own body and the hours in it — renders on the reference viewer, which is the page the
+# scenario's own assertion talks about ("the reference page renders that same doc at
+# the same path").
+UI_PATH = "/dashboard/guides/reference"
+
 
 def _payloads(agent):
     for tool, raw in (agent.get("payloads") or {}).items():

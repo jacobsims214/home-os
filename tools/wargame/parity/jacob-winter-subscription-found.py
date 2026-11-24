@@ -38,6 +38,14 @@ import os
 # the probe on it would make the probe fail for the corpus's reason, not the product's.
 NEEDLE = "streamly"
 
+# Where this fact is actually DRAWN. The corpus's `open` step names
+# /dashboard/settings, which is a navigation hub: it renders no bills at all, so a
+# comparison against it would report "the page does not show the bill" for every
+# household alive. The bills list is the page that renders the amount and the payee.
+# A probe may override the starting page because the probe owns the comparison; the
+# corpus's `open` step stays as written, since it is what a person would do first.
+UI_PATH = "/dashboard/bills"
+
 
 def _amounts(text):
     """Every money amount in a blob of text, normalised to cents as ints."""
@@ -75,15 +83,29 @@ def probe(agent, ui):
     bill = _agent_bill(agent)
     text = (ui or {}).get("text") or ""
 
-    # The UI side: the row for this bill, then the amount in that row. If the page does
-    # not mention the bill at all, that is the finding — a bill the agent has and the
-    # page does not is exactly a cross-channel disagreement, not a missing reading.
-    ui_line = ""
-    for line in text.splitlines():
-        if NEEDLE in line.lower():
+    # The UI side: the bill's row, and the amount drawn in it.
+    #
+    # A bill row renders over several text lines, not one — on /dashboard/bills the
+    # shape is `Streamly subscription / Automatic / Next Sat, Dec 5 · in 11 days /
+    # Streamly / · / Monthly / Credit card ····3312 / $17.99`. Reading only the line
+    # that contains the name finds no amount and reports CANNOT_COMPARE for every bill
+    # on the page. So take a window around the name, and bound it to the next bill's
+    # name so a neighbour's amount cannot be read as this one's.
+    lines = text.splitlines()
+    ui_line, ui_cents = "", None
+    for i, line in enumerate(lines):
+        if NEEDLE not in line.lower():
+            continue
+        window = lines[i:i + 12]
+        for j, w in enumerate(window[1:], 1):
+            # stop at the next bill name if the page names another bill first
+            if j and _amounts(w):
+                ui_line = " / ".join(x for x in window[:j + 1] if x.strip())
+                ui_cents = _amounts(w)[0]
+                break
+        if ui_cents is None:
             ui_line = line
-            break
-    ui_cents = _amounts(ui_line)[0] if _amounts(ui_line) else None
+        break
     payee_visible = bool(bill and bill.get("payee") and bill["payee"].lower() in text.lower())
 
     if bill is None:

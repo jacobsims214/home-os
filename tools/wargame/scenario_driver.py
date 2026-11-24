@@ -71,6 +71,9 @@ PASS, FAIL, BLOCKED = "PASS", "FAIL", "BLOCKED"
 # A step that the other channel owns. Neither a pass nor a block: the round is
 # exercising it, just not through this driver.
 DELEGATED = "DELEGATED"
+# A step the driver cannot turn into a call: prose that names an argument only a person
+# (or a prior step's output) can supply. Not a pass, not a product failure.
+UNRESOLVED = "UNRESOLVED"
 
 NET_TIMEOUT = int(os.environ.get("WARGAME_STEP_TIMEOUT", "90"))
 UI_TIMEOUT = int(os.environ.get("WARGAME_UI_TIMEOUT", "45"))
@@ -174,12 +177,16 @@ def mcpcall_args(payload):
     if jsonarg is None and query is not None:
         jsonarg = json.dumps({"query": query})
 
+    # A tool call with no arguments object is only valid for tools that take none. The
+    # corpus's prose often defers an argument to a person ("with the top result's
+    # path", "for the 1098"), and running such a step produces a tool error that reads
+    # like a product defect. Name it instead: (argv, unresolved_reason_or_None).
     argv = [sys.executable, os.path.join(HERE, "mcpcall.py"), "--text"]
     if tool:
         argv.append(tool)
     if jsonarg:
         argv.append(jsonarg)
-    return argv
+    return argv, tool, jsonarg
 
 
 def parse_payload(out):
@@ -238,8 +245,17 @@ def persona_token(persona):
         return None
 
 
+# Steps whose prose defers an argument the driver cannot invent. Matched on the prose,
+# because the corpus is prose and the alternative is rewriting 163 scenarios.
+DEFERRED = (
+    "the top result's path", "with the 1098", "for the 1098", "with the amount",
+    "the reply's", "the message above", "with the new", "for the member",
+    "the bill's", "its amount", "the file", "the quote", "that path", "this path",
+)
+
+
 def do_mcpcall(payload, persona):
-    argv = mcpcall_args(payload)
+    argv, tool, jsonarg = mcpcall_args(payload)
     if not os.environ.get("HOMEOS_MCP_URL"):
         os.environ["HOMEOS_MCP_URL"] = os.environ.get(
             "HOMEOS_SITE", "https://homeos.simstech.cloud").rstrip("/")
@@ -260,6 +276,13 @@ def do_mcpcall(payload, persona):
                           "HOMEOS_AGENT_TOKEN not set for this persona"
                           % (persona, TOKEN_SECRET.get(persona, ("?", "?", "?"))[0],
                              TOKEN_SECRET.get(persona, ("?", "?", "?"))[1]),
+                "exit_code": None, "output": ""}
+    low = payload.lower()
+    if jsonarg is None and any(d in low for d in DEFERRED):
+        return {"status": UNRESOLVED,
+                "detail": "%s — the step defers an argument to a person (or to a prior "
+                          "step's output), so there is no call to make: %r"
+                          % (tool or "?", payload.strip()[:90]),
                 "exit_code": None, "output": ""}
     rc, out, err = run(argv, NET_TIMEOUT, env=env_extra)
     blob = out or err
@@ -501,6 +524,7 @@ def main(argv=None):
     # failed — so PASS requires a check that ran and passed.
     failed = [s for s in step_results if s["status"] == FAIL]
     blocked = [s for s in step_results if s["status"] == BLOCKED]
+    unresolved = [s for s in step_results if s["status"] == UNRESOLVED]
     unjudged = [s for s in blocked if s["kind"] == "none"]
     unrun = [s for s in blocked if s["kind"] != "none"]
 
@@ -535,6 +559,20 @@ def main(argv=None):
         basis = ("the assertion check passed but step %d did not run: %s"
                  % (unrun[0]["n"], unrun[0]["detail"]))
 
+    # An unresolved step is not a product failure, but it does mean this scenario was
+    # not fully exercised. If the check passed AND nothing else ran, say BLOCKED; if
+    # some steps ran, keep the check's verdict and name the unresolved ones in the
+    # basis so the scorecard never claims a clean pass over steps nobody could run.
+    ran_any = [s for s in step_results if s["status"] in (PASS, FAIL)]
+    if unresolved and not failed:
+        if not ran_any:
+            verdict = BLOCKED
+            basis = ("no step could be constructed from its prose (%d unresolved), so "
+                     "the scenario was not exercised" % len(unresolved))
+        elif verdict == PASS:
+            basis += (" (%d step(s) deferred an argument to a person and did not run)"
+                      % len(unresolved))
+
     result = {
         "id": doc["id"],
         "persona": persona,
@@ -545,6 +583,7 @@ def main(argv=None):
         "basis": basis,
         "has_check": check is not None,
         "unjudged_steps": len(unjudged),
+        "unresolved_steps": len(unresolved),
         "steps": step_results,
         "check": check,
         "evidence_dir": evid,

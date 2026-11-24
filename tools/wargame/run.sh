@@ -376,7 +376,18 @@ while IFS=$'\t' read -r ckpt season n_in; do
         # The scenario names the page a person would look at; take the first `open
         # <url>` step. Where it names none, the UI half cannot be driven and says so
         # rather than quietly comparing against nothing.
-        ui_url="$(printf '%s' "$doc" | jq -r '[.steps[] | capture("open\\s+(?<u>https?://[^\\s]*)").u] | first // ""' | sed 's/[.,]$//')"
+        # The page the fact is DRAWN on wins over the page the corpus's `open` step
+        # names: that step is where a person would start, and for a nav hub like
+        # /dashboard/settings it renders none of the data the parity fact is about. The
+        # probe owns the comparison, so it owns the page; the corpus is not edited.
+        ui_url="$(timeout 30 ./parity_probe.py --id "$sid" --ui-path 2>/dev/null || true)"
+        if [ -n "$ui_url" ]; then
+          ui_url="https://homeos.simstech.cloud${ui_url}"
+          ui_note="the probe's UI_PATH"
+        else
+          ui_url="$(printf '%s' "$doc" | jq -r '[.steps[] | capture("open\\s+(?<u>https?://[^\\s]*)").u] | first // ""' | sed 's/[.,]$//')"
+          ui_note="the scenario's first \`open\` step"
+        fi
         if [ -z "$ui_url" ]; then
           u_verdict="BLOCKED"
           u_basis="the scenario names no \`open <url>\` step, so there is no page to render"
