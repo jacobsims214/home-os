@@ -1009,6 +1009,12 @@ def main(argv=None):
     ap.add_argument("--markdown", action="store_true",
                     help="with --coverage: emit the matrix as a Markdown table")
     ap.add_argument("--season", choices=SEASONS, help="restrict to one season of the year corpus")
+    ap.add_argument("--month", action="append", metavar="N",
+                    help="restrict to one calendar month of the year corpus (1-12, repeatable). "
+                         "The month is the directory a scenario lives in, so it is a fact about "
+                         "the corpus, not a field anybody can retype.")
+    ap.add_argument("--year", action="store_true",
+                    help="restrict to the year corpus only (scenarios under scenarios/year/)")
     ap.add_argument("--selftest", action="store_true", help="run parser/validator tests")
     args = ap.parse_args(argv)
 
@@ -1028,6 +1034,22 @@ def main(argv=None):
         scenarios = [d for d in scenarios if d["origin"]["round"] == args.round]
     if args.season:
         scenarios = [d for d in scenarios if d.get("season") == args.season]
+    if args.year:
+        scenarios = [d for d in scenarios if d.get("month")]
+    if args.month:
+        # Normalise once, here: `--month 3`, `--month 03` and `--month 3-march` name the
+        # same month. An unparseable value is a usage error (exit 2), never an empty
+        # selection — an empty round reads as "nothing wrong", which is the exact defect
+        # run.sh refuses to emit a scorecard for.
+        wanted = set()
+        for raw in args.month:
+            tok = str(raw).strip().split("-")[0]
+            if not tok.isdigit() or not 1 <= int(tok) <= 12:
+                print("scenarios_load.py: --month %r is not a month (1-12)" % raw,
+                      file=sys.stderr)
+                return 2
+            wanted.add("%02d" % int(tok))
+        scenarios = [d for d in scenarios if (d.get("month") or "")[:2] in wanted]
     filtered = Corpus()
     filtered.scenarios = scenarios
     filtered.errors = corpus.errors
