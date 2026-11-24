@@ -1,0 +1,34 @@
+# Family year - winter, 01-january. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# It is January and the accountant wants everything. Go through the house and tell
+# me which 2026 documents we already have and which are missing.
+id: jacob-winter-tax-gather-agent
+persona: jacob
+surface: documents
+channel: agent
+intent: |
+  It is January and the accountant wants everything. Go through the house and tell me
+  which 2026 documents we already have and which are missing.
+steps:
+  - "mcpcall.py document_find with tax year 2026 as jacob"
+  - "mcpcall.py search_all with query '2026 tax' as jacob"
+  - "mcpcall.py kb_list as jacob"
+assertion: |
+  The list of documents the reply says we have is exactly the set document_find
+  returns for tax year 2026 - same documents, same count - and the ones it calls
+  missing appear in no payload from the turn. An agent that says "you are missing the
+  1098" when document_find returns one is the failure this scenario exists for: the
+  family then asks the bank for a form that is already filed.
+tags:
+  - documents
+  - search
+  - honesty
+  - agent-only
+origin:
+  round: r4
+  source: "#5713"
+  ref: winter/jacob-winter-tax-gather-agent
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

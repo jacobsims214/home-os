@@ -1,0 +1,35 @@
+# Family year - summer, 07-july. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# I have five minutes before a call. Just tell me everything we owe in the next
+# two weeks and what will pay itself - do not make me open five pages.
+id: jacob-summer-whats-due-agent
+persona: jacob
+surface: money
+channel: agent
+intent: |
+  I have five minutes before a call. Just tell me everything we owe in the next two
+  weeks and what will pay itself - do not make me open five pages.
+steps:
+  - "mcpcall.py bill_find with due_within_days 14 as jacob"
+  - "mcpcall.py budget_summary with sections ['obligations','due_soon'] as jacob"
+  - "mcpcall.py notification_find as jacob"
+assertion: |
+  The answer is a read, and every figure in it is in a payload from that turn: the
+  number of bills it lists equals the number bill_find returns inside 14 days, the
+  ones it says will pay themselves are exactly those whose `attention` is `automatic`,
+  and it does not state a total the payload does not carry. A reply that groups a bill
+  as self-paying when its attention is `needs_setup` fails - that is the one
+  mis-grouping that costs a family a late fee.
+tags:
+  - money
+  - bills
+  - attention
+  - agent-only
+origin:
+  round: r4
+  source: "#5713"
+  ref: summer/jacob-summer-whats-due-agent
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

@@ -1,0 +1,34 @@
+# Family year - fall, 09-september. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# It is 4:40 and I have not planned anything. Show me what the house already thinks
+# we are having, from the phone, without a conversation.
+id: amber-fall-meal-tonight-ui
+persona: amber
+surface: meals
+channel: ui
+intent: |
+  It is 4:40 and I have not planned anything. Show me what the house already thinks we
+  are having, from the phone, without a conversation.
+steps:
+  - "open https://homeos.simstech.cloud/dashboard/meals at 390x844 as amber"
+  - "read tonight's dinner cell"
+  - "mcpcall.py meal_suggest for tonight as amber (to have a payload to compare against)"
+  - "read the grocery list link from the meals page"
+assertion: |
+  The meals page shows a dinner for tonight: either the meal that was set, or the
+  suggestion meal_suggest returns - and whichever it shows, the name on the page is a
+  name a payload from the turn contains. An empty dinner cell with no "nothing
+  planned" state fails, because it is indistinguishable from a page that did not load.
+tags:
+  - meals
+  - ui-only
+  - honesty
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: fall/amber-fall-meal-tonight-ui
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested
