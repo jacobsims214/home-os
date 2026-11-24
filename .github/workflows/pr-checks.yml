@@ -195,6 +195,37 @@ jobs:
             grep -q -- "--- PASS: $t " "$RUNNER_TEMP/typesense-tests.log" || { echo "::error::$t did not PASS (skipped or missing)"; exit 1; }
           done
 
+  # The root /.dockerignore is a hand-kept allowlist (`*` then `!path`), and a
+  # COPY of a path it does not re-include is absent from the build context, so
+  # BuildKit dies at checksum time on every root-context image:
+  #   failed to compute cache key: "/packages/notify": not found
+  # That has now cost three outages -- allergen (#4891, fixed in 0a31798) and
+  # notify (#5516, fixed in #5661) both shipped an allowlist that omitted a
+  # module the Dockerfiles COPY, and 2 of 5 packages is a 40% failure rate.
+  # icalx, billcal and billdue were only fine because the same commit happened
+  # to touch .dockerignore: luck, not a rule. This asserts the rule.
+  #
+  # An ASSERTION, not a generator (#5661's reasoning): generating .dockerignore
+  # from the Dockerfiles would hide the change inside a file nobody diffs. It
+  # also asserts go.work's ./packages set against .dockerignore's
+  # !packages set, which catches the same defect from the other side.
+  #
+  # Static parse of the Dockerfiles and the two YAML/ignore files: no Docker
+  # daemon, no docker CLI, under a second. The job's own --self-test is the
+  # negative control -- it runs the checker against fixture trees with known
+  # verdicts (clean, the #5661 shape, the #4891 shape, go.work drift, a stale
+  # entry, no discoverable Dockerfile) and fails if any verdict is wrong, so a
+  # broken COPY parser cannot report success while blind.
+  dockerignore-allowlist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Self-test the checker (negative control)
+        run: tools/ci/check-dockerignore-allowlist.sh --self-test
+      - name: Assert every root-context COPY is allowlisted
+        run: tools/ci/check-dockerignore-allowlist.sh
+
   ui-build:
     runs-on: ubuntu-latest
     steps:
