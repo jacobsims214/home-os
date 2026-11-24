@@ -8,8 +8,12 @@ you check what actually landed in Home OS with direct MCP calls.
 |---|---|
 | `up.sh` | **Verify the environment before a round**: cluster 5/5 Ready, both personas' Dex passwords actually sign in, both agent tokens answer `tools/list`, site 200 and Dex discovery. Pass/fail table, non-zero exit on anything wrong, never prints a secret. Idempotent — see [Verifying the environment](#verifying-the-environment--upsh-and-what-it-refuses-to-guess). |
 | `run.sh` | **Play a whole round in one command**: gates on `up.sh`, selects scenarios from the corpus, executes each one, and writes `scorecard.md` with the delta against the previous round. Exit `1` if any scenario FAILED, so it can gate a deploy — see [Running a round with `run.sh`](#running-a-round-with-runsh). |
-| `scenario_driver.py` | Executes ONE scenario for `run.sh`: runs the steps that have a driver (mcpcall.py, api.py, chat.sh, headless Chrome at 390px) and records PASS/FAIL/BLOCKED with evidence. Not a round entry point. |
+| `scenario_driver.py` | Executes ONE scenario for `run.sh`: runs the steps that have a driver (mcpcall.py, api.py, chat.sh; `--channel agent/ui` delegates the other channel's steps) and records PASS/FAIL/BLOCKED with evidence. Not a round entry point. |
 | `checks/<id>.py` | A scenario's own assertion check, run by the driver. Absent one the scenario is BLOCKED, never PASS. |
+| `ui_channel.mjs` | The **UI channel**: drives Chrome over the DevTools protocol at 390x844, signed in as the persona, and reports what the page actually rendered (`document.body.innerText` + a screenshot). Exits `2` rather than reporting a page it did not render. |
+| `dex_login.py` | The one home for the Dex sign-in: mints a persona's `id_token` through the interactive connector, caches it 0600 for its 24h life (Envoy limits `/dex/auth*` at 10/min), and prints the file path — never the token. |
+| `parity_probe.py` | Compares what the agent reported to what the UI rendered, on one scenario's `parity` fact. `PARITY_OK` / `PARITY_MISMATCH` / `CANNOT_COMPARE` / `TRUTH_MISMATCH`. Absent a `parity/<id>.py` a `both` scenario is `CANNOT_COMPARE`, never a pass. |
+| `parity/<id>.py` | One scenario's parity probe. May declare `UI_PATH` (the page the fact is drawn on) and `truth(...)` (a database cross-check). |
 | `chat.sh` | Sends one persona turn to a moltis agent, waits for the reply, prints the tool calls it made and its answer. `--history` dumps a whole session; `--stdin` / `--file` take the message where the shell cannot expand it — **see the quoting section immediately below**; `--selftest` runs the message-guard tests. |
 | `mcpcall.py` | Ground truth: calls one Home OS MCP tool as a household member and prints the result, over Streamable HTTP at `POST <HOMEOS_MCP_URL>/mcp` — the only MCP transport Home OS serves. `--selftest` runs its transport tests with no network. |
 | `api.py` | Same idea for the REST API (`/api/v1/...`). **Dex id_token only** — a `hos_` agent token 401s there by design; see [Two kinds of token](#two-kinds-of-token-agent-tokens-are-mcp-scoped). |
@@ -457,6 +461,12 @@ cd tools/wargame
 ./run.sh --tag attention --round r4       # the household-reality set that touches attention
 ./run.sh --ids amber-payee-contact,amber-missed-setup-bill   # exactly these
 ./run.sh --limit 3                        # a quick smoke round
+
+# the family year: a month, a season, or all twelve months (resumable)
+./run.sh --month 3                        # March only
+./run.sh --month 1 --month 2              # a two-month slice
+./run.sh --season spring                  # March, April, May
+./run.sh --year --label family-year-r4    # the whole year; re-run to resume
 ```
 
 It writes `rounds/<label>/scorecard.md` plus `rounds/<label>/evidence/<scenario-id>/` (a
@@ -470,6 +480,7 @@ append-only and nothing outside them is written, so running a round twice is saf
 | `0` | The round ran and **no scenario FAILED** (PASS/BLOCKED only). |
 | `1` | At least one scenario **FAILED**. A deploy must not go out. |
 | `2` | The round **never started**: `up.sh` failed the gate, or the filters matched nothing. No scorecard is written. |
+| `3` | No failure, but some scenarios are **BLOCKED**. Not green: `war-game-cadence.md` requires no BLOCKED row in the slice. `--allow-blocked` is the explicit opt-out for an exploratory round. |
 
 ### The gate: `run.sh` will not play a round against a half-up environment
 
@@ -485,9 +496,39 @@ the scorecard records that it was skipped, because those results are not compara
 | **PASS** | Every step with a driver ran, **and** the scenario's own assertion check (`checks/<id>.py`) ran and passed. Nothing reaches PASS without something that could have failed. |
 | **FAIL** | A step's driver ran and errored, or the assertion check ran and failed. This is a fact about the product. |
 | **BLOCKED** | The round could not judge it: there is no `checks/<id>.py` yet, or a step has no driver (the corpus's steps are prose taps written for a human), or a driver could not tell (a `429` from the MCP is BLOCKED, not FAIL — a rate limit is not a product defect). The scorecard names which. |
+| **PARITY_MISMATCH** | A `channel: both` scenario's agent answer and rendered page **disagree** on the scenario's `parity` fact. Its own verdict, counted on its own line: "the product is wrong" and "the two channels tell different stories" are different bugs with different fixes. |
+| **TRUTH_MISMATCH** | Both channels say the same thing and the **database** says otherwise. The case a cross-channel comparison alone cannot catch. |
 
 A scenario graduates from BLOCKED to a real verdict by gaining a `checks/<id>.py`. The delta then
 shows that graduation as progress, which is the point of scoring the same corpus every round.
+
+### Two channels, and parity as a verdict
+
+A `channel: both` scenario is played **twice** in one round: the agent (`scenario_driver.py` —
+mcpcall/chat turns) and the UI (`ui_channel.mjs` — Chrome DevTools at 390x844, signed in as the same
+persona with the `home-os-token` cookie `dex_login.py` minted). `parity_probe.py` then compares them
+on the single fact the scenario's `parity:` names.
+
+```bash
+./dex_login.py --persona jacob --print-token-file   # mint/cache the UI's id_token (0600)
+./run.sh --month 1 --month 2
+```
+
+- **A probe per scenario** lives at `parity/<id>.py` and defines `probe(agent, ui)`. It may declare
+  `UI_PATH` (the page the fact is *drawn* on — the corpus's `open` step is only where a person
+  starts; `/dashboard/settings` renders no bills) and `truth(...)` (a **database** cross-check, so
+  two channels agreeing with each other and both being wrong stays catchable).
+- **No probe is `CANNOT_COMPARE`, never a pass.** Otherwise 36 scenarios read green while comparing
+  nothing. The scorecard lists them under "Not compared".
+- A `channel: agent` or `channel: ui` scenario runs only that channel and says so.
+
+### Checkpoints: a year is long, so a month is the unit
+
+Each month writes `rounds/<label>/months/<NN-month>/results.jsonl` and a `DONE` marker once every
+scenario in it has a result. Re-running the same `--label` skips DONE months, so a timeout in July
+does not throw away January–June; `--no-resume` replays everything. **A month that BLOCKS does not
+stop the round** — it is recorded and the next month is played, so one broken area cannot hide the
+other eleven.
 
 ### The delta is the point
 
