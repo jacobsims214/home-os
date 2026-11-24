@@ -11,9 +11,11 @@
 #   ./run.sh --season spring                     # March, April, May
 #   ./run.sh --year --label family-year-r4        # the whole year, resumable
 #
-# Exit: 0 the round ran and nothing FAILED and no channel disagreed; 1 at least one
-# scenario FAILED or reported PARITY_MISMATCH, so the round cannot gate a deploy; 2 the
-# round never started (the environment gate failed, or the selection matched nothing).
+# Exit: 0 the round ran and nothing FAILED, no channel disagreed and nothing is BLOCKED;
+# 1 at least one scenario FAILED or reported PARITY_MISMATCH, so the round cannot gate a
+# deploy; 2 the round never started (the environment gate failed, or the selection
+# matched nothing); 3 no failure but some scenarios are BLOCKED, so the round is not
+# green either — see `--allow-blocked` for an exploratory round that expects them.
 #
 # ## The five things this does, in order
 #
@@ -106,6 +108,7 @@ YEAR_ONLY=0
 RESUME=1
 NO_RESUME=0
 CHANNEL=""
+ALLOW_BLOCKED=0
 
 usage() {
   sed -n '2,80p' "$0" | sed 's/^# \{0,1\}//'
@@ -141,6 +144,7 @@ while [ $# -gt 0 ]; do
     --channel)    CHANNEL="${2:-}"; shift 2 ;;
     --channel=*)  CHANNEL="${1#--channel=}"; shift ;;
     --no-resume)  NO_RESUME=1; shift ;;
+    --allow-blocked) ALLOW_BLOCKED=1; shift ;;
     --skip-up)    SKIP_UP=1; shift ;;
     -h|--help)    usage ;;
     *) echo "run.sh: unknown argument: $1" >&2; usage ;;
@@ -926,6 +930,18 @@ if [ "$bad" -ne 0 ]; then
   echo "Scorecard: $SCORECARD"
   exit 1
 fi
-echo "GATE: passed — no scenario FAILED and no channel disagreed ($PASSES PASS, $BLOCKED BLOCKED)."
+# BLOCKED is not a pass. `how-to/war-game-cadence.md` is explicit: a deploy is not
+# complete until run.sh exited 0 *and no scenario in the slice is BLOCKED*. A round
+# that said "green" over six BLOCKED scenarios is exactly the fail-closed-silently
+# shape §7 forbids — the reader would see exit 0 and stop there.
+if [ "$BLOCKED" -ne 0 ] && [ "$ALLOW_BLOCKED" != "1" ]; then
+  echo "GATE: NOT GREEN — no scenario FAILED and no channel disagreed, but $BLOCKED of"
+  echo "$n_played are BLOCKED, and a BLOCKED scenario is not a pass (war-game-cadence.md)."
+  echo "Scorecard: $SCORECARD"
+  echo "To play a round that is expected to have BLOCKED rows (an exploratory round),"
+  echo "pass --allow-blocked; it exits 0 and says so in the scorecard."
+  exit 3
+fi
+echo "GATE: passed — $PASSES PASS, $BLOCKED BLOCKED (allowed by --allow-blocked)."
 echo "Scorecard: $SCORECARD"
 exit 0

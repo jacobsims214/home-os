@@ -251,7 +251,19 @@ DEFERRED = (
     "the top result's path", "with the 1098", "for the 1098", "with the amount",
     "the reply's", "the message above", "with the new", "for the member",
     "the bill's", "its amount", "the file", "the quote", "that path", "this path",
+    # `bill_delete or bill_update to end the subscription` — an ALTERNATIVE the driver
+    # cannot choose between, and neither can it invent the bill_id both need. Running
+    # one of them arbitrarily would be worse than not running it: a destructive call
+    # picked by a heuristic.
+    " or ",
 )
+
+# A tool whose required argument is an id the prose never gives. Running it produces
+# "<field> is required" from the product, which reads like a defect and is really the
+# cor0pus deferring the value to the prior step's output.
+REQUIRED_ID_RE = re.compile(
+    r"(bill_id|document_id|event_id|note_id|list_id|person_id|vendor_id|asset_id|"
+    r"property_id|vehicle_id|pet_id|invitee_email|member_id|path|query)\s*is required")
 
 
 def do_mcpcall(payload, persona):
@@ -287,6 +299,16 @@ def do_mcpcall(payload, persona):
     rc, out, err = run(argv, NET_TIMEOUT, env=env_extra)
     blob = out or err
     detail = "%s as %s" % (payload.strip()[:90], persona)
+
+    # The product asking for an argument the step never supplied is the corpus's prose
+    # deferring it, not a product defect. Say that instead of FAIL — the same reasoning
+    # as DEFERRED above, applied to the reply rather than to the step text.
+    m = REQUIRED_ID_RE.search(blob or "")
+    if m and rc == 0:
+        return {"status": UNRESOLVED,
+                "detail": "%s — the product asked for %r and the step supplied none, so "
+                          "there was no call to make" % (payload.strip()[:80], m.group(1)),
+                "exit_code": rc, "output": blob[:1500]}
 
     # mcpcall.py's exit codes: 0 ok, 1 the server REFUSED the call (a JSON-RPC
     # error or the tool's own isError), 2 transport/usage. The distinction is
@@ -443,8 +465,20 @@ def run_check(sid, persona, evidence_dir):
     path = os.path.join(HERE, "checks", sid + ".py")
     if not os.path.exists(path):
         return None
+    # A check reads ground truth through mcpcall.py, so it needs THIS persona's token —
+    # the same one do_mcpcall resolves. Passing the inheriting shell's environment would
+    # let amber's check read as jacob, which is the silent cross-persona leak the
+    # WARGAME_TOKEN_PERSONA guard exists to stop.
+    env_extra = {}
+    tok = persona_token(persona)
+    if tok:
+        env_extra["HOMEOS_AGENT_TOKEN"] = tok
+        env_extra["WARGAME_TOKEN_PERSONA"] = persona
+    if not os.environ.get("HOMEOS_MCP_URL"):
+        env_extra["HOMEOS_MCP_URL"] = os.environ.get(
+            "HOMEOS_SITE", "https://homeos.simstech.cloud").rstrip("/")
     rc, out, err = run([sys.executable, path, "--evidence-dir", evidence_dir,
-                        "--persona", persona], NET_TIMEOUT)
+                        "--persona", persona], NET_TIMEOUT, env=env_extra)
     lines = (out.strip().splitlines() or [err.strip() or "check exited %d" % rc])
     if rc == 0:
         status = PASS
