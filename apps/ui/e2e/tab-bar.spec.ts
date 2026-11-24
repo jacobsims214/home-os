@@ -100,7 +100,9 @@ for (const width of [375, 390]) {
         await expect(sheet.getByText(name, { exact: true })).toBeVisible();
       }
       await expect(sheet.getByText(/coming soon/i)).toHaveCount(0);
-      await expect(sheet.getByText("Family, home, cars, pets, vendors")).toBeVisible();
+      // #5696 moved "pets" out of this hint (Pets is its own tile); #5704 moved the
+      // rest of the house out too. The hint now names only what People & House owns.
+      await expect(sheet.getByText("Family, home, cars, vendors")).toBeVisible();
       await expect(sheet.getByRole("button", { name: /^Notifications/ })).toBeVisible();
       // One family in the stub: the row names it and goes to Members, rather
       // than offering a switch there is nothing to switch to (#4574).
@@ -126,10 +128,13 @@ for (const width of [375, 390]) {
       await expect(more).toBeFocused();
       await expect(nav.getByRole("link", { name: "Today" })).toHaveAttribute("aria-current", "page");
 
-      // A row navigates and closes the sheet.
+      // A tile navigates and closes the sheet.
+      // #5704: Money's href is the OVERVIEW now, not Bills. /dashboard/money
+      // has existed since #4571 and no surface linked to it — the section
+      // pointed past a page nobody could reach.
       await more.click();
       await sheet.getByRole("link", { name: "Money" }).click();
-      await expect(page).toHaveURL(/\/dashboard\/bills$/);
+      await expect(page).toHaveURL(/\/dashboard\/money$/);
       await expect(sheet).toBeHidden();
 
       // The account row opens the account menu — the phone's bottom sheet — with

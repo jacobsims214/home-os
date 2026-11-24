@@ -94,7 +94,7 @@ test.describe("phone 390px", () => {
     await expect(sheet.getByRole("link", { name: /Money/ })).toBeVisible();
     // #5408: Guides was in no nav surface at all; the tile is the fix.
     await expect(sheet.getByRole("link", { name: /Guides/ })).toBeVisible();
-    await expect(sheet.getByText("Family, home, cars, pets, vendors")).toBeVisible();
+    await expect(sheet.getByText("Family, home, cars, vendors")).toBeVisible();
     await expect(sheet.locator('[aria-disabled="true"]')).toHaveCount(0);
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
