@@ -111,6 +111,36 @@ export function relationLabel(relationship: string | null | undefined): string {
 }
 
 /**
+ * Whether this person is a SIGN-IN ACCOUNT or a record only (#5696).
+ *
+ * The household holds both, and they are different tables: a `person` is a
+ * record (a kid with an allergy, a grandparent, a nanny); a `membership` is a
+ * login with a role. `people.user_id` is the link — non-null means a
+ * membership exists for them.
+ *
+ * ONE RULE, ONE HOME. `has_login` is the API's own answer
+ * (apps/api/internal/people/handler.go:135, `p.UserID != nil`), and it is
+ * deliberately among the fields a housesitter still gets (read_basic, same
+ * file:347-357): a sitter must not mistake a child for an adult with a login.
+ * Prefer it; fall back to `user_id` only for callers that hold a person row
+ * without the flag. Never derive this from relationship or age — a 16-year-old
+ * may have an account and a nanny may not.
+ */
+export function isAccount(person: Pick<PersonLike, "has_login" | "user_id">): boolean {
+  if (typeof person.has_login === "boolean") return person.has_login;
+  return !!person.user_id;
+}
+
+/**
+ * The badge that says which one this person is. Two words, the same two
+ * everywhere: "Signs in" (an account, with a role in Members) and "Record"
+ * (no login — the child, the grandparent, the nanny).
+ */
+export function accountLabel(person: Pick<PersonLike, "has_login" | "user_id">): string {
+  return isAccount(person) ? "Signs in" : "No login";
+}
+
+/**
  * "Daughter · 8": what a list card carries under the name. The relationship
  * leads (it is how a family reads its own household), then the age when the
  * birthday is known. `today` is null until the household is known, so an age

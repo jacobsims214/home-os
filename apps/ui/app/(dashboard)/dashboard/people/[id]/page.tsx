@@ -65,6 +65,7 @@ import {
   bareAllergen,
   bornValue,
   initials,
+  isAccount,
   personEditBody,
   personSubtitle,
   preferenceCategory,
@@ -332,6 +333,14 @@ export default function PersonDetailPage() {
             {person.display_name}
           </h3>
           <p className="mt-0.5 text-sm text-ink-3 [overflow-wrap:anywhere]">{subtitle || "No details yet"}</p>
+          {/* #5696: the same rule the People list badge uses, from the same
+              helper, so the list and the record can never disagree about who
+              can sign in. */}
+          <p className="mt-1 text-[13px] text-ink-2" data-person-account>
+            {isAccount(person)
+              ? "Signs in — their own login, and a role in Members."
+              : "No login — a record in this household, not an account."}
+          </p>
         </div>
       </div>
     ) : null;

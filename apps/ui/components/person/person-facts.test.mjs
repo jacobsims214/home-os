@@ -2,10 +2,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  accountLabel,
   allergyEntries,
   allergyNote,
   allergySummary,
   bareAllergen,
+  isAccount,
   bornValue,
   initials,
   personCreateBody,
@@ -130,4 +132,27 @@ test("a preference category reads only when it is not the default", () => {
   assert.equal(preferenceCategory("food"), "food");
   assert.equal(preferenceCategory("GENERAL"), "");
   assert.equal(preferenceCategory(null), "");
+});
+
+/**
+ * #5696: who is a sign-in account and who is a record. The distinction is a
+ * real household difference (a parent with a role in Members vs a 9-year-old
+ * with an allergy), and the UI must not infer it from relationship or age.
+ */
+test("isAccount reads the API's has_login, not the relationship", () => {
+  // The API's own answer wins, in both directions.
+  assert.equal(isAccount({ has_login: true, user_id: "u-1" }), true);
+  assert.equal(isAccount({ has_login: false, user_id: null }), false);
+  // A relationship is never evidence: an adult grandmother may have no login.
+  assert.equal(isAccount({ has_login: false, user_id: null, relationship: "grandmother" }), false);
+  // Older callers that hold a person row without the flag fall back to user_id,
+  // which is the same FK the API derives has_login from.
+  assert.equal(isAccount({ user_id: "u-2" }), true);
+  assert.equal(isAccount({ user_id: null }), false);
+  assert.equal(isAccount({}), false);
+});
+
+test("accountLabel says the two words the list badges use", () => {
+  assert.equal(accountLabel({ has_login: true }), "Signs in");
+  assert.equal(accountLabel({ has_login: false }), "No login");
 });

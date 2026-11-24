@@ -57,7 +57,13 @@ import classes from "./BottomNav.module.css";
 const TILE_HINTS: Partial<Record<NavSectionId, string>> = {
   // #4569: the artifact's own subtitle for the Documents tile (artifact #75 v1).
   documents: "Insurance, school forms, receipts",
-  people: "Family, home, cars, pets, vendors",
+  // #5696: "pets" left this hint because Pets became its own tile. Everything
+  // else is the artifact's wording (artifact #75 v1); only the word that moved
+  // was dropped, so the People tile stops promising a page it no longer owns.
+  people: "Family, home, cars, vendors",
+  // #5696: pets are their own tile now. The hint names the care a parent
+  // actually comes for, because "Pets" alone reads like a view-only page.
+  pets: "Vet, meds, feeding, appointments",
   money: "Bills and loans",
   // #5408: the tile that was missing entirely — the More sheet was the only
   // phone surface that could have carried Guides and it had no tile to show.
