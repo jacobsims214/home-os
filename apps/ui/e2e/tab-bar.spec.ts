@@ -100,7 +100,9 @@ for (const width of [375, 390]) {
         await expect(sheet.getByText(name, { exact: true })).toBeVisible();
       }
       await expect(sheet.getByText(/coming soon/i)).toHaveCount(0);
-      await expect(sheet.getByText("Family, home, cars, pets, vendors")).toBeVisible();
+      // #5696 moved "pets" out of this hint (Pets is its own tile); #5704 moved the
+      // rest of the house out too. The hint now names only what People & House owns.
+      await expect(sheet.getByText("Family, home, cars, vendors")).toBeVisible();
       await expect(sheet.getByRole("button", { name: /^Notifications/ })).toBeVisible();
       // One family in the stub: the row names it and goes to Members, rather
       // than offering a switch there is nothing to switch to (#4574).
