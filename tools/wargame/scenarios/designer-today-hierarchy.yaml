@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (cross-cutting-3), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-today-hierarchy
+persona: designer
+surface: today
+intent: |
+  Is the Today page's information in the right order?
+steps:
+  - open /dashboard at 390px as amber
+  - count screens of scroll and note where people/allergy info sits
+assertion: |
+  Content a babysitter needs fast (people, allergies) is not at the bottom of a
+  seven-screen scroll, or the placement is a deliberate documented choice.
+tags:
+  - ui
+  - mobile
+  - today
+  - hierarchy
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: cross-cutting-3
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: partial

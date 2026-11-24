@@ -540,7 +540,11 @@ export default function FileUpload({
             ? "border-accent bg-accent-soft"
             : "border-line bg-surface-2 hover:border-accent hover:bg-accent-soft"
         } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
-        aria-label="Drop files here or click to upload"
+        /* No aria-label: the visible text IS the name (WCAG 2.5.3, axe
+           label-content-name-mismatch). The label that used to sit here said
+           "Drop files here or click to upload", which is not what the zone
+           reads, and a name that disagrees with the words on screen breaks
+           voice control ("click browse" found nothing). */
       >
         <UploadIcon />
         <p className="mt-2 text-sm font-medium text-ink">

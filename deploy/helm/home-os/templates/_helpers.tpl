@@ -106,6 +106,31 @@ agentCredentialsKey
 {{- end -}}
 
 {{/*
+TYPESENSE_HOST / TYPESENSE_PORT / TYPESENSE_API_KEY for every pod that talks to
+the search index: api, worker and mcp. Defined once so a deployment cannot be
+left out of it.
+
+The MCP was left out (#5621): it had the block copy-pasted into the api and
+worker deployments but not its own, so kb_search's semantic search returned
+"no search index configured", fell back to literal word matching, and reported
+a normal empty result for a paraphrase of a doc that existed all along. The
+key comes from the same Secret the api and worker read; nothing here is a
+literal, and TYPESENSE_PROTOCOL is not read by the MCP (config.go takes host,
+port and key only).
+*/}}
+{{- define "home-os.typesenseEnv" -}}
+- name: TYPESENSE_HOST
+  value: home-os-typesense
+- name: TYPESENSE_PORT
+  value: "{{ .Values.typesense.port }}"
+- name: TYPESENSE_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "home-os.secretsName" . }}
+      key: typesenseApiKey
+{{- end -}}
+
+{{/*
 Database connection parts, shared by home-os.databaseUrl and Dex's storage
 config. Managed: the chart's CNPG cluster as `app`, no TLS. External:
 database.external.*. home-os.dbHost is the bare Service name in managed mode;

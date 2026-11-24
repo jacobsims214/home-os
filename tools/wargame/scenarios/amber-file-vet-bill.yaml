@@ -1,0 +1,29 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (A2), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-file-vet-bill
+persona: amber
+surface: money
+intent: |
+  File the dog's vet bill - $82.50, due 12/05 - and remind me.
+steps:
+  - "chat.sh amber r2-vet --stdin <<'EOF' (vet bill $82.50 due 12/05, add a reminder)"
+  - mcpcall.py bill_find as amber
+  - "mcpcall.py document_find --query 'Riverside Animal Hospital' as amber"
+  - mcpcall.py event_find --from 2026-12-04 --to 2026-12-05 as amber
+assertion: |
+  The stored amount is exactly 82.5, the reminder exists in Home OS, and any 'all
+  filed' claim is backed by a document row plus a non-null source_document_id on the
+  bill.
+tags:
+  - money
+  - documents
+  - agent
+  - write
+  - honesty
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: A2
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: partial

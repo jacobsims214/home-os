@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T1), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-kids-schedule
+persona: amber
+surface: calendar
+intent: |
+  What do the kids have on this week and next week?
+steps:
+  - "chat.sh amber r1-kids --file msg (ask: kids' schedule this week + next)"
+  - mcpcall.py event_find --from today --to +14d as amber
+  - "compare the reply's dates/times against event_find"
+assertion: |
+  Every date and time in the reply appears in event_find for the 14-day window; an
+  overlap with Thanksgiving dinner is flagged rather than silently booked over.
+tags:
+  - calendar
+  - agent
+  - read
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T1
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: pass

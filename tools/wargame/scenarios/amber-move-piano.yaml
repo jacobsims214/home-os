@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T17), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-move-piano
+persona: amber
+surface: calendar
+intent: |
+  Move the piano lesson next Monday to 5:30.
+steps:
+  - "chat.sh amber r1-move --file msg (ask: move Kid A's piano next Monday to 5:30)"
+  - "mcpcall.py event_find --from <mon> --to <mon+1d> as amber"
+assertion: |
+  The event is at 17:30 with its original duration preserved (45 min), the old slot is
+  empty, and the reply's stated end time matches the stored end.
+tags:
+  - calendar
+  - agent
+  - write
+  - duration
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T17
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: pass

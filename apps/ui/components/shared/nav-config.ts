@@ -11,11 +11,16 @@
  * Lists, Documents and Guides with `comingSoon: true`, which the shell rendered
  * as a "Soon" pill / "Coming soon" tile: placeholder copy shipped to a family,
  * advertising features the build did not have (artifact #168, D7/D8; the
- * approved artifact has no such badge anywhere). Guides and Lists still have no
- * page, so they are simply not in the list — a hidden destination is honest, a
- * badge saying "soon" is a promise. There is deliberately no flag for
- * "planned but unbuilt": a section is added back when its route exists, and a
- * test walks the filesystem to prove every href resolves.
+ * approved artifact has no such badge anywhere). There is deliberately no flag
+ * for "planned but unbuilt": a section is added back when its route exists, and
+ * a test walks the filesystem to prove every href resolves.
+ *
+ * Every one of those three has come back since, each when its page landed:
+ * Lists in #4566, Documents in #4569, and Guides in #5408. Guides is the case
+ * that made the rule hurt: /dashboard/guides shipped in #4570 and was reachable
+ * only by typing the URL, because the shell draws itself from this list and the
+ * list had no entry for it. A page that exists and a section that is defined
+ * are one decision, so add them together (#5408).
  *
  * Documents came back in #4569, when /dashboard/documents landed: it sits in
  * the Household group between Meals and People & House, exactly as the approved
@@ -27,7 +32,9 @@
  */
 import type { Icon } from "@tabler/icons-react";
 import {
+  IconBook,
   IconCalendar,
+  IconChecklist,
   IconFiles,
   IconHome,
   IconSettings,
@@ -61,7 +68,16 @@ const READERS: readonly NavRole[] = [...FAMILY, "viewer"];
 /** Readers plus housesitter (calendar and meals). */
 const SITTERS: readonly NavRole[] = [...READERS, "housesitter"];
 
-export type NavSectionId = "today" | "calendar" | "meals" | "documents" | "people" | "money" | "settings";
+export type NavSectionId =
+  | "today"
+  | "calendar"
+  | "meals"
+  | "lists"
+  | "documents"
+  | "people"
+  | "money"
+  | "guides"
+  | "settings";
 
 export interface NavSection {
   id: NavSectionId;
@@ -123,6 +139,19 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     matches: ["/dashboard/recipes"],
   },
   {
+    // #4566: Lists is a real destination now, so it is back in the nav — the
+    // approved shell (artifact #75 v1) draws it right after Meals, and #5199
+    // removed it only because there was no page to point at. ResLists in the
+    // API's role policy is rolesSitter for reads: family, viewer, housesitter.
+    // A vendor does not see the section at all.
+    id: "lists",
+    label: "Lists",
+    href: "/dashboard/lists",
+    icon: IconChecklist,
+    group: "main",
+    roles: SITTERS,
+  },
+  {
     // #4569: the household's paperwork (the documents hub). READERS is the
     // files read grant in the API's role policy, so a housesitter and a vendor
     // do not see the section at all — the API answers 403 for them.
@@ -136,12 +165,16 @@ export const NAV_SECTIONS: readonly NavSection[] = [
   {
     id: "people",
     label: "People & House",
-    // The People page (#4565) doesn't exist yet; properties is today's way in.
-    href: "/dashboard/properties",
+    // The People page (#4565) is the way in: the family comes first, the house
+    // follows from the same section (properties, vehicles, pets, vendors).
+    href: "/dashboard/people",
     icon: IconHome,
     group: "household",
     matches: [
       "/dashboard/people",
+      // Properties led this section before the People page existed; it is
+      // still part of it now that the href is People.
+      "/dashboard/properties",
       "/dashboard/members",
       "/dashboard/assets",
       "/dashboard/maintenance",
@@ -160,11 +193,32 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     matches: ["/dashboard/money", "/dashboard/loans"],
     roles: READERS,
   },
+  {
+    // #5408: Guides is the family's how-tos and runbooks (/dashboard/guides,
+    // #4570). It sits last in the Household group, where the approved shell
+    // draws it (artifact #75 v1), and it is the tile the More sheet was missing:
+    // before this, no nav surface anywhere in the app linked to the page.
+    //
+    // The roles are the page's own read grant, not a guess: guides read is
+    // ResGuides = rolesSitter in apps/api/internal/auth/roles.go, i.e. family +
+    // viewer + housesitter, and writes are family only (#4689). A housesitter
+    // reading "reset the router" is the whole reason guides exist, so the
+    // section is SITTERS — the same grant as Calendar, Meals and Lists. A vendor
+    // has no read grant and does not see the section.
+    id: "guides",
+    label: "Guides",
+    href: "/dashboard/guides",
+    icon: IconBook,
+    group: "household",
+    roles: SITTERS,
+  },
   { id: "settings", label: "Settings", href: "/dashboard/settings", icon: IconSettings, group: "you", matches: ["/dashboard/admin"] },
 ];
 
 /** Page titles for routes that aren't a section's own page. */
 const ROUTE_TITLES: ReadonlyArray<[prefix: string, title: string]> = [
+  // The People page (#4565); a person's own page keeps the same title.
+  ["/dashboard/people", "People"],
   ["/dashboard/properties", "Properties"],
   ["/dashboard/members", "Members"],
   ["/dashboard/assets", "Assets"],
@@ -177,6 +231,8 @@ const ROUTE_TITLES: ReadonlyArray<[prefix: string, title: string]> = [
   ["/dashboard/admin", "Admin"],
   ["/dashboard/meals", "Meals"],
   ["/dashboard/recipes", "Recipes"],
+  // A single list keeps "Lists", like a recipe keeps "Recipes"; the section's
+  // own label covers it, so no entry is needed here.
   // The Documents hub's own page is the section (its title comes from there);
   // a single document keeps "Documents", like a recipe keeps "Recipes".
   ["/dashboard/documents", "Documents"],
@@ -185,6 +241,28 @@ const ROUTE_TITLES: ReadonlyArray<[prefix: string, title: string]> = [
   // section of its own — the header still reads "Family activity", and the tab
   // bar keeps Today current (activeSection falls back to Today for it).
   ["/dashboard/activity", "Family activity"],
+  // Guides (#4570) is a real page with no nav section of its own (#5199), so
+  // without this entry the header h1 fell through to "Home OS" — the app's
+  // name instead of the page's, which is what #5409 found. It sits below
+  // Documents here because a guide keeps the list's title, like a recipe.
+  //
+  // The family reference (#5503) lives under the same section and its own
+  // routes, so it needs its own title — otherwise the header read "Guides"
+  // over a page whose own heading says "Reference", which is #5409's defect
+  // again.
+  ["/dashboard/guides/reference", "Reference"],
+  ["/dashboard/guides", "Guides"],
+  // Settings' sub-routes (#4560). Each section page draws its body under this
+  // header, so without these the h1 read "Settings" on all six and the
+  // document outline named the same page everywhere (#5409). The labels are
+  // the ones in SETTINGS_SECTIONS (components/settings/settings-sections.ts),
+  // which is what the section page's own h2 shows — keep the two in step.
+  ["/dashboard/settings/household", "Household"],
+  ["/dashboard/settings/members", "Members"],
+  ["/dashboard/settings/credentials", "Credentials"],
+  ["/dashboard/settings/phone-calendar", "Phone calendar"],
+  ["/dashboard/settings/agent-tokens", "Agent tokens"],
+  ["/dashboard/settings/account", "Account"],
 ];
 
 function underPrefix(pathname: string, prefix: string): boolean {

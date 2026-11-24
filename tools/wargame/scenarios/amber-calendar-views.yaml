@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U12), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-calendar-views
+persona: amber
+surface: calendar
+intent: |
+  Show me the week, the day, and the month.
+steps:
+  - open /dashboard/calendar as amber
+  - "switch through Agenda, Day and Month"
+  - "check a recurring event's description and a bill projection's paid state"
+assertion: |
+  All three views render, recurrence is spelled out in words, and bill projections
+  show their paid-for state.
+tags:
+  - calendar
+  - ui
+  - views
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U12
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: pass

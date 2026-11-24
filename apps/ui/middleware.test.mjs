@@ -30,11 +30,17 @@ const PUBLIC = [
   "/reset-password/confirm",
   "/invite/x",
   "/invite/abc123",
+  "/invites", // the accept page the API's accept_url points at (#4579)
+  "/invites/accept",
+  "/invites/accept?token=4f1c9a7e-2b8d",
   "/onboarding",
   "/onboarding/household",
   "/api/auth",
   "/api/auth/login",
   "/api/auth/callback",
+  "/auth", // the app's own last step of a login (#5304)
+  "/auth/complete",
+  "/auth/complete?to=%2Fdashboard%2Fcalendar",
 ];
 const PASSTHROUGH = [
   "/bff/members",
@@ -53,7 +59,9 @@ const PROTECTED = [
   "/dashboard/settings/profile",
   "/dashboard/report.pdf", // a dot no longer bypasses the guard
   "/loginx", // prefix must match a whole segment
+  "/authx", // "/auth" is the completion route only (#5304)
   "/invitex",
+  "/invitesomething",
   "/bffx",
   "/api/other",
 ];

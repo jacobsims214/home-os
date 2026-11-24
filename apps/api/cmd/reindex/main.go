@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"time"
@@ -9,12 +10,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"home-os/api/internal/config"
-	"home-os/api/internal/file"
-	"home-os/api/internal/guides"
 	"home-os/api/internal/search"
+	"home-os/api/internal/searchrecon"
 )
 
+// reindex rebuilds the household_search Typesense collection from Postgres.
+//
+// Postgres is the source of truth; the index is a derived copy of it. This
+// tool used to carry its own ad-hoc SQL per table, which is how calendar
+// events came to be missing entirely (#5298): the list here and the list the
+// handlers wrote had nothing in common. The mapping now lives in
+// searchrecon.Documents, the same code the API's periodic sweep runs, so a
+// record that is searchable after a write is searchable after a reindex.
 func main() {
+	household := flag.String("household", "", "reindex one household id only (default: every household)")
+	keepCollection := flag.Bool("keep", false, "keep the existing collection and reconcile into it (default: drop and recreate)")
+	flag.Parse()
+
 	cfg, _ := config.Load()
 
 	ctx := context.Background()
@@ -26,9 +38,26 @@ func main() {
 
 	sc := search.NewClient(cfg)
 
+	if *keepCollection {
+		// Reconcile in place: upsert every document, prune the ones whose
+		// record is gone. This is what the API's sweep does per tick, so a
+		// -keep run reproduces exactly what a healthy deployment converges to.
+		if err := sc.InitCollection(ctx); err != nil {
+			log.Fatalf("init collection: %v", err)
+		}
+		start := time.Now()
+		stats, err := searchrecon.Reconcile(ctx, pool, sc, *household)
+		if err != nil {
+			log.Fatalf("reconcile: %v", err)
+		}
+		fmt.Printf("Reconciled %d households: %d documents indexed, %d pruned (took %s)\n",
+			stats.Households, stats.Indexed, stats.Pruned, time.Since(start).Round(time.Millisecond))
+		return
+	}
+
 	// Full rebuild: drop household_search and recreate it with the current
 	// schema (auto-embedding field backed by Typesense's local
-	// ts/all-MiniLM-L12-v2 model), then re-import every row below. Typesense
+	// ts/all-MiniLM-L12-v2 model), then re-import every row. Typesense
 	// computes each document's embedding during the upsert. The first create
 	// downloads the model into the Typesense data dir if it is not there yet.
 	if err := sc.RecreateCollection(ctx); err != nil {
@@ -42,83 +71,11 @@ func main() {
 		log.Fatalf("files embedding migration: %v", err)
 	}
 
-	type entityDef struct {
-		table      string
-		entityType string
-		nameCol    string
-		bodyCol    string
+	start := time.Now()
+	stats, err := searchrecon.Reconcile(ctx, pool, sc, *household)
+	if err != nil {
+		log.Fatalf("index from postgres: %v", err)
 	}
-
-	entities := []entityDef{
-		{"assets", "asset", "name", "COALESCE(notes,'')"},
-		{"vehicles", "vehicle", "make || ' ' || model", "COALESCE(notes,'')"},
-		{"pets", "pet", "name", "COALESCE(notes,'')"},
-		{"vendors", "vendor", "name", "COALESCE(notes,'') || ' ' || COALESCE(specialty,'')"},
-		{"properties", "property", "name", "COALESCE(notes,'') || ' ' || COALESCE(address,'')"},
-		{"bills", "bill", "name", "COALESCE(category,'')"},
-		{"notes", "note", "COALESCE(title,'')", "COALESCE(body,'')"},
-		{"secrets", "secret", "name", "secret_type"},
-	}
-
-	total := 0
-	for _, e := range entities {
-		sql := fmt.Sprintf(
-			`SELECT id::text, household_id::text, %s AS name, %s AS body FROM %s`,
-			e.nameCol, e.bodyCol, e.table)
-		rows, err := pool.Query(ctx, sql)
-		if err != nil {
-			log.Printf("skip %s: %v", e.table, err)
-			continue
-		}
-		for rows.Next() {
-			var id, householdID, name, body string
-			if err := rows.Scan(&id, &householdID, &name, &body); err != nil {
-				continue
-			}
-			doc := search.SearchDocument{
-				ID:          e.entityType + "-" + id,
-				HouseholdID: householdID,
-				EntityType:  e.entityType,
-				EntityID:    id,
-				Title:       name,
-				Body:        body,
-				CreatedAt:   time.Now().Unix(),
-				UpdatedAt:   time.Now().Unix(),
-			}
-			if err := sc.IndexDocument(ctx, doc); err != nil {
-				log.Printf("ERR %s/%s: %v", e.table, id, err)
-			} else {
-				total++
-			}
-		}
-		rows.Close()
-	}
-	// Guides carry tags and property_id too, so they use the same document
-	// builder as the API instead of the generic name/body query above.
-	if err := guides.NewRepo(pool).All(ctx, func(g *guides.Guide) error {
-		if err := sc.IndexDocument(ctx, guides.Document(g)); err != nil {
-			log.Printf("ERR guides/%s: %v", g.ID, err)
-		} else {
-			total++
-		}
-		return nil
-	}); err != nil {
-		log.Printf("skip guides: %v", err)
-	}
-
-	// Document metadata (048): one household_search document per file, built
-	// by the same function the file handler uses on upload/PATCH. The OCR
-	// text stays in the worker's files collection.
-	if err := file.NewRepo(pool).AllForIndex(ctx, func(f *file.File, person string) error {
-		if err := sc.IndexDocument(ctx, file.SearchDocument(f, person)); err != nil {
-			log.Printf("ERR files/%s: %v", f.ID, err)
-		} else {
-			total++
-		}
-		return nil
-	}); err != nil {
-		log.Printf("skip files: %v", err)
-	}
-
-	fmt.Printf("Indexed %d documents\n", total)
+	fmt.Printf("Indexed %d documents across %d households (took %s)\n",
+		stats.Indexed, stats.Households, time.Since(start).Round(time.Millisecond))
 }

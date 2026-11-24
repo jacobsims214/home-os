@@ -72,6 +72,78 @@ func TestLoadDefaults(t *testing.T) {
 	equal(t, DefaultRegisterPerHour, cfg.RegisterPerHour)
 }
 
+// TestLoadTypesenseAllOrNothing pins #5621's wiring class from the config side.
+//
+// TYPESENSE_HOST, TYPESENSE_PORT and TYPESENSE_API_KEY are read here, and the
+// deployed mcp pod was missing all three while api and worker had them. The
+// symptom was not a crash: kb_search searched by words and reported a normal
+// empty result for a paraphrase of a document that existed, which an agent
+// relays to a family as "there is no such document".
+//
+// Two things are asserted, and both would have caught this:
+//   - none of the three is silent: Configured() is false and names what is
+//     missing, so cmd/mcp can log it and kb_search can label its results
+//     (it does; see TestKBSearchFailsLoudlyWithoutAnIndex).
+//   - a PARTIAL set is a configuration ERROR, not a working pod. A host and no
+//     key is the shape a typo or a half-copied env block produces, and it must
+//     stop the process rather than degrade a search.
+func TestLoadTypesenseAllOrNothing(t *testing.T) {
+	full := map[string]string{
+		"DATABASE_URL":      "postgres://x",
+		"TYPESENSE_HOST":    "home-os-typesense",
+		"TYPESENSE_PORT":    "8108",
+		"TYPESENSE_API_KEY": "k",
+	}
+
+	t.Run("all three: configured", func(t *testing.T) {
+		setEnv(t, full)
+		cfg := mustLoad(t)
+		if !cfg.Configured() {
+			t.Fatalf("Configured() = false with all three set; missing = %v", cfg.missingSearchSettings())
+		}
+		equal(t, "home-os-typesense", cfg.TypesenseHost)
+		equal(t, "8108", cfg.TypesensePort)
+	})
+
+	t.Run("none: not configured, not an error", func(t *testing.T) {
+		// A local checkout without Typesense must still start; it just must
+		// never pretend its word matching is a meaning search.
+		setEnv(t, map[string]string{"DATABASE_URL": "postgres://x"})
+		cfg := mustLoad(t)
+		if cfg.Configured() {
+			t.Fatal("Configured() = true with no TYPESENSE_* set")
+		}
+		equal(t, []string{"TYPESENSE_HOST", "TYPESENSE_PORT", "TYPESENSE_API_KEY"}, cfg.missingSearchSettings())
+	})
+
+	// Every partial set is refused, and the error names the missing vars.
+	for _, missing := range [][2]string{
+		{"TYPESENSE_HOST", "TYPESENSE_HOST"},
+		{"TYPESENSE_PORT", "TYPESENSE_PORT"},
+		{"TYPESENSE_API_KEY", "TYPESENSE_API_KEY"},
+	} {
+		t.Run("only "+missing[0]+" missing is refused", func(t *testing.T) {
+			env := map[string]string{}
+			for k, v := range full {
+				if k != missing[0] {
+					env[k] = v
+				}
+			}
+			setEnv(t, env)
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("%s unset with the other two set must be refused, not started", missing[0])
+			}
+			if !strings.Contains(err.Error(), missing[1]) {
+				t.Errorf("error must name %s so the fix is obvious: %v", missing[1], err)
+			}
+			if !strings.Contains(err.Error(), "TYPESENSE_* is partly configured") {
+				t.Errorf("error must say the settings are partly configured: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadDerivesFromPublicBaseURL(t *testing.T) {
 	setEnv(t, map[string]string{
 		"DATABASE_URL":    "postgres://x",

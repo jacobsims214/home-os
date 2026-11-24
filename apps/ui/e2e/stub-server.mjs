@@ -28,6 +28,10 @@
  *                          first), /households/me answers the active one and
  *                          /bills returns the active household's rows. Without
  *                          it, every session keeps the single seed household.
+ *                          An EMPTY list is allowed and means "this account
+ *                          belongs to no family yet" — the state /welcome's
+ *                          wizard is for (#5409), which no other session can
+ *                          produce.
  *                          householdHeaders in /e2e/stats is what the API saw:
  *                          one {sid, path, household} per API request, so a spec
  *                          can prove the BFF scoped a request to a family.
@@ -48,6 +52,20 @@
  *                          keeps the verifier as is; the API stores argon2id.
  *   POST /e2e/secrets/seed {sid, key_salt, key_hash}
  *                          Seed a pre-051 (legacy) master key for a session.
+ *   POST /e2e/secrets/records {sid, records: [{id, name, secret_type,
+ *                                              shared_with_agents?}]}
+ *                          Seed listed credentials for a session (#4575), so a
+ *                          spec can assert the list, the share switch and the
+ *                          per-credential activity link without a real vault.
+ *                          GET /api/v1/secrets answers these (filtered by
+ *                          entity_type/entity_id when the query has them) and
+ *                          GET /api/v1/secrets/:id answers one with a blob.
+ *   PUT/DELETE /api/v1/secrets/:id/agent-share
+ *                          Mirror agentshare.go's role gate: owner and
+ *                          family_manager only (403 otherwise), 404 for an
+ *                          unknown id, 503 without a key configured. A PUT
+ *                          records "PUT agent-share" in apiWrites and sets the
+ *                          flag; a DELETE clears it. The value is never kept.
  *   GET  /e2e/secrets?sid= {set_up, legacy, upgraded, requests}: what the
  *                          secrets endpoints received (field names only).
  *   GET  /healthz          200 (Playwright webServer readiness probe)
@@ -69,11 +87,30 @@ const SEED_USER = {
   name: "E2E Tester",
 };
 
+/**
+ * What the stub's POST /auth/caldav-password reports as the CalDAV server
+ * (#5289). A public URL, not this machine's: the UI must display this value
+ * verbatim, so a spec fails if a localhost literal ever comes back. Override
+ * with E2E_CALDAV_SERVER_URL to assert the UI follows the API rather than a
+ * constant.
+ */
+const CALDAV_SERVER_URL = process.env.E2E_CALDAV_SERVER_URL || "https://home.example/dav/";
+
 const key = randomBytes(32);
 // refresh token -> session id (sid). A sid lives for the whole sign-in.
 const refreshTokens = new Map();
 // sid -> { key_salt, key_version, verifier?, key_hash?, upgraded, requests[] }
 const secretKeys = new Map();
+/** Credentials per session for the list/view UI (#4575): see /e2e/secrets/records. */
+const secretRecords = new Map();
+/**
+ * Payment accounts (#5506), per session: the rows, and EVERY request body the
+ * payment-accounts routes received. `requestBodies` is the evidence for the
+ * round trip's central claim -- the server never receives a plaintext
+ * credential -- so it records the raw parsed body verbatim, not a summary.
+ */
+const paymentAccounts = new Map();
+const paymentAccountBodies = [];
 const stats = { dexRefreshes: 0, apiRequests: 0, apiUnauthorized: 0, codeExchanges: 0, lastRedirectUri: null, apiWrites: [], householdHeaders: [] };
 // sid -> [{ id, name, role, timezone, bills }]. Empty: the single seed family.
 const sessionHouseholds = new Map();
@@ -135,13 +172,114 @@ function b64Len(v) {
   return Buffer.from(v, "base64").length;
 }
 
-/** /api/v1/secrets/{key,setup,verify}; null for any other secrets path. */
-function secretsRoute(method, resource, sid, body) {
+/**
+ * The documented shape of a listed credential (#4446): metadata only, plus the
+ * sharing flag. encrypted_data/iv appear ONLY on GET /secrets/:id, exactly as
+ * the Go handler does it, and agent_ciphertext never appears at all.
+ */
+function secretListItem(rec, withBlob = false) {
+  const item = {
+    id: rec.id,
+    household_id: rec.household_id,
+    entity_type: rec.entity_type,
+    entity_id: rec.entity_id,
+    name: rec.name,
+    secret_type: rec.secret_type,
+    key_version: 1,
+    created_at: rec.created_at ?? new Date().toISOString(),
+    updated_at: rec.created_at ?? new Date().toISOString(),
+    shared_with_agents: rec.shared_with_agents === true,
+  };
+  if (item.shared_with_agents) item.agent_shared_at = rec.agent_shared_at;
+  if (withBlob) {
+    item.encrypted_data = rec.encrypted_data ?? "";
+    item.iv = rec.iv ?? "";
+  }
+  return item;
+}
+
+/**
+ * What the API lets one role do with "shared with agents" (#4446's
+ * CanShareWithAgents): owner and family_manager only.
+ */
+const SHARE_ROLES = new Set(["owner", "family_manager"]);
+
+/**
+ * /api/v1/secrets/{key,setup,verify} and, since #4575, the list, one record
+ * and the agent-share endpoints. null for any other secrets path.
+ *
+ * `ctx` carries the request's query string and the caller's role, because the
+ * list is filtered and sharing is role-gated. The role comes from the stub's
+ * seeded households: the first household is the active one, which is what
+ * /me/households resolves to without an X-Household-ID.
+ */
+/**
+ * lastFourError mirrors paymentaccount.ValidateLastFour in Go (#5506). Kept
+ * deliberately identical in WHAT IT ACCEPTS: four ASCII digits or nothing. The
+ * message is close enough to be useful in a failure, and the spec asserts the
+ * refusal, not the wording.
+ */
+function lastFourError(v) {
+  if (!v) return "";
+  if (!/^[0-9]+$/.test(v)) return "Last four must be exactly four digits.";
+  if (v.length !== 4) return "Last four must be exactly four digits (that is " + v.length + ").";
+  return "";
+}
+
+function secretsRoute(method, resource, sid, body, ctx = {}) {
   const rec = secretKeys.get(sid);
   if (method === "GET" && resource === "secrets/key") {
     if (!rec) return [404, { error: { code: "NOT_FOUND", message: "master key not set up" } }];
     return [200, { data: { key_salt: rec.key_salt, key_version: rec.key_version } }];
   }
+  // ── Per-credential agent sharing (#4575) ────────────────────────────────
+  // Mirrors apps/api/internal/secret/agentshare.go: role gate first (403),
+  // then the id (404), then the server key (503 on PUT). The value is dropped
+  // immediately: this stub records only that a share happened.
+  const shareMatch = /^secrets\/([^/]+)\/agent-share$/.exec(resource);
+  if (shareMatch && (method === "PUT" || method === "DELETE")) {
+    if (!SHARE_ROLES.has(ctx.role)) {
+      return [403, { error: { code: "FORBIDDEN", message: "only an owner or family manager can change agent sharing" } }];
+    }
+    const rows = secretRecords.get(sid) ?? [];
+    const row = rows.find((r) => r.id === shareMatch[1]);
+    if (!row) return [404, { error: { code: "NOT_FOUND", message: "secret not found" } }];
+    if (method === "PUT") {
+      if (!rec) return [503, { error: { code: "AGENT_SHARING_DISABLED", message: "sharing credentials with agents is not configured on this server" } }];
+      if (!body || typeof body.value !== "object" || body.value === null) {
+        return [400, { error: { code: "BAD_REQUEST", message: "value is required" } }];
+      }
+      row.shared_with_agents = true;
+      row.agent_shared_at = new Date().toISOString();
+      row.agent_uses = row.agent_uses ?? 0;
+    } else {
+      row.shared_with_agents = false;
+      row.agent_shared_at = undefined;
+    }
+    return [200, { data: secretListItem(row) }];
+  }
+
+  // ── List and one record (#4575) ─────────────────────────────────────────
+  // GET /secrets is filtered by entity_type/entity_id when the query carries
+  // them (the credentials section always scopes to a record).
+  if (method === "GET" && (resource === "secrets" || resource.startsWith("secrets/"))) {
+    const rows = secretRecords.get(sid) ?? [];
+    if (resource === "secrets") {
+      const params = new URLSearchParams(ctx.search ?? "");
+      const entityType = params.get("entity_type");
+      const entityId = params.get("entity_id");
+      const list = rows.filter(
+        (r) =>
+          (!entityType || r.entity_type === entityType) && (!entityId || r.entity_id === entityId),
+      );
+      return [200, { data: list.map((r) => secretListItem(r)) }];
+    }
+    const id = resource.slice("secrets/".length);
+    const row = rows.find((r) => r.id === id);
+    if (!row) return [404, { error: { code: "NOT_FOUND", message: "secret not found" } }];
+    return [200, { data: secretListItem(row, true) }];
+  }
+
   if (method !== "POST" || (resource !== "secrets/setup" && resource !== "secrets/verify")) return null;
   const verifier = body.verifier || body.key_hash;
   const log = { endpoint: resource, fields: Object.keys(body).sort() };
@@ -187,6 +325,26 @@ const SEED = {
   ],
 };
 
+/**
+ * The single seed household every session keeps unless it POSTed
+ * /e2e/households (see the header contract). It is what the Go API answers for
+ * an account with one family: a name, the caller's role in it, its zone, and its
+ * own rows. The bills are SEED.bills, so a session that never seeded families
+ * gets the same list it always got.
+ */
+const SEED_HOUSEHOLD = {
+  id: SEED_USER.household_id,
+  // The same convention the API's bootstrap uses for a first household
+  // (apps/api/internal/seed/bootstrap.go: "<AdminName>'s Home"). It must NOT be
+  // the UI's "Your family" placeholder: that string means "the household is not
+  // known", and a spec that cannot tell a known family from an unknown one is
+  // how the empty-list bug went unnoticed.
+  name: `${SEED_USER.name}'s Home`,
+  role: "owner",
+  timezone: "UTC",
+  bills: SEED.bills,
+};
+
 async function readBody(req) {
   const chunks = [];
   for await (const c of req) chunks.push(c);
@@ -204,10 +362,39 @@ const server = createServer(async (req, res) => {
 
   if (path === "/healthz") return send(res, 200, { ok: true });
   if (path === "/e2e/stats") return send(res, 200, stats);
+  // What the payment-accounts routes actually received (#5506). `bodies` is
+  // the raw JSON of every request, so a spec can assert that no body ever
+  // carried a password/username -- only ciphertext or a uuid.
+  if (path === "/e2e/payment-accounts" && req.method === "GET") {
+    const sid = url.searchParams.get("sid") ?? "";
+    return send(res, 200, {
+      accounts: paymentAccounts.get(sid) ?? [],
+      bodies: paymentAccountBodies,
+    });
+  }
   if (path === "/e2e/secrets" && req.method === "GET") {
     const rec = secretKeys.get(url.searchParams.get("sid") ?? "");
     return send(res, 200, { set_up: !!rec, legacy: !!rec?.key_hash, upgraded: !!rec?.upgraded, requests: rec?.requests ?? [] });
   }
+  // Credentials for the list/view UI (#4575), per sign-in session like the
+  // vault itself. The blob is a placeholder: no spec decrypts it, because the
+  // specs that matter here are about the list, the share switch and the link.
+  if (path === "/e2e/secrets/records" && req.method === "POST") {
+    const { sid, records } = JSON.parse((await readBody(req)) || "{}");
+    secretRecords.set(
+      sid,
+      (records ?? []).map((r) => ({
+        household_id: SEED_USER.household_id,
+        secret_type: "login",
+        created_at: new Date().toISOString(),
+        encrypted_data: "",
+        iv: "",
+        ...r,
+      })),
+    );
+    return send(res, 201, { ok: true });
+  }
+
   if (path === "/e2e/secrets/seed" && req.method === "POST") {
     const { sid, key_salt, key_hash } = JSON.parse((await readBody(req)) || "{}");
     if (!sid || !key_salt || !key_hash) return send(res, 400, { error: "sid, key_salt and key_hash are required" });
@@ -249,8 +436,11 @@ const server = createServer(async (req, res) => {
 
   if (path === "/e2e/households" && req.method === "POST") {
     const { sid, households } = JSON.parse((await readBody(req)) || "{}");
-    if (!sid || !Array.isArray(households) || households.length === 0) {
-      return send(res, 400, { error: "sid and a non-empty households list are required" });
+    // An empty list is a real state, not a mistake: an account that belongs to
+    // no family yet (#5409). Requiring a non-empty list made "familyless"
+    // unreachable, which is how /welcome went on assuming everybody was new.
+    if (!sid || !Array.isArray(households)) {
+      return send(res, 400, { error: "sid and a households list are required" });
     }
     sessionHouseholds.set(sid, households);
     return send(res, 201, { ok: true });
@@ -271,7 +461,12 @@ const server = createServer(async (req, res) => {
     // sid so parallel specs (one stub process) can read only their own.
     const headerHousehold = req.headers["x-household-id"] ?? null;
     stats.householdHeaders.push({ sid: claims.sid ?? null, path: resource, household: headerHousehold });
-    const households = sessionHouseholds.get(claims.sid ?? "");
+    // The documented contract (header, POST /e2e/households): without a seeded
+    // list, every session keeps the single seed household. This used to be
+    // `sessionHouseholds.get(...)` alone, so a session that never seeded one
+    // fell through to `SEED[resource] ?? []` and /me/households answered
+    // {"data":[]} — no role, and every role-gated page stuck in its skeleton.
+    const households = sessionHouseholds.get(claims.sid ?? "") ?? [SEED_HOUSEHOLD];
     const activeHousehold =
       households?.find((h) => h.id === headerHousehold) ?? households?.[0] ?? null;
     let body = {};
@@ -281,16 +476,145 @@ const server = createServer(async (req, res) => {
       } catch {
         /* not JSON */
       }
+
+
     }
-    if (resource.startsWith("secrets/")) {
-      const out = secretsRoute(req.method, resource, jwtClaims(auth.slice(7)).sid ?? "", body);
+    // ── Payment accounts (#5506) ──────────────────────────────────────────
+    // Mirrors apps/api/internal/paymentaccount: last_four is validated the way
+    // the Go handler validates it, so a spec that pastes a full number gets the
+    // same 400 the real API would give (and the UI's own refusal is testable
+    // against a server that agrees with it).
+    if (resource === "payment-accounts" || resource.startsWith("payment-accounts/")) {
+      paymentAccountBodies.push({ method: req.method, resource, body });
+      const sid = jwtClaims(auth.slice(7)).sid ?? "";
+      const rows = paymentAccounts.get(sid) ?? [];
+      if (req.method === "GET") return send(res, 200, { data: rows });
+
+      if (req.method === "POST" && resource === "payment-accounts") {
+        const lf = String(body.last_four ?? "").trim();
+        const check = lastFourError(lf);
+        if (check) return send(res, 400, { error: { code: "BAD_REQUEST", message: check } });
+        if (!String(body.name ?? "").trim()) {
+          return send(res, 400, { error: { code: "BAD_REQUEST", message: "name is required" } });
+        }
+        const row = {
+          id: `pa-${rows.length + 1}`,
+          household_id: SEED_USER.household_id,
+          name: String(body.name).trim(),
+          institution: body.institution || undefined,
+          account_type: body.account_type || "checking",
+          last_four: lf || null,
+          notes: body.notes || undefined,
+          login_stored: false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        rows.push(row);
+        paymentAccounts.set(sid, rows);
+        return send(res, 201, row);
+      }
+
+      const rest = resource.slice("payment-accounts/".length);
+      const secretMatch = /^([^/]+)\/secret$/.exec(rest);
+      const id = secretMatch ? secretMatch[1] : rest;
+      const row = rows.find((r) => r.id === id);
+      if (!row) return send(res, 404, { error: { code: "NOT_FOUND", message: "payment account not found" } });
+
+      if (secretMatch && req.method === "PUT") {
+        // The body is a UUID or null -- never a credential. A linked secret
+        // makes "login stored" true without the stub ever seeing a plaintext.
+        const secretId = body.secret_id ?? null;
+        row.login_stored = !!secretId;
+        row.login_secret_id = secretId ?? undefined;
+        return send(res, 200, row);
+      }
+      if (req.method === "GET") return send(res, 200, row);
+      if (req.method === "PUT") {
+        const lf = String(body.last_four ?? "").trim();
+        const check = lastFourError(lf);
+        if (check) return send(res, 400, { error: { code: "BAD_REQUEST", message: check } });
+        row.name = String(body.name ?? row.name).trim();
+        row.institution = body.institution || undefined;
+        row.account_type = body.account_type || row.account_type;
+        row.last_four = lf || null;
+        row.notes = body.notes || undefined;
+        return send(res, 200, row);
+      }
+      if (req.method === "DELETE") {
+        paymentAccounts.set(sid, rows.filter((r) => r.id !== id));
+        return send(res, 204, undefined);
+      }
+    }
+
+    if (req.method === "POST" && resource === "secrets") {
+      paymentAccountBodies.push({ method: "POST", resource: "secrets", body });
+      // Record the credential the editor just encrypted (#5506), so the vault's
+      // viewer can fetch it back by id. The BLOB stays the placeholder the
+      // generic write echo produced: no spec here decrypts it, and the point of
+      // the round trip is that only ciphertext ever arrived.
+      const sid = jwtClaims(auth.slice(7)).sid ?? "";
+      const rows = secretRecords.get(sid) ?? [];
+      const row = {
+        id: `sec-${rows.length + 1}`,
+        entity_type: body.entity_type ?? null,
+        entity_id: body.entity_id ?? null,
+        name: body.name ?? "Untitled",
+        secret_type: body.secret_type ?? "login",
+        household_id: SEED_USER.household_id,
+        created_at: new Date().toISOString(),
+        shared_with_agents: false,
+        encrypted_data: body.encrypted_data,
+        iv: body.iv,
+        key_version: body.key_version,
+      };
+      rows.push(row);
+      secretRecords.set(sid, rows);
+      return send(res, 201, { data: secretListItem(row) });
+    }
+    if (resource === "secrets" || resource.startsWith("secrets/")) {
+      // The active household's role is what the API reads from the claims; the
+      // stub derives it the same way /me/households does (#4575's share gate).
+      const out = secretsRoute(
+        req.method,
+        resource,
+        jwtClaims(auth.slice(7)).sid ?? "",
+        body,
+        { search: url.search, role: activeHousehold?.role ?? "owner" },
+      );
       if (out) return send(res, out[0], out[1]);
+    }
+    // POST /auth/caldav-password (#5289). Mirrors the API's caldavPasswordResponse
+    // (apps/api/internal/auth/handler.go): the plaintext is returned once, and
+    // server_url is built from the API's PUBLIC_URL. The stub answers a fixed
+    // public URL on purpose — it is what the UI must show verbatim instead of a
+    // localhost literal, and a spec asserts exactly that.
+    if (resource === "auth/caldav-password" && req.method === "POST") {
+      return send(res, 200, {
+        password: "e2eapppassword0123456789abcdefghij",
+        username: SEED_USER.email,
+        server_url: CALDAV_SERVER_URL,
+      });
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
       stats.apiWrites.push(`${req.method} ${path}${url.search}${body.name ? ` ${body.name}` : ""}`);
       if (req.method === "POST") return send(res, 201, { data: { id: `e2e-${stats.apiWrites.length}`, ...body } });
     }
     if (resource === "auth/me" || resource === "users/me") return send(res, 200, { data: SEED_USER });
+    // GET /budget/obligations: an EMPTY but COMPLETE payload (#5506). The Money
+    // page crashes on a response with no `categories` at all ("Spread syntax
+    // requires ...iterable not be null") — a real defect the page's own guard
+    // now fixes, and this keeps the stub honest about the API's shape: an
+    // empty household answers with empty arrays, not with absent ones.
+    if (resource === "budget/obligations") {
+      return send(res, 200, {
+        data: { month: "2026-11", currency: "USD", categories: [], uncategorized: null,
+                totals: { committed: "0.00", budgeted: "0.00", uncounted: 0 } },
+      });
+    }
+    if (resource === "budget/due-soon") {
+      return send(res, 200, { data: { from: "2026-11-01", to: "2026-11-30", days: 30, total: "0.00",
+        bill_count: 0, loan_count: 0, items: [], coverage: {} } });
+    }
     if (households) {
       // Mirrors GET /api/v1/me/households: role per household, is_default on
       // the first, current on the one X-Household-ID resolved to.
@@ -308,8 +632,21 @@ const server = createServer(async (req, res) => {
         });
       }
       if (resource === "households/me" && activeHousehold) {
+        // The API's REAL wire shape (#5300): GetMe serialises the Go Household
+        // struct, which has no json tags, so the keys are capitalised
+        // (`Timezone`, not `timezone`). This stub used to answer a tidy lowercase
+        // object the product never sends, and a page reading the wrong key
+        // passed every spec. Stub the API as it is: a spec that only passes
+        // against a made-up payload is not testing anything.
         return send(res, 200, {
-          data: { id: activeHousehold.id, name: activeHousehold.name, timezone: activeHousehold.timezone ?? "UTC" },
+          data: {
+            ID: activeHousehold.id,
+            Name: activeHousehold.name,
+            Timezone: activeHousehold.timezone ?? "UTC",
+            Settings: null,
+            CreatedAt: "2026-01-01T00:00:00Z",
+            UpdatedAt: "2026-01-01T00:00:00Z",
+          },
         });
       }
       // Lists and records the spec seeds per household: only the active
@@ -329,6 +666,7 @@ const server = createServer(async (req, res) => {
     return send(res, 200, { data: SEED[resource] ?? [] });
   }
 
+  if (process.env.E2E_STUB_DEBUG) console.error("STUB-404 path=" + path);
   send(res, 404, { error: { code: "NOT_FOUND", message: path } });
 });
 

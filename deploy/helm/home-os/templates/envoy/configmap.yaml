@@ -44,6 +44,143 @@ data:
                     - { address_prefix: {{ $parts._0 | quote }}, prefix_len: {{ $parts._1 | default (ternary "128" "32" (contains ":" $parts._0)) }} }
                     {{- end }}
               {{- end }}
+              {{- if $rl.enabled }}
+              # ANY 429 is a page a person reads, never Envoy's bare local-reply
+              # body (#5407).
+              #
+              # The only 429 this proxy produces is the Dex login throttle above,
+              # and it is produced as a LOCAL REPLY: the request never reaches
+              # Dex or the UI, so no application code -- not the login page, not
+              # an error boundary -- ever runs on it. That is why the app-side
+              # work in this same ticket (lib/auth/login-surface.ts, the login
+              # page's rate-limit state) could not fix the reported symptom on
+              # its own: the person's browser was rendering `local_rate_limited`,
+              # Envoy's own body text, on a blank page with no form and no
+              # explanation.
+              #
+              # The body is written out in full here because it is served by the
+              # proxy, so it can borrow nothing from the app: no stylesheet, no
+              # font, no component. Colours are the app's light-mode tokens
+              # (apps/ui/app/globals.css) inlined, and the wording matches
+              # RATE_LIMIT_COPY in lib/auth/login-surface.ts so the two surfaces
+              # say the same thing.
+              #
+              # It is a 429, not a 200 or a 303: the status is honest, so a
+              # monitoring rule or an API client still sees the throttle. Only
+              # the presentation changes. The limiter itself is untouched.
+              local_reply_config:
+                mappers:
+                - filter:
+                    status_code_filter:
+                      comparison:
+                        op: EQ
+                        value: { default_value: 429 }
+                  body_format_override:
+                    content_type: "text/html; charset=utf-8"
+                    text_format_source:
+                      inline_string: |
+                        <!doctype html>
+                        <html lang="en">
+                        <head>
+                        <meta charset="utf-8">
+                        <meta name="viewport" content="width=device-width, initial-scale=1">
+                        <meta name="robots" content="noindex">
+                        <title>Too many sign-in attempts &mdash; Home OS</title>
+                        <style>
+                          :root { color-scheme: light dark; }
+                          * { box-sizing: border-box; }
+                          body { margin: 0; background: #f8f9fa; color: #212529;
+                                 font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+                          .stand { min-height: 100dvh; display: flex; flex-direction: column;
+                                   align-items: center; justify-content: flex-start;
+                                   padding: calc(24px + env(safe-area-inset-top, 0px)) 16px
+                                            calc(24px + env(safe-area-inset-bottom, 0px)); }
+                          .brand { display: flex; align-items: center; gap: 10px;
+                                   margin-bottom: 24px; font-size: 18px; font-weight: 600;
+                                   letter-spacing: -0.01em; }
+                          .mark { width: 36px; height: 36px; border-radius: 10px; background: #0b7285;
+                                  display: grid; place-items: center; color: #fff; }
+                          .mark svg { width: 20px; height: 20px; }
+                          main { width: 100%%; max-width: 420px; }
+                          .card h1 { margin: 0; font-size: 24px; line-height: 1.15;
+                                     font-weight: 600; letter-spacing: -0.015em; }
+                          .sub { margin: 6px 0 20px; font-size: 15px; color: #495057; }
+                          .warn { display: flex; gap: 12px; margin: 0 0 20px; padding: 14px;
+                                  border: 1px solid #ffd8a8; border-radius: 12px;
+                                  background: #fff4e6; color: #8a3c00; }
+                          .warn svg { flex: 0 0 auto; width: 20px; height: 20px; margin-top: 2px; }
+                          .warn p { margin: 0; }
+                          .warn strong { display: block; font-weight: 600; }
+                          .warn span { display: block; margin-top: 2px; font-size: 13px; line-height: 1.4; }
+                          .btn { display: flex; align-items: center; justify-content: center;
+                                 width: 100%%; min-height: 48px; padding: 0 16px; border: 0;
+                                 border-radius: 8px; background: #0b7285; color: #fff;
+                                 font: inherit; font-size: 15px; font-weight: 600;
+                                 text-decoration: none; cursor: pointer; }
+                          .btn:focus-visible { outline: 3px solid #66d9e8; outline-offset: 2px; }
+                          .alt { margin: 20px 0 0; text-align: center; font-size: 14px; color: #495057; }
+                          .foot { margin-top: 16px; text-align: center; font-size: 12px; color: #636a71; }
+                          @media (min-width: 768px) {
+                            .stand { justify-content: center; padding: 40px 24px; }
+                            .card { padding: 32px; border: 1px solid #e2e6ea; border-radius: 16px;
+                                    background: #fff; box-shadow: 0 1px 2px rgba(16,24,40,.06); }
+                          }
+                          @media (prefers-color-scheme: dark) {
+                            body { background: #1f1f1f; color: #e9ecef; }
+                            .sub, .alt { color: #c1c2c5; }
+                            .foot { color: #9d9fa3; }
+                            .warn { border-color: #5c4320; background: #3a2a14; color: #ffd8a8; }
+                            .btn { background: #0b7285; }
+                            @media (min-width: 768px) {
+                              .card { border-color: #3a3a3a; background: #242424;
+                                      box-shadow: 0 1px 2px rgba(0,0,0,.4); }
+                            }
+                          }
+                        </style>
+                        </head>
+                        <body>
+                        <div class="stand">
+                          <div class="brand">
+                            <span class="mark" aria-hidden="true">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                   stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9.5V21h13V9.5"/>
+                              </svg>
+                            </span>
+                            <span>Home OS</span>
+                          </div>
+                          <main class="card" data-auth-page="rate-limited">
+                            <h1>Too many sign-in attempts</h1>
+                            <p class="sub">Sign-in is paused for a moment</p>
+                            <div class="warn" role="alert">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M12 9v4M12 17v.01"/>
+                                <path d="M10.3 4.2 2.6 17.5A2 2 0 0 0 4.3 20.5h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0z"/>
+                              </svg>
+                              <p>
+                                <strong>Too many sign-in attempts</strong>
+                                <span>Sign-in is paused for about {{ int $rl.retryAfterSeconds }} seconds to protect your
+                                family&#39;s account from password guessing. Wait a moment, then try again.</span>
+                              </p>
+                            </div>
+                            <a class="btn" href="/login">Try signing in again</a>
+                            <p class="alt">Still stuck? Wait a full minute &mdash; the pause lifts on its own.</p>
+                          </main>
+                          <p class="foot">Home OS &middot; self-hosted</p>
+                        </div>
+                        </body>
+                        </html>
+                  headers_to_add:
+                  # A client (or an operator) can read how long to wait without
+                  # parsing the page. Envoy's own local replies do not pass
+                  # through the router, so the route's retry-after above is not
+                  # guaranteed to be applied here.
+                  - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                    header: { key: retry-after, value: {{ int $rl.retryAfterSeconds | quote }} }
+                  - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                    header: { key: cache-control, value: "no-store" }
+              {{- end }}
               route_config:
                 name: local_route
                 virtual_hosts:

@@ -9,4 +9,5 @@ use (
 	./packages/billcal
 	./packages/billdue
 	./packages/icalx
+	./packages/notify
 )

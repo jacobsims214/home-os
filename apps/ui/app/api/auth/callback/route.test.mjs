@@ -72,7 +72,14 @@ test("env set: redirect_uri is DEX_UI_REDIRECT_URI despite a different Host, and
   assert.equal(dexCalls[0].url, "http://dex.test:5556/dex/token");
   assert.equal(dexCalls[0].body.get("redirect_uri"), "https://h.example/api/auth/callback");
   assert.equal(dexCalls[0].body.get("grant_type"), "authorization_code");
-  assert.equal(done.headers.get("location"), "https://h.example/dashboard");
+  // Login ends on the app's own completion page, whose ?to= is the destination
+  // (#5304): that page is what Back lands on instead of Dex's login form.
+  const complete = new URL(done.headers.get("location"));
+  assert.equal(complete.pathname, "/auth/complete");
+  assert.equal(complete.searchParams.get("to"), "/dashboard");
+  // The one-time code and state must never appear in any URL the browser keeps.
+  assert.equal(complete.searchParams.get("code"), null);
+  assert.equal(complete.searchParams.get("state"), null);
 });
 
 test("env set: callback error redirects go to PUBLIC_URL, not the Host header", async () => {
@@ -91,7 +98,10 @@ test("env unset: header-derived origin and the home-os-dex default (unchanged be
   assert.equal(authorize.searchParams.get("redirect_uri"), "https://home.example/api/auth/callback");
   assert.equal(dexCalls[0].url, "http://home-os-dex:5556/dex/token");
   assert.equal(dexCalls[0].body.get("redirect_uri"), "https://home.example/api/auth/callback");
-  assert.equal(done.headers.get("location"), "https://home.example/dashboard");
+  const complete = new URL(done.headers.get("location"));
+  assert.equal(complete.origin, "https://home.example");
+  assert.equal(complete.pathname, "/auth/complete");
+  assert.equal(complete.searchParams.get("to"), "/dashboard");
 });
 
 test("env unset: a malformed Host is not trusted", async () => {
@@ -102,7 +112,10 @@ test("env unset: a malformed Host is not trusted", async () => {
 test("?redirect= survives the round trip when it is a same-origin path", async () => {
   process.env.PUBLIC_URL = "https://h.example";
   const { done } = await loginRoundTrip({}, `?redirect=${encodeURIComponent("/dashboard/bills?month=2026-11")}`);
-  assert.equal(done.headers.get("location"), "https://h.example/dashboard/bills?month=2026-11");
+  const complete = new URL(done.headers.get("location"));
+  assert.equal(complete.origin, "https://h.example");
+  assert.equal(complete.pathname, "/auth/complete");
+  assert.equal(complete.searchParams.get("to"), "/dashboard/bills?month=2026-11");
 });
 
 test("?redirect= cannot send the browser off-origin", async () => {
@@ -126,6 +139,25 @@ test("a tampered return path in the PKCE cookie is re-validated in the callback"
 test("a pre-#4617 PKCE cookie (state.verifier) still completes login", async () => {
   process.env.PUBLIC_URL = "https://h.example";
   const done = await callback.GET(req("/api/auth/callback?code=c&state=s1", { cookie: "home-os-pkce=s1.v1" }));
-  assert.equal(done.headers.get("location"), "https://h.example/dashboard");
+  const complete = new URL(done.headers.get("location"));
+  assert.equal(complete.pathname, "/auth/complete");
+  assert.equal(complete.searchParams.get("to"), "/dashboard");
   assert.equal(dexCalls[0].body.get("code_verifier"), "v1");
+});
+
+test("the callback never redirects to Dex: no login URL is left for Back to revisit", async () => {
+  // #5304. The whole fix in one assertion: every Location the callback can
+  // produce is on the app origin, so no Dex URL (whose state is spent) can be
+  // the page the browser's Back button returns to.
+  process.env.PUBLIC_URL = "https://h.example";
+  const ok = await loginRoundTrip({}, `?redirect=${encodeURIComponent("/dashboard/bills")}`);
+  const failures = [
+    await callback.GET(req("/api/auth/callback")),
+    await callback.GET(req("/api/auth/callback?code=c&state=s", { cookie: "home-os-pkce=s.v" })),
+  ];
+  for (const res of [ok.done, ...failures]) {
+    const location = new URL(res.headers.get("location"));
+    assert.equal(location.origin, "https://h.example");
+    assert.ok(!location.pathname.startsWith("/dex"), location.pathname);
+  }
 });

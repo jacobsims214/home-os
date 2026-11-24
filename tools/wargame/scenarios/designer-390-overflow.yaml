@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (overflow-390), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-390-overflow
+persona: designer
+surface: app-shell
+intent: |
+  Nothing should run off the side of an iPhone 13.
+steps:
+  - "Playwright iPhone 13 emulation (390x844), signed in as amber"
+  - visit all 9 dashboard sections
+  - assert document.scrollWidth == 390 on each
+assertion: |
+  Zero horizontal overflow on every section at 390px.
+tags:
+  - ui
+  - mobile
+  - layout
+  - overflow
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: overflow-390
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: pass

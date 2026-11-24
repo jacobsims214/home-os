@@ -1,5 +1,5 @@
 {
-  "note": "Household role policy contract (#4689). apps/api/internal/auth/roles.go and apps/mcp/internal/auth/policy.go each mirror this table; TestRolePolicyMatchesFixture in both packages fails when either drifts. Edit both tables, this file and KB decisions/2026-11-15-role-policy.md together.",
+  "note": "Household role policy contract (#4689). apps/api/internal/auth/roles.go and apps/mcp/internal/auth/policy.go each mirror this table; TestRolePolicyMatchesFixture in both packages fails when either drifts. Edit both tables, this file and KB decisions/2026-11-15-role-policy.md together. 076 (#5502) adds policy.kb (every role reads the knowledge base, family roles write) and entity_resources.kb_doc -> kb.",
   "roles": [
     "owner",
     "family_manager",
@@ -163,6 +163,21 @@
       "write": [
         "owner",
         "family_manager"
+      ]
+    },
+    "kb": {
+      "read": [
+        "owner",
+        "family_manager",
+        "family_member",
+        "viewer",
+        "housesitter",
+        "vendor"
+      ],
+      "write": [
+        "owner",
+        "family_manager",
+        "family_member"
       ]
     },
     "links": {
@@ -441,6 +456,12 @@
         "family_manager",
         "family_member"
       ]
+    },
+    "member_audit": {
+      "read": [
+        "owner",
+        "family_manager"
+      ]
     }
   },
   "entity_resources": {
@@ -454,6 +475,7 @@
     "file": "files",
     "guide": "guides",
     "household": "family_notes",
+    "kb_doc": "kb",
     "list": "lists",
     "list_item": "lists",
     "loan": "loans",
@@ -471,6 +493,7 @@
     "room": "properties",
     "secret": "secrets",
     "vehicle": "vehicles",
-    "vendor": "vendors"
+    "vendor": "vendors",
+    "membership": "member_audit"
   }
 }

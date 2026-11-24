@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (cross-cutting-4), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-today-quick-actions
+persona: designer
+surface: today
+intent: |
+  I want to reach the fourth quick action on Today.
+steps:
+  - open /dashboard at 390px and 320px
+  - read the quick-actions row and try to scroll it
+assertion: |
+  Every quick action is either fully visible or the row signals horizontally that it
+  scrolls.
+tags:
+  - ui
+  - mobile
+  - today
+  - layout
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: cross-cutting-4
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: fail

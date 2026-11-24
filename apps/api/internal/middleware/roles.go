@@ -82,12 +82,31 @@ var routeRules = map[string]RouteRule{
 	"PUT /api/v1/pets/{id}":    rr(auth.ResPets, auth.ActWrite),
 	"DELETE /api/v1/pets/{id}": rr(auth.ResPets, auth.ActWrite),
 
+	// Payment accounts (075, #5497). ResBills is the money policy: an account
+	// is money-adjacent (it is the source of a bill's payment), so the least a
+	// role needs is money read. The credential fact on the response
+	// (login_stored) is gated separately on ResSecrets inside the handler,
+	// because a viewer has money read but no secrets.
+	"GET /api/v1/payment-accounts":         rr(auth.ResBills, auth.ActRead),
+	"POST /api/v1/payment-accounts":        rr(auth.ResBills, auth.ActWrite),
+	"GET /api/v1/payment-accounts/{id}":    rr(auth.ResBills, auth.ActRead),
+	"PUT /api/v1/payment-accounts/{id}":    rr(auth.ResBills, auth.ActWrite),
+	"DELETE /api/v1/payment-accounts/{id}": rr(auth.ResBills, auth.ActWrite),
+	// Linking a login is a credential WRITE, not a money write: it attaches a
+	// secrets row to an account. ResSecrets keeps it family-only, so a viewer
+	// who can read the account cannot point it at a credential.
+	"PUT /api/v1/payment-accounts/{id}/secret": rr(auth.ResSecrets, auth.ActWrite),
+
 	// Vendors (contacts).
 	"GET /api/v1/vendors":         rr(auth.ResVendors, auth.ActRead),
 	"POST /api/v1/vendors":        rr(auth.ResVendors, auth.ActWrite),
 	"GET /api/v1/vendors/{id}":    rr(auth.ResVendors, auth.ActRead),
 	"PUT /api/v1/vendors/{id}":    rr(auth.ResVendors, auth.ActWrite),
 	"DELETE /api/v1/vendors/{id}": rr(auth.ResVendors, auth.ActWrite),
+	// Linking the payee portal login is a credential WRITE (ResSecrets, family
+	// only), not a vendor write: a viewer may read the vendor and must not be
+	// able to point it at a credential.
+	"PUT /api/v1/vendors/{id}/portal-secret": rr(auth.ResSecrets, auth.ActWrite),
 
 	// Calendar.
 	"GET /api/v1/calendars":                          rr(auth.ResCalendar, auth.ActRead),
@@ -199,7 +218,7 @@ var routeRules = map[string]RouteRule{
 	"POST /api/v1/lists/{id}/unarchive":           rr(auth.ResLists, auth.ActManage),
 	"GET /api/v1/lists/{id}/items":                rr(auth.ResLists, auth.ActRead),
 	"POST /api/v1/lists/{id}/items":               rr(auth.ResLists, auth.ActAddItems),
-	"POST /api/v1/lists/{id}/items/merge":          rr(auth.ResLists, auth.ActAddItems),
+	"POST /api/v1/lists/{id}/items/merge":         rr(auth.ResLists, auth.ActAddItems),
 	"POST /api/v1/lists/{id}/items/check":         rr(auth.ResLists, auth.ActCheckItems),
 	"POST /api/v1/lists/{id}/items/uncheck":       rr(auth.ResLists, auth.ActCheckItems),
 	"POST /api/v1/lists/{id}/items/remove":        rr(auth.ResLists, auth.ActEditItems),
@@ -240,6 +259,14 @@ var routeRules = map[string]RouteRule{
 	"GET /api/v1/guides/{id}/revisions":                       rr(auth.ResGuides, auth.ActRead),
 	"GET /api/v1/guides/{id}/revisions/{revisionId}":          rr(auth.ResGuides, auth.ActRead),
 	"POST /api/v1/guides/{id}/revisions/{revisionId}/restore": rr(auth.ResGuides, auth.ActWrite),
+
+	// The family knowledge base (#5502). Every role reads it — a housesitter
+	// included, because the babysitter needs the router doc — and the family
+	// roles write. The {path...} wildcard carries the doc's namespaced slug.
+	"GET /api/v1/kb":      rr(auth.ResKB, auth.ActRead),
+	"GET /api/v1/kb/*":    rr(auth.ResKB, auth.ActRead),
+	"PUT /api/v1/kb/*":    rr(auth.ResKB, auth.ActWrite),
+	"DELETE /api/v1/kb/*": rr(auth.ResKB, auth.ActWrite),
 }
 
 // RuleFor returns the rule for a route (HEAD is looked up as GET).

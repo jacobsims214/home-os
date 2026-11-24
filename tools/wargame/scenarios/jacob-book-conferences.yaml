@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-jacob.md (T3), #4541.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-book-conferences
+persona: jacob
+surface: calendar
+intent: |
+  Go ahead and book the Dec 3 conferences.
+steps:
+  - chat.sh jacob cal3 --file msg (confirm the held booking)
+  - mcpcall.py event_find --from 2026-12-03 --to 2026-12-03 as jacob
+assertion: |
+  One conference event exists on Dec 3 with the reminder and both people attached, and
+  the reply quotes the stored reminder_minutes.
+tags:
+  - calendar
+  - agent
+  - write
+  - reminders
+origin:
+  round: r1
+  source: discoveries/war-game-r1-jacob.md
+  ref: T3
+  ticket: "#4541"
+  date: "2026-11-16"
+  verdict: pass

@@ -146,10 +146,70 @@ export const mealKeys = {
   feedback: (mealId: string) => [...mealKeys.all, "feedback", mealId] as const,
 };
 
+/**
+ * Lists (#4566). One key for the household's whole set of list rows (the index
+ * and the template picker read the same `archived=all` response, so they share
+ * a cache entry), one per list detail, and one per list's LIVE ITEM FEED.
+ *
+ * The feed key is deliberately not the detail key: the detail query is the
+ * first paint and can be stale, while the feed is the polled truth that the
+ * optimistic check-off writes into. Two keys means a poll can never clobber a
+ * detail fetch that is still in flight.
+ */
+export const listKeys = {
+  all: ["lists"] as const,
+  allRows: () => [...listKeys.all, "rows"] as const,
+  details: () => [...listKeys.all, "detail"] as const,
+  detail: (id: string) => [...listKeys.details(), id] as const,
+  // "feed", not "items": lib/today/api.ts owns ["lists","items",id] with a bare
+  // ListItem[] value, and this entry is an ItemsFeed ({items, as_of}). Sharing
+  // the key would hand Today a feed object where it expects an array.
+  feed: (id: string) => [...listKeys.all, "feed", id] as const,
+  people: () => [...listKeys.all, "people"] as const,
+};
+
 /** The household's people, including their allergies (#4567's safety context). */
 export const personKeys = {
   all: ["people"] as const,
   lists: () => [...personKeys.all, "list"] as const,
   list: () => [...personKeys.lists()] as const,
   detail: (id: string) => [...personKeys.all, "detail", id] as const,
+};
+
+/**
+ * Guides (#4570). The list is fetched whole and narrowed on the client: the
+ * API's only filters are subject and tag (`?property_id=&tag=`), and a family
+ * has tens of guides, not thousands — a search box that round-trips per
+ * keystroke would be slower than the filter it replaces.
+ */
+export const guideKeys = {
+  all: ["guides"] as const,
+  lists: () => [...guideKeys.all, "list"] as const,
+  list: () => [...guideKeys.lists()] as const,
+  details: () => [...guideKeys.all, "detail"] as const,
+  detail: (id: string) => [...guideKeys.details(), id] as const,
+  revisions: (id: string) => [...guideKeys.detail(id), "revisions"] as const,
+  revision: (id: string, revisionId: string) => [...guideKeys.revisions(id), revisionId] as const,
+};
+
+/**
+ * The family reference — the KB (HOME-OS-5503).
+ *
+ * Under `guideKeys.all` on purpose: a guide and a reference doc share one page
+ * family (the Guides section), so a save in either must invalidate what the
+ * other side lists. Two roots would let a doc appear in the reference list
+ * while the Guides count on the switch still says the old number.
+ *
+ * `search(q)` is its own key because the API answers a SEARCH differently from
+ * a list: the hits come back ranked with a `score`, and re-using `list()` for
+ * them would hand a ranked result to a query already cached as an
+ * alphabetised list (and overwrite it).
+ */
+export const kbKeys = {
+  all: [...guideKeys.all, "kb"] as const,
+  lists: () => [...kbKeys.all, "list"] as const,
+  list: (prefix?: string) => [...kbKeys.lists(), prefix ?? ""] as const,
+  search: (q: string) => [...kbKeys.all, "search", q] as const,
+  details: () => [...kbKeys.all, "detail"] as const,
+  detail: (path: string) => [...kbKeys.details(), path] as const,
 };

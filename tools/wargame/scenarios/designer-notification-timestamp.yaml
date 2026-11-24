@@ -1,0 +1,25 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (cross-cutting-9), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-notification-timestamp
+persona: designer
+surface: notifications
+intent: |
+  Is this notice about something that already happened?
+steps:
+  - open the notifications sheet at 390px as amber
+  - read a notice whose event has already started
+assertion: |
+  A notice for a past event is visually distinguished from an upcoming one (or the CTA
+  is adjusted), rather than shown under NEW with 'Open event'.
+tags:
+  - ui
+  - mobile
+  - notifications
+  - copy
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: cross-cutting-9
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: fail

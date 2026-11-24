@@ -46,6 +46,14 @@ const (
 
 	// MigrationsDirEnv overrides where migrations are read from.
 	MigrationsDirEnv = "HOMEOS_MIGRATIONS_DIR"
+	// ServerEnv points the harness at an already-running PostgreSQL instead of
+	// starting a Docker container: a URL with no database (e.g.
+	// postgres://postgres@127.0.0.1:55498/postgres). Every migration is applied
+	// to a template database once, exactly as the container path does, and each
+	// NewPool clones it. It exists for hosts where Docker cannot run (a broken
+	// daemon, a CI sandbox) and the suite still has to be run; unset, nothing
+	// changes.
+	ServerEnv = "HOMEOS_TEST_POSTGRES"
 )
 
 var (
@@ -70,7 +78,7 @@ func NewPool(t testing.TB) *pgxpool.Pool {
 	defer cancel()
 
 	name := fmt.Sprintf("homeos_test_%d_%d", os.Getpid(), dbCounter.Add(1))
-	if err := adminExec(ctx, fmt.Sprintf("CREATE DATABASE %s TEMPLATE %s", name, templateDB)); err != nil {
+	if err := adminExec(ctx, fmt.Sprintf("CREATE DATABASE %s TEMPLATE %s", name, templateForProcess())); err != nil {
 		t.Fatalf("testutil: create database %s: %v", name, err)
 	}
 
@@ -90,6 +98,14 @@ func NewPool(t testing.TB) *pgxpool.Pool {
 	})
 
 	return pool
+}
+
+// templateForProcess is the template database name this binary's setup built.
+func templateForProcess() string {
+	if os.Getenv(ServerEnv) != "" {
+		return fmt.Sprintf("%s_%d", templateDB, os.Getpid())
+	}
+	return templateDB
 }
 
 // Household is the seeded household, user and owner membership.
@@ -143,6 +159,10 @@ func setup() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
+	if server := os.Getenv(ServerEnv); server != "" {
+		return setupOnServer(ctx, server)
+	}
+
 	dir, err := migrationsDir()
 	if err != nil {
 		return err
@@ -195,6 +215,55 @@ func setup() error {
 	// The template must have no open connections when it is cloned.
 	if err := conn.Close(ctx); err != nil {
 		return fmt.Errorf("close template db: %w", err)
+	}
+	return nil
+}
+
+// setupOnServer builds the migrated template database on an existing server
+// (ServerEnv) instead of starting one. It does exactly what setup does after
+// the container is up, so the tests see the same database either way.
+func setupOnServer(ctx context.Context, server string) error {
+	adminConnStr = withDatabase(server, "postgres")
+	// One template per test binary: `go test ./...` runs one binary per package
+	// in parallel, and two of them building the same template would drop it
+	// under each other (the container path gets one container per binary
+	// instead). The name stays on the throwaway server afterwards.
+	tpl := fmt.Sprintf("%s_%d", templateDB, os.Getpid())
+	if err := adminExec(ctx, `DO $$ BEGIN
+		IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app') THEN CREATE ROLE app; END IF;
+	END $$`); err != nil {
+		return fmt.Errorf("create app role: %w", err)
+	}
+	_ = adminExec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", tpl))
+	if err := adminExec(ctx, fmt.Sprintf("CREATE DATABASE %s", tpl)); err != nil {
+		return fmt.Errorf("create template database: %w", err)
+	}
+	dir, err := migrationsDir()
+	if err != nil {
+		return err
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.up.sql"))
+	if err != nil {
+		return fmt.Errorf("glob migrations: %w", err)
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no *.up.sql migrations in %s", dir)
+	}
+	sort.Strings(files)
+
+	conn, err := pgx.Connect(ctx, withDatabase(server, tpl))
+	if err != nil {
+		return fmt.Errorf("connect template db: %w", err)
+	}
+	defer conn.Close(ctx)
+	for _, f := range files {
+		sql, err := os.ReadFile(f)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", filepath.Base(f), err)
+		}
+		if _, err := conn.Exec(ctx, string(sql)); err != nil {
+			return fmt.Errorf("apply %s: %w", filepath.Base(f), err)
+		}
 	}
 	return nil
 }

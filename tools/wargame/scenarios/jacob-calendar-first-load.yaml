@@ -1,0 +1,33 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-jacob.md (F-CAL-1), #4584.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-calendar-first-load
+persona: jacob
+surface: calendar
+intent: |
+  I just signed in - does the calendar come up first time?
+steps:
+  - sign in as jacob in a fresh profile
+  - navigate straight to /dashboard/calendar as the first in-app navigation
+  - repeat across several loads
+assertion: |
+  The week loads on the first navigation with no 'couldn't load the calendar' error;
+  if it fails, the copy names the safety invariant rather than showing an empty week.
+tags:
+  - calendar
+  - ui
+  - auth-race
+origin:
+  round: r2
+  source: discoveries/war-game-r2-jacob.md
+  ref: F-CAL-1
+  ticket: "#4584"
+  date: "2026-11-18"
+  verdict: partial
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-jacob.md
+      ref: "5307"
+      ticket: "#4595"
+      date: "2026-11-20"
+      verdict: pass
+      note: 3/3 clean first loads

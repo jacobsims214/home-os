@@ -154,12 +154,18 @@ export function SectionRow({
   icon: SettingsSection["icon"];
   title: string;
   hint: string;
-  /** Accessible label, when the visible text alone is ambiguous. */
+  /**
+   * Extra words for the accessible name, appended AFTER the visible text.
+   * Never replaces it: WCAG 2.5.3 (axe label-content-name-mismatch) requires
+   * every visible string to appear in the accessible name, so a label that
+   * only says "Household settings" on a row reading "Household / Name, time
+   * zone and how Home OS looks" is a serious violation (#4588).
+   */
   label?: string;
 }) {
   const Icon = icon;
   return (
-    <Link href={href} aria-label={label} className={settingsClasses.indexRow}>
+    <Link href={href} className={settingsClasses.indexRow}>
       <span className={settingsClasses.indexIcon} aria-hidden>
         <Icon size={20} stroke={ICON_STROKE} />
       </span>

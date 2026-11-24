@@ -429,6 +429,9 @@ SELECT id FROM vendors
 		if _, err := tx.Exec(ctx, tagVetSQL, id, hid, phone.ptr()); err != nil {
 			return vetChoice{}, nil, err
 		}
+		if _, err := tx.Exec(ctx, vetKindSQL, id, hid); err != nil {
+			return vetChoice{}, nil, err
+		}
 		return vetChoice{given: true, id: &id}, nil, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -468,6 +471,14 @@ UPDATE vendors
        updated_at = NOW()
  WHERE id = $1 AND household_id = $2
    AND (NOT ('vet' = ANY (trades)) OR NULLIF(btrim(phone), '') IS NULL)`
+
+// vetKindSQL promotes a PAYEE used as a vet to 'both' (#5529, 080). The 080
+// trigger fires on a trade change; this path can match a vendor that already
+// has 'vet' and only fills a blank phone, so it promotes explicitly. A
+// service_provider or both row is left alone.
+const vetKindSQL = `
+UPDATE vendors SET kind = 'both', updated_at = NOW()
+ WHERE id = $1 AND household_id = $2 AND kind = 'payee'`
 
 // vetFKError maps the composite vet FK (a contact deleted meanwhile) to an
 // isError result; nil for any other error.

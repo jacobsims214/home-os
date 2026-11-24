@@ -1,0 +1,28 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-jacob.md (F-AGENT-1), #4584.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-agent-concurrency
+persona: jacob
+surface: app-shell
+intent: |
+  Both parents are asking their assistant something at the same time.
+steps:
+  - "fire 5 persona turns at moltis-wg-jacob in parallel (5 sessions, one normal multi-ask message each)"
+  - "record each turn's outcome and wall time"
+  - re-run any failed turn solo in a new session
+  - mcpcall.py activity_find --from today as jacob (did a failed turn still write?)
+assertion: |
+  All five turns answer; any turn that fails says which parts it completed and which
+  it did not, and a failed turn never leaves a write unaccounted for in activity_find.
+tags:
+  - app-shell
+  - agent
+  - concurrency
+  - latency
+  - honesty
+origin:
+  round: r2
+  source: discoveries/war-game-r2-jacob.md
+  ref: F-AGENT-1
+  ticket: "#4584"
+  date: "2026-11-18"
+  verdict: partial

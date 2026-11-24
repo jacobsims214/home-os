@@ -6,14 +6,16 @@
  * ENDPOINTS USED (all through the BFF, all already in apps/api/cmd/api/routes.go
  * and mapped in middleware/roles.go — nothing here invents a route):
  *
- *   GET    /api/v1/households/me           household name + timezone (ResHousehold read)
+ *   GET    /api/v1/me/households           the caller's role here AND the household
+ *                                          record (name + timezone), via
+ *                                          useCurrentHousehold() in
+ *                                          components/shared/use-nav-role.ts
  *   GET    /api/v1/households/me/members   the roster: user_id, name, email, role,
  *                                          joined_at, vendor_id, vendor_name, color
  *                                          (ResMembers read: everyone but a vendor)
  *   GET    /api/v1/people                  relationship, allergies, user_id
  *                                          (ResPeople read_basic; a housesitter gets
  *                                          names/relationship/allergies only)
- *   GET    /api/v1/me/households           the caller's role here (use-nav-role)
  *   GET    /api/v1/auth/me                 the caller's own user id ("you", self colour)
  *   PATCH  /api/v1/people/{id}             {color} — people.set_color (#4821)
  *   PATCH  /api/v1/households/me/members/{userId}  {role, vendor_id?} (ResMembers write)
@@ -51,12 +53,6 @@ export type { MemberRow, PersonRow, RosterMember, WriteError } from "./roster";
 
 // ── Shapes, exactly as the API answers them ──────────────────────────
 
-export interface HouseholdRow {
-  id: string;
-  name: string;
-  timezone: string;
-}
-
 /** GET /api/v1/invites (apps/api/internal/invite/model.go inviteView). */
 export interface InviteRow {
   id: string;
@@ -83,7 +79,6 @@ export const memberKeys = {
   roster: () => [...memberKeys.all, "roster"] as const,
   invites: () => [...memberKeys.all, "invites"] as const,
   vendors: () => [...memberKeys.all, "vendors"] as const,
-  household: () => [...memberKeys.all, "household"] as const,
 };
 
 /**
@@ -135,16 +130,6 @@ export function useViewerId(enabled = true) {
   });
 }
 
-export function useHousehold(enabled: boolean) {
-  return useQuery({
-    queryKey: memberKeys.household(),
-    queryFn: () => apiFetch<{ data: HouseholdRow }>("/api/v1/households/me"),
-    enabled,
-    staleTime: 60_000,
-    retry: false,
-  });
-}
-
 /** Pending invitations. Managers only: the API answers 403 to everyone else. */
 export function useInvites(enabled: boolean) {
   return useQuery({
@@ -156,11 +141,20 @@ export function useInvites(enabled: boolean) {
   });
 }
 
-/** The family's vendor contacts, for linking a vendor login to its company. */
+/**
+ * The family's vendor contacts, for linking a vendor login to its company.
+ *
+ * kind=service_provider is explicit (#5529): a vendor login belongs to a
+ * company that does work for the family, never to a utility that is only a
+ * bill payee.
+ */
 export function useVendors(enabled: boolean) {
   return useQuery({
     queryKey: memberKeys.vendors(),
-    queryFn: () => apiFetch<{ data: VendorRow[] }>("/api/v1/vendors"),
+    queryFn: () =>
+      apiFetch<{ data: VendorRow[] }>("/api/v1/vendors", {
+        params: { kind: "service_provider" },
+      }),
     enabled,
     staleTime: 5 * 60_000,
     retry: false,

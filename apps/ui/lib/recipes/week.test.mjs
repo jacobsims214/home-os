@@ -8,6 +8,7 @@ import {
   dateKey,
   dinnerRating,
   firstEmptyDay,
+  firstUpcomingDay,
   mealAllergyPayload,
   mealTitle,
   parseDateKey,
@@ -110,9 +111,74 @@ test("a dinner outside the week's dates never lands on a row", () => {
 
 test("firstEmptyDay returns the empty slot a suggestion would fill", () => {
   const full = buildWeek("2026-11-16", Array.from({ length: 7 }, (_, i) => meal({ id: `m${i}`, date: addDays("2026-11-16", i) })), "2026-11-16");
-  assert.equal(firstEmptyDay(full), null);
+  assert.equal(firstEmptyDay(full, "2026-11-16"), null);
   const partial = buildWeek("2026-11-16", [meal({ date: "2026-11-16" })], "2026-11-16");
-  assert.equal(firstEmptyDay(partial).date, "2026-11-17");
+  assert.equal(firstEmptyDay(partial, "2026-11-16").date, "2026-11-17");
+});
+
+// ── #5305: a past day is never "open" ───────────────────────
+
+test("firstEmptyDay never offers a day that has already gone (R2 G8)", () => {
+  // The reported week and day: Mon Nov 16 - Sun Nov 22, opened on Wed Nov 18.
+  // Monday and Tuesday are empty. The OLD firstEmptyDay returned Monday the
+  // 16th, so the page said "Mon is open — November 16 has no dinner planned.
+  // Plan Mon's dinner" two days after that dinner would have been eaten.
+  const days = buildWeek("2026-11-16", [], "2026-11-18");
+  const next = firstEmptyDay(days, "2026-11-18");
+  assert.ok(next, "some day of this week is still open");
+  assert.equal(next.date, "2026-11-18", "it is today, not Monday the 16th");
+  assert.equal(next.dow, "Wed");
+  assert.equal(firstEmptyDay(days, "2026-11-16").date, "2026-11-16", "on Monday itself, Monday IS open");
+  assert.equal(firstEmptyDay(days, "2026-11-17").date, "2026-11-17");
+});
+
+test("firstEmptyDay skips a planned today and lands on tomorrow", () => {
+  // Wednesday is planned; Thursday is the first open day a family can cook.
+  const days = buildWeek("2026-11-16", [meal({ date: "2026-11-18", title: "Pizza night" })], "2026-11-18");
+  assert.equal(firstEmptyDay(days, "2026-11-18").date, "2026-11-19");
+});
+
+test("a week entirely in the past has no next empty day", () => {
+  // Browsing back to last week must not invite anyone to plan a dinner for it.
+  const lastWeek = buildWeek("2026-11-09", [], "2026-11-18");
+  assert.equal(firstEmptyDay(lastWeek, "2026-11-18"), null);
+  assert.equal(firstUpcomingDay(lastWeek, "2026-11-18"), null);
+  // Its empty rows are marked past, so the page can render them as settled.
+  assert.equal(lastWeek.every((d) => d.isPast), true);
+});
+
+test("buildWeek marks each row past / today / future against the family's day", () => {
+  const days = buildWeek("2026-11-16", [], "2026-11-18");
+  assert.deepEqual(
+    days.map((d) => [d.date, d.isToday, d.isPast]),
+    [
+      ["2026-11-16", false, true],
+      ["2026-11-17", false, true],
+      ["2026-11-18", true, false],
+      ["2026-11-19", false, false],
+      ["2026-11-20", false, false],
+      ["2026-11-21", false, false],
+      ["2026-11-22", false, false],
+    ],
+  );
+});
+
+test("buildWeek with no known today calls nothing past (never a guess)", () => {
+  // The page passes "" for the one paint before the household's day is known.
+  // Nothing may be called gone on that paint: suppressing a nag is only safe
+  // when the answer is certain.
+  const days = buildWeek("2026-11-16", [], "");
+  assert.equal(days.some((d) => d.isPast), false);
+  assert.equal(days.some((d) => d.isToday), false);
+});
+
+test("firstUpcomingDay gives the dinner sheet a day that hasn't gone", () => {
+  // Every remaining day is planned, so there is no empty slot, but the
+  // "What's for dinner?" sheet still needs a day — a past one would be wrong.
+  const planned = Array.from({ length: 7 }, (_, i) => meal({ id: `m${i}`, date: addDays("2026-11-16", i) }));
+  const days = buildWeek("2026-11-16", planned, "2026-11-18");
+  assert.equal(firstEmptyDay(days, "2026-11-18"), null);
+  assert.equal(firstUpcomingDay(days, "2026-11-18").date, "2026-11-18");
 });
 
 test("addWeek moves the whole week, across a month boundary", () => {

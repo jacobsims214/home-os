@@ -1,0 +1,33 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U4), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-drawer-search
+persona: amber
+surface: search
+intent: |
+  The search box in the menu - let me type in it.
+steps:
+  - open the nav drawer as amber at 390px
+  - "tap the Search input and type 'mortgage' (real CDP text insertion)"
+  - wait 8s and watch for a dropdown or a /bff/search request
+assertion: |
+  Typing in the drawer search either shows suggestions/results or submits to
+  /dashboard/search; a field that silently does nothing is a fail.
+tags:
+  - search
+  - ui
+  - drawer
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U4
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: partial
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-jacob.md
+      ref: "5303"
+      ticket: "#4595"
+      date: "2026-11-20"
+      verdict: pass
+      note: form submit navigates with the right result; synthetic Enter does not submit (harness caveat)

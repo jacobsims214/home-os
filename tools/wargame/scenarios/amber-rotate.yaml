@@ -1,0 +1,23 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-amber.md (N13), #4596.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-rotate
+persona: amber
+surface: app-shell
+intent: |
+  I turned my phone sideways.
+steps:
+  - open /dashboard/meals as amber at 390x844
+  - rotate to 844x390 and back
+assertion: |
+  The layout reflows without breaking or clipping, and returns cleanly to portrait.
+tags:
+  - app-shell
+  - ui
+  - rotation
+origin:
+  round: r3
+  source: discoveries/war-game-r3-amber.md
+  ref: N13
+  ticket: "#4596"
+  date: "2026-11-20"
+  verdict: pass

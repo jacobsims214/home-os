@@ -1,0 +1,250 @@
+/*
+ * The account menu (#5198), per KB design/app-shell.md ("Family switcher, user
+ * menu, notifications") and artifact #75 v1:
+ *
+ *   phone  < 768 px  bottom sheet — radius 16 at the top, grab handle,
+ *                    padding-bottom 16 px + safe-area, 52 px rows.
+ *   >= 768 px        320 px card popover — radius 12, 1 px --line border,
+ *                    max-height 70vh, no transition.
+ *
+ * Theme tokens only, through the --shell-* aliases: both surfaces render in a
+ * portal, outside the shell's .root, so they have to carry the variables
+ * themselves (BottomNav's More sheet and the notifications panel do the same).
+ */
+
+/* ---------- header avatar (the phone/tablet trigger) ---------- */
+
+.headerButton {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+}
+
+/* ---------- the part both surfaces share ---------- */
+
+.identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.identityText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.25;
+}
+
+/* Wraps rather than ellipsising: a name clipped to "Jac…" is unreadable, and
+   the artifact draws the email on its own line. */
+.identityName {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--shell-ink);
+  overflow-wrap: anywhere;
+}
+
+.identityEmail {
+  font-size: 13px;
+  color: var(--shell-ink-3);
+  overflow-wrap: anywhere;
+}
+
+.close {
+  flex: none;
+  color: var(--shell-ink-2);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One 52 px row: icon, label, then the row's control (chevron, or the theme
+   segmented control). The 44 px minimum hit target is the row itself. */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 52px;
+  padding: 4px;
+  border: 0;
+  border-bottom: 1px solid var(--shell-line);
+  background: none;
+  color: var(--shell-ink);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.row:hover {
+  background: var(--shell-surface-2);
+}
+
+/* The Theme row is a label + control, not a destination: no hover fill and a
+   default cursor, so it doesn't read as something that opens a page. */
+.row[data-static] {
+  cursor: default;
+}
+
+.row[data-static]:hover {
+  background: none;
+}
+
+.rowIcon {
+  flex: none;
+  width: 32px;
+  color: var(--shell-ink-2);
+}
+
+.rowLabel {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.chevron {
+  flex: none;
+  color: var(--shell-ink-3);
+}
+
+/* Full-width ghost-danger Log out: a 1 px outline button, red text, 48 px
+   tall so a thumb can hit it, with 12 px of air above it. */
+.logoutForm {
+  margin: 12px 0 0;
+}
+
+.logout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 12px;
+  border: 1px solid var(--shell-line);
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--danger);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.logout:hover {
+  background: var(--shell-surface-2);
+}
+
+/* ---------- phone: bottom sheet ---------- */
+
+.sheet {
+  composes: shellVars from "../shared/DashboardShell.module.css";
+  display: flex;
+  flex-direction: column;
+  height: auto !important;
+  max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 12px) !important;
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  background: var(--shell-raised);
+  color: var(--shell-ink);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.sheet:focus,
+.sheet:focus-visible {
+  outline: none;
+}
+
+/* The identity header IS the dialog's title: 22 px of top padding leaves room
+   for the grab handle, then the avatar row. */
+.sheetHeader {
+  position: relative;
+  flex: none;
+  min-height: 0;
+  padding: 22px 8px 14px 16px;
+  background: inherit;
+  border-bottom: 1px solid var(--shell-line);
+}
+
+.sheetTitle {
+  min-width: 0;
+}
+
+.sheetBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 16px calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+.handle {
+  position: absolute;
+  z-index: 1; /* above Mantine's sticky header */
+  top: 6px;
+  left: 50%;
+  width: 36px;
+  height: 4px;
+  margin-left: -18px;
+  border-radius: 2px;
+  background: var(--shell-line);
+}
+
+/* ---------- 768 px and up: card popover ---------- */
+
+.popover {
+  composes: shellVars from "../shared/DashboardShell.module.css";
+  width: 320px;
+  max-width: calc(100vw - 16px);
+  max-height: 70vh;
+  overflow: hidden;
+  border: 1px solid var(--shell-line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+  background: var(--shell-raised);
+  color: var(--shell-ink);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: calc(70vh - 24px);
+  padding: 8px 12px 12px;
+}
+
+/* The popover's identity header closes itself with an X, so it needs the
+   divider and the space the artifact draws under the name. */
+.panel .identity {
+  padding: 4px 4px 14px;
+  border-bottom: 1px solid var(--shell-line);
+}
+
+/* Rows inside the popover sit flush under the identity divider. */
+.panel .row {
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+/* The sheet renders in a portal, outside the shell's focus rule. */
+.sheet :focus-visible,
+.popover :focus-visible {
+  outline: 2px solid var(--shell-accent);
+  outline-offset: 2px;
+}

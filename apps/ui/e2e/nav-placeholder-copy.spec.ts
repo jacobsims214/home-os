@@ -1,5 +1,15 @@
 import type { Page } from "@playwright/test";
 import { test, expect, onlyOn } from "./fixtures";
+import { NAV_SECTIONS } from "../components/shared/nav-config";
+
+/**
+ * How many section rows a nav surface draws, derived from nav-config rather than
+ * hand-kept. The previous literal (7) had already drifted from the 8 sections
+ * in the list and was red for good; #5408 added Guides, making it 9. A section
+ * added or removed in nav-config now updates this with no edit here, which is
+ * the rule app-shell.spec.ts states for its own fixture.
+ */
+const SECTION_ROW_COUNT = NAV_SECTIONS.length;
 
 /**
  * No placeholder copy in the shell (#5199).
@@ -11,8 +21,9 @@ import { test, expect, onlyOn } from "./fixtures";
  * (artifact #75 v1) has no such badge and gives each tile a descriptive
  * subtitle instead.
  *
- * The fix removes those three sections from nav-config entirely, so this spec
- * guards both halves of it:
+ * The fix removed those three sections from nav-config while they had no page;
+ * each returned when its route landed (#4566 Lists, #4569 Documents, #5408
+ * Guides). So this spec guards both halves of the rule:
  *   - no placeholder copy renders in any nav surface, in any state;
  *   - every nav entry is a real link (nothing is drawn as a disabled "not yet"
  *     row, which is the other way a shell says "unfinished").
@@ -63,8 +74,8 @@ test.describe("phone 390px", () => {
     await gotoHome(page);
     expect(await placeholderCopy(page), "placeholder copy on the default shell").toEqual([]);
 
-    // Tab bar: every tab is a link, and the three sections with pages are there
-    // (Lists has no page, so the tab that used to promise it is gone).
+    // Tab bar: every tab is a link, and the three tab sections are there (the
+    // four phone tabs are fixed by the approved shell; More is the fifth).
     const bar = page.getByTestId("tab-bar");
     await expect(bar.getByRole("link")).toHaveCount(3);
     await expect(bar.getByRole("link", { name: "Today" })).toHaveAttribute("aria-current", "page");
@@ -81,6 +92,8 @@ test.describe("phone 390px", () => {
     await expect(sheet.getByRole("link", { name: /Documents/ })).toBeVisible();
     await expect(sheet.getByRole("link", { name: /People & House/ })).toBeVisible();
     await expect(sheet.getByRole("link", { name: /Money/ })).toBeVisible();
+    // #5408: Guides was in no nav surface at all; the tile is the fix.
+    await expect(sheet.getByRole("link", { name: /Guides/ })).toBeVisible();
     await expect(sheet.getByText("Family, home, cars, pets, vendors")).toBeVisible();
     await expect(sheet.locator('[aria-disabled="true"]')).toHaveCount(0);
     await page.keyboard.press("Escape");
@@ -91,7 +104,7 @@ test.describe("phone 390px", () => {
     const drawer = page.getByRole("dialog", { name: /Home OS menu/ });
     await expect(drawer).toBeVisible();
     expect(await placeholderCopy(page), "placeholder copy with the drawer open").toEqual([]);
-    await expect(drawer.locator("ul li > a")).toHaveCount(7);
+    await expect(drawer.locator("ul li > a")).toHaveCount(SECTION_ROW_COUNT);
     await expect(drawer.locator("[aria-disabled]")).toHaveCount(0);
   });
 });
@@ -107,16 +120,16 @@ for (const width of [820, 1440]) {
       await expect(nav).toBeVisible();
       expect(await placeholderCopy(page), `placeholder copy at ${width}px`).toEqual([]);
       // The section rows only (the sidebar also links its family card).
-      // Today, Calendar, Meals | Documents, People & House, Money | Settings.
+      // Today, Calendar, Meals, Lists | Documents, People & House, Money,
+      // Guides | Settings.
       const rows = nav.locator("ul li > a, ul li > span[aria-disabled=\"true\"]");
-      await expect(rows).toHaveCount(7);
+      await expect(rows).toHaveCount(SECTION_ROW_COUNT);
       await expect(nav.locator("[aria-disabled]")).toHaveCount(0);
       await expect(nav.getByRole("link", { name: "Meals" })).toBeVisible();
-      // Lists / Guides have no page yet, so they are not promised. (Documents
-      // left this list in #4569: /dashboard/documents exists.)
-      for (const gone of ["Lists", "Guides"]) {
-        await expect(nav.getByRole("link", { name: gone, exact: true })).toHaveCount(0);
-        await expect(nav.getByText(gone, { exact: true })).toHaveCount(0);
+      // Every section has a page (#5408 completed the set: Guides was the last
+      // one missing, and it is now a real row rather than an absence).
+      for (const name of ["Lists", "Documents", "Guides"]) {
+        await expect(nav.getByRole("link", { name, exact: true })).toBeVisible();
       }
     });
   });

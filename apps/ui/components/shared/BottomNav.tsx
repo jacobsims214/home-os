@@ -35,7 +35,7 @@ import HouseholdSwitcher, {
   type HouseholdSwitcherControl,
 } from "@/components/shared/HouseholdSwitcher";
 import { useUnreadCount } from "@/components/notifications/use-notifications";
-import { useAuthStore } from "@/stores/auth";
+import { useAccountIdentity } from "@/components/shared/use-account";
 import {
   NAV_ICON_STROKE,
   NAV_SECTIONS,
@@ -59,6 +59,11 @@ const TILE_HINTS: Partial<Record<NavSectionId, string>> = {
   documents: "Insurance, school forms, receipts",
   people: "Family, home, cars, pets, vendors",
   money: "Bills and loans",
+  // #5408: the tile that was missing entirely — the More sheet was the only
+  // phone surface that could have carried Guides and it had no tile to show.
+  // #5503: the tile now leads to both halves of the section, so the hint names
+  // both. It stays SHORT: a tile hint is a one-glance line at 390 px.
+  guides: "How-tos, and things to look up",
 };
 
 interface BottomNavProps {
@@ -166,19 +171,13 @@ function MoreSheet({
   const router = useRouter();
   const reduceMotion = useReducedMotion();
   const [query, setQuery] = useState("");
-  const user = useAuthStore((s) => s.user);
+  // The identity the account row shows (#5198): GET /auth/me, shared with the
+  // account menu and the drawer foot so all three name the same person.
+  const { user, name, initials } = useAccountIdentity();
 
   // The notifications query is the header bell's (#4563), so the pill here and
   // the bell's badge can never disagree.
   const unread = useUnreadCount();
-  const name = user?.name || "Account";
-  const initials =
-    (user?.name || user?.email || "U")
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((p) => p[0]!.toUpperCase())
-      .join("") || "U";
   const sections = useNavSections();
   const tiles = sections.filter((s) => s.group === "household");
   const settings = sections.find((s) => s.id === "settings") ?? NAV_SECTIONS.find((s) => s.id === "settings")!;
@@ -268,11 +267,27 @@ function MoreSheet({
           <IconChevronRight size={18} stroke={NAV_ICON_STROKE} className={classes.chevron} aria-hidden />
         </Link>
 
-        <UnstyledButton className={classes.row} onClick={onOpenAccount} aria-haspopup="menu">
-          <Avatar size={32} radius="xl" color="cyan.9" variant="filled" src={user?.avatar_url ?? undefined}>
+        {/* #5198: the account menu is a dialog (bottom sheet on phones, card
+            popover above 48em), not a Mantine menu. */}
+        <UnstyledButton className={classes.row} onClick={onOpenAccount} aria-haspopup="dialog">
+          {/* Same construction as the header avatar (HeaderAccountButton) and the
+              desktop SidebarAccount: the avatar is decoration, and a
+              VisuallyHidden "Account menu for" names the row. Without them the
+              initials leak into the accessible name — this row announced
+              "ET E2E Tester Account & log out", so the three ways into the
+              account menu disagreed (#5410). */}
+          <Avatar
+            size={32}
+            radius="xl"
+            color="cyan.9"
+            variant="filled"
+            src={user?.avatar_url ?? undefined}
+            aria-hidden
+          >
             {initials}
           </Avatar>
           <span className={classes.accountText}>
+            <VisuallyHidden>Account menu for </VisuallyHidden>
             <span className={classes.rowLabel}>{name}</span>
             <span className={classes.rowSub}>Account &amp; log out</span>
           </span>

@@ -28,6 +28,7 @@ var findExample = map[string]any{"trade": "plumber"}
 type findInput struct {
 	id        *uuid.UUID
 	trade     string // as given, trimmed (for summaries and specialty matching)
+	kind      string // "" = contacts (not payee-only), "payee" = payees, "both"
 	tradeNorm string // stored form: lower case, underscores, synonyms mapped
 	query     string
 	limit     int
@@ -39,6 +40,12 @@ func (in findInput) filtered() bool { return in.id != nil || in.trade != "" || i
 // contactSelect loads the household's contacts with their counts, one page
 // at a time, and the total before paging.
 //
+// kind (080, #5529): this is the CONTACTS list -- people who do work -- so it
+// excludes payee-only rows. A utility or mortgage servicer created for a bill
+// payee must not appear when someone asks "who's the plumber?". A row that is
+// `both` stays, because it does work. $9='payee' asks for the other side
+// (payee and both), which is what a bill payee picker needs.
+//
 // trade ($3-$5) matches a stored trade exactly (GIN index on trades), a
 // stored trade containing the text ("plumb" finds plumber), or the free-text
 // specialty containing it (vendors whose specialty 043 could not map).
@@ -47,7 +54,7 @@ func (in findInput) filtered() bool { return in.id != nil || in.trade != "" || i
 // idx_maintenance_tasks_vendor_id (065), not seq scans.
 // vendors.property_id is deliberately not selected (dropped in 056).
 const contactSelect = `
-	SELECT v.id, v.name, v.trades, v.specialty, v.phone, v.email, v.website, v.address, v.notes,
+	SELECT v.id, v.name, v.kind, v.trades, v.specialty, v.phone, v.email, v.website, v.address, v.notes,
 	       v.created_at, v.updated_at,
 	       (SELECT count(*) FROM bills b WHERE b.vendor_id = v.id),
 	       (SELECT count(*) FROM maintenance_tasks m WHERE m.vendor_id = v.id
@@ -57,6 +64,9 @@ const contactSelect = `
 	FROM vendors v
 	WHERE v.household_id = $1
 	  AND ($2::uuid IS NULL OR v.id = $2)
+	  AND CASE $9::text WHEN 'payee' THEN v.kind <> 'service_provider'
+	                    WHEN 'both'  THEN v.kind = 'both'
+	                    ELSE              v.kind <> 'payee' END
 	  AND ($3::text = '' OR v.trades @> ARRAY[$3::text]
 	       OR EXISTS (SELECT 1 FROM unnest(v.trades) tr WHERE tr ILIKE '%' || $5 || '%')
 	       OR v.specialty ILIKE '%' || $4 || '%')
@@ -74,10 +84,12 @@ const contactSelect = `
 func NewContactFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Find a contact by trade or name: \"who's the plumber?\" uses trade=plumber. " +
-			"Returns phone, email and notes. Pass id for exactly one contact."),
+			"Returns phone, email and notes. Pass id for one contact. " +
+			"Lists people who do work; kind=payee lists who the family pays."),
 		mcp.WithString("id", mcp.Description("A contact_id (UUID) to get exactly that contact")),
 		mcp.WithString("trade", mcp.Description("What they do, e.g. plumber, pediatrician, vet, hvac")),
 		mcp.WithString("query", mcp.Description("Text in the name, trade, notes, email or phone, e.g. joe")),
+		mcp.WithString("kind", mcp.Description("People who do work (default) or payee: who the family pays")),
 		mcp.WithNumber("limit", mcp.Description("Max contacts to return, 1-100 (default 25)"), mcp.Min(1), mcp.Max(maxLimit)),
 		mcp.WithString("cursor", mcp.Description("next_cursor from the previous result, for the next page")),
 		respond.ListSchema[contactData](),
@@ -128,7 +140,7 @@ func NewContactFindTool(pool *pgxpool.Pool) (string, mcp.Tool, toolHandler) {
 func findContacts(ctx context.Context, q querier, householdID string, in findInput) ([]contactData, int, error) {
 	rows, err := q.Query(ctx, contactSelect, householdID, in.id,
 		in.tradeNorm, escapeLike(in.trade), escapeLike(in.tradeNorm), escapeLike(in.query),
-		in.limit, in.offset)
+		in.limit, in.offset, in.kind)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -138,7 +150,7 @@ func findContacts(ctx context.Context, q querier, householdID string, in findInp
 			d  contactData
 			id uuid.UUID
 		)
-		err := row.Scan(&id, &d.Name, &d.Trades, &d.Specialty, &d.Phone, &d.Email, &d.Website, &d.Address, &d.Notes,
+		err := row.Scan(&id, &d.Name, &d.Kind, &d.Trades, &d.Specialty, &d.Phone, &d.Email, &d.Website, &d.Address, &d.Notes,
 			&d.CreatedAt, &d.UpdatedAt,
 			&d.Counts.Bills, &d.Counts.OpenMaintenance, &d.Counts.Pets, &total)
 		d.ID = id.String()
@@ -234,6 +246,21 @@ func parseFindInput(raw map[string]any) (findInput, error) {
 		return in, err
 	} else if q != nil {
 		in.query = *q
+	}
+	if k, err := optionalString(args, "kind"); err != nil {
+		return in, err
+	} else if k != nil {
+		in.kind = strings.ToLower(strings.TrimSpace(*k))
+		switch in.kind {
+		case "", "service_provider", "payee", "both":
+		default:
+			return in, badArg("kind", fmt.Sprintf("kind %q is not a contact kind.", *k),
+				"Leave kind out for the contacts list (people who do work), or pass payee for who the family pays.")
+		}
+		// service_provider means the same as the default.
+		if in.kind == "service_provider" {
+			in.kind = ""
+		}
 	}
 	if n, ok, err := wholeNumber(args, "limit", 1, maxLimit); err != nil {
 		return in, err

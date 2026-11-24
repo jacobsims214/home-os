@@ -163,7 +163,7 @@ func TestToolDefinition(t *testing.T) {
 	if len(tool.InputSchema.Required) != 0 {
 		t.Errorf("required = %v, want none", tool.InputSchema.Required)
 	}
-	want := []string{"id", "trade", "query", "limit", "cursor"}
+	want := []string{"id", "trade", "query", "kind", "limit", "cursor"}
 	if len(tool.InputSchema.Properties) != len(want) {
 		t.Errorf("got %d params, want %v", len(tool.InputSchema.Properties), want)
 	}

@@ -1,0 +1,26 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-usability.md (cross-cutting-1), #4594.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: designer-fab-scroll-clearance
+persona: designer
+surface: app-shell
+intent: |
+  I'm scrolling to the last card on a long page.
+steps:
+  - "open Calendar, Lists, Money and the CalDAV settings page at 390px"
+  - scroll to the bottom of each
+  - check whether the FAB or bottom nav covers content
+assertion: |
+  Every page has bottom padding so the last card can scroll clear of the FAB and the
+  bottom tab bar.
+tags:
+  - ui
+  - mobile
+  - layout
+  - fab
+origin:
+  round: r3
+  source: discoveries/war-game-r3-usability.md
+  ref: cross-cutting-1
+  ticket: "#4594"
+  date: "2026-11-20"
+  verdict: fail

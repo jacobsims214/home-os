@@ -1,0 +1,28 @@
+# War-game scenario - transcribed from discoveries/war-game-r1-amber.md (T9), #4542.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-file-copay-bill
+persona: amber
+surface: money
+intent: |
+  Got this bill in the mail - file it so we don't forget to pay it.
+steps:
+  - "chat.sh amber r1-docs --file msg (paste: pediatrics statement 11/10, copay $35.00 due 12/10)"
+  - mcpcall.py bill_find as amber (find the new bill)
+  - "mcpcall.py document_find --query 'copay' as amber"
+  - compare the stored amount and the document body against the pasted text
+assertion: |
+  The stored bill amount equals the amount in the pasted text ($35.00), the filed
+  document body contains the original wording, and source_document_id links the two.
+tags:
+  - money
+  - documents
+  - agent
+  - write
+  - money-integrity
+origin:
+  round: r1
+  source: discoveries/war-game-r1-amber.md
+  ref: T9
+  ticket: "#4542"
+  date: "2026-11-16"
+  verdict: fail

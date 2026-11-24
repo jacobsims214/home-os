@@ -1,0 +1,29 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (A1), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-copay-reconcile
+persona: amber
+surface: money
+intent: |
+  I'm re-sending this copay bill - and while you're in there, is the mortgage actually
+  paid? Check before you answer.
+steps:
+  - chat.sh amber r2-copay --file msg (re-file the $35 copay + ask about the mortgage)
+  - mcpcall.py bill_find as amber
+  - "mcpcall.py document_find --query 'copay' as amber"
+assertion: |
+  The existing copay bill is recognised rather than duplicated, a date discrepancy is
+  raised as a question instead of silently corrected, and the mortgage status is
+  quoted from bill_find fields (status / paid_date).
+tags:
+  - money
+  - bills
+  - agent
+  - dedup
+  - honesty
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: A1
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: pass

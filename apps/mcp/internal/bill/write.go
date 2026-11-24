@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"home-os/mcp/internal/auth"
 	"home-os/mcp/internal/budgetcat"
 	"home-os/mcp/internal/respond"
 	"home-os/mcp/internal/server"
@@ -115,22 +116,6 @@ func contactExists(ctx context.Context, tx pgx.Tx, id uuid.UUID, householdID str
 	return exists, err
 }
 
-// writeOutbox records the event the API writes for the same change, so
-// outbox consumers see agent changes too.
-func writeOutbox(ctx context.Context, tx pgx.Tx, eventType, householdID string, payload map[string]string) error {
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal %s event: %w", eventType, err)
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO outbox_events (type, payload, household_id) VALUES ($1, $2, $3)`,
-		eventType, b, householdID,
-	); err != nil {
-		return fmt.Errorf("write %s event: %w", eventType, err)
-	}
-	return nil
-}
-
 // NewBillCreateTool creates the bill_create MCP tool (catalog v2, class C),
 // replacing the S1 working name create_bill.
 //
@@ -153,8 +138,8 @@ func writeOutbox(ctx context.Context, tx pgx.Tx, eventType, householdID string, 
 // document, so a mistyped amount cannot be filed as if it had been checked.
 func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
-		mcp.WithDescription("Add a bill (electric, Netflix, property tax). Give due_day for monthly bills, or frequency " +
-			"plus due_date for quarterly, annual or one-time ones. Use this, not a calendar event."),
+		mcp.WithDescription("Add a bill (electric, Netflix): due_day for monthly, or frequency plus due_date; not a calendar event. " +
+			"It files no document: document_upload a paper bill, then link source_document_id."),
 		mcp.WithString("name", mcp.Description("Bill name, e.g. Electric"), mcp.Required()),
 		mcp.WithNumber("amount", mcp.Description("Amount due each time, e.g. 142.50"), mcp.Required(), mcp.Min(0)),
 		mcp.WithString("frequency", mcp.Description("How often it is due (default monthly)"), mcp.Enum(frequencies...)),
@@ -249,7 +234,7 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		))
 		switch {
 		case err == nil:
-			b := dup.data(today)
+			b := dup.data(today, auth.CanSeeMoney(claims.Role))
 			b.Duplicate = true
 			return respond.OK(
 				fmt.Sprintf("Bill %s (%s, %s) was already created a few minutes ago; returned it instead of adding a second one.",
@@ -281,24 +266,23 @@ func NewBillCreateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		if _, err := syncBillEvent(ctx, tx, claims.HouseholdID, r); err != nil {
 			return respond.Failed("create the bill", err), nil
 		}
-		if err := writeOutbox(ctx, tx, "bill.created", claims.HouseholdID,
-			map[string]string{"id": r.ID.String(), "name": r.Name}); err != nil {
-			return respond.Failed("create the bill", err), nil
-		}
 		if err := tx.Commit(ctx); err != nil {
 			return respond.Failed("create the bill", err), nil
 		}
 
-		b := r.data(today)
+		b := r.data(today, auth.CanSeeMoney(claims.Role))
 		next := []string{fmt.Sprintf("Mark it paid with bill_pay bill_id=%s.", b.ID)}
 		if check != nil && !check.agreed() && len(check.Doc.Lines) > 0 {
 			next = append(next, fmt.Sprintf("Read the source with document_get document_id=%s, then correct the "+
 				"amount with bill_update bill_id=%s amount=…", check.Doc.ID, b.ID))
 		}
+		if h := filingHint(b); h != "" {
+			next = append(next, h)
+		}
 		next = append(next, "See monthly totals by category with budget_summary.")
 		return respond.OK(
 			fmt.Sprintf("Created bill %s, %s %s.", b.Name, money(in.amount), b.dueText())+
-				budgetText(cat)+check.cite()+check.warn()+check.note(),
+				budgetText(cat)+check.cite()+check.warn()+check.note()+linkedNote(b)+filingNote(b),
 			b,
 			next...,
 		), nil
@@ -530,24 +514,23 @@ func NewBillUpdateTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 		if _, err := syncBillEvent(ctx, tx, claims.HouseholdID, r); err != nil {
 			return respond.Failed("update the bill", err), nil
 		}
-		if err := writeOutbox(ctx, tx, "bill.updated", claims.HouseholdID,
-			map[string]string{"id": r.ID.String(), "name": r.Name}); err != nil {
-			return respond.Failed("update the bill", err), nil
-		}
 		if err := tx.Commit(ctx); err != nil {
 			return respond.Failed("update the bill", err), nil
 		}
 
-		b := r.data(today)
+		b := r.data(today, auth.CanSeeMoney(claims.Role))
 		summary := fmt.Sprintf("Updated bill %s (%s).", b.Name, strings.Join(in.params, ", "))
 		if d := b.dueText(); d != "" {
 			summary = fmt.Sprintf("Updated bill %s (%s); next %s.", b.Name, strings.Join(in.params, ", "), d)
 		}
-		summary += budgetText(cat) + check.cite() + check.warn() + check.note()
+		summary += budgetText(cat) + check.cite() + check.warn() + check.note() + linkedNote(b) + filingNote(b)
 		next := []string{fmt.Sprintf("Mark it paid with bill_pay bill_id=%s.", b.ID)}
 		if in.amountGiven != nil {
 			next = append(next, fmt.Sprintf("See the change in the family feed with activity_find about_type=bill since=%q.",
 				today.Format(time.DateOnly)))
+		}
+		if h := filingHint(b); h != "" {
+			next = append(next, h)
 		}
 		return respond.OK(summary, b, next...), nil
 	}
@@ -611,17 +594,11 @@ func NewBillDeleteTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.C
 			return respond.Failed("delete the bill", err), nil
 		}
 
-		// Same event type the API writes on bill delete; name added for
-		// consumers that want it without a lookup (the row is gone).
-		if err := writeOutbox(ctx, tx, "bill.deleted", claims.HouseholdID,
-			map[string]string{"id": r.ID.String(), "name": r.Name}); err != nil {
-			return respond.Failed("delete the bill", err), nil
-		}
 		if err := tx.Commit(ctx); err != nil {
 			return respond.Failed("delete the bill", err), nil
 		}
 
-		b := r.data(today)
+		b := r.data(today, auth.CanSeeMoney(claims.Role))
 		return respond.OK(fmt.Sprintf("Deleted bill %s.", b.Name), b,
 			"See the remaining bills with bill_find."), nil
 	}
@@ -641,15 +618,29 @@ type billPayInput struct {
 // NewBillPayTool creates the bill_pay MCP tool (catalog v2, class U),
 // replacing the S1 working name mark_bill_paid.
 //
-// It records a bill in the authenticated household as paid by setting
-// bills.paid_date and bills.paid_for_due_date (there is no payments table
-// yet, so no history is kept and amount is echoed back as amount_paid, not
-// stored). paid_date defaults to today in the household's timezone. The due
-// date the payment covers is for_due_date when given (#4655: it must be one
-// of the bill's due dates and at most a month after today), otherwise
-// inferred from paid_date (paidForDueDate), as before for_due_date existed.
+// A payment is an EVENT, so bill_pay writes two things in one transaction
+// (#5514):
+//
+//  1. a bill_payments row: what was paid, when, and which due cycle it settles.
+//     This is the history — every payment is kept, so "how much did we pay this
+//     provider last year" and "two payments on one bill" are answerable.
+//  2. bills.paid_date and bills.paid_for_due_date, the derived CACHE of the
+//     latest payment. Every existing reader still reads these
+//     (billdue.BillDueFor through bill_find, the API's bill responses, the
+//     agenda, the worker's reminders and the notification policy); switching
+//     them to the ledger is a separate ticket. Until then both are written, so
+//     the ledger and the cache cannot disagree about the payment just made.
+//
+// paid_date defaults to today in the household's timezone. The due date the
+// payment covers is for_due_date when given (#4655: it must be one of the
+// bill's due dates and at most a month after today), otherwise inferred from
+// paid_date (paidForDueDate), as before for_due_date existed.
+//
 // Paying again for a due date that is already covered (or an earlier one)
-// changes nothing and returns already_paid true.
+// changes nothing and returns already_paid true: no ledger row, no cache move.
+// That rule is WHY a second payment on one bill has to be for a later cycle —
+// see the ticket's follow-up, which reconsiders it once the ledger is
+// authoritative.
 func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error)) {
 	opts := []mcp.ToolOption{
 		mcp.WithDescription("Record a bill as paid. " +
@@ -734,8 +725,32 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 		}
 
 		// Already paid: r keeps its stored payment, which is the effective
-		// one. Otherwise record this payment and the due date it covers.
+		// one, and no event is recorded — a payment that does not happen is
+		// not history. Otherwise write the event and move the derived cache.
 		if !alreadyPaid {
+			// 1. The ledger row: the payment itself, kept forever (#5514).
+			// amount is what the caller said was paid, falling back to the
+			// bill's amount (the tool's documented default: "default the
+			// bill's amount"). It stays NULL when the bill has no amount at
+			// all — unknown is not zero, and 090 allows it for exactly this
+			// case. paid_for_due_date is the cycle computed above, stored as
+			// computed: re-deriving it later would be the bug 052 fixed.
+			// method stays NULL: bill_pay has no method argument, and the tool
+			// must not guess "how" from "which tool". (An unknown how is a fact
+			// the column can hold; a wrong one it cannot.) is_reconstructed is
+			// FALSE — somebody recorded this payment, which is the difference
+			// the flag exists to mark.
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO bill_payments
+				     (household_id, bill_id, amount, paid_on, paid_for_due_date, is_reconstructed)
+				 VALUES ($1, $2, COALESCE($3::numeric, $4::numeric), $5, $6, FALSE)`,
+				claims.HouseholdID, r.ID, in.amount, r.Amount, paid, target,
+			); err != nil {
+				return respond.Failed("record the payment", err), nil
+			}
+
+			// 2. The cache every existing reader uses. Both are written in
+			// this transaction, so they always agree about THIS payment.
 			if err := tx.QueryRow(ctx,
 				`UPDATE bills SET paid_date = $3, paid_for_due_date = $4, updated_at = NOW()
 				 WHERE id = $1 AND household_id = $2
@@ -746,13 +761,6 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 			}
 			r.PaidDate, r.PaidFor = &paid, target
 
-			// The row changed, so write the event the API writes on any bill
-			// update; paid_date tells consumers what changed.
-			if err := writeOutbox(ctx, tx, "bill.updated", claims.HouseholdID, map[string]string{
-				"id": r.ID.String(), "name": r.Name, "paid_date": paid.Format(time.DateOnly),
-			}); err != nil {
-				return respond.Failed("record the payment", err), nil
-			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -764,7 +772,7 @@ func NewBillPayTool(pool *pgxpool.Pool) (string, mcp.Tool, func(ctx context.Cont
 		// next unpaid due date as of today (never in the past, even for a
 		// back-dated payment), status is due/paid, and paid_for_due_date is
 		// the due date this payment covers (#4653).
-		b := r.data(today)
+		b := r.data(today, auth.CanSeeMoney(claims.Role))
 		b.AlreadyPaid = &alreadyPaid
 		b.AmountPaid = in.amount
 		if b.AmountPaid == nil {

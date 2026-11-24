@@ -110,6 +110,9 @@ const DETAIL_ROUTES: Readonly<Record<string, (id: string) => string>> = {
   calendar: () => "/dashboard/calendar",
   maintenance_task: () => "/dashboard/maintenance",
   maintenance_schedule: () => "/dashboard/maintenance",
+  // #5503: the family reference (the KB). Its address is its path, so the id a
+  // hit carries IS the route — a doc found here opens the doc, not a modal.
+  kb_doc: (id) => `/dashboard/guides/reference/${id}`,
 };
 
 /** The page for a record, or null when the build has none. */
@@ -217,6 +220,24 @@ export const GROUPS: readonly GroupDef[] = [
     entityTypes: ["guide"],
     open: "record",
     canSee: (role) => canSeeEntity(role, "guide"),
+  },
+  {
+    // #5503: the family reference (kb_docs). A SEPARATE group from Guides
+    // because it is a separate thing to a reader — a procedure you follow vs a
+    // thing you look up — and because merging them would put a doc's path and
+    // a guide's step count in one indistinguishable list.
+    //
+    // The KB is readable by EVERY role (ResKB read = rolesEveryone, and
+    // migration 076 added kb_doc to role_can_see_entity for exactly that
+    // reason: the sitter needs the router doc), so this group is drawn for
+    // everyone the Guides section reaches. A vendor can read a doc by API but
+    // has no nav to the surface; the API still answers their search.
+    id: "kb_doc",
+    label: "Reference",
+    kind: "doc",
+    entityTypes: ["kb_doc"],
+    open: "link",
+    canSee: (role) => canSeeEntity(role, "kb_doc"),
   },
   {
     id: "credential",
@@ -392,16 +413,19 @@ function humanize(value: string | null | undefined): string {
  * cannot do that. Civil dates (YYYY-MM-DD) are read as UTC so the browser's
  * zone cannot move a document back a day.
  */
-export function formatShortDate(iso: string | null | undefined): string {
+export function formatShortDate(iso: string | null | undefined, timeZone?: string): string {
   if (!iso) return "";
   const civil = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
   const d = civil ? new Date(Date.UTC(+civil[1], +civil[2] - 1, +civil[3])) : new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
+  // `timeZone` is always explicit (#5316): a civil date is read as UTC so the
+  // browser's zone cannot move it, and an instant is read in the household's
+  // zone so two people in the same family see the same day.
   return d.toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
-    ...(civil ? { timeZone: "UTC" } : {}),
+    timeZone: civil ? "UTC" : timeZone ?? "UTC",
   });
 }
 
@@ -691,6 +715,23 @@ export function recordText(group: GroupDef, record: RecordFacts | null | undefin
     return "The password itself is never part of search — only a credential's name and type are. Open it in Settings → Credentials to read or copy it.";
   }
   return (record.body ?? "").trim();
+}
+
+// ─── the one URL a query lives at ───────────────────────────
+
+/**
+ * Where a query lives (`#5303`). The Search page renders `?q=`, the sidebar and
+ * drawer boxes navigate to it, and the phone's More sheet does too — one rule,
+ * so a query typed anywhere can be linked, reloaded and shared, and a second
+ * surface cannot invent its own way to spell a search.
+ *
+ * An empty query drops the parameter rather than leaving `?q=`: the page reads
+ * a missing `q` and an empty one the same way, but a bare `?q=` in the address
+ * bar looks like a search that has not happened yet.
+ */
+export function searchHref(q: string | null | undefined): string {
+  const trimmed = (q ?? "").trim();
+  return trimmed ? `/dashboard/search?q=${encodeURIComponent(trimmed)}` : "/dashboard/search";
 }
 
 // ─── narrowing to one area ──────────────────────────────────

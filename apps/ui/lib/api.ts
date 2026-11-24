@@ -66,6 +66,11 @@ const BFF_PREFIX = "/bff";
 const PUBLIC_API_PATHS = new Set([
   "/api/v1/auth/forgot-password",
   "/api/v1/auth/reset-password",
+  // Invite signup, mode B (#4401, #4579): a person with no account yet has no
+  // session, so the BFF would answer 401 before the API ever saw the token.
+  // The route is registered outside RequireAuth for exactly this reason, and
+  // it is rate limited per client IP (architecture/api-rate-limiting.md).
+  "/api/v1/invites/accept",
 ]);
 
 /**

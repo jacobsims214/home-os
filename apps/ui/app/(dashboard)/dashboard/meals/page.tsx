@@ -34,10 +34,10 @@
  * and adding to Groceries are gated.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import dayjs from "dayjs";
+import { useHouseholdToday } from "@/lib/today/api";
 import {
   Badge,
   Button,
@@ -72,6 +72,7 @@ import {
   buildWeek,
   dinnerRating,
   firstEmptyDay,
+  firstUpcomingDay,
   mealAllergyPayload,
   plannedDinners,
   weekHeading,
@@ -97,23 +98,27 @@ export default function MealsPage() {
   const params = useSearchParams();
   const requestedWeek = params?.get("week") ?? "";
 
-  // Today comes from the BROWSER once mounted, never during SSR: the server's
-  // clock (and its time zone) is not the family's, and a week row that says
-  // "today" on the wrong day is worse than no highlight for one paint.
-  const [today, setToday] = useState<string | null>(null);
+  // Today is the FAMILY's day (#5316), in the household's time zone, after
+  // mount: the server's clock (and its zone) is not the family's, and a browser
+  // on UTC at 22:30 in New York is already on tomorrow. It is `null` until the
+  // household is known, so nothing below calls a day past, or asks anyone to
+  // plan one, on a guess — and no row is highlighted "today" on the wrong day.
+  // `householdToday` is the same answer Today, Calendar, Pets, People and Bills
+  // use, so no two pages can disagree about what day it is.
+  //
+  // The panel's week: a `?week=` link wins, otherwise the family's week. With
+  // no day yet there is no week to draw (`start` is null) — the alternative,
+  // a browser-clock placeholder, is the defect this consolidation removed.
+  const today = useHouseholdToday();
   const [weekOffset, setWeekOffset] = useState(0);
-
-  useEffect(() => {
-    setToday(dayjs().format("YYYY-MM-DD"));
-  }, []);
-  const nowKey = today ?? dayjs().format("YYYY-MM-DD");
   const start = useMemo(() => {
-    const anchor = requestedWeek || nowKey;
+    const anchor = requestedWeek || today;
+    if (!anchor) return null;
     return addWeek(weekStart(anchor), weekOffset);
-  }, [requestedWeek, nowKey, weekOffset]);
+  }, [requestedWeek, today, weekOffset]);
 
-  const range = useMemo(() => ({ from: start, to: addDays(start, 6) }), [start]);
-  const mealsQuery = useMealPlans(range);
+  const range = useMemo(() => (start ? { from: start, to: addDays(start, 6) } : null), [start]);
+  const mealsQuery = useMealPlans(range ?? { from: "", to: "" }, !!range);
   const peopleQuery = usePeople();
   const recipesQuery = useRecipes();
 
@@ -125,9 +130,28 @@ export default function MealsPage() {
   const recipes = useMemo(() => recipesQuery.data?.data ?? [], [recipesQuery.data]);
   const recipesById = useMemo(() => new Map(recipes.map((r) => [r.id, r])), [recipes]);
 
-  const days = useMemo(() => buildWeek(start, meals, nowKey), [start, meals, nowKey]);
+  const days = useMemo(
+    () => (start && today ? buildWeek(start, meals, today) : []),
+    [start, meals, today],
+  );
   const planned = plannedDinners(days);
-  const nextEmpty = firstEmptyDay(days);
+  // Only a day that is today or later may be called open (#5305).
+  const nextEmpty = today ? firstEmptyDay(days, today) : null;
+  // Some day of this week to open the suggestion sheet on when no dinner is
+  // open: the first that hasn't gone, never `days[0]` (a gone Monday).
+  const upcomingDay = today ? firstUpcomingDay(days, today) : null;
+  // When the whole visible week is in the past (someone browsed back with ‹),
+  // "What's for dinner?" still means TONIGHT, so the sheet opens on today
+  // rather than on the week's Monday. Its own row, built from the same data, so
+  // the sheet's heading and the write both name a real, still-cookable day.
+  const todayRow = useMemo(
+    () => (today ? buildWeek(weekStart(today), meals, today).find((d) => d.date === today) ?? null : null),
+    [today, meals],
+  );
+  const suggestionDay = nextEmpty ?? upcomingDay ?? todayRow ?? days[0];
+  // Nothing in this week can still be cooked, so the page must not offer to:
+  // no nag, and no "Plan a dinner" instruction on a week that is over.
+  const weekIsPast = days.length > 0 && days.every((d) => d.isPast);
 
   const plan = usePlanMeal();
   const clear = useClearMeal();
@@ -212,7 +236,7 @@ export default function MealsPage() {
           </Button>
           {canWrite && (
             <Button
-              onClick={() => setSuggestFor(nextEmpty ?? days[0])}
+              onClick={() => setSuggestFor(suggestionDay)}
               leftSection={<IconSparkles size={16} stroke={ICON_STROKE} />}
               className="max-md:min-h-11"
               data-meals-suggest
@@ -237,10 +261,10 @@ export default function MealsPage() {
         </Button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <Text fw={600} size="lg" style={{ lineHeight: 1.2 }} data-meals-weekday>
-            {weekHeading(start, nowKey)}
+            {start && today ? weekHeading(start, today) : "This week"}
           </Text>
           <Text size="xs" style={{ color: "var(--ink-3)" }} data-meals-weekrange>
-            {weekLabel(start)} · {planned} {planned === 1 ? "dinner" : "dinners"} planned
+            {start ? weekLabel(start) : "\u2014"} · {planned} {planned === 1 ? "dinner" : "dinners"} planned
           </Text>
         </div>
         <Button
@@ -365,14 +389,16 @@ export default function MealsPage() {
                     </Text>
                     <Text size="xs" style={{ color: "var(--ink-3)" }}>
                       {planned === 0
-                        ? "Plan a dinner and its ingredients can go on Groceries."
+                        ? weekIsPast
+                          ? "No dinner was planned this week."
+                          : "Plan a dinner and its ingredients can go on Groceries."
                         : `Merge ${planned} planned ${planned === 1 ? "dinner" : "dinners"} into Groceries.`}
                     </Text>
                   </div>
                 </Group>
                 <Button
                   component={Link}
-                  href={`/dashboard/meals/grocery?from=${range.from}&to=${range.to}`}
+                  href={range ? `/dashboard/meals/grocery?from=${range.from}&to=${range.to}` : "/dashboard/meals/grocery"}
                   variant="default"
                   fullWidth
                   mt="sm"
@@ -477,6 +503,7 @@ function DayRow({
       role="listitem"
       data-meal-day={day.date}
       data-meal-today={day.isToday ? "true" : undefined}
+      data-meal-past={day.isPast ? "true" : undefined}
       style={{
         display: "grid",
         gridTemplateColumns: "44px minmax(0,1fr)",
@@ -484,6 +511,12 @@ function DayRow({
         padding: "10px 12px",
         borderBottom: isLast ? "none" : "1px solid var(--line)",
         background: day.isToday ? "var(--surface-2)" : "transparent",
+        // A gone day is history: it stays readable (it is what the family ate)
+        // but stops competing with the days that can still be planned. It used
+        // to be dimmed with opacity 0.72, which dropped its 12 px labels to
+        // 3.05:1 and 3.93:1 on white — under WCAG AA's 4.5:1 (#4588). The
+        // de-emphasis is now the token colours the row already carries
+        // (--ink-2 / --ink-3), which pass on their own.
       }}
     >
       <div style={{ paddingTop: 4 }} aria-label={day.isToday ? `Today, ${day.long}` : day.long}>
@@ -581,7 +614,9 @@ function DayRow({
               <Button variant="subtle" size="compact-xs" onClick={onRate} className="max-md:min-h-11" data-meal-rate>
                 Rate it
               </Button>
-              {canWrite && (
+              {/* Rating is an after-the-fact act and stays on a gone day; swapping
+                  or clearing a dinner already eaten is not an offer to make. */}
+              {canWrite && !day.isPast && (
                 <>
                   <Button variant="subtle" size="compact-xs" onClick={onSuggest} className="max-md:min-h-11" data-meal-swap>
                     Swap
@@ -601,6 +636,31 @@ function DayRow({
                 </>
               )}
             </Group>
+          </div>
+        ) : day.isPast ? (
+          /*
+            A past day with no dinner is SETTLED, not open (#5305, R2 G8): the
+            old row offered "Plan dinner" for Monday on Wednesday, and the side
+            panel led with "Mon is open — November 16 has no dinner planned".
+            Nobody can cook a dinner for a day that has gone, so this says what
+            happened and offers nothing. It is not a disabled button: a dead
+            control still reads as an action that should work.
+          */
+          <div
+            data-meal-settled={day.date}
+            style={{
+              minHeight: 52,
+              display: "flex",
+              alignItems: "center",
+              padding: "0 12px",
+              borderRadius: "var(--r-md)",
+              border: "1px solid var(--line)",
+              background: "transparent",
+            }}
+          >
+            <Text size="xs" style={{ color: "var(--ink-3)" }}>
+              No dinner planned
+            </Text>
           </div>
         ) : (
           <UnstyledButton

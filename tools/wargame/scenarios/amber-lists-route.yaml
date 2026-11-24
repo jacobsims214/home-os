@@ -1,0 +1,41 @@
+# War-game scenario - transcribed from discoveries/war-game-r2-amber.md (U3), #4585.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: amber-lists-route
+persona: amber
+surface: lists
+intent: |
+  I'm in the store and I want to check things off the grocery list.
+steps:
+  - open Today as amber and tap the grocery list card
+  - open /dashboard/lists directly
+  - tap a checkbox on one item
+  - "mcpcall.py search_all --query 'Groceries' as amber"
+assertion: |
+  The list route renders the real list with check-off controls, and checking an item
+  is persisted (the item shows as checked after a reload and in the MCP read).
+tags:
+  - lists
+  - ui
+  - write
+origin:
+  round: r2
+  source: discoveries/war-game-r2-amber.md
+  ref: U3
+  ticket: "#4585"
+  date: "2026-11-18"
+  verdict: fail
+  reruns:
+    - round: r3
+      source: discoveries/war-game-r3-amber.md
+      ref: G3
+      ticket: "#4596"
+      date: "2026-11-20"
+      verdict: pass
+      note: /dashboard/lists renders with 6 templates and 34 items
+    - round: r3
+      source: discoveries/war-game-r3-amber.md
+      ref: N3
+      ticket: "#4596"
+      date: "2026-11-20"
+      verdict: pass
+      note: "list opens from Today's grocery card"

@@ -30,39 +30,51 @@
  *
  * The header bell is #4563's notifications opener: the bottom sheet on phones,
  * the popover from 768 px up (components/notifications/NotificationsSurface).
+ *
+ * The header avatar opens the account menu (#5198, components/account/AccountMenu):
+ * a bottom sheet below 48em, a 320 px card popover above, with the identity
+ * header, Profile / Theme / Notification settings and Log out. Its open state
+ * lives here too, because the More sheet's account row opens the same menu.
  */
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
 import {
   ActionIcon,
   AppShell,
-  Avatar,
   Box,
   Drawer,
-  Menu,
   ScrollArea,
-  UnstyledButton,
   VisuallyHidden,
 } from "@mantine/core";
 import { useDisclosure, useMediaQuery, useReducedMotion } from "@mantine/hooks";
-import { IconChevronDown, IconMenu2 } from "@tabler/icons-react";
-import dayjs from "dayjs";
+import { IconMenu2 } from "@tabler/icons-react";
+import AccountMenu, { HeaderAccountButton } from "@/components/account/AccountMenu";
+import { useAccountIdentity } from "@/components/shared/use-account";
 import BottomNav from "@/components/shared/BottomNav";
 import OfflineBanner, { ServiceWorkerBridge } from "@/components/shared/OfflineBanner";
 import NotificationsSurface from "@/components/notifications/NotificationsSurface";
-import Sidebar, { AccountMenuItems, Brand } from "@/components/shared/Sidebar";
+import Sidebar, { Brand } from "@/components/shared/Sidebar";
 import HouseholdSwitcher, {
   useHouseholdSwitcherControl,
   type HouseholdSwitcherControl,
 } from "@/components/shared/HouseholdSwitcher";
 import { useNavSections } from "@/components/shared/use-nav-role";
-import { apiFetch } from "@/lib/api";
-import { useAuthStore } from "@/stores/auth";
 import { NAV_ICON_STROKE, activeSection, pageTitle, type NavSection } from "@/components/shared/nav-config";
+import { useHouseholdToday } from "@/lib/today/api";
 import classes from "./DashboardShell.module.css";
+
+/** "Wednesday, November 18" for a YYYY-MM-DD the household already decided. */
+function dayHeading(civil: string): string {
+  const [y, m, d] = civil.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
 import bottomNavClasses from "./BottomNav.module.css";
 
 /** Mantine breakpoints the shell switches at (sm = 48em, md = 62em). */
@@ -204,10 +216,13 @@ function ShellHeader({
   /** The shell's single family-switcher state (#4574). */
   switcher: HouseholdSwitcherControl;
 }) {
-  // Rendered after mount so server and client agree (the server's timezone
-  // may differ from the browser's).
-  const [today, setToday] = useState<string | null>(null);
-  useEffect(() => setToday(dayjs().format("dddd, MMMM D")), []);
+  // The header's date is the FAMILY's date (#5316), the same one every page
+  // below it uses. Null until the household is known, so the header never
+  // names a day the rest of the app is not on. The formatting is done on the
+  // civil date with an explicit UTC zone: the day was already decided by the
+  // household, so re-reading a clock here would only reintroduce the bug.
+  const todayDay = useHouseholdToday();
+  const today = todayDay ? dayHeading(todayDay) : null;
 
   return (
     <div className={classes.headerRow}>
@@ -255,44 +270,35 @@ function HeaderBell({ opened, onChange: setOpened }: { opened: boolean; onChange
   );
 }
 
-/** Avatar menu (phone and tablet; desktop has the user block in the sidebar). */
+/**
+ * Avatar menu (phone and tablet; desktop has the user block in the sidebar).
+ *
+ * #5198 rebuilt it to the approved shell spec (artifact #75 v1): below 48em it is
+ * a bottom sheet, from 48em the 320 px card popover, both with the identity
+ * header, Profile / Theme / Notification settings rows and a full-width
+ * ghost-danger Log out. The old Mantine Menu (a small anchored dropdown with a
+ * static "Account" label) was the biggest build-vs-design gap in the shell
+ * audit (artifact #168, rows D3/D4). AccountMenu owns the surfaces; this only
+ * supplies the avatar trigger and the open state the More sheet shares.
+ */
 function UserMenu({ opened, onChange }: { opened: boolean; onChange: (opened: boolean) => void }) {
-  const user = useAuthStore((s) => s.user);
-  const name = user?.name || "Account";
-  const initials =
-    (user?.name || user?.email || "U")
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((p) => p[0]!.toUpperCase())
-      .join("") || "U";
+  const { user, name, initials } = useAccountIdentity();
 
   return (
-    <Menu
+    <AccountMenu
+      placement="header"
       opened={opened}
       onChange={onChange}
-      position="bottom-end"
-      width={280}
-      shadow="lg"
-      radius="md"
-      withinPortal
-    >
-      <Menu.Target>
-        <UnstyledButton
-          className={classes.avatarButton}
-          aria-label={`Account menu for ${name}`}
-          aria-haspopup="menu"
-        >
-          <Avatar size={32} radius="xl" color="cyan.9" variant="filled" src={user?.avatar_url ?? undefined}>
-            {initials}
-          </Avatar>
-        </UnstyledButton>
-      </Menu.Target>
-      <Menu.Dropdown>
-        {/* Name, Settings, Theme (#4529) and the native logout form (#4424). */}
-        <AccountMenuItems />
-      </Menu.Dropdown>
-    </Menu>
+      trigger={
+        <HeaderAccountButton
+          name={name}
+          initials={initials}
+          avatarUrl={user?.avatar_url}
+          expanded={opened}
+          onClick={() => onChange(!opened)}
+        />
+      }
+    />
   );
 }
 

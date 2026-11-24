@@ -156,6 +156,28 @@ func (r *Repo) All(ctx context.Context, fn func(*Guide) error) error {
 	return rows.Err()
 }
 
+// AllInHousehold calls fn for every guide of one household, for searchrecon
+// (#5298). Guide documents are built by Document, so a reconciled guide keeps
+// the summary-first body the write path produces.
+func (r *Repo) AllInHousehold(ctx context.Context, householdID string, fn func(*Guide) error) error {
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+guideCols+` FROM guides WHERE household_id = $1::uuid ORDER BY id`, householdID)
+	if err != nil {
+		return fmt.Errorf("guides: all in household: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		g, err := scanGuide(rows)
+		if err != nil {
+			return fmt.Errorf("guides: all in household scan: %w", err)
+		}
+		if err := fn(g); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 // Get returns one guide of the household.
 func (r *Repo) Get(ctx context.Context, householdID, id uuid.UUID) (*Guide, error) {
 	g, err := scanGuide(r.pool.QueryRow(ctx,

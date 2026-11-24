@@ -1,0 +1,24 @@
+# War-game scenario - transcribed from discoveries/war-game-r3-jacob.md (documents), #4595.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+id: jacob-mobile-documents
+persona: jacob
+surface: documents
+intent: |
+  Are my documents organised on the phone?
+steps:
+  - open /dashboard/documents as jacob at 390px
+  - "read category counts, provenance labels and the upload affordance"
+  - mcpcall.py document_find as jacob
+assertion: |
+  Category counts equal document_find's totals and there is no phantom unfiled bucket.
+tags:
+  - documents
+  - ui
+  - mobile
+origin:
+  round: r3
+  source: discoveries/war-game-r3-jacob.md
+  ref: documents
+  ticket: "#4595"
+  date: "2026-11-20"
+  verdict: pass

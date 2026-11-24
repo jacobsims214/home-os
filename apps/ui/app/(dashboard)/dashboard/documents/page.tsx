@@ -11,7 +11,9 @@
  *   2. expiring soon — the reason the hub exists (a policy that lapses is a
  *      real loss), ordered by date with the already-expired first;
  *   3. categories with real counts (a tile only for a category that holds
- *      something, and "other" only when documents are actually unfiled);
+ *      something). "Other" is a category like the rest — a document filed as
+ *      Other is filed (#5299); the only unfiled ones are those with NO
+ *      category, and the note under the tiles counts exactly those;
  *   4. recently added and the full list;
  *   5. the add control: a camera first, because a receipt is photographed at
  *      the counter.
@@ -73,15 +75,15 @@ import { useDocuments } from "@/lib/documents/api";
 import {
   CATEGORY_LABELS,
   CATEGORY_SINGULAR,
-  categoryCounts,
   expiringSoon,
   filterDocuments,
   isCategory,
   populatedCategories,
-  todayString,
+  unfiledDocuments,
   type Category,
 } from "@/lib/documents/model";
-import { CategoryIcon } from "@/components/documents/categories";
+import { useHouseholdToday } from "@/lib/today/api";
+import { CategoryIcon, categoryTint } from "@/components/documents/categories";
 import DocumentRow from "@/components/documents/DocumentRow";
 import UploadSheet from "@/components/documents/UploadSheet";
 
@@ -127,12 +129,20 @@ function DocumentsHub() {
   // counts and the expiring list are computed from it.
   const documentsQ = useDocuments(categoryView ? { category: categoryView } : {}, mayRead);
   const files = useMemo(() => documentsQ.data?.data ?? [], [documentsQ.data]);
-  const today = todayString();
+  // "Expiring soon" and the counts are the FAMILY's day (#5316): a warranty
+  // that expires today is not expired yet, and which of the two it is must not
+  // depend on the browser's zone. Null until the household is known, so the
+  // lists are empty rather than wrong.
+  const today = useHouseholdToday();
 
-  const expiring = useMemo(() => expiringSoon(files, today), [files, today]);
-  const cats = useMemo(() => populatedCategories(files, today), [files, today]);
-  const counts = useMemo(() => categoryCounts(files, today), [files, today]);
+  const expiring = useMemo(() => (today ? expiringSoon(files, today) : []), [files, today]);
+  const cats = useMemo(() => (today ? populatedCategories(files, today) : []), [files, today]);
   const filtered = useMemo(() => filterDocuments(files, { q: query }), [files, query]);
+  // Filedness is ONE rule (#5299): this list, the count printed over it and
+  // each card's chip all come from the model (`unfiledDocuments` /
+  // `documentCategoryLabel`), so the group cannot contradict its own cards. A
+  // document filed as "Other" is filed, so it is not here.
+  const unfiled = useMemo(() => unfiledDocuments(files), [files]);
 
   const openUpload = (category: Category | null = null) => {
     setUploadCategory(category);
@@ -367,7 +377,9 @@ function DocumentsHub() {
                 </section>
               )}
 
-              {/* Categories with something in them. */}
+              {/* Categories with something in them. Every count here is a
+                  filed document (categoryCounts asks `isFiled`), so a tile can
+                  never include a card that shows no category. */}
               <section aria-labelledby="docs-categories" data-documents-categories>
                 <SectionHeading id="docs-categories" title="Categories" />
                 <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4">
@@ -388,8 +400,7 @@ function DocumentsHub() {
                           display: "grid",
                           placeItems: "center",
                           borderRadius: 11,
-                          background: c.category === "other" ? "var(--surface-2)" : "var(--accent-soft)",
-                          color: c.category === "other" ? "var(--ink-2)" : "var(--accent)",
+                          ...categoryTint({ category: c.category }),
                         }}
                       >
                         <CategoryIcon category={c.category} size={20} />
@@ -411,9 +422,15 @@ function DocumentsHub() {
                     </Link>
                   ))}
                 </div>
-                {counts.get("other")!.count > 0 && (
+                {/* Only documents with no category at all are unfiled, and only
+                    then is this sentence shown (#5299). The test is the same
+                    `isFiled` the tiles and the rows use, so the note can never
+                    contradict a card: a document filed as "Other" is filed, and
+                    its tile is named Other — not "Not filed yet". */}
+                {unfiled.length > 0 && (
                   <Text size="xs" mt={8} style={{ color: "var(--ink-3)" }}>
-                    &ldquo;Not filed yet&rdquo; are documents with no category — give one a category from its own page.
+                    No category yet on {unfiled.length} {unfiled.length === 1 ? "document" : "documents"} — give
+                    each one a category from its own page.
                   </Text>
                 )}
               </section>
@@ -490,7 +507,7 @@ function SectionHeading({ id, title, count }: { id: string; title: string; count
 
 function LoadingHub() {
   return (
-    <div aria-busy="true" aria-label="Loading documents" data-documents-loading>
+    <div role="status" aria-busy="true" aria-label="Loading documents" data-documents-loading>
       <Skeleton height={16} width={140} mb="sm" radius="sm" />
       <Skeleton height={200} radius="md" mb="lg" />
       <Skeleton height={16} width={110} mb="sm" radius="sm" />
@@ -515,7 +532,7 @@ function EmptyHub({
   if (categoryView) {
     return (
       <div data-documents-empty data-documents-empty-category>
-        <Title order={3} mt="md" className="text-xl font-semibold text-ink">
+        <Title order={2} mt="md" className="text-xl font-semibold text-ink">
           Nothing in {CATEGORY_LABELS[categoryView]} yet
         </Title>
         <Text size="sm" mt={6} style={{ color: "var(--ink-2)", lineHeight: 1.55, maxWidth: 560 }}>
@@ -532,7 +549,7 @@ function EmptyHub({
   }
   return (
     <div data-documents-empty>
-      <Title order={3} mt="md" className="text-xl font-semibold text-ink">
+      <Title order={2} mt="md" className="text-xl font-semibold text-ink">
         No documents yet
       </Title>
       <Text size="sm" mt={6} style={{ color: "var(--ink-2)", lineHeight: 1.55, maxWidth: 620 }}>

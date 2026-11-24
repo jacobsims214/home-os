@@ -1,0 +1,49 @@
+# War-game scenario - written for R4 from #5505 (household reality); not played yet.
+# Do not edit the prose of `intent` to match new behavior: change the assertion.
+#
+# Two ways into one doc: the reference search in the UI (GET /api/v1/kb?q=) and the
+# agent's kb_search, both ranked by meaning through Typesense. The seed's
+# how-to/networking/router-reset is titled "Reset the router when the wifi is out",
+# so the AGENT's query below is deliberately worded with none of those words ("the
+# internet stopped working again, what do I do") - a literal word match cannot find
+# it, which is the point. If meaning search is degraded, kb_search must fail loudly
+# and the agent must fall back to kb_list; an empty result presented as "we have no
+# such doc" is the failure this scenario exists to catch (#5298).
+id: amber-kb-find
+persona: amber
+surface: guides
+intent: |
+  The wifi is out and Jacob is at work. How do I reset the router?
+steps:
+  - "open https://homeos.simstech.cloud as amber at 390x844 -> Guides -> Reference"
+  - "type 'reset the router' in the Search the family reference box and read the result rows"
+  - "open the top result and read its path and body"
+  - "chat.sh amber r4-kb --file msg (ask how to reset the router, without naming a doc or a tool)"
+  - mcpcall.py kb_search with query 'the internet stopped working again, what do I do' as amber
+  - mcpcall.py kb_list as amber
+assertion: |
+  Both routes land on the same path: how-to/networking/router-reset. The UI's top
+  result link points at /dashboard/guides/reference/how-to/networking/router-reset
+  and the page body contains the seeded steps ("Unplug the power, wait 30
+  seconds") - not just a title match. kb_search returns that path in its hits even
+  though the query shares no word with the doc's title, and the agent's reply
+  names the same doc and quotes at least one instruction that appears verbatim in
+  kb_get of that path (for example the 30-second wait or the Northlight Fiber
+  number 555-0175); it does not invent a step and does not answer that the family
+  has no such doc. kb_list contains the path, so "not found" is a failed scenario
+  rather than a plausible empty answer. If meaning search is impaired the reply
+  must say search is impaired and fall back to kb_list - an empty result presented
+  as "we have nothing" fails.
+tags:
+  - guides
+  - kb
+  - search
+  - agent
+  - meaning-search
+origin:
+  round: r4
+  source: "#5505"
+  ref: household-reality/7
+  ticket: "#5505"
+  date: "2026-11-23"
+  verdict: untested
