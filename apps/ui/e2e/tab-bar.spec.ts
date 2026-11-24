@@ -126,10 +126,13 @@ for (const width of [375, 390]) {
       await expect(more).toBeFocused();
       await expect(nav.getByRole("link", { name: "Today" })).toHaveAttribute("aria-current", "page");
 
-      // A row navigates and closes the sheet.
+      // A tile navigates and closes the sheet.
+      // #5704: Money's href is the OVERVIEW now, not Bills. /dashboard/money
+      // has existed since #4571 and no surface linked to it — the section
+      // pointed past a page nobody could reach.
       await more.click();
       await sheet.getByRole("link", { name: "Money" }).click();
-      await expect(page).toHaveURL(/\/dashboard\/bills$/);
+      await expect(page).toHaveURL(/\/dashboard\/money$/);
       await expect(sheet).toBeHidden();
 
       // The account row opens the account menu — the phone's bottom sheet — with
