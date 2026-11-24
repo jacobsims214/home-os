@@ -20,8 +20,18 @@ Each step is classified and, where a driver exists, actually run:
 | `mcpcall.py <tool> ['<json>']`      | real MCP call     |
 | `api.py <METHOD> <path>`            | real REST call    |
 | `chat.sh <persona> <session> ...`   | one moltis turn   |
-| `open <url> ... at 390[px|x844]`    | headless Chrome   |
+| `open <url> ... at 390[px|x844]`    | the UI channel    |
 | anything else (a tap, a read)       | none — BLOCKED    |
+
+**Which channel a step belongs to, and why `--channel` exists.** A `channel: both`
+scenario is played by `run.sh` twice: once with this driver (the agent: mcpcall/chat) and
+once with `ui_channel.mjs` (the UI: Chrome at 390x844, signed in). So this driver must not
+also try to render the `open <url>` steps — without `--channel agent` it renders them
+with no session, gets the login screen, and turns every `both` scenario BLOCKED for a
+reason that is not about the product. With `--channel agent` those steps are marked
+`DELEGATED` (they are the UI channel's job) and do not make the verdict BLOCKED; with
+`--channel ui` the mcpcall/chat steps are delegated instead. The default (`both`) keeps
+the single-channel behaviour this script always had.
 
 The verdict is then:
 
@@ -42,6 +52,7 @@ python3 (see README "Requirements").
 """
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -57,6 +68,9 @@ sys.path.insert(0, HERE)
 import scenarios_load  # noqa: E402  (the only corpus reader — never re-parse YAML here)
 
 PASS, FAIL, BLOCKED = "PASS", "FAIL", "BLOCKED"
+# A step that the other channel owns. Neither a pass nor a block: the round is
+# exercising it, just not through this driver.
+DELEGATED = "DELEGATED"
 
 NET_TIMEOUT = int(os.environ.get("WARGAME_STEP_TIMEOUT", "90"))
 UI_TIMEOUT = int(os.environ.get("WARGAME_UI_TIMEOUT", "45"))
@@ -190,9 +204,64 @@ def parse_payload(out):
     return d
 
 
+# persona -> (namespace, Secret, key) for the `hos_` agent token up.sh already proved
+# live. One home for it: up.sh checks these very Secrets, and this reads the same ones.
+TOKEN_SECRET = {
+    "jacob": ("moltis", "home-os-token-wg-jacob", "token"),
+    "amber": ("moltis", "home-os-token-wg-amber", "token"),
+}
+
+
+def persona_token(persona):
+    """That persona's agent token, or None. Never prints it, never returns it in output.
+
+    Read from the Secret into this process's environment only. `kubectl`'s jsonpath
+    output is base64 and is decoded here rather than in a shell, so the value never
+    reaches argv (visible in `ps`) and never lands in a log.
+    """
+    ns_name = TOKEN_SECRET.get(persona)
+    if not ns_name:
+        return None
+    ns, name, key = ns_name
+    argv = ["kubectl"]
+    kubeconfig = os.environ.get("WARGAME_KUBECONFIG", "")
+    if kubeconfig:
+        argv += ["--kubeconfig", kubeconfig]
+    argv += ["-n", ns, "get", "secret", name, "-o", "jsonpath={.data.%s}" % key,
+             "--request-timeout=20s"]
+    rc, out, err = run(argv, NET_TIMEOUT)
+    if rc != 0 or not out.strip():
+        return None
+    try:
+        return base64.b64decode(out.strip()).decode("utf-8").strip()
+    except Exception:
+        return None
+
+
 def do_mcpcall(payload, persona):
     argv = mcpcall_args(payload)
-    rc, out, err = run(argv, NET_TIMEOUT)
+    if not os.environ.get("HOMEOS_MCP_URL"):
+        os.environ["HOMEOS_MCP_URL"] = os.environ.get(
+            "HOMEOS_SITE", "https://homeos.simstech.cloud").rstrip("/")
+    # mccall reads the token from the environment (never argv). Resolution order:
+    # an explicit HOMEOS_AGENT_TOKEN for THIS persona (the round sets it), else the
+    # persona's own Secret, else the inherited value — and if none of those, the step
+    # is BLOCKED rather than a spurious tool failure.
+    tok = os.environ.get("HOMEOS_AGENT_TOKEN") if os.environ.get("WARGAME_TOKEN_PERSONA") == persona else None
+    if not tok:
+        tok = persona_token(persona)
+    env_extra = {}
+    if tok:
+        env_extra["HOMEOS_AGENT_TOKEN"] = tok
+        env_extra["WARGAME_TOKEN_PERSONA"] = persona
+    else:
+        return {"status": BLOCKED,
+                "detail": "no agent token for %s: Secret %s/%s unreadable and "
+                          "HOMEOS_AGENT_TOKEN not set for this persona"
+                          % (persona, TOKEN_SECRET.get(persona, ("?", "?", "?"))[0],
+                             TOKEN_SECRET.get(persona, ("?", "?", "?"))[1]),
+                "exit_code": None, "output": ""}
+    rc, out, err = run(argv, NET_TIMEOUT, env=env_extra)
     blob = out or err
     detail = "%s as %s" % (payload.strip()[:90], persona)
 
@@ -203,6 +272,12 @@ def do_mcpcall(payload, persona):
     # could not tell — and "could not tell" is BLOCKED, never FAIL (§7).
     if rc == 2:
         hint = "transport/usage failure"
+        if "set HOMEOS_MCP_URL" in blob:
+            return {"status": BLOCKED,
+                    "detail": "%s — HOMEOS_MCP_URL is not set, so the MCP endpoint is "
+                              "unknown; that is an environment gap, not a tool defect"
+                              % payload.strip()[:70],
+                    "exit_code": rc, "output": blob[:2000]}
         if "HTTP 429" in blob or "rate limit" in blob.lower():
             hint = ("rate limited by the MCP endpoint (HTTP 429) — this round could "
                     "not read ground truth for this step")
@@ -366,6 +441,10 @@ def main(argv=None):
     ap.add_argument("--id", required=True)
     ap.add_argument("--corpus", default=os.path.join(HERE, "scenarios"))
     ap.add_argument("--evidence-dir", required=True)
+    ap.add_argument("--channel", choices=("both", "agent", "ui"), default="both",
+                    help="which half of a two-channel scenario this run owns: 'agent' "
+                         "delegates the `open <url>` steps to the UI channel and 'ui' "
+                         "delegates the tool/chat steps to the agent channel")
     args = ap.parse_args(argv)
 
     corpus = scenarios_load.load_corpus(args.corpus)
@@ -382,6 +461,19 @@ def main(argv=None):
     step_results = []
     for idx, step in enumerate(doc["steps"], 1):
         kind, payload = classify(step)
+        # A step that belongs to the OTHER channel is recorded as DELEGATED, not as
+        # BLOCKED: it is not unexercised, it is being exercised by the other driver in
+        # the same round. Calling it BLOCKED would report a scenario as unjudged when
+        # both halves ran.
+        mine = {"mcpcall": "agent", "chat": "agent", "api": "agent", "ui": "ui"}.get(kind)
+        if args.channel != "both" and mine and mine != args.channel:
+            r = {"status": DELEGATED,
+                 "detail": "this step belongs to the %s channel, which run.sh drives "
+                           "separately" % mine,
+                 "exit_code": None, "output": ""}
+            r.update({"n": idx, "step": step.strip()[:300], "kind": kind})
+            step_results.append(r)
+            continue
         if kind == "mcpcall":
             r = do_mcpcall(payload, persona)
         elif kind == "api":
