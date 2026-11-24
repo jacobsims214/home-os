@@ -1,0 +1,39 @@
+# Family year - spring, 05-may. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# When the folder surfaces a document we only have on paper, scan it and file it
+# against the house so the next search finds it by name and by year.
+id: jacob-spring-septic-document-filed
+persona: jacob
+surface: documents
+channel: both
+intent: |
+  When the folder surfaces a document we only have on paper, scan it and file it
+  against the house so the next search finds it by name and by year.
+steps:
+  - "mcpcall.py document_upload with the scanned septic inspection as jacob, property = Maple Street"
+  - "mcpcall.py document_find with query 'septic' as jacob"
+  - "mcpcall.py search_all with query 'septic' as jacob"
+  - "open https://homeos.simstech.cloud/dashboard/documents at 390x844 as jacob"
+assertion: |
+  The document is filed to the property, has a document_type that is not empty and not
+  the "Other" catch-all, and is findable by the same query through both document_find
+  and search_all - two code paths to one document is the point, since the family
+  reaches it by whichever one the page happens to use. The row's filed-to label on the
+  documents page names Maple Street, the same property document_find returns.
+parity: |
+  the document's filed-to target: document_find's property name and the row's filed-to
+  label are the same property
+tags:
+  - documents
+  - property
+  - search
+  - write
+  - filing
+origin:
+  round: r4
+  source: "#5713"
+  ref: spring/jacob-spring-septic-document-filed
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

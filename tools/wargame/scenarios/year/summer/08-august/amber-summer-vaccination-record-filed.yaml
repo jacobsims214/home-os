@@ -1,0 +1,39 @@
+# Family year - summer, 08-august. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The rabies certificate is in my hand at the counter. File it against Biscuit so
+# that boarding the dog next summer does not turn into an archaeology project.
+id: amber-summer-vaccination-record-filed
+persona: amber
+surface: documents
+channel: both
+intent: |
+  The rabies certificate is in my hand at the counter. File it against Biscuit so that
+  boarding the dog next summer does not turn into an archaeology project.
+steps:
+  - "mcpcall.py document_upload with the rabies certificate as amber, linked to Biscuit"
+  - "mcpcall.py document_find with query 'rabies' as amber"
+  - "mcpcall.py pet_find with query 'Biscuit' as amber"
+  - "open https://homeos.simstech.cloud/dashboard/documents at 390x844 as amber"
+assertion: |
+  The certificate is a filed document whose subject is Biscuit - the pet, not the
+  property and not unfiled - and whose document_type is a real value. The pet record
+  and the document agree on the expiry date: the date in the document's fields equals
+  the date pet_find returns for the rabies vaccination. Two records that disagree
+  about when the dog is protected is exactly the failure this scenario exists to
+  catch.
+parity: |
+  the rabies expiry: the date in the filed certificate and pet_find's vaccination date
+  are the same day
+tags:
+  - documents
+  - pets
+  - write
+  - filing
+origin:
+  round: r4
+  source: "#5713"
+  ref: summer/amber-summer-vaccination-record-filed
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

@@ -1,0 +1,38 @@
+# Family year - summer, 07-july. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# We are at the cabin July 18 to 25. Block it on the family calendar and work out
+# who is driving when, so nobody books a dentist appointment in the middle of it.
+id: amber-summer-cabin-trip-calendar
+persona: amber
+surface: calendar
+channel: both
+intent: |
+  We are at the cabin July 18 to 25. Block it on the family calendar and work out who
+  is driving when, so nobody books a dentist appointment in the middle of it.
+steps:
+  - "chat.sh amber cabin --stdin with the message above"
+  - "mcpcall.py event_find with from 2027-07-17 to 2027-07-26 as amber"
+  - "mcpcall.py calendar_find_free_time as amber within the trip week"
+  - "open https://homeos.simstech.cloud/dashboard/calendar at 390x844 as amber"
+assertion: |
+  The trip is a single all-day block from 2027-07-18 through 2027-07-25 inclusive -
+  eight days, checked by counting what event_find returns, not by reading the title.
+  It is on the family calendar (the one both parents see), not on Amber's private one.
+  calendar_find_free_time returns no free slots inside the block, which is the
+  assertion that the block is real rather than decorative.
+parity: |
+  the trip's length and dates: event_find's start/end and the dates the calendar block
+  spans are the same 2027-07-18 to 2027-07-25
+tags:
+  - calendar
+  - write
+  - count
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: summer/amber-summer-cabin-trip-calendar
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

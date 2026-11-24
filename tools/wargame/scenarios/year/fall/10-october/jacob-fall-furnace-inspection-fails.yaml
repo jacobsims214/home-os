@@ -1,0 +1,42 @@
+# Family year - fall, 10-october. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The furnace inspection FAILED - cracked heat exchanger, and the technician says do
+# not run it until it is replaced. Record the failure and make the follow-up impossible
+# to forget.
+id: jacob-fall-furnace-inspection-fails
+persona: jacob
+surface: maintenance
+channel: both
+intent: |
+  The furnace inspection FAILED - cracked heat exchanger, and the technician says do
+  not run it until it is replaced. Record the failure and make the follow-up
+  impossible to forget.
+steps:
+  - "chat.sh jacob furnace --stdin with the message above"
+  - "mcpcall.py asset_find with query 'Furnace' as jacob"
+  - "mcpcall.py maintenance_create for the replacement, attached to the furnace asset"
+  - "mcpcall.py maintenance_find as jacob"
+  - "open https://homeos.simstech.cloud/dashboard/maintenance at 390x844 as jacob"
+assertion: |
+  A maintenance task exists for the furnace replacement, attached to the Furnace
+  asset, with a due date in the future and a status that is not `completed` - the
+  inspection itself is recorded as failed, not as a pass. The maintenance page shows
+  it as open work needing attention; a failed inspection that lands as a completed
+  task fails this scenario, because the house then looks safe when it is not.
+parity: |
+  the furnace task's status and due date: maintenance_find's status and due date match
+  the badge and the date the maintenance page renders
+tags:
+  - maintenance
+  - assets
+  - failure
+  - write
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: fall/jacob-fall-furnace-inspection-fails
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

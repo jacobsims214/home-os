@@ -1,0 +1,39 @@
+# Family year - spring, 03-march. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The furnace filter is 20x25x1 and it is three months overdue. I changed it, so log
+# it against the furnace itself and put the next one on the calendar 90 days out.
+id: jacob-spring-furnace-filter
+persona: jacob
+surface: maintenance
+channel: both
+intent: |
+  The furnace filter is 20x25x1 and it is three months overdue. I changed it, so log
+  it against the furnace itself and put the next one on the calendar 90 days out.
+steps:
+  - "mcpcall.py asset_find with query 'Furnace' as jacob"
+  - "mcpcall.py maintenance_complete with the furnace asset and the filter change"
+  - "mcpcall.py maintenance_find for the furnace's next due date"
+  - "open https://homeos.simstech.cloud/dashboard/maintenance at 390x844 as jacob"
+assertion: |
+  The completed task is attached to the Furnace asset (asset_id equals the id
+  asset_find returns for "Furnace", not to the property), its completion date is today
+  in the household's timezone, and the next due date maintenance_find returns is
+  exactly 90 days after that date - computed, not typed. The maintenance page shows a
+  Furnace row whose next-due text is the same date maintenance_find returned.
+parity: |
+  the next filter-change date: maintenance_find's next_due and the date the Furnace
+  row renders are the same calendar day
+tags:
+  - maintenance
+  - assets
+  - write
+  - date-math
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: spring/jacob-spring-furnace-filter
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

@@ -1,0 +1,36 @@
+# Family year - fall, 11-november. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The insurance went up $328 a quarter and the furnace is about to cost us thousands.
+# Show me what that means for the next three months before I find out the hard way.
+id: amber-fall-insurance-budget-impact
+persona: amber
+surface: money
+channel: both
+intent: |
+  The insurance went up $328 a quarter and the furnace is about to cost us thousands.
+  Show me what that means for the next three months before I find out the hard way.
+steps:
+  - "mcpcall.py budget_summary with sections ['obligations'] as amber"
+  - "open https://homeos.simstech.cloud/dashboard/money at 390x844 as amber"
+  - "compare the three monthly obligation totals against the same months' figures from before the renewal"
+assertion: |
+  The Money page renders budget_summary's totals for all three months, digit for
+  digit, and the reply's per-month figures are those totals rather than a sum the
+  agent produced. The increase across the three months is 328.00 total (a quarterly
+  premium lands once, not three times) - a reply that triples it fails.
+parity: |
+  the three monthly obligation totals: budget_summary.totals and the three totals on
+  the Money page are the same amounts, in cents
+tags:
+  - money
+  - budget
+  - honesty
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: fall/amber-fall-insurance-budget-impact
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

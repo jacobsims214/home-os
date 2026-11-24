@@ -1,0 +1,38 @@
+# Family year - fall, 09-september. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The bus comes at 7:42 for Ava and 8:05 for Liam, and it is a different route this
+# year. Put it on the calendar as a repeating thing, not one heroic entry.
+id: amber-fall-bus-schedule-calendar
+persona: amber
+surface: calendar
+channel: both
+intent: |
+  The bus comes at 7:42 for Ava and 8:05 for Liam, and it is a different route this
+  year. Put it on the calendar as a repeating thing, not one heroic entry.
+steps:
+  - "chat.sh amber bus --stdin with the message above"
+  - "mcpcall.py event_find with from 2027-09-06 to 2027-09-17 as amber"
+  - "mcpcall.py calendar_find as amber"
+  - "open https://homeos.simstech.cloud/dashboard/calendar at 390x844 as amber"
+assertion: |
+  Two recurring school-morning events exist, at 07:42 and 08:05 in the household's
+  timezone, one per child, and event_find over two school weeks returns both on every
+  weekday - ten school-day occurrences each, counted, not eyeballed. The times the
+  calendar renders are the same times the payload carries; a repeating event stored as
+  one dated entry returns one occurrence and fails.
+parity: |
+  the two bus times and their weekday count: event_find's start times and the
+  occurrences over two school weeks match the times and count the calendar shows
+tags:
+  - calendar
+  - people
+  - recurrence
+  - write
+origin:
+  round: r4
+  source: "#5713"
+  ref: fall/amber-fall-bus-schedule-calendar
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

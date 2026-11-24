@@ -268,8 +268,29 @@ ID_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 
 REQUIRED = ("id", "persona", "surface", "intent", "steps", "assertion", "tags", "origin")
 ORIGIN_REQUIRED = ("round", "source", "ref", "ticket", "date", "verdict")
-OPTIONAL = ("notes",)
+# `channel` and `parity` are the year corpus's two additions (#5713). They stay optional
+# in the schema so the 123 R1-R4 files remain valid untouched, and the directory rule
+# below requires them of anything under scenarios/year/: a month of a household's year
+# is only a test of the two channels agreeing if it says which channels it runs and what
+# has to match between them.
+OPTIONAL = ("notes", "channel", "parity")
+CHANNELS = ("agent", "ui", "both")
 TAG_MIN, TAG_MAX = 3, 6
+
+# The year corpus: scenarios/year/<season>/<NN-month>/<id>.yaml. Season and month come
+# from the path rather than from a field, so the brief's "two new fields" stay the only
+# two; the loader puts them on the doc as `season` and `month`.
+YEAR_DIR = "year"
+SEASONS = ("spring", "summer", "fall", "winter")
+MONTH_RE = re.compile(r"^\d{2}-[a-z]+$")
+
+# Every platform surface the year has to exercise (#5713's coverage requirement). A
+# surface no month touches is a gap; `--coverage` fails on it rather than assuming it.
+YEAR_SURFACES = (
+    "bills", "calendar", "meals", "lists", "documents", "people", "properties",
+    "assets", "vehicles", "pets", "vendors", "maintenance", "guides", "kb", "money",
+    "search", "settings", "notifications", "invites",
+)
 
 
 def validate_scenario(doc, filename):
@@ -284,6 +305,23 @@ def validate_scenario(doc, filename):
                         % (key, ", ".join(REQUIRED + OPTIONAL)))
     if errs:
         return errs
+
+    # --- the two year-corpus fields (#5713) ---------------------------------
+    channel = doc.get("channel")
+    parity = doc.get("parity")
+    if channel is not None and channel not in CHANNELS:
+        errs.append("channel %r must be one of %s" % (channel, ", ".join(CHANNELS)))
+    if parity is not None:
+        if not isinstance(parity, str) or not parity.strip():
+            errs.append("parity must be a non-empty string - the fact that has to match")
+        elif channel != "both":
+            # One channel cannot disagree with itself: a parity fact on a single-channel
+            # scenario is a scenario that believes it is a cross-channel check.
+            errs.append("parity is only meaningful with channel: both (this one declares %r)"
+                        % (channel,))
+    if channel == "both" and not parity:
+        errs.append("channel: both needs parity - the fact the agent's answer and the UI's "
+                    "render must agree on (an amount, a date, a status, a count)")
 
     sid = doc["id"]
     if not isinstance(sid, str) or not sid:
@@ -384,9 +422,49 @@ class Corpus:
         self.errors = []
         self.warnings = []
         self.files = 0
+        self.directory = None
 
     def ok(self):
         return not self.errors
+
+
+def _corpus_files(directory):
+    """Every scenario file: the flat corpus, plus the year corpus two directories deep.
+
+    This used to glob `*.yaml` in one directory. The year corpus is grouped by season and
+    month, so the loader walks; directory names starting with `.` or `_` are skipped
+    (drafts and editor leftovers are not scenarios).
+    """
+    out = []
+    for root, dirs, names in os.walk(directory):
+        dirs[:] = sorted(d for d in dirs if not d.startswith((".", "_")))
+        for name in sorted(names):
+            if name.endswith(".yaml"):
+                out.append(os.path.join(root, name))
+    return out
+
+
+def _year_coords(rel_path):
+    """(season, month, error) for a path under year/, else None.
+
+    `year/spring/03-march/amber-spring-tax-bill.yaml` -> ("spring", "03-march", None).
+    A file under year/ that is not exactly two directories deep cannot be placed in the
+    calendar, and an unplaceable month is a coverage hole, so it is an error rather than
+    quietly uncounted.
+    """
+    parts = rel_path.split("/")
+    if YEAR_DIR not in parts:
+        return None
+    i = parts.index(YEAR_DIR)
+    rest = parts[i + 1:]
+    if len(rest) != 3:
+        return ("", "", "year/ expects <season>/<NN-month>/<id>.yaml, found %r" % rel_path)
+    season, month = rest[0], rest[1]
+    if season not in SEASONS:
+        return ("", "", "season %r must be one of %s" % (season, ", ".join(SEASONS)))
+    if not MONTH_RE.match(month):
+        return ("", "", "month directory %r must look like 03-march" % (month,))
+    return (season, month, None)
 
 
 def load_corpus(directory):
@@ -394,7 +472,8 @@ def load_corpus(directory):
     corpus = Corpus()
     if not os.path.isdir(directory):
         raise SystemExit("scenarios_load: not a directory: %s" % directory)
-    files = sorted(glob.glob(os.path.join(directory, "*.yaml")))
+    corpus.directory = directory
+    files = sorted(_corpus_files(directory))
     if not files:
         raise SystemExit("scenarios_load: no *.yaml files in %s" % directory)
 
@@ -403,13 +482,31 @@ def load_corpus(directory):
     seen_fingerprints = {}
     for path in files:
         base = os.path.basename(path)
+        rel = os.path.relpath(path, directory).replace(os.sep, "/")
         try:
             with open(path, encoding="utf-8") as fh:
                 doc = parse_yaml(fh.read(), base)
         except YamlError as exc:
-            corpus.errors.append("%s: %s" % (base, exc))
+            corpus.errors.append("%s: %s" % (rel, exc))
             continue
         errs = validate_scenario(doc, base)
+        # Season and month are the directory, so a year scenario cannot drift from the
+        # month it claims to be in; and a year scenario must carry its two new fields.
+        where = _year_coords(rel)
+        if where is not None:
+            season, month, path_err = where
+            if path_err:
+                errs.append(path_err)
+            else:
+                doc["season"] = season
+                doc["month"] = month
+                if not doc.get("channel"):
+                    errs.append("a year-corpus scenario needs channel (%s)"
+                                % ", ".join(CHANNELS))
+                if isinstance(doc.get("surface"), str) and doc["surface"] \
+                        and doc["surface"] not in YEAR_SURFACES:
+                    errs.append("surface %r is not one of the year's surfaces (%s)"
+                                % (doc["surface"], ", ".join(YEAR_SURFACES)))
         # Collect the id even from a file that fails validation: a duplicate id is worth
         # reporting alongside whatever else is wrong with it.
         sid = doc.get("id")
@@ -422,7 +519,7 @@ def load_corpus(directory):
             else:
                 seen_ids[sid] = base
         for err in errs:
-            corpus.errors.append("%s: %s" % (base, err))
+            corpus.errors.append("%s: %s" % (rel, err))
         if errs or duplicate:
             continue
         # A same-persona, same-surface, same-intent scenario is a duplicate even with
@@ -503,6 +600,79 @@ def report(corpus, out=sys.stdout):
     for verdict in VERDICTS:
         if latest.get(verdict):
             print("  %-9s %3d" % (verdict, latest.get(verdict, 0)), file=out)
+
+
+def coverage(corpus, out=sys.stdout):
+    """The surface x month matrix for the year corpus, and the gap it exposes.
+
+    Returns 0 when every one of YEAR_SURFACES is exercised in at least one month and no
+    month is empty; 1 otherwise, naming each surface nothing touches. A matrix printed
+    with holes in it and no failure is how a gap becomes an assumption (#5713).
+    """
+    year = [d for d in corpus.scenarios if d.get("season")]
+    if not year:
+        print("coverage: no year-corpus scenarios loaded", file=out)
+        return 1
+
+    months = sorted({d["month"] for d in year})
+    month_season = {d["month"]: d["season"] for d in year}
+    months.sort(key=lambda m: (SEASONS.index(month_season[m]), m))
+
+    used = {}
+    for doc in year:
+        used.setdefault(doc["surface"], set()).add(doc["month"])
+
+    # The matrix: one row per required surface, one column per month.
+    width = max(11, max(len(m) for m in months))
+    print("Year corpus: %d scenarios across %d months (%s)"
+          % (len(year), len(months), corpus.directory or "?"), file=out)
+    print("\nSurface x month (a cell is the number of scenarios that month exercises it):",
+          file=out)
+    header = "  %-12s" % "surface" + "".join(" %-*s" % (width - 9, m.split("-")[0] + " " + m.split("-")[1][:3])
+                                             for m in months)
+    print(header, file=out)
+    gaps = []
+    for surface in YEAR_SURFACES:
+        cells = []
+        for month in months:
+            n = sum(1 for d in year if d["surface"] == surface and d["month"] == month)
+            cells.append(str(n) if n else ".")
+        if surface not in used:
+            gaps.append(surface)
+        print("  %-12s" % surface + "".join(" %-*s" % (width - 9, c) for c in cells), file=out)
+
+    print("\nBy season:", file=out)
+    for season in SEASONS:
+        herd = [d for d in year if d["season"] == season]
+        chans = {}
+        for d in herd:
+            chans[d.get("channel", "?")] = chans.get(d.get("channel", "?"), 0) + 1
+        print("  %-7s %3d  (%s)" % (season, len(herd),
+                                    ", ".join("%s %d" % (k, v) for k, v in sorted(chans.items()))),
+              file=out)
+
+    print("\nBy channel:", file=out)
+    by_channel = _tally(year, lambda d: d.get("channel", "(none)"))
+    for channel in CHANNELS:
+        print("  %-6s %3d" % (channel, by_channel.get(channel, 0)), file=out)
+    no_parity = [d["id"] for d in year if d.get("channel") == "both" and not d.get("parity")]
+    both = sum(1 for d in year if d.get("channel") == "both")
+
+    empty_months = [m for m in months if not any(d["month"] == m for d in year)]
+    problems = 0
+    if gaps:
+        print("\nGAP: no month exercises %s" % ", ".join(gaps), file=out)
+        problems += 1
+    if empty_months:
+        print("\nGAP: month(s) with no scenario: %s" % ", ".join(empty_months), file=out)
+        problems += 1
+    if both * 2 < len(year):
+        print("\nGAP: only %d/%d scenarios run both channels; the point of the year is that "
+              "the two channels agree" % (both, len(year)), file=out)
+        problems += 1
+    print("\ncoverage: %s" % ("every surface covered" if not problems
+                               else "%d gap(s) above" % problems), file=out)
+    return 1 if problems else 0
 
 
 def check(corpus, out=sys.stdout):
@@ -703,6 +873,9 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true", help="print the corpus as JSON")
     ap.add_argument("--persona", choices=PERSONAS, help="restrict to one persona")
     ap.add_argument("--round", choices=ROUNDS, help="restrict to scenarios from one round")
+    ap.add_argument("--coverage", action="store_true",
+                    help="the year corpus's surface x month matrix; exit 1 on a gap")
+    ap.add_argument("--season", choices=SEASONS, help="restrict to one season of the year corpus")
     ap.add_argument("--selftest", action="store_true", help="run parser/validator tests")
     args = ap.parse_args(argv)
 
@@ -720,6 +893,8 @@ def main(argv=None):
         scenarios = [d for d in scenarios if d["persona"] == args.persona]
     if args.round:
         scenarios = [d for d in scenarios if d["origin"]["round"] == args.round]
+    if args.season:
+        scenarios = [d for d in scenarios if d.get("season") == args.season]
     filtered = Corpus()
     filtered.scenarios = scenarios
     filtered.errors = corpus.errors
@@ -735,6 +910,8 @@ def main(argv=None):
         print(json.dumps({"scenarios": scenarios, "errors": corpus.errors,
                           "warnings": corpus.warnings}, indent=2))
         return 1 if corpus.errors else 0
+    if args.coverage:
+        return coverage(corpus) if not corpus.errors else check(corpus)
     if args.check:
         return check(corpus)
     if args.report:

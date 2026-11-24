@@ -1,0 +1,39 @@
+# Family year - winter, 12-december. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The insurer wants photos, the plumber's report and the restoration quote, all
+# attached to claim 44-2210. Get them off my phone and onto the claim.
+id: amber-winter-claim-documents-attached
+persona: amber
+surface: documents
+channel: both
+intent: |
+  The insurer wants photos, the plumber's report and the restoration quote, all
+  attached to claim 44-2210. Get them off my phone and onto the claim.
+steps:
+  - "mcpcall.py document_upload for the photos, the plumber's report and the quote as amber"
+  - "attach each to the claim (property or bill) as amber"
+  - "mcpcall.py document_find with query 'claim' as amber"
+  - "open https://homeos.simstech.cloud/dashboard/documents at 390x844 as amber"
+assertion: |
+  Exactly three documents are attached to claim 44-2210 - counted from document_find's
+  payload - and each has a document_type that is a real value, never empty and never
+  the "Other" catch-all. The documents page groups them under the same claim. Two of
+  three attached is a FAIL, and so is three attached to nothing: an insurer's packet
+  missing a page is the thing this scenario is about.
+parity: |
+  the attached document count: document_find's three claim documents and the number of
+  documents grouped under the claim on the documents page are the same integer
+tags:
+  - documents
+  - money
+  - count
+  - write
+  - filing
+origin:
+  round: r4
+  source: "#5713"
+  ref: winter/amber-winter-claim-documents-attached
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

@@ -1,0 +1,39 @@
+# Family year - winter, 01-january. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The power went out at 6pm and the kids are asking whether the food is going bad.
+# What does the house say to do, and where is the flashlight note we wrote?
+id: amber-winter-power-outage-guide
+persona: amber
+surface: guides
+channel: both
+intent: |
+  The power went out at 6pm and the kids are asking whether the food is going bad.
+  What does the house say to do, and where is the flashlight note we wrote?
+steps:
+  - "chat.sh amber power --stdin with the message above"
+  - "mcpcall.py kb_search with query 'power outage' as amber"
+  - "mcpcall.py guide_find with query 'outage' as amber"
+  - "open https://homeos.simstech.cloud/dashboard/guides at 390x844 as amber"
+assertion: |
+  The guide the agent points at is one that exists: guide_find returns it and the
+  guide page's address is the one the reply gives - never a plausible-looking link the
+  agent constructed. The fridge and freezer guidance in it names a number of hours,
+  and the reply's number is that number. A reply that answers from general knowledge
+  without a guide behind it fails, because the household's guide is what says 4 hours,
+  not 24.
+parity: |
+  the outage guidance: the hours the reply states and the hours in the guide's own
+  body are the same number, and the guide's address is the one guide_find returns
+tags:
+  - guides
+  - kb
+  - honesty
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: winter/amber-winter-power-outage-guide
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

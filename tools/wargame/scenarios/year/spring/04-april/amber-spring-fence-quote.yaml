@@ -1,0 +1,42 @@
+# Family year - spring, 04-april. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# Two fence companies came out. The second one, Orchard Fence, quoted $4,850 for
+# 140 feet of cedar. I need to be able to call them from the porch without hunting
+# for a piece of paper.
+id: amber-spring-fence-quote
+persona: amber
+surface: vendors
+channel: both
+intent: |
+  Two fence companies came out. The second one, Orchard Fence, quoted $4,850 for 140
+  feet of cedar. I need to be able to call them from the porch without hunting for a
+  piece of paper.
+steps:
+  - "chat.sh amber fence --stdin <<'EOF' (heredoc quoted: the message contains a $)"
+  - "mcpcall.py contact_find with query 'Orchard Fence' as amber"
+  - "open https://homeos.simstech.cloud/dashboard/vendors at 390x844 as amber"
+  - "open the Orchard Fence vendor page and read the Call action's href"
+assertion: |
+  Orchard Fence exists as a vendor with a phone number, and the number on the vendor
+  page is that number: the Call action's href is `tel:` plus the digits of
+  contact_find's `phone`, character for character, with nothing typed by hand. The
+  quoted amount 4850.00 appears in the vendor's notes or the filed quote, and the
+  reply quotes the same figure - a quote the family cannot reach or cannot read back
+  is the failure this scenario is here to catch.
+parity: |
+  the contractor's phone number: contact_find's phone and the tel: href on the vendor
+  page carry the same digits
+tags:
+  - vendors
+  - money
+  - contact
+  - write
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: spring/amber-spring-fence-quote
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

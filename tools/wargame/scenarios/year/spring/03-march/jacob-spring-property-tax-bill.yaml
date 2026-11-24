@@ -1,0 +1,42 @@
+# Family year - spring, 03-march. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The school district property tax bill came in the mail - $3,120, due April 15 -
+# and this is the one that ruins a year if it is missed. Put it in so it is on the
+# board, and tell me what it will do.
+id: jacob-spring-property-tax-bill
+persona: jacob
+surface: bills
+channel: both
+intent: |
+  The school district property tax bill came in the mail - $3,120, due April 15 - and
+  this is the one that ruins a year if it is missed. Put it in so it is on the board,
+  and tell me what it will do.
+steps:
+  - "chat.sh jacob tax --stdin <<'EOF' (the message above, heredoc quoted: it contains a $)"
+  - "mcpcall.py bill_find with query 'School Tax' as jacob"
+  - "open https://homeos.simstech.cloud/dashboard/bills at 390x844 as jacob"
+  - "read the School Tax row's amount text, its due date and its attention badge"
+assertion: |
+  The bill the agent says it filed is the bill the board holds: bill_find returns one
+  row whose amount is exactly 3120.00 and whose due_date is 2027-04-15 (the March
+  statement's own date, not "next month"), with payee naming the school district. Its
+  `attention` is `needs_setup` - there is no autopay and no paying account - and it is
+  never `automatic`, because nothing pays it. The reply names the amount and the due
+  date, and neither is a figure the payload does not contain.
+parity: |
+  the amount and due date of the School Tax row: bill_find's amount/due_date and the
+  digits in the row's amount text and its due-date text are the same two values
+tags:
+  - bills
+  - money
+  - write
+  - attention
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: spring/jacob-spring-property-tax-bill
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

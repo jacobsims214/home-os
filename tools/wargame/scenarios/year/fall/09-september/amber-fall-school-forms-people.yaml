@@ -1,0 +1,40 @@
+# Family year - fall, 09-september. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# Three kids, three schools' worth of forms, and the pediatrician still has last
+# year's emergency contact. Update the kids' records so the school office and I are
+# looking at the same facts.
+id: amber-fall-school-forms-people
+persona: amber
+surface: people
+channel: both
+intent: |
+  Three kids, three schools' worth of forms, and the pediatrician still has last
+  year's emergency contact. Update the kids' records so the school office and I are
+  looking at the same facts.
+steps:
+  - "chat.sh amber school --stdin with the message above"
+  - "mcpcall.py person_find as amber"
+  - "mcpcall.py person_update for Ava, Liam and Nora with school and grade"
+  - "open https://homeos.simstech.cloud/dashboard/people at 390x844 as amber"
+assertion: |
+  person_find returns exactly five people (two parents, three children), and each
+  child's record carries the school and grade the reply names - Ava 9 and in grade 4,
+  Liam 6 and in grade 1, Nora 3 and in preschool. The number of children on the people
+  page equals the number of relationship=child records in the payload; a form signed
+  against a child who does not exist in the house is the failure mode.
+parity: |
+  the children's ages and grades: person_find's birthdate-derived age and grade for
+  each child match what each child's page renders
+tags:
+  - people
+  - write
+  - count
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: fall/amber-fall-school-forms-people
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

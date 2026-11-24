@@ -1,0 +1,38 @@
+# Family year - fall, 10-october. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# If the furnace is unsafe, the house's own record of it has to say so - not just a
+# task on a list someone can dismiss. Put the condition on the asset.
+id: jacob-fall-furnace-asset-flags
+persona: jacob
+surface: assets
+channel: both
+intent: |
+  If the furnace is unsafe, the house's own record of it has to say so - not just a
+  task on a list someone can dismiss. Put the condition on the asset.
+steps:
+  - "mcpcall.py asset_find with query 'Furnace' as jacob"
+  - "mcpcall.py asset_update for the Furnace with its condition and the technician's finding"
+  - "mcpcall.py asset_find as jacob to read it back"
+  - "open https://homeos.simstech.cloud/dashboard/assets/ (Furnace) at 390x844 as jacob"
+assertion: |
+  The Furnace asset's own record carries the failed inspection - its condition or
+  notes field names the heat exchanger and the date - and the asset page renders that
+  same text. Reading the asset back through the tool and through the page returns the
+  identical string; a note that exists only on the maintenance task leaves the asset
+  page saying the furnace is fine, which fails.
+parity: |
+  the furnace's condition: the text asset_find returns for the Furnace and the
+  condition shown on the asset page are the same string
+tags:
+  - assets
+  - maintenance
+  - write
+  - honesty
+origin:
+  round: r4
+  source: "#5713"
+  ref: fall/jacob-fall-furnace-asset-flags
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

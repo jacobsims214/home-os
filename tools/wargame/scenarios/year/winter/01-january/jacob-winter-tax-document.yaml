@@ -1,0 +1,40 @@
+# Family year - winter, 01-january. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# The mortgage interest statement for 2026 is in the portal. Get it into the tax
+# folder and tell me the interest figure, because I am not opening that portal again.
+id: jacob-winter-tax-document
+persona: jacob
+surface: documents
+channel: both
+intent: |
+  The mortgage interest statement for 2026 is in the portal. Get it into the tax
+  folder and tell me the interest figure, because I am not opening that portal again.
+steps:
+  - "chat.sh jacob taxes --stdin <<'EOF' (heredoc quoted: the message contains a $ amount)"
+  - "mcpcall.py document_upload for the 1098 with document_type tax, as jacob"
+  - "mcpcall.py document_find with query '1098' as jacob"
+  - "open https://homeos.simstech.cloud/dashboard/documents at 390x844 as jacob"
+assertion: |
+  The 1098 is filed with a document_type of tax (a real value from the enumerated set,
+  not a free-text "taxes"), for tax year 2026, and document_find returns it when
+  searched by year and by type - both paths, not just one. The interest figure the
+  reply states is the amount in the document's own fields; a reply that reads the
+  number off the PDF and states it without the document existing in the tax folder
+  fails.
+parity: |
+  the 2026 interest amount: document_find's amount for the 1098 equals the amount
+  rendered on its documents row
+tags:
+  - documents
+  - money
+  - write
+  - filing
+  - search
+origin:
+  round: r4
+  source: "#5713"
+  ref: winter/jacob-winter-tax-document
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

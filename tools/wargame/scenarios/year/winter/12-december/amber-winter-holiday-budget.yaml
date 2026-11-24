@@ -1,0 +1,40 @@
+# Family year - winter, 12-december. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# December has three birthdays besides Christmas and I am not doing this on a card
+# again. Set the holiday budget and tell me what is left after the gifts I already
+# bought.
+id: amber-winter-holiday-budget
+persona: amber
+surface: money
+channel: both
+intent: |
+  December has three birthdays besides Christmas and I am not doing this on a card
+  again. Set the holiday budget and tell me what is left after the gifts I already
+  bought.
+steps:
+  - "chat.sh amber holidays --stdin <<'EOF' (heredoc quoted: the message contains $ amounts)"
+  - "mcpcall.py budget_set_category for gifts as amber"
+  - "mcpcall.py budget_summary with sections ['obligations','categories'] as amber"
+  - "open https://homeos.simstech.cloud/dashboard/money at 390x844 as amber"
+assertion: |
+  The gifts category is set to the amount the family gave, and the remaining figure
+  the reply states equals the budget minus the recorded spend - both numbers read from
+  budget_summary, so the subtraction is checkable against the payload. The Money page
+  renders that same remaining amount. A reply that states what is left without the
+  category existing in budget_summary fails.
+parity: |
+  the gifts budget and what is left: budget_summary's category limit and remaining
+  amount match the two figures rendered on the Money page
+tags:
+  - money
+  - budget
+  - write
+  - mobile
+origin:
+  round: r4
+  source: "#5713"
+  ref: winter/amber-winter-holiday-budget
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested

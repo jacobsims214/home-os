@@ -1,0 +1,39 @@
+# Family year - summer, 07-july. Written for R4 from #5713; not played yet.
+# Do not edit `intent` to match new behavior: change the assertion.
+#
+# Seven days, three kids, a dog and a cabin with no washing machine. Give me a
+# packing list that survives contact with my family.
+id: amber-summer-trip-packing-list
+persona: amber
+surface: lists
+channel: both
+intent: |
+  Seven days, three kids, a dog and a cabin with no washing machine. Give me a packing
+  list that survives contact with my family.
+steps:
+  - "chat.sh amber packing --stdin with the message above"
+  - "mcpcall.py list_find as amber"
+  - "mcpcall.py list_get for the packing list"
+  - "open https://homeos.simstech.cloud/dashboard/lists at 390x844 as amber"
+assertion: |
+  The list has one item per kid needing clothes (three, named), plus the dog's food
+  and the medication line for Ava's EpiPen, and the number of items list_get returns
+  equals the count the list page renders. Every item the reply claims to have added
+  appears in list_get by name; an item the reply names but the payload does not hold
+  is a FAIL, because that is the agent confidently describing work it did not do.
+parity: |
+  the packing item count: list_get's item count and the number in the list header are
+  the same integer
+tags:
+  - lists
+  - pets
+  - people
+  - write
+  - count
+origin:
+  round: r4
+  source: "#5713"
+  ref: summer/amber-summer-trip-packing-list
+  ticket: "#5713"
+  date: 2026-11-24
+  verdict: untested
