@@ -248,3 +248,21 @@ not credible and will not be acted on.
    capability?
 6. If you changed a Dockerfile or the build context, **did you actually build**? A merged change
    that breaks the build blocks every deploy.
+
+---
+
+## 12. A deploy is not complete until its smoke slice is green
+
+Every production deploy plays the war-game **smoke slice** against the sha it just rolled out, and
+every release to `main` plays the **full family year** first. The trigger, the fixed slice, the
+scorecard location and what "green" means are in `how-to/war-game-cadence.md`; the rule in one
+line:
+
+> **A deploy ticket is not complete until its smoke slice is green** — `run.sh` exited `0`, the
+> scorecard's delta line reads `No new findings, no regressions`, and no scenario in the slice is
+> `BLOCKED`. A failed round blocks the deploy; the ticket stays open.
+
+A release ticket's definition of done is the same with the full family year instead of the slice.
+The deploy ticket's owner runs the round and pastes the scorecard path and delta line into the
+ticket; there is no separate war-game owner. §11 applies to a war-game check as much as to a Go
+test: revert-check it.
